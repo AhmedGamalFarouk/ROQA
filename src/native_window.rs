@@ -6,8 +6,8 @@ use std::{
 use windows::Win32::{
     Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
     Graphics::Gdi::{
-        CreateRectRgn, DeleteObject, GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
-        MonitorFromPoint, SetWindowRgn, ValidateRect,
+        CombineRgn, CreateRectRgn, DeleteObject, GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY,
+        MONITORINFO, MonitorFromPoint, RGN_OR, SetRectRgn, SetWindowRgn, ValidateRect,
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::*},
@@ -79,6 +79,21 @@ impl NativeWindow {
             Ok(Self(hwnd))
         }
     }
+    /// A layered transparent HWND lets input reach windows in other processes, unlike HTTRANSPARENT.
+    pub fn create_shadow(bounds: Bounds) -> Result<Self> {
+        let window = Self::create_hidden(bounds, w!("ROQA Notch Shadow"))?;
+        // SAFETY: owned hidden HWND; layered + transparent is Windows' cross-thread input bypass.
+        unsafe {
+            let style = GetWindowLongPtrW(window.0, GWL_EXSTYLE) as u32;
+            SetWindowLongPtrW(
+                window.0,
+                GWL_EXSTYLE,
+                (style | WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0) as isize,
+            );
+            SetLayeredWindowAttributes(window.0, Default::default(), 255, LWA_ALPHA)?;
+        }
+        Ok(window)
+    }
     /// Moves/resizes in place without activation or z-order change.
     pub fn resize(&self, bounds: Bounds) -> Result<()> {
         // SAFETY: owned live HWND; positive validated layout; explicitly nonactivating.
@@ -100,27 +115,38 @@ impl NativeWindow {
             let _ = ShowWindow(self.0, SW_SHOWNOACTIVATE);
         }
     }
-    /// Limits input and visible pixels to a window-relative rectangle; `None` restores the whole window.
-    /// Rounded outlines are drawn anti-aliased by Direct2D, so the region only has to contain them.
-    pub fn set_region(&self, area: Option<Bounds>) -> Result<()> {
-        // SAFETY: owned live HWND; a created region's ownership transfers to the window only on success.
+    /// Transfers a silhouette region to Windows; the scratch row and any failed result stay owned here.
+    pub fn set_notch_region(&self, rows: &[Bounds]) -> Result<()> {
+        // SAFETY: owned HWND; all rows are bounded window-relative pixels. Only a successful
+        // SetWindowRgn transfers ownership. Both temporary GDI regions are cleaned on every error.
         unsafe {
-            let Some(area) = area else {
-                return match SetWindowRgn(self.0, None, false) {
-                    0 => Err(Error::from_thread()),
-                    _ => Ok(()),
-                };
-            };
-            let region = CreateRectRgn(area.x, area.y, area.x + area.width, area.y + area.height);
+            let region = CreateRectRgn(0, 0, 0, 0);
             if region.0.is_null() {
                 return Err(Error::from_thread());
             }
-            if SetWindowRgn(self.0, Some(region), false) == 0 {
+            let row = CreateRectRgn(0, 0, 0, 0);
+            if row.0.is_null() {
                 let failure = Error::from_thread();
                 let _ = DeleteObject(region.into());
                 return Err(failure);
             }
-            Ok(())
+            let applied = (|| {
+                for span in rows {
+                    SetRectRgn(row, span.x, span.y, span.x + span.width, span.y + 1).ok()?;
+                    if CombineRgn(Some(region), Some(region), Some(row), RGN_OR).0 == 0 {
+                        return Err(Error::from_thread());
+                    }
+                }
+                if SetWindowRgn(self.0, Some(region), false) == 0 {
+                    return Err(Error::from_thread());
+                }
+                Ok(())
+            })();
+            let _ = DeleteObject(row.into());
+            if applied.is_err() {
+                let _ = DeleteObject(region.into());
+            }
+            applied
         }
     }
 }

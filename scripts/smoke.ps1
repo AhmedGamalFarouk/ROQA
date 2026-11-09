@@ -3,6 +3,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 if (!$SkipBuild) { & "$PSScriptRoot/cargo.ps1" build --locked --release }
+Add-Type -Path "$projectRoot/tests/PickerProbe.cs"
 Add-Type -AssemblyName System.Drawing
 Add-Type -Path "$projectRoot/tests/NativeProbe.cs" -ReferencedAssemblies System.Drawing
 [NativeProbe]::EnablePhysicalPixels()
@@ -11,7 +12,7 @@ New-Item -ItemType Directory -Force -Path $evidence | Out-Null
 $executable = Join-Path $projectRoot 'target/release/roqa.exe'
 $observations = [ordered]@{ Label = 'M1 observation only; not a product-budget or competitor result';
     BinarySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $executable).Hash;
-    Utc = [DateTime]::UtcNow.ToString('o'); Checks = @(); ResourceSamples = @() }
+    Utc = [DateTime]::UtcNow.ToString('o'); Checks = @(); ResourceSamples = @(); ClickProbes = @() }
 
 function Assert-Check([bool]$Condition, [string]$Name) {
     if (!$Condition) { throw "FAIL: $Name" }
@@ -181,10 +182,15 @@ try {
         Assert-Pixels $surface.Window "$($surface.Name)-idle.png" '0,0,0' $awayX $awayY $idlePoints
         Assert-Pixels $surface.Window "$($surface.Name)-hover.png" '0,0,0' $hoverX $hoverY $hoverPoints $settle
         if ($surface.Name -eq 'notch') {
-            # Open: the region has grown into the drawn shadow, i.e. the whole fixed window.
-            $openRegion = "0,0,$($rect.Width),$($rect.Height)"
+            # Only the body and ears own input; the shadow is a separate transparent HWND.
+            $openEars = & $px 16
+            $openRegion = "$($expandedLeft - $openEars),0,$((& $px 320) + 2 * $openEars),$(& $px 80)"
             $observedRegion = [NativeProbe]::RegionBox($surface.Window)
-            Assert-Check ($observedRegion -eq $openRegion) "Open notch region covers its drawn shadow (expected $openRegion, observed $observedRegion)"
+            Assert-Check ($observedRegion -eq $openRegion) "Open notch input excludes its shadow (expected $openRegion, observed $observedRegion)"
+            $shadowPoint = New-Object NativeProbe+Point
+            $shadowPoint.X = $hoverX; $shadowPoint.Y = $rect.Top + (& $px 100)
+            $underShadow = [NativeProbe]::WindowFromPoint($shadowPoint)
+            Assert-Check ($underShadow -ne $surface.Window -and $underShadow -ne (Surface-Window 'ROQA Notch Shadow')) 'Open shadow band resolves to an underlying window'
             $sizeNow = New-Object NativeProbe+Rect
             [void][NativeProbe]::GetWindowRect($surface.Window, [ref]$sizeNow)
             Assert-Check ($sizeNow.Left -eq $rect.Left -and $sizeNow.Top -eq $rect.Top -and $sizeNow.Width -eq $rect.Width -and $sizeNow.Height -eq $rect.Height) 'Hover opens the notch in place without moving or resizing its HWND'
@@ -192,6 +198,8 @@ try {
         Assert-Foreground $focusBaseline 'Hover does not steal focus'
         Assert-Pixels $surface.Window "$($surface.Name)-leave.png" '0,0,0' $awayX $awayY $idlePoints $settle
         if ($surface.Name -eq 'notch') {
+            $underShadow = [NativeProbe]::WindowFromPoint($shadowPoint)
+            Assert-Check ($underShadow -ne $surface.Window -and $underShadow -ne (Surface-Window 'ROQA Notch Shadow')) 'Collapsed shadow band resolves to an underlying window'
             $observedRegion = [NativeProbe]::RegionBox($surface.Window)
             Assert-Check ($observedRegion -eq $restRegion) "Pointer leave collapses the notch and restores its rest region (observed $observedRegion)"
             # Hover intent: touching the pill and leaving sideways within 320 ms must never open the panel.
@@ -201,6 +209,77 @@ try {
             Start-Sleep -Milliseconds 800
             $observedRegion = [NativeProbe]::RegionBox($surface.Window)
             Assert-Check ($observedRegion -eq $restRegion) "A pointer passing over the pill does not open the panel (observed $observedRegion)"
+        }
+        if ($surface.Name -eq 'notch') {
+            $anchorRect = New-Object NativeProbe+Rect
+            [void][NativeProbe]::GetWindowRect($anchor, [ref]$anchorRect)
+            try {
+                Assert-Check ([NativeProbe]::SetWindowPos($anchor, [IntPtr]::Zero, $rect.Left - 20, $rect.Top - 40, $rect.Width + 40, $rect.Height + 80, 0x0014)) 'Place underlying fixture behind the notch'
+                # Each click must be received by this PowerShell process's fixture, not ROQA.
+                foreach ($case in @(
+                    @{ Name = 'rest rounded corner'; Wait = 0; X = $bodyLeft + (& $px 1); Y = & $px 29 },
+                    @{ Name = 'hover intent side margin'; Wait = 120; X = & $px 30; Y = & $px 40 },
+                    @{ Name = 'expanding side shadow'; Wait = 1; Expansion = $true },
+                    @{ Name = 'open side shadow'; Wait = 1100; X = & $px 30; Y = & $px 40 },
+                    @{ Name = 'open rounded corner'; Wait = 1100; X = $expandedLeft + (& $px 1); Y = & $px 79 },
+                    @{ Name = 'closing side shadow'; Wait = 1100; Close = $true; X = & $px 30; Y = & $px 40 },
+                    @{ Name = 'closing rounded corner'; Wait = 1100; Close = $true; X = $expandedLeft + (& $px 1); Y = & $px 79 }
+                )) {
+                    [void][NativeProbe]::SetCursorPos($awayX, $awayY)
+                    Start-Sleep -Milliseconds 650
+                    if ($case.Wait -gt 0) {
+                        [void][NativeProbe]::SetCursorPos($hoverX, $hoverY)
+                        Start-Sleep -Milliseconds $case.Wait
+                    }
+                    if ($case.ContainsKey('Close')) {
+                        [void][NativeProbe]::SetCursorPos($awayX, $awayY)
+                        Start-Sleep -Milliseconds 60
+                    }
+                    $point = New-Object NativeProbe+Point
+                    $phaseClock = [Diagnostics.Stopwatch]::StartNew()
+                    $waitToExpansionMs = 0
+                    if ($case.ContainsKey('Expansion')) {
+                        # Observe actual growth beyond the 33.5-DIP intent swell. Do not infer
+                        # expansion from a sleep: fail if no intermediate geometry is observed.
+                        do {
+                            $regionBefore = [NativeProbe]::RegionBox($surface.Window)
+                            $boundsBefore = @($regionBefore.Split(',') | ForEach-Object { [int]$_ })
+                            if ($boundsBefore.Count -ne 4) { throw 'No notch region while waiting for expansion.' }
+                            if ($boundsBefore[3] -ge (& $px 48) -and $boundsBefore[3] -le (& $px 64)) { break }
+                            Start-Sleep -Milliseconds 2
+                        } while ($phaseClock.ElapsedMilliseconds -lt 2000)
+                        Assert-Check ($boundsBefore[3] -ge (& $px 48) -and $boundsBefore[3] -le (& $px 64)) 'Observe intermediate panel expansion after hover intent'
+                        $waitToExpansionMs = $phaseClock.ElapsedMilliseconds
+                        $phaseClock.Restart()
+                        # Just outside the contemporaneous silhouette bounds, halfway down
+                        # the growing panel: inside the shadow, outside all body-region rows.
+                        $point.X = $rect.Left + $boundsBefore[0] - (& $px 2)
+                        $point.Y = $rect.Top + [int][Math]::Floor($boundsBefore[3] / 2)
+                    } else {
+                        $regionBefore = [NativeProbe]::RegionBox($surface.Window)
+                        $point.X = $rect.Left + $case.X; $point.Y = $rect.Top + $case.Y
+                    }
+                    Assert-Check ([NativeProbe]::WindowFromPoint($point) -eq $anchor) "$($case.Name) resolves to the underlying fixture"
+                    $beforeClicks = [NativeProbe]::AnchorClicks()
+                    [PickerProbe]::Click($point.X, $point.Y)
+                    $regionAfter = [NativeProbe]::RegionBox($surface.Window)
+                    $clickElapsedMs = $phaseClock.ElapsedMilliseconds
+                    if ($case.ContainsKey('Expansion')) {
+                        $boundsAfter = @($regionAfter.Split(',') | ForEach-Object { [int]$_ })
+                        Assert-Check ($boundsAfter.Count -eq 4 -and $boundsAfter[3] -ge $boundsBefore[3] -and $boundsAfter[3] -lt (& $px 76)) 'Expansion click is bracketed by growing intermediate geometry before settling'
+                    }
+                    Start-Sleep -Milliseconds 80
+                    $receivedClicks = [NativeProbe]::AnchorClicks() - $beforeClicks
+                    $observations.ClickProbes += [ordered]@{ Phase = $case.Name; RegionBefore = $regionBefore;
+                        RegionAfter = $regionAfter; WindowX = $point.X - $rect.Left; WindowY = $point.Y - $rect.Top;
+                        WaitToExpansionMs = $waitToExpansionMs; ObservationToInjectionMs = $clickElapsedMs; ReceivedClicks = $receivedClicks }
+                    Assert-Check ($receivedClicks -eq 1) "$($case.Name) delivers a real click to the underlying process"
+                }
+            } finally {
+                [void][NativeProbe]::SetWindowPos($anchor, [IntPtr]::Zero, $anchorRect.Left, $anchorRect.Top, $anchorRect.Width, $anchorRect.Height, 0x0014)
+                [void][NativeProbe]::SetCursorPos($awayX, $awayY)
+                Start-Sleep -Milliseconds 650
+            }
         }
         Assert-Check ([NativeProbe]::SetWindowPos($surface.Window, [IntPtr](-1), $originalRect.Left, $originalRect.Top, $originalRect.Width, $originalRect.Height, 0x0010)) 'Restore test-owned window to intended geometry'
     }

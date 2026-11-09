@@ -27,11 +27,14 @@ public static class NativeProbe {
     static readonly WindowProcedure AnchorProcedure = AnchorCallback;
     static readonly ManualResetEvent AnchorReady = new ManualResetEvent(false);
     static IntPtr anchor;
+    static int anchorClicks;
+    public static int AnchorClicks() { return Interlocked.CompareExchange(ref anchorClicks, 0, 0); }
     static Thread anchorThread;
     static Exception anchorFailure;
 
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string className, string title);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr window);
@@ -152,6 +155,7 @@ public static class NativeProbe {
         anchorThread = null; anchor = IntPtr.Zero;
     }
     static IntPtr AnchorCallback(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam) {
+        if (message == 0x0201) { Interlocked.Increment(ref anchorClicks); return IntPtr.Zero; }
         if (message == 2) { PostQuitMessage(0); return IntPtr.Zero; }
         return DefWindowProc(window, message, wparam, lparam);
     }

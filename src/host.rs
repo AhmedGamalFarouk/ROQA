@@ -17,7 +17,7 @@ use std::{
     mem::size_of,
     sync::OnceLock,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use windows::Win32::{
     Foundation::{E_FAIL, HANDLE, HWND, LPARAM, WAIT_EVENT, WAIT_FAILED, WAIT_OBJECT_0, WPARAM},
@@ -57,9 +57,41 @@ impl Drop for Apartment {
     }
 }
 
+struct NotchShadow {
+    canvas: Canvas,
+    window: NativeWindow,
+}
+impl NotchShadow {
+    fn create(graphics: &Graphics, bounds: Bounds) -> Result<Self> {
+        let window = NativeWindow::create_shadow(bounds)?;
+        let canvas = Canvas::create(graphics, window.0, bounds)?;
+        window.show();
+        Ok(Self { canvas, window })
+    }
+    fn paint(&self, scene: &NotchScene, notch: HWND) -> Result<()> {
+        // Follow the body even when a test moves its HWND; keep the shadow immediately behind it.
+        // SAFETY: both HWNDs are owned on this UI thread; no activation or focus change.
+        unsafe {
+            let mut bounds = Default::default();
+            GetWindowRect(notch, &mut bounds)?;
+            SetWindowPos(
+                self.window.0,
+                Some(notch),
+                bounds.left,
+                bounds.top,
+                bounds.right - bounds.left,
+                bounds.bottom - bounds.top,
+                SWP_NOACTIVATE,
+            )?;
+        }
+        self.canvas.paint_notch_shadow(scene)
+    }
+}
+
 struct Surface {
     // Declared first: UIA must release the dock before its HWND is destroyed.
     _accessible: Option<DockAccessibility>,
+    shadow: Option<NotchShadow>,
     canvas: Canvas,
     window: NativeWindow,
     kind: SurfaceKind,
@@ -75,12 +107,17 @@ impl Surface {
         uia: &dock_uia::Shared,
     ) -> Result<Self> {
         let bounds = placement(work, dpi, kind, slots);
+        let shadow = if kind == SurfaceKind::Notch {
+            Some(NotchShadow::create(graphics, bounds)?)
+        } else {
+            None
+        };
         let window = NativeWindow::create(bounds, kind)?;
         let accessible = match kind {
             SurfaceKind::Dock => Some(DockAccessibility::create(window.0, uia)?),
             SurfaceKind::Notch => {
                 // Collapsed at rest: only the visible notch takes input.
-                window.set_region(Some(layout::notch_region(bounds, dpi, 0.0)))?;
+                window.set_notch_region(&layout::notch_rows(bounds, dpi, 0.0))?;
                 None
             }
         };
@@ -88,6 +125,7 @@ impl Surface {
         window.show();
         Ok(Self {
             _accessible: accessible,
+            shadow,
             canvas,
             window,
             kind,
@@ -141,7 +179,7 @@ struct Desktop {
     dock_live: bool,
     uia: dock_uia::Shared,
     /// Window region last applied to the notch; it follows the drawn shape frame by frame.
-    notch_area: Option<Bounds>,
+    notch_area: Vec<Bounds>,
     /// Windows text size (Accessibility > Text size) scales the whole notch, whose only content is text.
     text: TextSettings,
     text_factor: f64,
@@ -172,7 +210,7 @@ impl Desktop {
             notch_live: false,
             dock_live: false,
             uia: Arc::new(Mutex::new(dock_uia::State::default())),
-            notch_area: None,
+            notch_area: Vec::new(),
             text,
             text_factor,
             clock: String::new(),
@@ -213,11 +251,7 @@ impl Desktop {
             } else {
                 self.notch_motion = Tween::rest(0.0);
                 (self.notch_engaged, self.notch_intent) = (false, None);
-                self.notch_area = Some(layout::notch_region(
-                    self.notch_window(),
-                    self.notch_dpi(),
-                    0.0,
-                ));
+                self.notch_area = layout::notch_rows(self.notch_window(), self.notch_dpi(), 0.0);
                 self.notch_live = false;
                 let now = clock::now();
                 (self.clock, self.date) = (now.time, now.date);
@@ -247,14 +281,22 @@ impl Desktop {
         }
         Ok(now.next_minute_ms)
     }
-    fn paint_notch(&self) -> Result<()> {
+    fn paint_notch(&mut self) -> Result<()> {
+        let progress = self.notch_motion.value(Instant::now());
+        self.fit_notch_region(progress)?;
         match self.notch() {
-            Some(notch) => notch.canvas.paint_notch(&NotchScene {
-                time: &self.clock,
-                date: &self.date,
-                progress: self.notch_motion.value(Instant::now()),
-                dpi: self.notch_dpi(),
-            }),
+            Some(notch) => {
+                let scene = NotchScene {
+                    time: &self.clock,
+                    date: &self.date,
+                    progress,
+                    dpi: self.notch_dpi(),
+                };
+                if let Some(shadow) = &notch.shadow {
+                    shadow.paint(&scene, notch.window.0)?;
+                }
+                notch.canvas.paint_notch(&scene)
+            }
             None => Ok(()),
         }
     }
@@ -295,7 +337,6 @@ impl Desktop {
         }
         if self.notch_live {
             self.paint_notch()?;
-            self.fit_notch_region(now)?;
             self.notch_live = self.notch_motion.running(now) || self.notch_intent.is_some();
         }
         if self.dock_live {
@@ -305,19 +346,14 @@ impl Desktop {
         }
         Ok(self.notch_live || self.dock_live)
     }
-    /// Keeps the window region around what is drawn. While growing it leads by two frames, because
-    /// region and composition updates are not synchronized; a larger region only adds transparent pixels.
-    fn fit_notch_region(&mut self, now: Instant) -> Result<()> {
-        let progress = self
-            .notch_motion
-            .value(now)
-            .max(self.notch_motion.value(now + Duration::from_millis(33)));
-        let area = layout::notch_region(self.notch_window(), self.notch_dpi(), progress);
-        if self.notch_area != Some(area) {
+    /// Input and drawing use the same frame progress, without a speculative growth lead.
+    fn fit_notch_region(&mut self, progress: f32) -> Result<()> {
+        let rows = layout::notch_rows(self.notch_window(), self.notch_dpi(), progress);
+        if self.notch_area != rows {
             if let Some(notch) = self.notch() {
-                notch.window.set_region(Some(area))?;
+                notch.window.set_notch_region(&rows)?;
             }
-            self.notch_area = Some(area);
+            self.notch_area = rows;
         }
         Ok(())
     }
@@ -645,6 +681,13 @@ fn compositor_clock() -> Option<CompositorClockWait> {
     })
 }
 
+// https://learn.microsoft.com/windows/win32/directcomp/compositor-clock/compositor-clock
+// The function reference also documents immediate occlusion status returns.
+fn compositor_wake_supported(wake: u32, event_count: usize) -> bool {
+    wake.wrapping_sub(WAIT_OBJECT_0.0) <= event_count as u32
+        || wake == windows::Win32::Foundation::WAIT_TIMEOUT.0
+}
+
 /// While animating, sleeps until the next compositor frame or an IPC event; queued input is drained
 /// right after, so it waits at most one frame. Idle returns to the plain blocking wait in `event_loop`.
 fn next_frame(events: &[HANDLE], timeout: u32) -> WAIT_EVENT {
@@ -652,7 +695,9 @@ fn next_frame(events: &[HANDLE], timeout: u32) -> WAIT_EVENT {
     unsafe {
         if let Some(wait) = compositor_clock() {
             let wake = wait(events.len() as u32, events.as_ptr(), timeout.min(33));
-            if wake != WAIT_FAILED.0 {
+            // Microsoft's compositor-clock example assigns the extra index to clock ticks.
+            // Occlusion and any unrecognized NTSTATUS must take the bounded fallback below.
+            if compositor_wake_supported(wake, events.len()) {
                 return WAIT_EVENT(wake);
             }
         }
@@ -719,4 +764,22 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod clock_wait_tests {
+    use super::*;
+    #[test]
+    fn accepts_events_clock_and_timeout_but_falls_back_on_occlusion_or_failure() {
+        for index in 0..=4 {
+            assert!(compositor_wake_supported(WAIT_OBJECT_0.0 + index, 4));
+        }
+        assert!(compositor_wake_supported(
+            windows::Win32::Foundation::WAIT_TIMEOUT.0,
+            4
+        ));
+        for status in [WAIT_FAILED.0, 0xC01E0006, 0x80, 5] {
+            assert!(!compositor_wake_supported(status, 4));
+        }
+    }
 }

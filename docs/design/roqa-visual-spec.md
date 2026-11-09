@@ -20,12 +20,10 @@ Author: `/root`, 2026-11-09. Reference study: `nusa-reference.md`. All sizes are
 ### Window, hit area and region
 
 - **Window.** A fixed **400 × 124** HWND, centred and flush with the work-area top. It holds the expanded body plus ears, room for the open overshoot, and the shadow below and beside the body. It never moves or resizes.
-- **Region (`layout::notch_region`).** Updated every animation frame. It covers the current body and ears, plus a shadow reach of 44 × √smooth(p) DIP to the sides and below, clamped to the window. While growing it leads by two frames.
-  - At rest, it is exactly the collapsed footprint (170 × 30), so the screen edge stays clickable.
-  - During the hover-intent swell, it is barely larger than the pill.
-  - Fully open, it is the whole window, because the shadow is drawn there.
-- **Hover (`layout::notch_hit`).** The pointer must be over the drawn body or ears, plus 4 DIP of slop. Transparent margins and the shadow never hold or re-open the panel.
-- **Drawing, hover and region share one geometry** (`layout::notch_body`): whole-pixel body, centred.
+- **Body region (`layout::notch_rows`).** Updated with the same progress used to draw each frame, with no speculative growth lead. One-pixel rows follow the circular concave ears and rounded bottom corners, using the same rounded body and radius clamp as drawing. Rows conservatively contain edge coverage within a one-pixel fringe.
+- **Shadow.** A separate layered, transparent, nonactivating HWND sits directly behind the body. It follows the same bounds and animation; input passes through it to other processes. Canvas and window ownership follow the notch lifetime.
+- **Hover (`layout::notch_hit`).** Uses the same silhouette edge with 4 DIP of slop, rather than a rectangular ear band.
+- **Shared geometry.** Drawing, hover and region share `layout::notch_body` and `notch_radius`; the region and hover also use the same analytic circular edge.
 - **Text size.** The Windows text-size factor (Accessibility > Text size, `UISettings.TextScaleFactor`) multiplies the notch's effective DPI. The whole notch, whose only content is text, scales and is rebuilt live on the change event.
 
 ### Type
@@ -69,7 +67,7 @@ The font is Segoe UI Variable, from the system; no font is bundled.
 ## Frame pacing and idle cost
 
 - **Painting.** A surface paints per frame only while a tween runs or hover intent is pending, then one final exact frame.
-- **Waiting while animating.** The loop waits on `DCompositionWaitForCompositorClock` (the same IPC handles, timeout ≤ 33 ms), then drains input, so input waits at most one frame. That function is Windows 11 only, so it is resolved at run time with `GetProcAddress` and ROQA still loads elsewhere. When it is absent or fails, the loop falls back to a ≤ 16 ms message wait.
+- **Waiting while animating.** The loop waits on `DCompositionWaitForCompositorClock` (the same IPC handles, timeout ≤ 33 ms), then drains input, so input waits at most one frame. That function is Windows 11 only, so it is resolved at run time with `GetProcAddress` and ROQA still loads elsewhere. When it is absent, fails, returns display occlusion or an unexpected status, the loop falls back to a ≤ 16 ms message wait.
 - **Idle.** The original blocking `MsgWaitForMultipleObjectsEx`, with only the catalog and minute deadlines. No timer and no polling.
 
 ## Accessibility
@@ -83,6 +81,6 @@ The font is Segoe UI Variable, from the system; no font is bundled.
 
 - **Text scaling.** The notch follows the Windows text-size setting; this is verified only at 1.0 on this machine, and other factors use the same path as DPI scaling. The dock has no text.
 - **High contrast.** There's no high-contrast colour mapping.
-- **Shadow band.** While open, the drawn shadow takes clicks (it is inside the region), but it doesn't hold the hover. As the panel closes, the region shrinks with the shadow.
+- **Input edge.** The pixel region conservatively contains the anti-aliased outline within a one-pixel fringe. Visual edge quality still needs fresh capture after this change.
 - **Dock corners.** The dock's transparent anti-aliased corners are inside the HWND and take input on a few pixels.
 - **Evidence.** Frame pacing is evidenced by screen-capture sequences (about 140 Hz sampling), not by a compositor frame-time trace.

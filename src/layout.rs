@@ -1,4 +1,4 @@
-use crate::{dock, motion};
+use crate::dock;
 
 /// Notch outline in DIPs: body size, bottom corner radius and the concave "ear" fillets that
 /// blend the top corners into the screen edge.
@@ -22,10 +22,8 @@ pub const NOTCH_EXPANDED: NotchShape = NotchShape {
     ears: 16.0,
 };
 /// The notch HWND never moves or resizes: the expanded body and ears plus room for the open
-/// overshoot and the soft shadow. `notch_region` keeps input and pixels to what is actually drawn.
+/// overshoot and the soft shadow. `notch_region` bounds body input; a separate transparent HWND draws the shadow.
 pub const NOTCH_WINDOW: (i32, i32) = (400, 124);
-/// How far the shadow reaches past the open body; the region grows into it as the notch opens.
-const NOTCH_SHADOW_REACH: f32 = 44.0;
 /// Pointer slop around the drawn body that still counts as hovering it.
 const NOTCH_HOVER_SLOP: f32 = 4.0;
 
@@ -60,29 +58,63 @@ pub fn notch_body(window_width: i32, dpi: u32, shape: NotchShape) -> NotchBody {
     }
 }
 
-/// Window-relative input/visible region: body and ears, plus shadow room that grows with the open
-/// progress. At rest it is exactly the collapsed footprint; transparent margins never take clicks
-/// unless the shadow is drawn there.
-pub fn notch_region(window: Bounds, dpi: u32, progress: f32) -> Bounds {
-    let body = notch_body(window.width, dpi, notch_shape(progress));
-    let reach = scaled(NOTCH_SHADOW_REACH * motion::smooth(progress).sqrt(), dpi);
-    let side = body.ears.max(reach);
-    let left = (body.left - side).max(0);
-    let right = (body.left + body.width + side).min(window.width);
-    Bounds {
-        x: left,
-        y: 0,
-        width: right - left,
-        height: (body.height + reach).min(window.height),
+/// Horizontal silhouette edge at a physical Y coordinate. This uses the same circular ears and
+/// bottom corners, pixel-rounded body and radius clamp as the Direct2D outline.
+fn notch_left(body: NotchBody, radius: f32, y: f32) -> f32 {
+    let left = body.left as f32;
+    let ears = body.ears as f32;
+    if y < ears {
+        left - ears + (ears * ears - (y - ears).powi(2)).max(0.0).sqrt()
+    } else if y > body.height as f32 - radius {
+        left + radius
+            - (radius * radius - (y - body.height as f32 + radius).powi(2))
+                .max(0.0)
+                .sqrt()
+    } else {
+        left
     }
 }
 
-/// Whether a window-relative point is over the drawn body or ears (plus slop); shadow and margins never hold the hover.
+pub fn notch_radius(body: NotchBody, shape: NotchShape, dpi: u32) -> f32 {
+    (shape.radius * dpi as f32 / 96.0)
+        .min((body.height - body.ears) as f32)
+        .min(body.width as f32 / 2.0)
+        .max(0.0)
+}
+
+/// One-pixel rows contain the anti-aliased outline, with at most a one-pixel edge fringe. They
+/// exclude the shadow and empty corners; the height is bounded by the actual HWND.
+pub fn notch_rows(window: Bounds, dpi: u32, progress: f32) -> Vec<Bounds> {
+    let shape = notch_shape(progress);
+    let body = notch_body(window.width, dpi, shape);
+    let radius = notch_radius(body, shape, dpi);
+    (0..body.height.min(window.height))
+        .map(|y| {
+            let edge = notch_left(body, radius, y as f32);
+            let left = (edge.floor() as i32).max(0);
+            let right = ((2 * body.left + body.width) as f32 - edge).ceil() as i32;
+            Bounds {
+                x: left,
+                y,
+                width: right.min(window.width) - left,
+                height: 1,
+            }
+        })
+        .collect()
+}
+
+/// Hover follows the silhouette with four DIP of slop; transparent side bands do not hold it open.
 pub fn notch_hit(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32) -> bool {
-    let body = notch_body(window_width, dpi, notch_shape(progress));
-    let reach = body.ears + scaled(NOTCH_HOVER_SLOP, dpi);
-    (0..body.height + reach - body.ears).contains(&y)
-        && (body.left - reach..body.left + body.width + reach).contains(&x)
+    let shape = notch_shape(progress);
+    let body = notch_body(window_width, dpi, shape);
+    let slop = scaled(NOTCH_HOVER_SLOP, dpi);
+    if !(0..body.height + slop).contains(&y) {
+        return false;
+    }
+    let radius = notch_radius(body, shape, dpi);
+    let left = notch_left(body, radius, (y - slop).max(0) as f32) - slop as f32;
+    let right = (2 * body.left + body.width) as f32 - left;
+    x as f32 >= left && (x as f32) < right
 }
 
 fn scaled(dips: f32, dpi: u32) -> i32 {
@@ -194,33 +226,61 @@ mod tests {
     }
 
     #[test]
-    fn notch_region_is_the_footprint_at_rest_and_grows_into_the_shadow_when_open() {
-        let window = Bounds {
-            x: 0,
-            y: 0,
-            width: 800,
-            height: 248,
-        };
-        // 200 %: collapsed body 300x60 plus 20px ears, centred.
-        assert_eq!(
-            notch_region(window, 192, 0.0),
-            Bounds {
-                x: 230,
+    fn silhouette_excludes_side_shadow_and_corners_during_motion() {
+        for dpi in [96, 120, 192, 384] {
+            let window = Bounds {
+                x: 0,
                 y: 0,
-                width: 340,
-                height: 60
+                width: scaled(400.0, dpi),
+                height: scaled(124.0, dpi),
+            };
+            for progress in [-0.09, 0.0, 0.07, 0.3, 0.7, 1.0, 1.07] {
+                let shape = notch_shape(progress);
+                let body = notch_body(window.width, dpi, shape);
+                let rows = notch_rows(window, dpi, progress);
+                let contains = |x, y| {
+                    rows.iter()
+                        .any(|r| r.y == y && x >= r.x && x < r.x + r.width)
+                };
+                let middle = window.width / 2;
+                assert!(contains(middle, body.height / 2));
+                assert!(notch_hit(
+                    window.width,
+                    dpi,
+                    progress,
+                    middle,
+                    body.height / 2
+                ));
+                let side_x = body.left - scaled(8.0, dpi);
+                let side_y = body.ears + scaled(8.0, dpi);
+                assert!(!contains(side_x, side_y));
+                assert!(!notch_hit(window.width, dpi, progress, side_x, side_y));
+                assert!(!contains(body.left, body.height - 1));
+                assert!(!notch_hit(
+                    window.width,
+                    dpi,
+                    progress,
+                    body.left - scaled(5.0, dpi),
+                    body.height - 1
+                ));
+                assert!(!contains(middle, body.height + scaled(10.0, dpi)));
             }
+        }
+        // Independent review's concrete regression point.
+        assert!(!notch_hit(400, 96, 1.0, 30, 40));
+        assert!(
+            !notch_rows(
+                Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 400,
+                    height: 124
+                },
+                96,
+                1.0
+            )
+            .iter()
+            .any(|r| r.y == 40 && r.x <= 30)
         );
-        // Open: the shadow reach fills the whole fixed window.
-        assert_eq!(notch_region(window, 192, 1.0), window);
-        // Hover intent swell: only slightly larger than the pill, never the transparent margins.
-        let swell = notch_region(window, 192, 0.07);
-        assert!(swell.width < 380 && swell.height < 92, "{swell:?}");
-        // Hover follows the drawn shape: pill centre yes, side margin and shadow band no.
-        assert!(notch_hit(800, 192, 0.0, 400, 20));
-        assert!(!notch_hit(800, 192, 0.0, 120, 20));
-        assert!(notch_hit(800, 192, 1.0, 400, 150));
-        assert!(!notch_hit(800, 192, 1.0, 400, 200));
-        assert!(!notch_hit(800, 192, 1.0, 20, 20));
     }
 }

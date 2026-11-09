@@ -154,7 +154,26 @@ impl Canvas {
         self.height = bounds.height as u32;
         Ok(())
     }
-    /// Black notch with concave top ears; the time crossfades to time over date as it opens.
+    /// Shadow is composed on a separate, input-transparent window.
+    pub fn paint_notch_shadow(&self, scene: &NotchScene) -> Result<()> {
+        let scale = scene.dpi as f32 / 96.0;
+        let shape = layout::notch_shape(scene.progress);
+        let pixels = layout::notch_body(self.width as i32, scene.dpi, shape);
+        self.draw(|context, rect| {
+            let body = D2D_RECT_F {
+                left: rect.left + pixels.left as f32,
+                top: rect.top,
+                right: rect.left + (pixels.left + pixels.width) as f32,
+                bottom: rect.top + pixels.height as f32,
+            };
+            let open = motion::smooth(scene.progress);
+            if open > 0.0 {
+                notch_shadow(context, &body, shape.radius * scale, scale, open)?;
+            }
+            Ok(())
+        })
+    }
+    /// Black notch with concave top ears and a persistent morphing clock.
     pub fn paint_notch(&self, scene: &NotchScene) -> Result<()> {
         let scale = scene.dpi as f32 / 96.0;
         let shape = layout::notch_shape(scene.progress);
@@ -168,11 +187,12 @@ impl Canvas {
                 right: left + pixels.width as f32,
                 bottom: rect.top + pixels.height as f32,
             };
-            let outline = notch_outline(context, &body, shape.radius * scale, pixels.ears as f32)?;
-            let open = motion::smooth(scene.progress);
-            if open > 0.0 {
-                notch_shadow(context, &body, shape.radius * scale, scale, open)?;
-            }
+            let outline = notch_outline(
+                context,
+                &body,
+                layout::notch_radius(pixels, shape, scene.dpi),
+                pixels.ears as f32,
+            )?;
             // SAFETY: context is live between surface BeginDraw/EndDraw; the clip is popped below.
             unsafe {
                 let black = context.CreateSolidColorBrush(&rgba(0, 0, 0, 1.0), None)?;
