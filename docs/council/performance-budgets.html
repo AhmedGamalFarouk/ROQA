@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ROQA proposed memory budgets</title>
+<style>
+body{margin:0;font-family:var(--font-sans);color:var(--foreground)}
+section{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+h2{font-size:17px;margin:0 0 7px}p{font-size:13px;color:var(--muted-foreground);line-height:1.5;margin:0 0 18px}
+.chart{height:205px;display:flex;flex-direction:column;justify-content:space-around}
+.row{display:grid;grid-template-columns:155px 1fr 65px;gap:10px;align-items:center;font-size:13px}
+.track{height:25px;background:var(--secondary);border-radius:4px;overflow:hidden}
+.bar{height:25px;background:var(--chart-1);border-radius:4px}
+.stretch{background:var(--chart-2)}.multi{background:var(--chart-3)}
+.value{font-variant-numeric:tabular-nums;text-align:right}.legend{margin:12px 0 0;font-size:12px}
+@media(max-width:460px){.row{grid-template-columns:105px 1fr 58px;gap:7px;font-size:12px}}
+</style></head>
+<body><section aria-label="Proposed engineering budgets, not measured results">
+<h2>Proposed memory budgets</h2>
+<p>Dock + notch core, optional modules off. App/helper private bytes; GPU memory tracked separately. These are targets, not benchmark results.</p>
+<div class="chart" role="img" aria-label="One-monitor stretch target 40 MiB; one-monitor initial budget 80 MiB; three-monitor initial budget 120 MiB. No apps have been benchmarked.">
+<div class="row"><span>1 monitor · stretch</span><div class="track"><div class="bar stretch" style="width:33.333%"></div></div><span class="value">40 MiB</span></div>
+<div class="row"><span>1 monitor · budget</span><div class="track"><div class="bar" style="width:66.667%"></div></div><span class="value">80 MiB</span></div>
+<div class="row"><span>3 monitors · budget</span><div class="track"><div class="bar multi" style="width:100%"></div></div><span class="value">120 MiB</span></div>
+</div>
+<p class="legend">Success also requires responsive input, accessibility, stable resource use and no material power/GPU regression. Nectar and Nusa need separate matched baseline measurements.</p>
+</section></body></html>
