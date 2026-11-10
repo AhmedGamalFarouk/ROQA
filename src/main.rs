@@ -35,6 +35,8 @@ fn run() -> Result<()> {
         [] => host::run(host::Probe::None, None),
         [command] if command == "--probe-failure" => host::run(host::Probe::Initialization, None),
         [command] if command == "--probe-panic" => host::run(host::Probe::Callback, None),
+        #[cfg(debug_assertions)]
+        [command] if command == "--probe-device-loss" => host::run(host::Probe::DeviceLoss, None),
         [command, path] if command == "--diagnostics" => {
             host::run(host::Probe::None, Some(std::path::PathBuf::from(path)))
         }

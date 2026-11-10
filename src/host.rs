@@ -38,6 +38,9 @@ pub enum Probe {
     None,
     Initialization,
     Callback,
+    /// Debug builds only: one synthetic device-removed failure right after startup.
+    #[cfg(debug_assertions)]
+    DeviceLoss,
 }
 
 struct Apartment;
@@ -374,6 +377,66 @@ const TOPOLOGY_RETRIES: u32 = 8;
 /// covers its whole monitor, so an ordinary desktop adds no wakes.
 // shortcut: an in-place resize to full screen with no other window event is seen at the next catalog generation (30 s worst case); a foreground-scoped location hook was rejected for its caret/cursor event volume.
 const FULLSCREEN_POLL: Duration = Duration::from_secs(2);
+/// A lost graphics device is rebuilt after a doubling delay (250 ms up to 8 s), since a driver reset
+/// or update takes a moment. Any rebuild failure retries, as one during a reset need not read as a
+/// loss; a failure ends the host once `GRAPHICS_ATTEMPTS` rebuilds have run with no settled minute
+/// between losses. Repeated successful rebuilds (a flapping device) stay one per 8 s at most.
+const GRAPHICS_RETRY: Duration = Duration::from_millis(250);
+const GRAPHICS_ATTEMPTS: u32 = 8;
+/// A loss this long after the last rebuild starts a fresh budget; sooner ones keep backing off.
+const GRAPHICS_SETTLED: Duration = Duration::from_secs(60);
+fn rebuild_delay(attempts: u32) -> Duration {
+    GRAPHICS_RETRY * (1 << attempts.min(5))
+}
+/// When the next device rebuild is due, and how many have run since the budget was refreshed.
+struct Rebuild {
+    due: Option<Instant>,
+    attempts: u32,
+    started: Instant,
+}
+impl Rebuild {
+    fn new(now: Instant) -> Self {
+        Self {
+            due: None,
+            attempts: 0,
+            started: now,
+        }
+    }
+    /// Schedules a rebuild for a detected loss; detections while one is pending keep it.
+    fn lose(&mut self, now: Instant) {
+        if self.due.is_some() {
+            return;
+        }
+        if now.duration_since(self.started) >= GRAPHICS_SETTLED {
+            self.attempts = 0;
+        }
+        self.due = Some(now + rebuild_delay(self.attempts));
+    }
+    /// Whether a rebuild is due now; if so it counts against the budget.
+    fn start(&mut self, now: Instant) -> bool {
+        if self.due.is_none_or(|due| due > now) {
+            return false;
+        }
+        self.attempts += 1;
+        self.started = now;
+        true
+    }
+    /// Records a rebuild's outcome; false once a failure has spent the budget.
+    fn finish(&mut self, rebuilt: bool, now: Instant) -> bool {
+        if rebuilt {
+            self.due = None;
+        } else if self.attempts >= GRAPHICS_ATTEMPTS {
+            return false;
+        } else {
+            self.due = Some(now + rebuild_delay(self.attempts));
+        }
+        true
+    }
+    fn wait(&self, now: Instant) -> u32 {
+        self.due
+            .map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+}
 
 struct Desktop {
     surfaces: Vec<Surface>,
@@ -391,6 +454,7 @@ struct Desktop {
     fullscreen_generation: Option<u64>,
     fullscreen_due: Option<Instant>,
     graphics: Graphics,
+    rebuild: Rebuild,
     picker: Option<Picker>,
     icons: IconService,
     dock_items: Vec<DockItem>,
@@ -422,6 +486,7 @@ impl Desktop {
             fullscreen_generation: None,
             fullscreen_due: None,
             graphics: Graphics::create()?,
+            rebuild: Rebuild::new(Instant::now()),
             picker: None,
             icons: IconService::create()?,
             dock_items: Vec::new(),
@@ -724,6 +789,7 @@ impl Desktop {
                 }
             }
             WM_MOUSELEAVE => surface.leave(),
+            WM_PAINT if self.graphics.removed() => self.lose_graphics(),
             _ => {}
         }
         Ok(())
@@ -824,6 +890,70 @@ impl Desktop {
         self.topology_due = Some(Instant::now());
         self.topology_retries = 0;
     }
+    /// One pass of state refreshes and frames; returns the clock wait and whether animation runs.
+    fn update(&mut self, model: &WindowModel) -> Result<(u32, bool)> {
+        self.refresh_topology()?;
+        if self.text.take_changed() {
+            self.rescale_text()?;
+        }
+        self.refresh_dock(model)?;
+        self.refresh_fullscreen(model.generation)?;
+        let clock_wait = self.refresh_clock()?;
+        if let Some(picker) = &mut self.picker {
+            picker.synchronize(model)?;
+            if picker.closed() {
+                self.picker.take();
+            }
+        }
+        Ok((clock_wait, self.animate()?))
+    }
+    /// A device loss schedules a rebuild and yields `fallback`; any other failure still ends the host.
+    fn survive<T>(&mut self, result: Result<T>, fallback: T) -> Result<T> {
+        match result {
+            Err(error) if self.graphics.lost(&error) => {
+                eprintln!("Graphics device lost: {error}");
+                self.lose_graphics();
+                Ok(fallback)
+            }
+            other => other,
+        }
+    }
+    /// Releases every old-device surface now and schedules the rebuild.
+    fn lose_graphics(&mut self) {
+        self.surfaces.clear();
+        self.rebuild.lose(Instant::now());
+    }
+    /// Applies a due rebuild: a new device, then every shown kind placed and painted on it. Failures
+    /// back off; once the budget is spent the error ends the host instead of leaving it invisible.
+    fn refresh_graphics(&mut self) -> Result<()> {
+        if !self.rebuild.start(Instant::now()) {
+            return Ok(());
+        }
+        // Includes any surface a topology change placed on the lost device meanwhile.
+        self.surfaces.clear();
+        // The old device is released by this assignment, after its surfaces and before any new one.
+        let rebuilt = Graphics::create().and_then(|graphics| {
+            self.graphics = graphics;
+            self.shown
+                .clone()
+                .into_iter()
+                .try_for_each(|kind| self.show(kind))
+        });
+        if let Err(error) = &rebuilt {
+            eprintln!("Graphics rebuild: {error}");
+            self.surfaces.clear();
+        } else {
+            // Windowless meanwhile, ROQA missed display, resume and time broadcasts, and a failed
+            // topology placement may have dropped a monitor: re-read both.
+            self.request_topology();
+            self.clock_due = Instant::now();
+        }
+        if self.rebuild.finish(rebuilt.is_ok(), Instant::now()) {
+            Ok(())
+        } else {
+            rebuilt
+        }
+    }
     /// Re-reads the Windows text size after its change event and rebuilds the notches at the new scale.
     fn rescale_text(&mut self) -> Result<()> {
         let factor = self.text.factor()?;
@@ -844,6 +974,11 @@ pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> 
     let _class = WindowClass::register()?;
     let controls = Controls::create()?;
     let mut desktop = Desktop::create(&probe)?;
+    #[cfg(debug_assertions)]
+    if probe == Probe::DeviceLoss {
+        let removed = windows::Win32::Graphics::Dxgi::DXGI_ERROR_DEVICE_REMOVED;
+        desktop.survive(Err(Error::from(removed)), ())?;
+    }
     if probe == Probe::Callback {
         // SAFETY: synchronous probe targets a live window on this thread; parameters contain no pointers.
         unsafe {
@@ -864,25 +999,16 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
     let events = controls.handles();
     loop {
         catalog.service()?;
-        desktop.refresh_topology()?;
-        if desktop.text.take_changed() {
-            desktop.rescale_text()?;
-        }
-        desktop.refresh_dock(catalog.model())?;
-        desktop.refresh_fullscreen(catalog.model().generation)?;
-        let clock_wait = desktop.refresh_clock()?;
-        if let Some(picker) = &mut desktop.picker {
-            picker.synchronize(catalog.model())?;
-            if picker.closed() {
-                desktop.picker.take();
-            }
-        }
+        desktop.refresh_graphics()?;
+        let pass = desktop.update(catalog.model());
+        let (clock_wait, animating) = desktop.survive(pass, (INFINITE, false))?;
         let timeout = catalog
             .wait_milliseconds()
             .min(clock_wait)
             .min(desktop.topology_wait())
-            .min(desktop.fullscreen_wait());
-        let wake = if desktop.animate()? {
+            .min(desktop.fullscreen_wait())
+            .min(desktop.rebuild.wait(Instant::now()));
+        let wake = if animating {
             next_frame(&events, timeout)
         } else {
             // SAFETY: handles stay alive throughout the wait; the UI queue is pumped after every wake.
@@ -902,8 +1028,11 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
         if index < events.len() {
             if matches!(Command::ALL[index], Command::ShowPicker) {
                 desktop.open_picker(catalog)?;
-            } else if !desktop.command(Command::ALL[index])? {
-                return Ok(());
+            } else {
+                let shown = desktop.command(Command::ALL[index]);
+                if !desktop.survive(shown, true)? {
+                    return Ok(());
+                }
             }
         }
         if !drain_messages(desktop, catalog)? || desktop.shown.is_empty() {
@@ -1015,6 +1144,48 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
 #[cfg(test)]
 mod clock_wait_tests {
     use super::*;
+    #[test]
+    fn graphics_rebuilds_back_off_to_a_cap() {
+        let delays: Vec<u128> = (0..8).map(|n| rebuild_delay(n).as_millis()).collect();
+        assert_eq!(delays, [250, 500, 1000, 2000, 4000, 8000, 8000, 8000]);
+        assert_eq!(rebuild_delay(u32::MAX).as_millis(), 8000);
+    }
+    #[test]
+    fn rebuilds_keep_one_pending_spend_a_budget_and_refresh_once_settled() {
+        let start = Instant::now();
+        let mut rebuild = Rebuild::new(start);
+        assert!(!rebuild.start(start));
+        rebuild.lose(start);
+        rebuild.lose(start + Duration::from_millis(200));
+        assert_eq!(rebuild.due, Some(start + GRAPHICS_RETRY));
+        assert!(!rebuild.start(start + Duration::from_millis(249)));
+        // Every failure backs off further until the budget is spent.
+        let mut now = start + GRAPHICS_RETRY;
+        for attempt in 1..GRAPHICS_ATTEMPTS {
+            assert!(rebuild.start(now));
+            assert!(rebuild.finish(false, now));
+            assert_eq!(rebuild.due, Some(now + rebuild_delay(attempt)));
+            now += rebuild_delay(attempt);
+        }
+        assert!(rebuild.start(now));
+        assert!(!rebuild.finish(false, now));
+        // Success clears the schedule; a loss soon after keeps backing off, a settled one starts over.
+        let mut rebuild = Rebuild::new(start);
+        rebuild.lose(start);
+        assert!(rebuild.start(start + GRAPHICS_RETRY));
+        assert!(rebuild.finish(true, start + GRAPHICS_RETRY));
+        assert_eq!(rebuild.wait(start), INFINITE);
+        let soon = start + Duration::from_secs(1);
+        rebuild.lose(soon);
+        assert_eq!(rebuild.due, Some(soon + rebuild_delay(1)));
+        let mut rebuild = Rebuild::new(start);
+        rebuild.lose(start);
+        assert!(rebuild.start(start + GRAPHICS_RETRY));
+        assert!(rebuild.finish(true, start + GRAPHICS_RETRY));
+        let later = start + GRAPHICS_RETRY + GRAPHICS_SETTLED;
+        rebuild.lose(later);
+        assert_eq!(rebuild.due, Some(later + GRAPHICS_RETRY));
+    }
     #[test]
     fn accepts_events_clock_and_timeout_but_falls_back_on_occlusion_or_failure() {
         for index in 0..=4 {

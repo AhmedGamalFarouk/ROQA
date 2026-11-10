@@ -7,7 +7,7 @@ use crate::{
 use std::mem::ManuallyDrop;
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::{
-    Foundation::{E_FAIL, HMODULE, HWND, POINT},
+    Foundation::{D2DERR_RECREATE_TARGET, E_FAIL, HMODULE, HWND, POINT},
     Graphics::{
         Direct2D::{
             CLSID_D2D1Shadow,
@@ -30,8 +30,8 @@ use windows::Win32::{
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
         },
         DirectComposition::{
-            DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionSurface,
-            IDCompositionTarget, IDCompositionVisual, IDCompositionVisual2,
+            DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionDevice,
+            IDCompositionSurface, IDCompositionTarget, IDCompositionVisual, IDCompositionVisual2,
         },
         DirectWrite::{
             DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -42,15 +42,20 @@ use windows::Win32::{
         },
         Dxgi::{
             Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM},
-            IDXGIDevice,
+            DXGI_ERROR_DEVICE_HUNG, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
+            DXGI_ERROR_DRIVER_INTERNAL_ERROR, IDXGIDevice,
         },
     },
 };
-use windows::core::{Error, Interface, PCWSTR, Result, w};
+use windows::core::{Error, HRESULT, Interface, PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
 #[derive(Clone)]
-pub struct Graphics(pub IDCompositionDesktopDevice);
+pub struct Graphics {
+    pub composition: IDCompositionDesktopDevice,
+    /// The device composition renders with, kept to ask whether it was removed.
+    d3d: ID3D11Device,
+}
 impl Graphics {
     pub fn create() -> Result<Self> {
         let mut d3d = None;
@@ -73,9 +78,42 @@ impl Graphics {
         // SAFETY: D2D and composition retain device references; all use stays on the UI thread.
         unsafe {
             let d2d = D2D1CreateDevice(&dxgi, None)?;
-            Ok(Self(DCompositionCreateDevice2(&d2d)?))
+            Ok(Self {
+                composition: DCompositionCreateDevice2(&d2d)?,
+                d3d,
+            })
         }
     }
+    /// Whether `error`, or the device itself, reports a device loss. A lost DXGI device also loses its
+    /// composition device, so both devices and everything drawn with them must be created again.
+    pub fn lost(&self, error: &Error) -> bool {
+        is_loss(error.code()) || self.removed()
+    }
+    /// Queries device state without drawing; DirectComposition sends WM_PAINT to its windows on a loss.
+    pub fn removed(&self) -> bool {
+        // SAFETY: state queries on devices owned by this UI thread. The desktop device answers
+        // IDCompositionDevice (DCompositionCreateDevice2); a failed query is not taken as a loss.
+        unsafe {
+            self.d3d.GetDeviceRemovedReason().is_err()
+                || self
+                    .composition
+                    .cast::<IDCompositionDevice>()
+                    .and_then(|device| device.CheckDeviceState())
+                    .is_ok_and(|valid| !valid.as_bool())
+        }
+    }
+}
+
+/// Results meaning the device is gone (the GetDeviceRemovedReason codes, and Direct2D's own).
+fn is_loss(code: HRESULT) -> bool {
+    [
+        DXGI_ERROR_DEVICE_REMOVED,
+        DXGI_ERROR_DEVICE_RESET,
+        DXGI_ERROR_DEVICE_HUNG,
+        DXGI_ERROR_DRIVER_INTERNAL_ERROR,
+        D2DERR_RECREATE_TARGET,
+    ]
+    .contains(&code)
 }
 
 /// What one dock slot shows. Slot 0 is the picker glyph; the others are real app groups.
@@ -124,8 +162,8 @@ impl Canvas {
     pub fn create(graphics: &Graphics, hwnd: HWND, bounds: Bounds) -> Result<Self> {
         // SAFETY: owned HWND outlives canvas; dimensions are positive validated layout.
         unsafe {
-            let target = graphics.0.CreateTargetForHwnd(hwnd, true)?;
-            let visual = graphics.0.CreateVisual()?;
+            let target = graphics.composition.CreateTargetForHwnd(hwnd, true)?;
+            let visual = graphics.composition.CreateVisual()?;
             let surface = create_surface(graphics, bounds)?;
             visual.SetContent(&surface)?;
             target.SetRoot(&visual)?;
@@ -263,7 +301,7 @@ impl Canvas {
             let ended = self.surface.EndDraw();
             drawing?;
             ended?;
-            self.graphics.0.Commit()
+            self.graphics.composition.Commit()
         }
     }
 }
@@ -274,7 +312,7 @@ impl Drop for Canvas {
             if let Err(error) = self.target.SetRoot(None::<&IDCompositionVisual>) {
                 eprintln!("Detach: {error}");
             }
-            if let Err(error) = self.graphics.0.Commit() {
+            if let Err(error) = self.graphics.composition.Commit() {
                 eprintln!("Composition shutdown: {error}");
             }
         }
@@ -284,7 +322,7 @@ impl Drop for Canvas {
 fn create_surface(graphics: &Graphics, bounds: Bounds) -> Result<IDCompositionSurface> {
     // SAFETY: dimensions are positive validated layout; premultiplied BGRA matches all content.
     unsafe {
-        graphics.0.CreateSurface(
+        graphics.composition.CreateSurface(
             bounds.width as u32,
             bounds.height as u32,
             DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -657,7 +695,23 @@ fn rgba(red: u8, green: u8, blue: u8, alpha: f32) -> D2D1_COLOR_F {
 
 #[cfg(test)]
 mod tests {
-    use super::designator_ranges;
+    use super::{designator_ranges, is_loss};
+    use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, E_FAIL, E_OUTOFMEMORY};
+    use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET};
+
+    #[test]
+    fn only_device_loss_results_trigger_a_rebuild() {
+        for code in [
+            DXGI_ERROR_DEVICE_REMOVED,
+            DXGI_ERROR_DEVICE_RESET,
+            D2DERR_RECREATE_TARGET,
+        ] {
+            assert!(is_loss(code));
+        }
+        for code in [E_FAIL, E_OUTOFMEMORY] {
+            assert!(!is_loss(code));
+        }
+    }
 
     fn ranges(text: &str) -> Vec<(u32, u32)> {
         let units: Vec<u16> = text.encode_utf16().collect();
