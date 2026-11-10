@@ -7,6 +7,7 @@ use crate::{
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
     layout::{self, Bounds, SurfaceKind, placement},
+    media::Media,
     motion::{self, Tween},
     native_window::{self, NativeWindow, WindowClass},
     picker::Picker,
@@ -460,6 +461,9 @@ struct Desktop {
     dock_items: Vec<DockItem>,
     dock_names: Vec<String>,
     dock_generation: Option<u64>,
+    /// Media session state, no UI yet. Declared before `text` so its WinRT objects and event tokens
+    /// are released before that field's `RoUninitialize`.
+    media: Media,
     /// Windows text size (Accessibility > Text size) scales the whole notch, whose only content is text.
     text: TextSettings,
     text_factor: f64,
@@ -492,6 +496,7 @@ impl Desktop {
             dock_items: Vec::new(),
             dock_names: dock::names(&[], &WindowModel::default()),
             dock_generation: None,
+            media: Media::create(),
             text,
             text_factor,
             clock: String::new(),
@@ -506,6 +511,9 @@ impl Desktop {
             ));
         }
         desktop.show(SurfaceKind::Dock)?;
+        // After the first paints, so loading the media component never delays them. WinRT is
+        // already initialized on this thread by `TextSettings`.
+        desktop.media.start();
         Ok(desktop)
     }
     fn dock_slots(&self) -> usize {
@@ -896,6 +904,7 @@ impl Desktop {
         if self.text.take_changed() {
             self.rescale_text()?;
         }
+        self.media.refresh();
         self.refresh_dock(model)?;
         self.refresh_fullscreen(model.generation)?;
         let clock_wait = self.refresh_clock()?;

@@ -9,6 +9,7 @@ mod host;
 mod icons;
 mod ipc;
 mod layout;
+mod media;
 mod motion;
 mod native_window;
 mod picker;

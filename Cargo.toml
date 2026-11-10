@@ -10,8 +10,11 @@ publish = false
 windows-core = "=0.62.2"
 # Same version the windows crate already locks; Direct2D path points are its Vector2.
 windows-numerics = "=0.3.1"
+# Same version the windows crate already locks; names the IAsyncOperation that media requests hold to cancel.
+windows-future = "=0.3.2"
 windows = { version = "=0.62.2", features = [
     "Foundation",
+    "Media_Control",
     "UI_ViewManagement",
     "Win32_System_WinRT",
     "Win32_Storage_EnhancedStorage",
