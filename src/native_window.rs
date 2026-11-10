@@ -354,7 +354,7 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
                 let _ = PostMessageW(Some(hwnd), CLOSE_SURFACE, WPARAM(0), LPARAM(0));
                 LRESULT(0)
             }
-            WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
+            WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_TIMECHANGE => {
                 let dpi = if message == WM_DPICHANGED {
                     wparam
                 } else {

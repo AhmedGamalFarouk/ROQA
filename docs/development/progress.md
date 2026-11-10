@@ -444,3 +444,24 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Verification.** `verify.ps1` PASS right before the commit: checks (29 passed, 0 failed) plus the release build. `roqa.exe` SHA-256 `78CFE1E5938D2362B4DF5409270D8854E56DB7038D4C3D5EF782DD32E03E161A`, identical to the recorded hash.
 - **Contents.** The POLISHED candidate, unchanged: `src/catalog_timing.rs`, `src/host.rs`, `src/native_window.rs`, plus this ledger entry. `.gitignore` is the user's own edit and is excluded.
 - **Still NOT RUN / deferred, not passed.** Native suites, idle and trace measurement, council review and accessibility.
+
+## M3 clock formatting gated to once per minute: POLISHED candidate (2026-11-10 local)
+
+- **Author.** Claude Opus 5.5 High worker, launched by the Chief Thread at the user's request. It approves nothing. Packet: `docs/development/m3-clock-candidate-1.md`.
+- **Change.** Uncommitted, on base `9e449d2`, in `src/host.rs` and `src/native_window.rs`.
+  - `refresh_clock` now formats only after a next-minute `Instant` deadline passes. Other wakes skip `GetLocalTime`, the locale formatting and both `String` allocations.
+  - `REPOSITION`, now also posted on `WM_TIMECHANGE`, forces a refresh on the next pass.
+  - The repaint check now compares the date text as well as the time.
+- **Verification.** `verify.ps1` PASS: 29 tests plus the release build. `roqa.exe` `595E7AA2B4CD993135B6EE50D6DFCC346CD59F875E0A1CC3AF1D1D2D3AD85581`.
+- **Review.** Independent Sol 6.1 Medium, which also served as clean-code-guard, ran 3 fresh rounds.
+  - Rounds 1 and 2 were POLISHED, each with one comment-accuracy Nit (M3C1-SOL-001 and -002). Both were fixed.
+  - Round 3 was **POLISHED with 0 findings** on manifest `artifacts/m3-clock-1/round-3/inputs.sha256`, SHA-256 `FDD3B1D07C560F42709C08C62EBEC52AFD8F5FA5F6C9B88B4C04D103F6610D24`.
+- **Still NOT RUN / deferred, not passed.** Performance measurement: the saving is static reasoning only. Also native resume, time and locale delivery, council review, native suites and accessibility.
+
+## M3 clock fix committed (2026-11-10 local)
+
+- **Commit worker.** Claude Opus 5.5 worker, launched by the Chief Thread at the user's explicit request ("do all"). It is the commit worker, not a reviewer, and approves nothing.
+- **Stale check.** The round-3 manifest hash, every listed `src/` entry and `candidate.diff` matched the working tree before commit.
+- **Verification.** `verify.ps1` PASS right before commit: checks (29 tests passed, 0 failed) and the locked release build. `roqa.exe` `595E7AA2B4CD993135B6EE50D6DFCC346CD59F875E0A1CC3AF1D1D2D3AD85581`, identical to the expected hash.
+- **Contents.** The POLISHED candidate, unchanged: `src/host.rs`, `src/native_window.rs`, plus the packet and this ledger entry. `.gitignore` is the user's own edit and is excluded.
+- **Still NOT RUN / deferred, not passed.** Native suites, idle and trace measurement, council review and accessibility.

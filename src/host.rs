@@ -364,6 +364,8 @@ struct Desktop {
     /// Last drawn time text; the notches repaint only when it changes.
     clock: String,
     date: String,
+    /// Just after the next minute boundary; until then a wake reuses the drawn text unformatted.
+    clock_due: Instant,
 }
 impl Desktop {
     fn create(probe: &Probe) -> Result<Self> {
@@ -391,6 +393,7 @@ impl Desktop {
             text_factor,
             clock: String::new(),
             date: String::new(),
+            clock_due: Instant::now(),
         };
         desktop.show(SurfaceKind::Notch)?;
         if *probe == Probe::Initialization {
@@ -447,20 +450,26 @@ impl Desktop {
         self.surfaces[last].set_visible(visible);
         Ok(())
     }
-    /// Repaints the notches only when the minute changed; returns how long until the next minute.
+    /// Formats the time only once the minute may have changed, and repaints the notches only when the
+    /// text changed; returns how long until the next minute.
+    // Windows `Instant` uses QPC, including suspend; an elapsed deadline is detected on the next loop pass.
     fn refresh_clock(&mut self) -> Result<u32> {
-        let now = clock::now();
-        if now.time != self.clock {
-            (self.clock, self.date) = (now.time, now.date);
-            for notch in self
-                .surfaces
-                .iter_mut()
-                .filter(|s| s.kind == SurfaceKind::Notch && s.visible)
-            {
-                notch.paint_notch(&self.clock, &self.date)?;
+        let now = Instant::now();
+        if now >= self.clock_due {
+            let clock = clock::now();
+            self.clock_due = now + Duration::from_millis(clock.next_minute_ms.into());
+            if clock.time != self.clock || clock.date != self.date {
+                (self.clock, self.date) = (clock.time, clock.date);
+                for notch in self
+                    .surfaces
+                    .iter_mut()
+                    .filter(|s| s.kind == SurfaceKind::Notch && s.visible)
+                {
+                    notch.paint_notch(&self.clock, &self.date)?;
+                }
             }
         }
-        Ok(now.next_minute_ms)
+        Ok(milliseconds_until(self.clock_due, now))
     }
     /// Paints one frame of each running animation; returns true while any still runs.
     /// The final frame always lands exactly on the target before a surface goes idle.
@@ -627,8 +636,10 @@ impl Desktop {
     }
     fn message(&mut self, message: &MSG) -> Result<()> {
         if message.message == native_window::REPOSITION {
-            // Every surface forwards display/DPI/settings changes; one coalesced read serves them all.
+            // Every surface forwards display/DPI/settings/time changes; one coalesced read serves them all.
             self.request_topology();
+            // A clock, time-zone or locale change can alter the text before the minute ends.
+            self.clock_due = Instant::now();
             return Ok(());
         }
         let slots = self.dock_slots();
