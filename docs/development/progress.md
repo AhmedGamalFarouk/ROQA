@@ -533,3 +533,48 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Verify:** `scripts/verify.ps1` run in root before commit: checks PASS (29 tests, 0 failed) and release build PASS. Release `roqa.exe` SHA-256 `1F61CABB399DECFC263B34431D88C1FB02933A6EE950B74541F1571316F89227`. This differs from the reviewed build `C757803F...36FA`; the base changed (docs only) and the build timestamp differs, so the binary was not byte-compared with the reviewed one.
 - **Still NOT RUN on this binary:** native suites; also council, accessibility and idle trace.
 - **Committed by:** the commit worker, not a reviewer.
+
+## M3 measurement 2: finer idle counters in `measure-idle.ps1`, ACCEPT; 3×3 run 1 done (2026-11-10 local)
+
+- **Author.** A Claude Opus 5.5 worker launched by the Chief Thread. Packet: `docs/development/m3-measure-2.md`. Evidence: `artifacts/m3-measure-2/`.
+- **Change.** `scripts/measure-idle.ps1` only, with no production change. All existing output fields are kept. New:
+  - `QueryProcessCycleTime` cycles/s (not tick-quantized), with an **approximate** ms/s figure at WMI `MaxClockSpeed`;
+  - GDI and USER objects at start and end;
+  - a per-thread WMI context-switch **wake proxy**, read outside the CPU window;
+  - `-SampleSeconds` (default 30);
+  - a STOP on any user input;
+  - a guard that refuses to run into the display-off or screen-saver timeout. It only reads settings.
+- **Not strictly M1-comparable.** The settle is now about 10 s (`SettleSeconds`).
+- **Self-check.** `artifacts/m3-measure-2/selfcheck.ps1` runs the script's own statements and helpers without launching ROQA, and passes:
+  - 0 parse errors;
+  - the C# compiles;
+  - the guard refuses 86400 s;
+  - the cycle, GUI, power and WMI helpers work;
+  - the per-thread delta cases pass.
+- **Review.** Each round was a fresh, independent, read-only Opus 5.5 High clean-code-guard reviewer. No Sol was used.
+  - **Round 1: REVISE.**
+    - 2 MAJOR: the wake proxy was biased low when threads exit; the 900 s display timeout falls inside a 15-minute run.
+    - 5 MINOR and 4 NIT.
+    - Manifest `BB67F5BA…D659DB`.
+    - Link: <t3-thread://v2/20b131d6-becb-42ea-b20c-104902347b7e/thread:delegated-task:command%3Amcp%3Ab6103d3e-035d-476c-ad32-4f2bda502186%3Adelegate-task%3A5edd64a6-68b8-4c6c-beca-387828f3c986>.
+  - **Round 2: ACCEPT WITH MINORS.**
+    - New: 2 MINOR (0 GDI threw; an empty WMI read passed as zero wakes) and 3 NIT.
+    - Manifest `11FC563C…5884D7`.
+    - Link: <t3-thread://v2/20b131d6-becb-42ea-b20c-104902347b7e/thread:delegated-task:command%3Amcp%3Ab6103d3e-035d-476c-ad32-4f2bda502186%3Adelegate-task%3Aeb8e471a-bad4-4eeb-85ea-46ddafe6189a>.
+  - **Round 3: ACCEPT.** All R2 findings were resolved.
+    - Manifest `artifacts/m3-measure-2/round-3/inputs.sha256` = `E06990606CEDB4E793BCF85CABA1A016ECA43C2F99E2FA99495A9B58B154AC8B`; 6/6 at both start and end.
+    - Its `scripts/measure-idle.ps1` entry is the current file.
+    - Link: <t3-thread://v2/20b131d6-becb-42ea-b20c-104902347b7e/thread:delegated-task:command%3Amcp%3Ab6103d3e-035d-476c-ad32-4f2bda502186%3Adelegate-task%3Ab41c4790-7c83-4897-878b-6dc154830643>.
+- **Deferred NITs (Limits wording only).**
+  - M3M2-R3-NIT-1: the group-policy display-off timeout is not listed as unread.
+  - M3M2-R3-NIT-2: the power source is read once, before launch.
+  - M3M2-R3-NIT-3: `ScreenSaveActive` is ignored. The guard errs toward refusing.
+  - Also open and documented: R1 NIT-4, an old `idle.json` survives a STOP. This predates the change.
+- **This machine.** The AC display-off timeout is 900 s, so the guard refuses a 900 s sample. The longest accepted sample is about 860 s with fresh input. A full 15-minute run needs the user to decide on their display timeout; nothing was changed.
+- **Binaries frozen for the next run:**
+  - `1e47cc2` `F00B5824…3B82`;
+  - `9e449d2` `0DB85A44…67EC`;
+  - `26cbb0a` `1F61CABB…9227`, copied to `artifacts/m3-measure-2/bin/26cbb0a/`.
+- **Run 1 (3×3, 30 s, 2026-11-10 about 15:42 to 15:49 UTC):** 9/9 complete, with no STOP and no input. Builds are **not distinguishable**: cycles/s medians are `1e47cc2` 1.58M, `9e449d2` 1.45M and `26cbb0a` 0.77M, but every build's range spans about 0.77M to 1.69M. The split into two clusters matched a wall-clock minute boundary inside the sample in 9/9 runs; that it is the clock repaint is a hypothesis. Approx. 0.20 to 0.43 ms/s, unverified clock basis. Wake proxy 1.6 to 3.8 switches/s. GDI 42, USER 21 and handles about 440→442 in every run. Private bytes about 20 MB. Not an M5 gate verdict. Details: `docs/development/m3-measure-2.md`, "Run 1 results"; evidence `artifacts/m3-measure-2/run-1/`.
+- **NOT RUN.** The long (up to about 860 s) run needs a fresh desktop-free confirmation from the user. No reviewer has checked run 1.
+- **Deferred.** Council review, accessibility, Windows 10, and DWM/GPU/power.
