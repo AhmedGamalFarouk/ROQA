@@ -91,12 +91,10 @@ impl NotchShadow {
 
 struct Surface {
     // Declared first: UIA must release the dock before its HWND is destroyed.
-    _accessible: Option<DockAccessibility>,
-    shadow: Option<NotchShadow>,
+    role: Role,
     canvas: Canvas,
     window: NativeWindow,
-    kind: SurfaceKind,
-    /// Owning monitor's device name; surfaces are keyed by it plus `kind`.
+    /// Owning monitor's device name; surfaces are keyed by it plus their kind.
     monitor: String,
     /// Monitor DPI; the notch's also includes the Windows text-size factor.
     dpi: u32,
@@ -108,15 +106,24 @@ struct Surface {
     live: bool,
     /// Notch: 0 collapsed to 1 expanded. Dock: pointer-inside progress of the bar fill.
     motion: Tween,
-    /// Notch only: pointer inside the hot band (not its shadow), the instant hover intent opens
-    /// the notch, and the window region last applied (it follows the drawn shape frame by frame).
-    engaged: bool,
-    intent: Option<Instant>,
-    area: Vec<Bounds>,
-    /// Dock only: hovered slot, per-slot hover progress and this dock's UIA geometry/names.
-    hover: Option<usize>,
-    slots: Vec<Tween>,
-    uia: dock_uia::Shared,
+}
+/// State only one surface kind needs.
+enum Role {
+    /// Pointer inside the hot band (not its shadow), the instant hover intent opens the notch, and
+    /// the window region last applied (it follows the drawn shape frame by frame).
+    Notch {
+        shadow: NotchShadow,
+        engaged: bool,
+        intent: Option<Instant>,
+        area: Vec<Bounds>,
+    },
+    /// Hovered slot, per-slot hover progress and this dock's UIA geometry/names.
+    Dock {
+        _accessible: DockAccessibility,
+        hover: Option<usize>,
+        slots: Vec<Tween>,
+        uia: dock_uia::Shared,
+    },
 }
 impl Surface {
     fn create(
@@ -127,30 +134,40 @@ impl Surface {
         slots: usize,
     ) -> Result<Self> {
         let bounds = placement(monitor.work, dpi, kind, slots);
-        let uia = dock_uia::Shared::default();
         let shadow = if kind == SurfaceKind::Notch {
             Some(NotchShadow::create(graphics, bounds)?)
         } else {
             None
         };
         let window = NativeWindow::create(bounds, kind)?;
-        let (accessible, area) = match kind {
-            SurfaceKind::Dock => (Some(DockAccessibility::create(window.0, &uia)?), Vec::new()),
-            SurfaceKind::Notch => {
+        let role = match shadow {
+            None => {
+                let uia = dock_uia::Shared::default();
+                Role::Dock {
+                    _accessible: DockAccessibility::create(window.0, &uia)?,
+                    hover: None,
+                    slots: vec![Tween::rest(0.0); slots],
+                    uia,
+                }
+            }
+            Some(shadow) => {
                 // Collapsed at rest: only the visible notch takes input.
                 let area = layout::notch_rows(bounds, dpi, 0.0);
                 window.set_notch_region(&area)?;
-                (None, area)
+                Role::Notch {
+                    shadow,
+                    engaged: false,
+                    intent: None,
+                    area,
+                }
             }
         };
         let canvas = Canvas::create(graphics, window.0, bounds)?;
         // Created hidden; the owner shows it after the first paint.
         Ok(Self {
-            _accessible: accessible,
-            shadow,
+            role,
             canvas,
             window,
-            kind,
             monitor: monitor.device.clone(),
             dpi,
             bounds,
@@ -158,13 +175,13 @@ impl Surface {
             visible: false,
             live: false,
             motion: Tween::rest(0.0),
-            engaged: false,
-            intent: None,
-            area,
-            hover: None,
-            slots: vec![Tween::rest(0.0); slots],
-            uia,
         })
+    }
+    fn kind(&self) -> SurfaceKind {
+        match self.role {
+            Role::Notch { .. } => SurfaceKind::Notch,
+            Role::Dock { .. } => SurfaceKind::Dock,
+        }
     }
     /// Hides or restores the surface (and the notch's shadow) without releasing anything. Hidden
     /// surfaces are not painted, so callers paint before restoring one.
@@ -173,8 +190,11 @@ impl Surface {
             return;
         }
         self.visible = visible;
-        let windows = self.shadow.iter().map(|shadow| &shadow.window);
-        for window in windows.chain([&self.window]) {
+        let shadow = match &self.role {
+            Role::Notch { shadow, .. } => Some(&shadow.window),
+            Role::Dock { .. } => None,
+        };
+        for window in shadow.into_iter().chain([&self.window]) {
             if visible {
                 window.show()
             } else {
@@ -183,16 +203,22 @@ impl Surface {
         }
         if !visible {
             // A hidden window gets no leave notification and needs no frames: settle at rest now.
-            (self.hovered, self.engaged, self.intent, self.hover) = (false, false, None, None);
-            self.live = false;
-            self.motion = Tween::rest(0.0);
-            self.slots.fill(Tween::rest(0.0));
+            (self.hovered, self.live, self.motion) = (false, false, Tween::rest(0.0));
+            match &mut self.role {
+                Role::Notch {
+                    engaged, intent, ..
+                } => (*engaged, *intent) = (false, None),
+                Role::Dock { hover, slots, .. } => {
+                    *hover = None;
+                    slots.fill(Tween::rest(0.0));
+                }
+            }
         }
     }
     fn leave(&mut self) {
         if self.hovered {
             self.hovered = false;
-            if self.kind == SurfaceKind::Dock {
+            if self.kind() == SurfaceKind::Dock {
                 self.hover_dock(None, false);
             } else {
                 self.set_notch_hover(false);
@@ -218,55 +244,57 @@ impl Surface {
         Ok(true)
     }
     fn paint_notch(&mut self, time: &str, date: &str) -> Result<()> {
+        let Role::Notch { shadow, area, .. } = &mut self.role else {
+            return Ok(());
+        };
         let progress = self.motion.value(Instant::now());
-        self.fit_notch_region(progress)?;
+        // Input and drawing use the same frame progress, without a speculative growth lead.
+        let rows = layout::notch_rows(self.bounds, self.dpi, progress);
+        if *area != rows {
+            self.window.set_notch_region(&rows)?;
+            *area = rows;
+        }
         let scene = NotchScene {
             time,
             date,
             progress,
             dpi: self.dpi,
         };
-        if let Some(shadow) = &self.shadow {
-            shadow.paint(&scene, self.window.0)?;
-        }
+        shadow.paint(&scene, self.window.0)?;
         self.canvas.paint_notch(&scene)
-    }
-    /// Input and drawing use the same frame progress, without a speculative growth lead.
-    fn fit_notch_region(&mut self, progress: f32) -> Result<()> {
-        let rows = layout::notch_rows(self.bounds, self.dpi, progress);
-        if self.area != rows {
-            self.window.set_notch_region(&rows)?;
-            self.area = rows;
-        }
-        Ok(())
     }
     /// Pointer entered or left the notch. Entering swells the pill at once and opens it only after
     /// `INTENT_TIME` (a pointer passing along the screen edge never pops the panel open); leaving
     /// closes from wherever the motion is. The HWND itself never moves.
-    fn set_notch_hover(&mut self, engaged: bool) {
-        if engaged == self.engaged {
+    fn set_notch_hover(&mut self, over: bool) {
+        let Role::Notch {
+            engaged, intent, ..
+        } = &mut self.role
+        else {
+            return;
+        };
+        if over == *engaged {
             return;
         }
-        self.engaged = engaged;
-        if !engaged {
-            self.intent = None;
+        *engaged = over;
+        if !over {
+            *intent = None;
             self.motion.retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
         } else if self.motion.value(Instant::now()) > NOTCH_SWELL {
             // Re-entered while still closing: reopen directly.
-            self.open_notch();
+            open_notch(intent, &mut self.motion);
         } else {
-            self.intent = Some(Instant::now() + motion::INTENT_TIME);
+            *intent = Some(Instant::now() + motion::INTENT_TIME);
             self.motion
                 .retarget(NOTCH_SWELL, motion::INTENT_TIME, motion::EASE_OUT);
         }
         self.live = true;
     }
-    fn open_notch(&mut self) {
-        self.intent = None;
-        self.motion.retarget(1.0, motion::OPEN_TIME, motion::OPEN);
-    }
     /// Highlights the hovered slot (or none) and the bar fill while the pointer is inside.
     fn hover_dock(&mut self, slot: Option<usize>, inside: bool) {
+        let Role::Dock { hover, slots, .. } = &mut self.role else {
+            return;
+        };
         let ease = |tween: &mut Tween, on: bool| {
             let (target, duration) = if on {
                 (1.0, motion::HOVER_IN_TIME)
@@ -276,15 +304,17 @@ impl Surface {
             tween.retarget(target, duration, motion::EASE_OUT);
         };
         ease(&mut self.motion, inside);
-        for (index, tween) in self.slots.iter_mut().enumerate() {
+        for (index, tween) in slots.iter_mut().enumerate() {
             ease(tween, slot == Some(index));
         }
-        self.hover = slot;
+        *hover = slot;
         self.live = true;
     }
     /// Shares slot names/geometry with this dock's UIA providers; a layout change retires every older element.
     fn publish_accessibility(&self, names: &[String], layout_changed: bool) {
-        if let Ok(mut state) = self.uia.lock() {
+        if let Role::Dock { uia, .. } = &self.role
+            && let Ok(mut state) = uia.lock()
+        {
             state.dpi = self.dpi;
             state.names = names.to_vec();
             if layout_changed {
@@ -293,8 +323,11 @@ impl Surface {
         }
     }
     fn paint_dock(&self, items: &[DockItem], icons: &[Option<Arc<IconPixels>>]) -> Result<()> {
+        let Role::Dock { slots: tweens, .. } = &self.role else {
+            return Ok(());
+        };
         let now = Instant::now();
-        let hover = |slot: usize| self.slots.get(slot).map_or(0.0, |t| t.value(now));
+        let hover = |slot: usize| tweens.get(slot).map_or(0.0, |t| t.value(now));
         let mut slots = vec![DockSlot {
             icon: None,
             active: false,
@@ -327,6 +360,11 @@ impl Surface {
 
 /// Hover-intent swell: the pill grows ~11 x 3 DIP to acknowledge the pointer before opening.
 const NOTCH_SWELL: f32 = 0.07;
+/// Opens the notch fully, ending any pending hover intent.
+fn open_notch(intent: &mut Option<Instant>, tween: &mut Tween) {
+    *intent = None;
+    tween.retarget(1.0, motion::OPEN_TIME, motion::OPEN);
+}
 /// Transient topology reads are retried this often, at most `TOPOLOGY_RETRIES` times per change.
 const TOPOLOGY_RETRY: Duration = Duration::from_millis(250);
 const TOPOLOGY_RETRIES: u32 = 8;
@@ -422,7 +460,7 @@ impl Desktop {
         if self
             .surfaces
             .iter()
-            .any(|surface| surface.kind == kind && surface.monitor == monitor.device)
+            .any(|surface| surface.kind() == kind && surface.monitor == monitor.device)
         {
             return Ok(());
         }
@@ -463,7 +501,7 @@ impl Desktop {
                 for notch in self
                     .surfaces
                     .iter_mut()
-                    .filter(|s| s.kind == SurfaceKind::Notch && s.visible)
+                    .filter(|s| s.kind() == SurfaceKind::Notch && s.visible)
                 {
                     notch.paint_notch(&self.clock, &self.date)?;
                 }
@@ -478,7 +516,7 @@ impl Desktop {
         let docks_live = self
             .surfaces
             .iter()
-            .any(|s| s.live && s.kind == SurfaceKind::Dock);
+            .any(|s| s.live && s.kind() == SurfaceKind::Dock);
         let icons = if docks_live {
             self.dock_icons()
         } else {
@@ -486,17 +524,21 @@ impl Desktop {
         };
         let mut running = false;
         for surface in &mut self.surfaces {
-            if surface.intent.is_some_and(|at| now >= at) {
-                surface.open_notch();
+            if let Role::Notch { intent, .. } = &mut surface.role
+                && intent.is_some_and(|at| now >= at)
+            {
+                open_notch(intent, &mut surface.motion);
             }
             if surface.live {
-                match surface.kind {
+                match surface.kind() {
                     SurfaceKind::Notch => surface.paint_notch(&self.clock, &self.date)?,
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
                 surface.live = surface.motion.running(now)
-                    || surface.intent.is_some()
-                    || surface.slots.iter().any(|tween| tween.running(now));
+                    || match &surface.role {
+                        Role::Notch { intent, .. } => intent.is_some(),
+                        Role::Dock { slots, .. } => slots.iter().any(|tween| tween.running(now)),
+                    };
             }
             running |= surface.live;
         }
@@ -504,12 +546,12 @@ impl Desktop {
     }
     fn close(&mut self, kind: SurfaceKind) {
         self.shown.retain(|shown| *shown != kind);
-        self.surfaces.retain(|surface| surface.kind != kind);
+        self.surfaces.retain(|surface| surface.kind() != kind);
     }
     fn dock_at(&self, hwnd: HWND) -> Option<&Surface> {
         self.surfaces
             .iter()
-            .find(|s| s.kind == SurfaceKind::Dock && s.window.0 == hwnd)
+            .find(|s| s.kind() == SurfaceKind::Dock && s.window.0 == hwnd)
     }
     fn open_picker(&mut self, catalog: &Catalog) -> Result<()> {
         self.picker.take();
@@ -527,7 +569,11 @@ impl Desktop {
             let items = dock::items(model);
             let changed = items != self.dock_items;
             self.dock_names = dock::names(&items, model);
-            for dock in self.surfaces.iter().filter(|s| s.kind == SurfaceKind::Dock) {
+            for dock in self
+                .surfaces
+                .iter()
+                .filter(|s| s.kind() == SurfaceKind::Dock)
+            {
                 dock.publish_accessibility(&self.dock_names, changed);
             }
             // Title-only changes publish new generations; they rename UIA items but leave pixels untouched.
@@ -538,16 +584,20 @@ impl Desktop {
             self.dock_items = items;
             if resized {
                 let slots = self.dock_slots();
-                for dock in self
-                    .surfaces
-                    .iter_mut()
-                    .filter(|s| s.kind == SurfaceKind::Dock)
-                {
+                for dock in &mut self.surfaces {
+                    let Role::Dock {
+                        hover,
+                        slots: tweens,
+                        ..
+                    } = &mut dock.role
+                    else {
+                        continue;
+                    };
                     let Some(monitor) = self.monitors.iter().find(|m| m.device == dock.monitor)
                     else {
                         continue;
                     };
-                    (dock.hover, dock.slots) = (None, vec![Tween::rest(0.0); slots]);
+                    (*hover, *tweens) = (None, vec![Tween::rest(0.0); slots]);
                     dock.bounds = placement(monitor.work, dock.dpi, SurfaceKind::Dock, slots);
                     dock.window.resize(dock.bounds)?;
                     dock.canvas.resize(dock.bounds)?;
@@ -558,7 +608,7 @@ impl Desktop {
         for dock in self
             .surfaces
             .iter()
-            .filter(|s| s.kind == SurfaceKind::Dock && s.visible)
+            .filter(|s| s.kind() == SurfaceKind::Dock && s.visible)
         {
             dock.paint_dock(&self.dock_items, &icons)?;
         }
@@ -570,7 +620,7 @@ impl Desktop {
         let densest = self
             .surfaces
             .iter()
-            .filter(|s| s.kind == SurfaceKind::Dock)
+            .filter(|s| s.kind() == SurfaceKind::Dock)
             .map(|s| s.dpi)
             .max();
         let Some(dpi) = densest else {
@@ -593,9 +643,10 @@ impl Desktop {
         version: u32,
         catalog: &Catalog,
     ) -> Result<()> {
-        let current = self
-            .dock_at(hwnd)
-            .and_then(|dock| dock.uia.lock().map(|state| state.version).ok());
+        let current = self.dock_at(hwnd).and_then(|dock| match &dock.role {
+            Role::Dock { uia, .. } => uia.lock().map(|state| state.version).ok(),
+            Role::Notch { .. } => None,
+        });
         if current == Some(version) {
             self.activate_slot(Some(slot), catalog)?;
         }
@@ -652,14 +703,14 @@ impl Desktop {
         };
         match message.message {
             native_window::CLOSE_SURFACE => {
-                let kind = surface.kind;
+                let kind = surface.kind();
                 self.close(kind);
             }
             WM_MOUSEMOVE => {
                 let entered = surface.track_pointer()?;
-                if surface.kind == SurfaceKind::Dock {
+                if let Role::Dock { hover, .. } = surface.role {
                     let slot = surface.dock_slot(message.lParam, slots);
-                    if entered || slot != surface.hover {
+                    if entered || slot != hover {
                         surface.hover_dock(slot, true);
                     }
                 } else {
@@ -697,7 +748,7 @@ impl Desktop {
         for surface in &mut self.surfaces {
             let visible = self.fullscreen.as_ref() != Some(&surface.monitor);
             if visible && !surface.visible {
-                match surface.kind {
+                match surface.kind() {
                     SurfaceKind::Notch => surface.paint_notch(&self.clock, &self.date)?,
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
@@ -779,7 +830,7 @@ impl Desktop {
             return Ok(());
         }
         self.text_factor = factor;
-        self.surfaces.retain(|s| s.kind != SurfaceKind::Notch);
+        self.surfaces.retain(|s| s.kind() != SurfaceKind::Notch);
         if self.shown.contains(&SurfaceKind::Notch) {
             self.show(SurfaceKind::Notch)?;
         }

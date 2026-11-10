@@ -516,3 +516,20 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
   - No performance gain is claimed.
 - **NOT RUN.** The `idle-matrix.ps1` helper (GDI/USER at idle, plus context switches as a wake proxy) did not run: its input gate stopped it, because the user was active. Also NOT RUN: the 15-minute trace and fullscreen cases.
 - **Deferred.** DWM, GPU, power, council review, accessibility and Windows 10.
+
+## M3 surface roles split (M3T1-CCG-MIN-3): ACCEPT, committed (2026-11-10 local)
+
+- **Author:** an Opus 5.5 High worker; packet `docs/development/m3-surface-roles-candidate-1.md`.
+- **Change:** `Surface` notch-only and dock-only fields moved into `enum Role { Notch, Dock }`, with `kind` derived from the role.
+- **Footprint:**
+  - `size_of::<Surface>()` went from 320 to 256 bytes, measured;
+  - notches no longer allocate unused slot tweens or a UIA Arc;
+  - no per-wake work added.
+- **Review:**
+  - fresh independent Opus 5.5 High clean-code-guard, round 1: ACCEPT on `13C60C00748CEEE65286D6ABE77C4404B20890B72281951D3272A636BF2D237F` (`artifacts/m3-surface-roles-1/round-1/inputs.sha256`; its `src/host.rs` entry `67879567...D1C1` is the committed file);
+  - M3T1-CCG-MIN-3 is resolved;
+  - comment-only nits M3SR-OPUS-NIT-1 and -2 are deferred to the next `host.rs` candidate;
+  - review link: <t3-thread://v2/20b131d6-becb-42ea-b20c-104902347b7e/thread:delegated-task:command%3Amcp%3A09bc86ad-2306-4226-8c8a-23010320204f%3Adelegate-task%3Af0f0c050-892c-4103-8f5e-11b60b729d9c>.
+- **Verify:** `scripts/verify.ps1` run in root before commit: checks PASS (29 tests, 0 failed) and release build PASS. Release `roqa.exe` SHA-256 `1F61CABB399DECFC263B34431D88C1FB02933A6EE950B74541F1571316F89227`. This differs from the reviewed build `C757803F...36FA`; the base changed (docs only) and the build timestamp differs, so the binary was not byte-compared with the reviewed one.
+- **Still NOT RUN on this binary:** native suites; also council, accessibility and idle trace.
+- **Committed by:** the commit worker, not a reviewer.
