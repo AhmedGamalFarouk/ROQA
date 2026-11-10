@@ -97,14 +97,14 @@ function Sample([string]$Name) {
     return [ordered]@{ Name = $Name; PrivateBytes = $resident.PrivateMemorySize64; Handles = $resident.HandleCount; User = [NativeProbe]::GetGuiResources($resident.Handle,1); Gdi = [NativeProbe]::GetGuiResources($resident.Handle,0) }
 }
 try {
-    Check ([NativeProbe]::FindWindow('ROQA.NativeSurface.1','ROQA Dock') -eq [IntPtr]::Zero) 'No pre-existing resident surface'
+    Check ([NativeProbe]::Surfaces('ROQA Dock').Count -eq 0) 'No pre-existing resident surface'
     $fixture = [NativeProbe]::StartAnchor()
     $title = 'ROQA fixture — مرحباً بالعالم واختبار العربية'
     Check ([NativeProbe]::SetWindowText($fixture,$title)) 'Real fixture uses mixed Latin and Arabic title'
     if (![NativeProbe]::SetForegroundWindow($fixture)) { throw 'INTERFERENCE: Windows denied initial fixture foreground.' }
     $resident = Start-Process $executable -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $evidence 'runtime.log')
     [void]$resident.Handle
-    Wait-Until { [NativeProbe]::FindWindow('ROQA.NativeSurface.1','ROQA Dock') -ne [IntPtr]::Zero } 'Native dock appears'
+    Wait-Until { [NativeProbe]::PrimarySurface('ROQA Dock') -ne [IntPtr]::Zero } 'Native dock appears'
     Assert-ForegroundOrClassify $fixture 'Passive launch keeps foreground fixture'
     $picker = Open-Picker
     Wait-Until { (List-Names) -contains $title } 'Picker contains actual catalog title through UIA'
@@ -153,7 +153,7 @@ try {
         Check (($sample.Handles-$baseline.Handles) -le 5 -and ($sample.User-$baseline.User) -le 3 -and ($sample.Gdi-$baseline.Gdi) -le 3) "Block $block picker handle USER GDI counts bounded"
     }
     # Dock: the real fixture group is a named UIA button, and clicks behave like the taskbar.
-    $dock = [NativeProbe]::FindWindow('ROQA.NativeSurface.1','ROQA Dock')
+    $dock = [NativeProbe]::PrimarySurface('ROQA Dock')
     Wait-Until { @((Dock-Buttons) | Where-Object { $_.name -like "$renamed*" }).Count -eq 1 } 'Dock exposes the real fixture group as a named UIA button'
     $buttons = Dock-Buttons
     Check ($buttons[0].name -eq 'All windows' -and $buttons[0].invoke) 'Dock slot 0 is the invokable picker button'

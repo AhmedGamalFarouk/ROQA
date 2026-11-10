@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 
 public static class NativeProbe {
@@ -62,6 +64,30 @@ public static class NativeProbe {
     public static void ShowFixture(IntPtr window, int command) { ShowWindow(window, command); }
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
 
+    delegate bool WindowVisitor(IntPtr window, IntPtr data);
+    [DllImport("user32.dll")] static extern bool EnumWindows(WindowVisitor visit, IntPtr data);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int count);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
+    // M3 places one surface per monitor; FindWindow would return an arbitrary one.
+    public static List<IntPtr> Surfaces(string title) {
+        List<IntPtr> found = new List<IntPtr>();
+        EnumWindows((window, data) => {
+            StringBuilder name = new StringBuilder(64), text = new StringBuilder(64);
+            if (GetClassName(window, name, 64) > 0 && name.ToString() == "ROQA.NativeSurface.1"
+                && GetWindowText(window, text, 64) >= 0 && text.ToString() == title) found.Add(window);
+            return found.Count < 256;
+        }, IntPtr.Zero);
+        return found;
+    }
+    // Suites written before M3 assert primary-monitor geometry, so they follow the primary surface.
+    public static IntPtr PrimarySurface(string title) {
+        foreach (IntPtr window in Surfaces(title)) {
+            MonitorInfo monitor = new MonitorInfo(); monitor.Size = Marshal.SizeOf(typeof(MonitorInfo));
+            if (GetMonitorInfo(MonitorFromWindow(window, 2), ref monitor) && (monitor.Flags & 1) != 0) return window;
+        }
+        return IntPtr.Zero;
+    }
     public static void EnablePhysicalPixels() {
         if (SetThreadDpiAwarenessContext(new IntPtr(-4)) == IntPtr.Zero)
             throw new InvalidOperationException("Cannot enter per-monitor-v2 test context.");

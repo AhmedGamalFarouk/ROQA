@@ -25,7 +25,7 @@ function Wait-Until([scriptblock]$Predicate, [string]$Name, [int]$Seconds = 15) 
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "FAIL: Timed out: $Name"
 }
-function Dock { [NativeProbe]::FindWindow('ROQA.NativeSurface.1', 'ROQA Dock') }
+function Dock { [NativeProbe]::PrimarySurface('ROQA Dock') }
 function Dock-Buttons {
     $json = & $probe buttons (Dock).ToInt64()
     if ($LASTEXITCODE -ne 0) { throw 'Native UIA dock query failed.' }
@@ -40,7 +40,7 @@ function Frame-Titles {
 }
 function Has-Button([string]$Title) { @((Dock-Buttons) | Where-Object { $_.name -eq $Title -or $_.name -like "$Title, *" }).Count -ge 1 }
 try {
-    Check ((Dock) -eq [IntPtr]::Zero) 'No pre-existing resident surface'
+    Check ([NativeProbe]::Surfaces('ROQA Dock').Count -eq 0) 'No pre-existing resident surface'
 
     # 1. A real hung top-level window (kernel32 Sleep: CLR STA waits such as Start-Sleep pump messages) exists before ROQA's first full scan.
     $hungScript = "Add-Type -AssemblyName System.Windows.Forms; `$f = New-Object System.Windows.Forms.Form; `$f.Text = 'ROQA hung fixture'; `$f.Show(); [System.Windows.Forms.Application]::DoEvents(); Add-Type -Name K -Namespace H -MemberDefinition '[DllImport(""kernel32.dll"")] public static extern void Sleep(uint ms);'; [H.K]::Sleep(180000)"

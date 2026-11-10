@@ -1,18 +1,22 @@
-use crate::layout::{Bounds, SurfaceKind};
+use crate::{
+    layout::{Bounds, SurfaceKind},
+    topology::Monitor,
+};
 use std::{
     mem::size_of,
     panic::{AssertUnwindSafe, catch_unwind},
 };
 use windows::Win32::{
-    Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
+    Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Gdi::{
-        CombineRgn, CreateRectRgn, DeleteObject, GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY,
-        MONITORINFO, MonitorFromPoint, RGN_OR, SetRectRgn, SetWindowRgn, ValidateRect,
+        CombineRgn, CreateRectRgn, DeleteObject, EnumDisplayMonitors, GetMonitorInfoW, HDC,
+        HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, RGN_OR,
+        SetRectRgn, SetWindowRgn, ValidateRect,
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::*},
 };
-use windows::core::{Error, Result, w};
+use windows::core::{BOOL, Error, Result, w};
 
 pub const REPOSITION: u32 = WM_APP + 1;
 pub const CLOSE_SURFACE: u32 = WM_APP + 2;
@@ -161,6 +165,15 @@ impl Drop for NativeWindow {
     }
 }
 
+fn bounds(rect: RECT) -> Bounds {
+    Bounds {
+        x: rect.left,
+        y: rect.top,
+        width: rect.right - rect.left,
+        height: rect.bottom - rect.top,
+    }
+}
+
 pub fn primary_work_area() -> Result<Bounds> {
     let mut monitor = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
@@ -174,17 +187,65 @@ pub fn primary_work_area() -> Result<Bounds> {
         )
         .ok()?;
     }
-    let rect = monitor.rcWork;
-    Ok(Bounds {
-        x: rect.left,
-        y: rect.top,
-        width: rect.right - rect.left,
-        height: rect.bottom - rect.top,
-    })
+    Ok(bounds(monitor.rcWork))
 }
 
-pub fn primary_dpi(work: Bounds) -> Result<u32> {
-    // A hidden primary-monitor HWND observes current DPI after scale changes since sign-in.
+/// Upper bound on monitors per snapshot; more are ignored rather than growing work per topology event.
+const MAX_MONITORS: usize = 16;
+
+/// One enumeration pass: device name, work area and current DPI of each monitor. HMONITORs are used
+/// only inside this call. A monitor that disappears mid-pass fails the pass; the caller retries.
+pub fn monitors() -> Result<Vec<Monitor>> {
+    let mut handles = Vec::<HMONITOR>::with_capacity(MAX_MONITORS);
+    // SAFETY: synchronous enumeration; the callback writes only into `handles`, which outlives it.
+    unsafe {
+        EnumDisplayMonitors(
+            None,
+            None,
+            Some(collect_monitor),
+            LPARAM(&raw mut handles as isize),
+        )
+        .ok()?;
+    }
+    handles
+        .into_iter()
+        .map(|handle| {
+            let mut info = MONITORINFOEXW::default();
+            info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+            // SAFETY: cbSize selects the MONITORINFOEXW layout, which begins with MONITORINFO.
+            unsafe { GetMonitorInfoW(handle, &raw mut info as *mut MONITORINFO).ok()? };
+            let name = &info.szDevice;
+            let length = name
+                .iter()
+                .position(|&unit| unit == 0)
+                .unwrap_or(name.len());
+            let work = bounds(info.monitorInfo.rcWork);
+            Ok(Monitor {
+                device: String::from_utf16_lossy(&name[..length]),
+                work,
+                dpi: dpi_at(work)?,
+            })
+        })
+        .collect()
+}
+
+unsafe extern "system" fn collect_monitor(
+    monitor: HMONITOR,
+    _: HDC,
+    _: *mut RECT,
+    handles: LPARAM,
+) -> BOOL {
+    // SAFETY: `monitors` passes its exclusively borrowed Vec for the duration of the enumeration.
+    let handles = unsafe { &mut *(handles.0 as *mut Vec<HMONITOR>) };
+    // Pushing within the reserved capacity never reallocates, so nothing here can unwind.
+    if handles.len() < handles.capacity() {
+        handles.push(monitor);
+    }
+    BOOL::from(true)
+}
+
+fn dpi_at(work: Bounds) -> Result<u32> {
+    // A hidden HWND on the monitor observes its current DPI after scale changes since sign-in.
     // It is never shown or composed, and RAII destroys it on this same thread.
     let probe = NativeWindow::create_hidden(
         Bounds {
@@ -195,13 +256,10 @@ pub fn primary_dpi(work: Bounds) -> Result<u32> {
         },
         w!("ROQA DPI Probe"),
     )?;
-    // SAFETY: the embedded PerMonitorV2 manifest applies to this owned live primary-monitor HWND.
+    // SAFETY: the embedded PerMonitorV2 manifest applies to this owned live HWND.
     let dpi = unsafe { GetDpiForWindow(probe.0) };
     if dpi == 0 {
-        return Err(Error::new(
-            E_FAIL,
-            "Cannot read current primary-monitor DPI.",
-        ));
+        return Err(Error::new(E_FAIL, "Cannot read current monitor DPI."));
     }
     Ok(dpi)
 }

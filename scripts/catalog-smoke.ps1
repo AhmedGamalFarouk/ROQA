@@ -48,7 +48,7 @@ $queueTraffic = $null
 $resident = $null; $fixture = [IntPtr]::Zero
 $originalForeground = [NativeProbe]::GetForegroundWindow()
 try {
-    Check ([NativeProbe]::FindWindow('ROQA.NativeSurface.1', 'ROQA Dock') -eq [IntPtr]::Zero) 'No pre-existing resident surface'
+    Check ([NativeProbe]::Surfaces('ROQA Dock').Count -eq 0) 'No pre-existing resident surface'
     $fixture = [NativeProbe]::StartAnchor()
     Check ([NativeProbe]::SetWindowText($fixture, 'ROQA catalog fixture')) 'Set real fixture title'
     Start-Sleep -Milliseconds 150
@@ -103,7 +103,7 @@ try {
         Check (($sample.PrivateBytes - $baseline.PrivateBytes) -le 8MB) "Block $block private memory bounded"
         Check (($sample.Handles - $baseline.Handles) -le 10 -and ($sample.User - $baseline.User) -le 3 -and ($sample.Gdi - $baseline.Gdi) -le 3) "Block $block kernel/USER/GDI bounded"
     }
-    $dock = [NativeProbe]::FindWindow('ROQA.NativeSurface.1', 'ROQA Dock')
+    $dock = [NativeProbe]::PrimarySurface('ROQA Dock')
     $fixture = [NativeProbe]::StartAnchor()
     $state = Wait-Catalog { param($s) (Fixture-Row $s $fixture).Count -eq 1 } 'Fixture present before queue saturation'
     $beforeQueueGeneration = $state.generation

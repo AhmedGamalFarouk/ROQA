@@ -14,6 +14,7 @@ mod native_window;
 mod picker;
 mod picker_font;
 mod text_settings;
+mod topology;
 mod window_catalog;
 mod window_model;
 mod window_source;

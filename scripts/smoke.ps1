@@ -19,7 +19,7 @@ function Assert-Check([bool]$Condition, [string]$Name) {
     $observations.Checks += $Name
 }
 function Surface-Window([string]$Title) {
-    $window = [NativeProbe]::FindWindow('ROQA.NativeSurface.1', $Title)
+    $window = [NativeProbe]::PrimarySurface($Title)
     if ($window -ne [IntPtr]::Zero -and $null -ne $script:hostProcess) {
         [uint32]$owner = 0
         [void][NativeProbe]::GetWindowThreadProcessId($window, [ref]$owner)
@@ -31,7 +31,9 @@ function Wait-Surface([string]$Title, [bool]$Present) {
     $deadline = [DateTime]::UtcNow.AddSeconds(5)
     do {
         $window = Surface-Window $Title
-        if (($window -ne [IntPtr]::Zero) -eq $Present) { return $window }
+        # Absence means gone from every monitor, not only the primary one.
+        $exists = if ($Present) { $window -ne [IntPtr]::Zero } else { [NativeProbe]::Surfaces($Title).Count -gt 0 }
+        if ($exists -eq $Present) { return $window }
         if ($script:hostProcess.HasExited -and $Present) { throw "Host exited with $($script:hostProcess.ExitCode) waiting for $Title." }
         Start-Sleep -Milliseconds 20
     } while ([DateTime]::UtcNow -lt $deadline)
@@ -110,7 +112,7 @@ $originalForeground = [NativeProbe]::GetForegroundWindow()
 $originalCursor = New-Object NativeProbe+Point
 [void][NativeProbe]::GetCursorPos([ref]$originalCursor)
 try {
-    Assert-Check ((Surface-Window 'ROQA Notch') -eq [IntPtr]::Zero -and (Surface-Window 'ROQA Dock') -eq [IntPtr]::Zero) 'No pre-existing ROQA surfaces'
+    Assert-Check ([NativeProbe]::Surfaces('ROQA Notch').Count -eq 0 -and [NativeProbe]::Surfaces('ROQA Dock').Count -eq 0) 'No pre-existing ROQA surfaces'
     $anchor = [NativeProbe]::StartAnchor()
     foreach ($attempt in 1..5) {
         [void][NativeProbe]::SetForegroundWindow($anchor)
@@ -287,13 +289,14 @@ try {
     Assert-Check (!$script:hostProcess.HasExited) 'Closing one surface preserves the other'
     Invoke-Control '--show-dock'; [void](Wait-Surface 'ROQA Dock' $true)
     $notch = Wait-Surface 'ROQA Notch' $true
-    $testDpi = [NativeProbe]::GetDpiForWindow($notch) + 48
-    [NativeProbe]::DpiChange($notch, $testDpi)
+    $realDpi = [NativeProbe]::GetDpiForWindow($notch)
+    # M3: WM_DPICHANGED only triggers a re-read of the real topology; its DPI value is not trusted.
+    [NativeProbe]::DpiChange($notch, $realDpi + 48)
     Start-Sleep -Milliseconds 250
-    $notch = Wait-Surface 'ROQA Notch' $true
+    $afterDpi = Wait-Surface 'ROQA Notch' $true
     $scaledRect = New-Object NativeProbe+Rect
-    [void][NativeProbe]::GetWindowRect($notch, [ref]$scaledRect)
-    Assert-Check ($scaledRect.Width -eq [int][Math]::Floor((400 * $testDpi + 48) / 96)) "Synthetic WM_DPICHANGED rebuilds geometry at requested scale (dpi=$testDpi, width=$($scaledRect.Width))"
+    [void][NativeProbe]::GetWindowRect($afterDpi, [ref]$scaledRect)
+    Assert-Check ($afterDpi -eq $notch -and $scaledRect.Width -eq [int][Math]::Floor((400 * $realDpi + 48) / 96)) "Synthetic WM_DPICHANGED keeps the unchanged notch HWND at the real DPI (dpi=$realDpi, width=$($scaledRect.Width))"
     # Query a separate PMv2 HWND on the primary monitor, never GetDpiForSystem/sign-in scale.
     $currentPrimaryDpi = [NativeProbe]::GetDpiForWindow($anchor)
     Assert-Check ($currentPrimaryDpi -gt 0) 'Independent primary-monitor DPI query succeeds'
@@ -363,7 +366,7 @@ try {
         if (!$failedHost.WaitForExit(5000)) { $failedHost.Kill(); throw "Failure probe hung: $probe" }
         Assert-Check ($failedHost.ExitCode -eq 1) "Failure takes expected orderly exit code 1: $probe"
         $failedHost.Dispose()
-        Assert-Check ((Surface-Window 'ROQA Notch') -eq [IntPtr]::Zero -and (Surface-Window 'ROQA Dock') -eq [IntPtr]::Zero) "No orphan surface after exited failure probe (OS cleanup also applies): $probe"
+        Assert-Check ([NativeProbe]::Surfaces('ROQA Notch').Count -eq 0 -and [NativeProbe]::Surfaces('ROQA Dock').Count -eq 0) "No orphan surface after exited failure probe (OS cleanup also applies): $probe"
     }
     $observations.Status = 'PASS'
 }

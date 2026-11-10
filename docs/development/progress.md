@@ -305,3 +305,76 @@ User instruction: "after everything is done, start a new thread with the next st
 Final Gemini High scoped recheck POLISHED on review-5 manifest905E1E91...5493C; all622 disk/archive entries verified, DESIGN-SOL-R3-001 resolved, no new findings. Report docs/design/review-round-4-gemini.md includes full source thread link and notes the original report's width-arithmetic typo without changing raw evidence. Sol Medium POLISHED and independent clean-code-guard ACCEPT already recorded. Current design pass is complete and user-accepted; implementation1d9e058, Sol report1522a7f, final report committed separately. Claude remains deferred. No unmeasured performance or outstanding manual/platform evidence is certified.
 
 Per latest user instruction, skip milestone council for now and launch a new top-level thread on the same ROQA checkout for remaining M2 validation and next implementation steps. This explicit user direction supersedes the council-gating workflow while deferred; it does not manufacture council approval or mark untested gates passed. Start by assessing existing M2 evidence gaps (Narrator/keyboard, physical Arabic/RTL/IME and live text scale), prepare safe bounded validation, then continue the plan as warranted. Obtain fresh desktop-free confirmation before any native run. No system settings changes without authorization. Keep native taskbar, pinned tooling, no copied assets, independent clean-code-guard for nontrivial new production code, and unrelated .gitignore edit untouched. No further design-review delegates required.
+
+## Follow-on M2 validation preparation (2026-11-09)
+
+Author: primary Codex agent (gpt-6.1-sol, medium), user-requested follow-on thread. Audited rules, plan, product, ledger and picker/input/text-size source and smoke coverage offline. HEAD ae6693645bf0434898d91784a2d41323e8246366; release binary SHA-256 verified as 21BBFE1A70CB87AAFE48268AC75469B6335BD566FEEE2A51851703BB8ED428C6. No rebuild, native execution/input, setting change, production edit, freeze or commit.
+
+Prepared docs/development/m2-assisted-validation.md with current-binary Narrator/keyboard failure recovery, physical Arabic versus actual IME composition, separately authorized live text-size/restore, desktop/foreground safety, result categories and M3 sequencing. Prior assisted speech belongs to the earlier binary; automated UIA and source subscriptions are not physical input/speech or live text-scale passes.
+
+Council remains skipped; no reviewers or replacement judges requested. All new manual cases NOT RUN pending fresh desktop-free confirmation and user-operated prerequisites. M2 is not newly accepted. M3 implementation waits for required runtime evidence or explicit user scope decision for unavailable prerequisites, not council tasks. Fresh independent non-author clean-code-guard remains required for nontrivial production fixes. Existing .gitignore edit and prior evidence remain untouched.
+
+## Current-binary assisted session started (2026-11-10 local)
+
+User confirmed desktop free for keyboard/Narrator session. Read-only foreground check found T3 Code foreground, no existing ROQA and Narrator not running. Existing release hash matched 21BBFE1A70CB87AAFE48268AC75469B6335BD566FEEE2A51851703BB8ED428C6. Computer Use launch reported no targetable window; read-only native reconciliation confirmed one new owned resident PID 28676 at expected path, dock HWND 1313430 and notch HWND 1772622, with T3 Code still foreground. No repeated launch or injected input. Observation 2026-11-09T22:00:15Z is November 10 in Africa/Cairo. Record artifacts/m2-assisted-next/20261110-0000/session.json.
+
+Resident intentionally retained for active user-assisted flow. Narrator/physical keyboard/failure cases still NOT RUN pending user operation; no settings changed, no new acceptance or council task. Fresh desktop confirmation is required for a separate later native run. Cleanup is pending completion of this session, not claimed complete.
+
+## Assisted-session scope update (2026-11-10 local)
+
+User explicitly skipped Narrator: current-binary speech check NOT RUN by user choice, not passed. User agreed to physical Arabic/RTL testing with an available layout. Read-only check found the same owned ROQA PID 28676, T3 Code foreground and no picker open. Current window inventory provided no Arabic-titled target; first user-driven subcase is physical filter entry/caret editing only, not matching-title activation or IME composition. No automated typing, setting changes or additional native launch. Awaiting physical user observation; cleanup remains pending active session completion.
+
+## Physical Arabic entry/editing user report (2026-11-10 local)
+
+Asked the user to open All windows, switch to the available Arabic layout, physically type the test word مرحبا (not paste), test arrow keys/Backspace and leave the picker open. User answered yes to correctly joined display and normal caret movement/deletion. Scoped result: PASS by user report for physical Arabic filter entry, joining and basic editing on the active session. No screenshot, codepoint readback or independent instrumented verification was collected for this subcase; layout identity and exact final edit contents were not measured. This is not mixed-title filtering/activation, full RTL UI validation, IME composition or Narrator evidence. Those scopes remain untested/skipped as previously recorded. No settings change or new native run; resident cleanup remains pending session completion.
+
+## Accessibility checks deferred by user; session cleaned up (2026-11-10 local)
+
+Latest explicit direction: skip the accessibility checks. Stop requesting Narrator, IME, additional Arabic/RTL and live text-size checks for now. Preserve the scoped Arabic user report; all omitted cases remain NOT RUN/deferred, not passed. No text-size setting was changed. Council remains deferred with no replacement judges; no M2 acceptance is manufactured.
+
+Closed only the owned test resident after validating PID 28676, executable path and recorded creation time. Read-only foreground check found T3 Code. Hidden --quit client exited 0 and the owned resident exited within the bounded wait; no forced termination, injected input or system mutation. Active assisted session is complete. Earlier session.json is a starting observation; this entry supersedes its pending-cleanup status.
+
+Prepared docs/development/m3-topology-preparation.md from current host/native-window/layout coupling: deterministic monitor model first, verified platform contracts, monitor-keyed surface reconciliation and targeted tests before native hardware validation; fullscreen/previews/recovery are later bounded slices. This is preparation, not implementation or acceptance. Existing .gitignore edit, frozen inputs and raw evidence remain untouched. Fresh non-author clean-code-guard still applies to future nontrivial production changes.
+
+## M3 topology candidate 1 implemented (2026-11-10 local)
+
+- **Author and scope.** Author: Claude Opus 5.5 High, primary agent in the user-requested top-level implementation thread. The user skipped the milestone council and accessibility checks; both are deferred and NOT RUN, not passed. Packet: `docs/development/m3-topology-candidate-1.md`. Base HEAD `ae6693645bf0434898d91784a2d41323e8246366`. Uncommitted, not frozen.
+- **Change.**
+  - New `src/topology.rs`: a monitor snapshot model with settle/diff and 5 tests, covering negative origins, work-area/DPI changes, reorder, removal/addition, and unchanged and transient snapshots.
+  - `native_window::monitors()`: bounded `EnumDisplayMonitors` + `MONITORINFOEXW` enumeration, with DPI read through a per-monitor probe HWND.
+  - `src/host.rs`: notch and dock surfaces are keyed by monitor device plus kind, with per-surface motion/hover/UIA state. Topology reads are coalesced and retried on a bounded schedule. The catalog/worker and IconService stay shared, and the picker stays on the primary monitor.
+- **Verification.** `verify.ps1` PASS: 27 tests plus the release build. Binary `A822BF9CAE160F37B52109A15A1DFA465BFFAA751FA560A782FC952FC7CBB13B` replaces `21BBFE1A…C6` in `target/release`. Evidence: `artifacts/m3-topology-1/`.
+- **Clean-code-guard.** Independent non-author reviews:
+  - First review on `0F223E15…050294`: REVISE, with M3T1-CCG-MAJ-1 plus MIN-1, MIN-2 and MIN-3.
+  - Author fixed MAJ-1, MIN-1 and MIN-2 and deferred MIN-3.
+  - Fresh recheck on `inputs-2.sha256` `1E698C0FF0CBD2CE05B45282D1965F78B17BEAA9B85A0F922063D5D5F86E0BC1`: **ACCEPT, code-only**. MAJ-1, MIN-1 and MIN-2 resolved, the MIN-3 deferral accepted, no new findings.
+  - This is not council or milestone acceptance.
+- **No native run in this thread.** This machine has two monitors: DISPLAY1 is primary, and DISPLAY2 sits at x=-1920 (read-only query). The existing title-based native suites assume a single notch and a single dock, so they need a multi-monitor-aware update before they count as evidence. Hardware placement, hotplug, DPI/work-area change, cleanup and per-monitor cost all remain open. Each native run needs fresh desktop-free confirmation.
+- **Untouched.** Prior M2/accessibility/Windows 10/compositor limits are unchanged. The `.gitignore` edit and earlier evidence are untouched.
+
+## M3 topology candidate 1: passive two-monitor run (2026-11-10 local)
+
+- **Consent and preflight.** The user said "go for it" in reply to the request for a desktop-free run. This was taken as confirmation for one run. Read-only preflight just before launch:
+  - T3 Code (Nightly) PID 11868 was in the foreground;
+  - there was no ROQA process or surface;
+  - the binary matched the reviewed `A822BF9C…B13B`;
+  - the monitors were `\\.\DISPLAY1` (primary, 0,0 1920x1080) and `\\.\DISPLAY2` (-1920,0 1920x1080). On both, the work area equals the monitor area at 96 DPI.
+- **Script.** New `scripts/topology-check.ps1`, a passive harness. It launches the build once, enumerates surfaces by class and PID, checks each monitor's surfaces against that monitor, takes cropped captures, then runs `--quit`. It injects no input and moves neither the cursor nor the foreground.
+- **Result: PASS, 25 checks.**
+  - Each monitor has exactly one notch, one shadow and one dock.
+  - On each monitor, the notch (400x124) is centred and flush with the top, the shadow matches the notch, and the dock (64 px high) is centred and sits 12 px above the bottom of the work area. That includes DISPLAY2, where the notch is at -1160,0 and the dock at -1080,1004.
+  - The foreground was unchanged after launch and after quit.
+  - `--quit` returned client exit 0, and the host exited with code 0 in 150 ms. No surface remained.
+  - The captures show both notches drawing the time and both docks drawing icons.
+  - One resource sample, with 2 monitors: private bytes 17543168, handles 451, GDI 42, USER 21. This is an observation, not a per-monitor cost measurement or comparison.
+  - Evidence: `artifacts/m3-topology-1/native-1/`. The captures also contain parts of the T3 Code window behind the notch/dock crops.
+- **Not covered.** Hotplug, reorder, DPI/work-area changes, mixed DPI, failure injection, per-monitor cost deltas and the multi-monitor update of the older title-based suites. The legacy smoke `DpiChange` case posts a synthetic `WM_DPICHANGED`. The host now re-reads the real DPI and ignores that value, so the case needs to be rewritten rather than rerun.
+- **Status.** No settings changed. No council review, acceptance or commit.
+
+## Native suites made multi-monitor aware (2026-11-10 local)
+
+- **Request and author.** The user asked to "update them and commit the changes". Author: Claude Opus 5.5 High.
+- **Lookups.** `tests/NativeProbe.cs` adds `Surfaces(title)`, which enumerates by class and title on every monitor, and `PrimarySurface(title)`. `smoke.ps1`, `picker-smoke.ps1`, `catalog-smoke.ps1` and `packaged-hung-check.ps1` no longer use `FindWindow`. They follow the primary-monitor surface, so their existing primary-geometry assertions keep their meaning. Checks for no pre-existing surface, no orphan and a hidden surface now require absence on every monitor.
+- **DPI case.** The smoke `DpiChange` case now asserts the M3 contract: a synthetic `WM_DPICHANGED` with no real DPI change keeps the same notch HWND at the real DPI. Previously it asserted a rebuild at the fake DPI.
+- **Verification.** `NativeProbe.cs` compiles, all five scripts parse with 0 errors, and a read-only probe returned 0 surfaces. **The updated suites have NOT been run.** Their results on the M3 binary are unknown until a separately confirmed desktop-free run. The prior PASS counts (shell 329, picker/dock 226, catalog 67, packaged/hung 16) belong to the earlier binary.
+- **Commit.** At the user's request, this commit contains the M3 topology candidate 1 code, the scripts and the docs. The user's `.gitignore` edit is excluded and ignored artifacts stay local. This is not council or milestone acceptance.

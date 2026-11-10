@@ -3,26 +3,27 @@ use crate::{
     dock::{self, DockItem},
     dock_uia::{self, DockAccessibility},
     graphics::{Canvas, DockScene, DockSlot, Graphics, NotchScene},
-    icons::{self, IconService},
+    icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
     layout::{self, Bounds, SurfaceKind, placement},
     motion::{self, Tween},
     native_window::{self, NativeWindow, WindowClass},
     picker::Picker,
     text_settings::TextSettings,
+    topology::{self, Monitor},
     window_catalog::Catalog,
     window_model::WindowModel,
 };
 use std::{
     mem::size_of,
-    sync::OnceLock,
-    sync::{Arc, Mutex},
-    time::Instant,
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
 };
 use windows::Win32::{
     Foundation::{E_FAIL, HANDLE, HWND, LPARAM, WAIT_EVENT, WAIT_FAILED, WAIT_OBJECT_0, WPARAM},
     System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
     System::LibraryLoader::{GetModuleHandleW, GetProcAddress},
+    System::Threading::INFINITE,
     UI::{
         Controls::WM_MOUSELEAVE,
         Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent},
@@ -95,30 +96,49 @@ struct Surface {
     canvas: Canvas,
     window: NativeWindow,
     kind: SurfaceKind,
+    /// Owning monitor's device name; surfaces are keyed by it plus `kind`.
+    monitor: String,
+    /// Monitor DPI; the notch's also includes the Windows text-size factor.
+    dpi: u32,
+    bounds: Bounds,
     hovered: bool,
+    /// Frames are painted only while set; `animate` clears it when motion settles.
+    live: bool,
+    /// Notch: 0 collapsed to 1 expanded. Dock: pointer-inside progress of the bar fill.
+    motion: Tween,
+    /// Notch only: pointer inside the hot band (not its shadow), the instant hover intent opens
+    /// the notch, and the window region last applied (it follows the drawn shape frame by frame).
+    engaged: bool,
+    intent: Option<Instant>,
+    area: Vec<Bounds>,
+    /// Dock only: hovered slot, per-slot hover progress and this dock's UIA geometry/names.
+    hover: Option<usize>,
+    slots: Vec<Tween>,
+    uia: dock_uia::Shared,
 }
 impl Surface {
     fn create(
         graphics: &Graphics,
         kind: SurfaceKind,
+        monitor: &Monitor,
         dpi: u32,
-        work: Bounds,
         slots: usize,
-        uia: &dock_uia::Shared,
     ) -> Result<Self> {
-        let bounds = placement(work, dpi, kind, slots);
+        let bounds = placement(monitor.work, dpi, kind, slots);
+        let uia = dock_uia::Shared::default();
         let shadow = if kind == SurfaceKind::Notch {
             Some(NotchShadow::create(graphics, bounds)?)
         } else {
             None
         };
         let window = NativeWindow::create(bounds, kind)?;
-        let accessible = match kind {
-            SurfaceKind::Dock => Some(DockAccessibility::create(window.0, uia)?),
+        let (accessible, area) = match kind {
+            SurfaceKind::Dock => (Some(DockAccessibility::create(window.0, &uia)?), Vec::new()),
             SurfaceKind::Notch => {
                 // Collapsed at rest: only the visible notch takes input.
-                window.set_notch_region(&layout::notch_rows(bounds, dpi, 0.0))?;
-                None
+                let area = layout::notch_rows(bounds, dpi, 0.0);
+                window.set_notch_region(&area)?;
+                (None, area)
             }
         };
         let canvas = Canvas::create(graphics, window.0, bounds)?;
@@ -129,7 +149,18 @@ impl Surface {
             canvas,
             window,
             kind,
+            monitor: monitor.device.clone(),
+            dpi,
+            bounds,
             hovered: false,
+            live: false,
+            motion: Tween::rest(0.0),
+            engaged: false,
+            intent: None,
+            area,
+            hover: None,
+            slots: vec![Tween::rest(0.0); slots],
+            uia,
         })
     }
     /// Starts leave tracking on first entry; returns true only for that transition.
@@ -150,67 +181,160 @@ impl Surface {
         self.hovered = true;
         Ok(true)
     }
+    fn paint_notch(&mut self, time: &str, date: &str) -> Result<()> {
+        let progress = self.motion.value(Instant::now());
+        self.fit_notch_region(progress)?;
+        let scene = NotchScene {
+            time,
+            date,
+            progress,
+            dpi: self.dpi,
+        };
+        if let Some(shadow) = &self.shadow {
+            shadow.paint(&scene, self.window.0)?;
+        }
+        self.canvas.paint_notch(&scene)
+    }
+    /// Input and drawing use the same frame progress, without a speculative growth lead.
+    fn fit_notch_region(&mut self, progress: f32) -> Result<()> {
+        let rows = layout::notch_rows(self.bounds, self.dpi, progress);
+        if self.area != rows {
+            self.window.set_notch_region(&rows)?;
+            self.area = rows;
+        }
+        Ok(())
+    }
+    /// Pointer entered or left the notch. Entering swells the pill at once and opens it only after
+    /// `INTENT_TIME` (a pointer passing along the screen edge never pops the panel open); leaving
+    /// closes from wherever the motion is. The HWND itself never moves.
+    fn set_notch_hover(&mut self, engaged: bool) {
+        if engaged == self.engaged {
+            return;
+        }
+        self.engaged = engaged;
+        if !engaged {
+            self.intent = None;
+            self.motion.retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
+        } else if self.motion.value(Instant::now()) > NOTCH_SWELL {
+            // Re-entered while still closing: reopen directly.
+            self.open_notch();
+        } else {
+            self.intent = Some(Instant::now() + motion::INTENT_TIME);
+            self.motion
+                .retarget(NOTCH_SWELL, motion::INTENT_TIME, motion::EASE_OUT);
+        }
+        self.live = true;
+    }
+    fn open_notch(&mut self) {
+        self.intent = None;
+        self.motion.retarget(1.0, motion::OPEN_TIME, motion::OPEN);
+    }
+    /// Highlights the hovered slot (or none) and the bar fill while the pointer is inside.
+    fn hover_dock(&mut self, slot: Option<usize>, inside: bool) {
+        let ease = |tween: &mut Tween, on: bool| {
+            let (target, duration) = if on {
+                (1.0, motion::HOVER_IN_TIME)
+            } else {
+                (0.0, motion::HOVER_OUT_TIME)
+            };
+            tween.retarget(target, duration, motion::EASE_OUT);
+        };
+        ease(&mut self.motion, inside);
+        for (index, tween) in self.slots.iter_mut().enumerate() {
+            ease(tween, slot == Some(index));
+        }
+        self.hover = slot;
+        self.live = true;
+    }
+    /// Shares slot names/geometry with this dock's UIA providers; a layout change retires every older element.
+    fn publish_accessibility(&self, names: &[String], layout_changed: bool) {
+        if let Ok(mut state) = self.uia.lock() {
+            state.dpi = self.dpi;
+            state.names = names.to_vec();
+            if layout_changed {
+                state.version = state.version.wrapping_add(1);
+            }
+        }
+    }
+    fn paint_dock(&self, items: &[DockItem], icons: &[Option<Arc<IconPixels>>]) -> Result<()> {
+        let now = Instant::now();
+        let hover = |slot: usize| self.slots.get(slot).map_or(0.0, |t| t.value(now));
+        let mut slots = vec![DockSlot {
+            icon: None,
+            active: false,
+            picker: true,
+            hover: hover(0),
+        }];
+        slots.extend(
+            items
+                .iter()
+                .zip(icons)
+                .enumerate()
+                .map(|(index, (item, icon))| DockSlot {
+                    icon: icon.as_deref(),
+                    active: item.active,
+                    picker: false,
+                    hover: hover(index + 1),
+                }),
+        );
+        self.canvas.paint_dock(&DockScene {
+            slots,
+            inside: self.motion.value(now),
+            dpi: self.dpi,
+        })
+    }
+    fn dock_slot(&self, lparam: LPARAM, slots: usize) -> Option<usize> {
+        let x = i32::from((lparam.0 & 0xffff) as u16 as i16);
+        dock::slot_at(x, self.bounds.width, self.dpi, slots)
+    }
 }
 
 /// Hover-intent swell: the pill grows ~11 x 3 DIP to acknowledge the pointer before opening.
 const NOTCH_SWELL: f32 = 0.07;
+/// Transient topology reads are retried this often, at most `TOPOLOGY_RETRIES` times per change.
+const TOPOLOGY_RETRY: Duration = Duration::from_millis(250);
+const TOPOLOGY_RETRIES: u32 = 8;
 
 struct Desktop {
     surfaces: Vec<Surface>,
+    /// Last settled topology; each monitor in it carries every shown kind.
+    monitors: Vec<Monitor>,
+    /// Kinds shown on every monitor; Show/Hide commands and closing a surface apply to all monitors.
+    shown: Vec<SurfaceKind>,
+    /// When the next topology read is due, and how many transient reads this change has retried.
+    topology_due: Option<Instant>,
+    topology_retries: u32,
     graphics: Graphics,
-    dpi: u32,
-    work: Bounds,
     picker: Option<Picker>,
     icons: IconService,
     dock_items: Vec<DockItem>,
+    dock_names: Vec<String>,
     dock_generation: Option<u64>,
-    dock_hover: Option<usize>,
-    /// Per-slot hover progress, and the pointer-inside progress of the bar fill.
-    dock_motion: Vec<Tween>,
-    dock_inside: Tween,
-    /// 0 collapsed to 1 expanded.
-    notch_motion: Tween,
-    /// Pointer inside the notch's hot band (not its shadow).
-    notch_engaged: bool,
-    /// Hover intent: the notch opens at this instant if the pointer is still engaged.
-    notch_intent: Option<Instant>,
-    /// Frames are painted only while these are set; `animate` clears them when motion settles.
-    notch_live: bool,
-    dock_live: bool,
-    uia: dock_uia::Shared,
-    /// Window region last applied to the notch; it follows the drawn shape frame by frame.
-    notch_area: Vec<Bounds>,
     /// Windows text size (Accessibility > Text size) scales the whole notch, whose only content is text.
     text: TextSettings,
     text_factor: f64,
-    /// Last drawn time text; the notch repaints only when it changes.
+    /// Last drawn time text; the notches repaint only when it changes.
     clock: String,
     date: String,
 }
 impl Desktop {
     fn create(probe: &Probe) -> Result<Self> {
-        let work = native_window::primary_work_area()?;
+        let monitors = topology::settle(native_window::monitors()?)
+            .ok_or_else(|| Error::new(E_FAIL, "No usable display monitor."))?;
         let text = TextSettings::create()?;
         let text_factor = text.factor()?;
         let mut desktop = Self {
             surfaces: Vec::new(),
+            monitors,
+            shown: Vec::new(),
+            topology_due: None,
+            topology_retries: 0,
             graphics: Graphics::create()?,
-            dpi: native_window::primary_dpi(work)?,
-            work,
             picker: None,
             icons: IconService::create()?,
             dock_items: Vec::new(),
+            dock_names: dock::names(&[], &WindowModel::default()),
             dock_generation: None,
-            dock_hover: None,
-            dock_motion: Vec::new(),
-            dock_inside: Tween::rest(0.0),
-            notch_motion: Tween::rest(0.0),
-            notch_engaged: false,
-            notch_intent: None,
-            notch_live: false,
-            dock_live: false,
-            uia: Arc::new(Mutex::new(dock_uia::State::default())),
-            notch_area: Vec::new(),
             text,
             text_factor,
             clock: String::new(),
@@ -230,164 +354,97 @@ impl Desktop {
         self.dock_items.len() + 1
     }
     fn show(&mut self, kind: SurfaceKind) -> Result<()> {
-        if !self.surfaces.iter().any(|surface| surface.kind == kind) {
-            let surface = Surface::create(
-                &self.graphics,
-                kind,
-                match kind {
-                    SurfaceKind::Notch => self.notch_dpi(),
-                    SurfaceKind::Dock => self.dpi,
-                },
-                self.work,
-                self.dock_slots(),
-                &self.uia,
-            )?;
-            self.surfaces.push(surface);
-            if kind == SurfaceKind::Dock {
-                self.reset_dock_motion();
-                self.dock_inside = Tween::rest(0.0);
-                self.publish_accessibility(None, false);
-                self.paint_dock()?;
-            } else {
-                self.notch_motion = Tween::rest(0.0);
-                (self.notch_engaged, self.notch_intent) = (false, None);
-                self.notch_area = layout::notch_rows(self.notch_window(), self.notch_dpi(), 0.0);
-                self.notch_live = false;
-                let now = clock::now();
-                (self.clock, self.date) = (now.time, now.date);
-                self.paint_notch()?;
-            }
+        if !self.shown.contains(&kind) {
+            self.shown.push(kind);
+        }
+        for monitor in self.monitors.clone() {
+            self.place(&monitor, kind)?;
         }
         Ok(())
     }
-    /// The notch's effective DPI: monitor DPI times the Windows text-size factor.
-    fn notch_dpi(&self) -> u32 {
-        (f64::from(self.dpi) * self.text_factor).round() as u32
-    }
-    fn notch_window(&self) -> Bounds {
-        placement(self.work, self.notch_dpi(), SurfaceKind::Notch, 0)
-    }
-    fn notch(&self) -> Option<&Surface> {
-        self.surfaces
+    /// Creates and paints `kind` on `monitor` unless it already has one.
+    fn place(&mut self, monitor: &Monitor, kind: SurfaceKind) -> Result<()> {
+        if self
+            .surfaces
             .iter()
-            .find(|surface| surface.kind == SurfaceKind::Notch)
+            .any(|surface| surface.kind == kind && surface.monitor == monitor.device)
+        {
+            return Ok(());
+        }
+        let dpi = match kind {
+            // The notch's effective DPI: monitor DPI times the Windows text-size factor.
+            SurfaceKind::Notch => (f64::from(monitor.dpi) * self.text_factor).round() as u32,
+            SurfaceKind::Dock => monitor.dpi,
+        };
+        let mut surface = Surface::create(&self.graphics, kind, monitor, dpi, self.dock_slots())?;
+        if kind == SurfaceKind::Notch {
+            // Advances every existing notch first, so all monitors show the same minute.
+            self.refresh_clock()?;
+            surface.paint_notch(&self.clock, &self.date)?;
+            self.surfaces.push(surface);
+            return Ok(());
+        }
+        surface.publish_accessibility(&self.dock_names, false);
+        self.surfaces.push(surface);
+        // Sized after the push: icons are extracted once, for the densest dock.
+        let icons = self.dock_icons();
+        let dock = &self.surfaces[self.surfaces.len() - 1];
+        dock.paint_dock(&self.dock_items, &icons)
     }
-    /// Repaints the notch only when the minute changed; returns how long until the next minute.
+    /// Repaints the notches only when the minute changed; returns how long until the next minute.
     fn refresh_clock(&mut self) -> Result<u32> {
         let now = clock::now();
         if now.time != self.clock {
             (self.clock, self.date) = (now.time, now.date);
-            self.paint_notch()?;
+            for notch in self
+                .surfaces
+                .iter_mut()
+                .filter(|s| s.kind == SurfaceKind::Notch)
+            {
+                notch.paint_notch(&self.clock, &self.date)?;
+            }
         }
         Ok(now.next_minute_ms)
-    }
-    fn paint_notch(&mut self) -> Result<()> {
-        let progress = self.notch_motion.value(Instant::now());
-        self.fit_notch_region(progress)?;
-        match self.notch() {
-            Some(notch) => {
-                let scene = NotchScene {
-                    time: &self.clock,
-                    date: &self.date,
-                    progress,
-                    dpi: self.notch_dpi(),
-                };
-                if let Some(shadow) = &notch.shadow {
-                    shadow.paint(&scene, notch.window.0)?;
-                }
-                notch.canvas.paint_notch(&scene)
-            }
-            None => Ok(()),
-        }
-    }
-    /// Pointer entered or left the notch. Entering swells the pill at once and opens it only after
-    /// `INTENT_TIME` (a pointer passing along the screen edge never pops the panel open); leaving
-    /// closes from wherever the motion is. The HWND itself never moves.
-    fn set_notch_hover(&mut self, engaged: bool) -> Result<()> {
-        if engaged == self.notch_engaged {
-            return Ok(());
-        }
-        self.notch_engaged = engaged;
-        if !engaged {
-            self.notch_intent = None;
-            self.notch_motion
-                .retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
-        } else if self.notch_motion.value(Instant::now()) > NOTCH_SWELL {
-            // Re-entered while still closing: reopen directly.
-            self.open_notch();
-        } else {
-            self.notch_intent = Some(Instant::now() + motion::INTENT_TIME);
-            self.notch_motion
-                .retarget(NOTCH_SWELL, motion::INTENT_TIME, motion::EASE_OUT);
-        }
-        self.notch_live = true;
-        Ok(())
-    }
-    fn open_notch(&mut self) {
-        self.notch_intent = None;
-        self.notch_motion
-            .retarget(1.0, motion::OPEN_TIME, motion::OPEN);
     }
     /// Paints one frame of each running animation; returns true while any still runs.
     /// The final frame always lands exactly on the target before a surface goes idle.
     fn animate(&mut self) -> Result<bool> {
         let now = Instant::now();
-        if self.notch_intent.is_some_and(|at| now >= at) {
-            self.open_notch();
-        }
-        if self.notch_live {
-            self.paint_notch()?;
-            self.notch_live = self.notch_motion.running(now) || self.notch_intent.is_some();
-        }
-        if self.dock_live {
-            self.paint_dock()?;
-            self.dock_live = self.dock_inside.running(now)
-                || self.dock_motion.iter().any(|tween| tween.running(now));
-        }
-        Ok(self.notch_live || self.dock_live)
-    }
-    /// Input and drawing use the same frame progress, without a speculative growth lead.
-    fn fit_notch_region(&mut self, progress: f32) -> Result<()> {
-        let rows = layout::notch_rows(self.notch_window(), self.notch_dpi(), progress);
-        if self.notch_area != rows {
-            if let Some(notch) = self.notch() {
-                notch.window.set_notch_region(&rows)?;
-            }
-            self.notch_area = rows;
-        }
-        Ok(())
-    }
-    fn reset_dock_motion(&mut self) {
-        self.dock_hover = None;
-        self.dock_motion = vec![Tween::rest(0.0); self.dock_slots()];
-    }
-    /// Highlights the hovered slot (or none) and the bar fill while the pointer is inside.
-    fn hover_dock(&mut self, slot: Option<usize>, inside: bool) {
-        let ease = |tween: &mut Tween, on: bool| {
-            let (target, duration) = if on {
-                (1.0, motion::HOVER_IN_TIME)
-            } else {
-                (0.0, motion::HOVER_OUT_TIME)
-            };
-            tween.retarget(target, duration, motion::EASE_OUT);
+        let docks_live = self
+            .surfaces
+            .iter()
+            .any(|s| s.live && s.kind == SurfaceKind::Dock);
+        let icons = if docks_live {
+            self.dock_icons()
+        } else {
+            Vec::new()
         };
-        ease(&mut self.dock_inside, inside);
-        for (index, tween) in self.dock_motion.iter_mut().enumerate() {
-            ease(tween, slot == Some(index));
+        let mut running = false;
+        for surface in &mut self.surfaces {
+            if surface.intent.is_some_and(|at| now >= at) {
+                surface.open_notch();
+            }
+            if surface.live {
+                match surface.kind {
+                    SurfaceKind::Notch => surface.paint_notch(&self.clock, &self.date)?,
+                    SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
+                }
+                surface.live = surface.motion.running(now)
+                    || surface.intent.is_some()
+                    || surface.slots.iter().any(|tween| tween.running(now));
+            }
+            running |= surface.live;
         }
-        self.dock_hover = slot;
-        self.dock_live = true;
+        Ok(running)
     }
     fn close(&mut self, kind: SurfaceKind) {
+        self.shown.retain(|shown| *shown != kind);
         self.surfaces.retain(|surface| surface.kind != kind);
     }
-    fn dock(&self) -> Option<&Surface> {
+    fn dock_at(&self, hwnd: HWND) -> Option<&Surface> {
         self.surfaces
             .iter()
-            .find(|surface| surface.kind == SurfaceKind::Dock)
-    }
-    fn dock_bounds(&self) -> Bounds {
-        placement(self.work, self.dpi, SurfaceKind::Dock, self.dock_slots())
+            .find(|s| s.kind == SurfaceKind::Dock && s.window.0 == hwnd)
     }
     fn open_picker(&mut self, catalog: &Catalog) -> Result<()> {
         self.picker.take();
@@ -404,7 +461,10 @@ impl Desktop {
             self.dock_generation = Some(model.generation);
             let items = dock::items(model);
             let changed = items != self.dock_items;
-            self.publish_accessibility(Some(dock::names(&items, model)), changed);
+            self.dock_names = dock::names(&items, model);
+            for dock in self.surfaces.iter().filter(|s| s.kind == SurfaceKind::Dock) {
+                dock.publish_accessibility(&self.dock_names, changed);
+            }
             // Title-only changes publish new generations; they rename UIA items but leave pixels untouched.
             if !changed && !icons_arrived {
                 return Ok(());
@@ -412,76 +472,61 @@ impl Desktop {
             let resized = items.len() != self.dock_items.len();
             self.dock_items = items;
             if resized {
-                self.reset_dock_motion();
-                let bounds = self.dock_bounds();
-                if let Some(surface) = self
+                let slots = self.dock_slots();
+                for dock in self
                     .surfaces
                     .iter_mut()
-                    .find(|s| s.kind == SurfaceKind::Dock)
+                    .filter(|s| s.kind == SurfaceKind::Dock)
                 {
-                    surface.window.resize(bounds)?;
-                    surface.canvas.resize(bounds)?;
+                    let Some(monitor) = self.monitors.iter().find(|m| m.device == dock.monitor)
+                    else {
+                        continue;
+                    };
+                    (dock.hover, dock.slots) = (None, vec![Tween::rest(0.0); slots]);
+                    dock.bounds = placement(monitor.work, dock.dpi, SurfaceKind::Dock, slots);
+                    dock.window.resize(dock.bounds)?;
+                    dock.canvas.resize(dock.bounds)?;
                 }
             }
         }
-        self.paint_dock()
-    }
-    /// Shares slot names/geometry with UIA providers; a layout change retires every older element.
-    fn publish_accessibility(&self, names: Option<Vec<String>>, layout_changed: bool) {
-        if let Ok(mut state) = self.uia.lock() {
-            state.dpi = self.dpi;
-            if let Some(names) = names {
-                state.names = names;
-            } else if state.names.is_empty() {
-                state.names = dock::names(&self.dock_items, &WindowModel::default());
-            }
-            if layout_changed {
-                state.version = state.version.wrapping_add(1);
-            }
+        let icons = self.dock_icons();
+        for dock in self.surfaces.iter().filter(|s| s.kind == SurfaceKind::Dock) {
+            dock.paint_dock(&self.dock_items, &icons)?;
         }
+        Ok(())
     }
-    fn paint_dock(&mut self) -> Result<()> {
-        let size = dock::px(dock::ICON_DIPS, self.dpi) as u32;
-        let pixels: Vec<_> = self
-            .dock_items
+    /// One icon set for every dock, extracted for the densest dock; lower-DPI docks scale it down.
+    // shortcut: mixed-DPI docks resample icons; keep one cache size per DPI if that looks soft on hardware.
+    fn dock_icons(&mut self) -> Vec<Option<Arc<IconPixels>>> {
+        let densest = self
+            .surfaces
+            .iter()
+            .filter(|s| s.kind == SurfaceKind::Dock)
+            .map(|s| s.dpi)
+            .max();
+        let Some(dpi) = densest else {
+            return Vec::new();
+        };
+        let size = dock::px(dock::ICON_DIPS, dpi) as u32;
+        self.dock_items
             .iter()
             .map(|item| {
                 let sources = icons::sources(&item.identity, item.executable.as_deref());
                 self.icons.icon(&item.identity, sources, size)
             })
-            .collect();
-        let Some(surface) = self.dock() else {
-            return Ok(());
-        };
-        let now = Instant::now();
-        let hover = |slot: usize| self.dock_motion.get(slot).map_or(0.0, |t| t.value(now));
-        let mut slots = vec![DockSlot {
-            icon: None,
-            active: false,
-            picker: true,
-            hover: hover(0),
-        }];
-        slots.extend(self.dock_items.iter().zip(&pixels).enumerate().map(
-            |(index, (item, icon))| DockSlot {
-                icon: icon.as_deref(),
-                active: item.active,
-                picker: false,
-                hover: hover(index + 1),
-            },
-        ));
-        surface.canvas.paint_dock(&DockScene {
-            slots,
-            inside: self.dock_inside.value(now),
-            dpi: self.dpi,
-        })
-    }
-    fn dock_slot(&self, lparam: LPARAM) -> Option<usize> {
-        let x = i32::from((lparam.0 & 0xffff) as u16 as i16);
-        dock::slot_at(x, self.dock_bounds().width, self.dpi, self.dock_slots())
+            .collect()
     }
     /// A UIA Invoke from an element of the current layout acts exactly like a click on that slot.
-    fn invoke_dock(&mut self, slot: usize, version: u32, catalog: &Catalog) -> Result<()> {
-        let current = self.uia.lock().map(|state| state.version).ok();
+    fn invoke_dock(
+        &mut self,
+        hwnd: HWND,
+        slot: usize,
+        version: u32,
+        catalog: &Catalog,
+    ) -> Result<()> {
+        let current = self
+            .dock_at(hwnd)
+            .and_then(|dock| dock.uia.lock().map(|state| state.version).ok());
         if current == Some(version) {
             self.activate_slot(Some(slot), catalog)?;
         }
@@ -514,45 +559,54 @@ impl Desktop {
             Command::HideNotch => self.close(SurfaceKind::Notch),
             Command::HideDock => self.close(SurfaceKind::Dock),
         }
-        Ok(!self.surfaces.is_empty())
+        if matches!(command, Command::ShowNotch | Command::ShowDock) {
+            // Also recovers monitors whose earlier placement ran out of retries.
+            self.request_topology();
+        }
+        Ok(!self.shown.is_empty())
     }
     fn message(&mut self, message: &MSG) -> Result<()> {
         if message.message == native_window::REPOSITION {
-            return self.reposition(message.wParam);
+            // Every surface forwards display/DPI/settings changes; one coalesced read serves them all.
+            self.request_topology();
+            return Ok(());
         }
-        let Some(index) = self
+        let slots = self.dock_slots();
+        let Some(surface) = self
             .surfaces
-            .iter()
-            .position(|surface| surface.window.0 == message.hwnd)
+            .iter_mut()
+            .find(|surface| surface.window.0 == message.hwnd)
         else {
             return Ok(());
         };
-        let kind = self.surfaces[index].kind;
         match message.message {
-            native_window::CLOSE_SURFACE => self.close(kind),
+            native_window::CLOSE_SURFACE => {
+                let kind = surface.kind;
+                self.close(kind);
+            }
             WM_MOUSEMOVE => {
-                let entered = self.surfaces[index].track_pointer()?;
-                if kind == SurfaceKind::Dock {
-                    let slot = self.dock_slot(message.lParam);
-                    if entered || slot != self.dock_hover {
-                        self.hover_dock(slot, true);
+                let entered = surface.track_pointer()?;
+                if surface.kind == SurfaceKind::Dock {
+                    let slot = surface.dock_slot(message.lParam, slots);
+                    if entered || slot != surface.hover {
+                        surface.hover_dock(slot, true);
                     }
                 } else {
                     let x = i32::from((message.lParam.0 & 0xffff) as u16 as i16);
                     let y = i32::from((message.lParam.0 >> 16) as u16 as i16);
-                    let progress = self.notch_motion.value(Instant::now());
-                    let width = self.notch_window().width;
-                    let over = layout::notch_hit(width, self.notch_dpi(), progress, x, y);
-                    self.set_notch_hover(over)?;
+                    let progress = surface.motion.value(Instant::now());
+                    let width = surface.bounds.width;
+                    let over = layout::notch_hit(width, surface.dpi, progress, x, y);
+                    surface.set_notch_hover(over);
                 }
             }
             WM_MOUSELEAVE => {
-                if self.surfaces[index].hovered {
-                    self.surfaces[index].hovered = false;
-                    if kind == SurfaceKind::Dock {
-                        self.hover_dock(None, false);
+                if surface.hovered {
+                    surface.hovered = false;
+                    if surface.kind == SurfaceKind::Dock {
+                        surface.hover_dock(None, false);
                     } else {
-                        self.set_notch_hover(false)?;
+                        surface.set_notch_hover(false);
                     }
                 }
             }
@@ -560,35 +614,75 @@ impl Desktop {
         }
         Ok(())
     }
-    fn reposition(&mut self, dpi: WPARAM) -> Result<()> {
-        let work = native_window::primary_work_area()?;
-        let dpi = if dpi.0 == 0 {
-            native_window::primary_dpi(work)?
-        } else {
-            (dpi.0 & 0xffff) as u32
-        };
-        if self.dpi == dpi && self.work == work {
+    /// Milliseconds until the pending topology read, or `INFINITE` without one.
+    fn topology_wait(&self) -> u32 {
+        self.topology_due.map_or(INFINITE, |due| {
+            due.saturating_duration_since(Instant::now()).as_millis() as u32
+        })
+    }
+    /// Applies a due topology read: releases surfaces of removed or changed monitors and places the
+    /// shown kinds on added or changed ones. Unchanged monitors keep their surfaces and motion state.
+    /// Transient reads and failed placements retry on a bounded schedule; existing surfaces stay.
+    fn refresh_topology(&mut self) -> Result<()> {
+        if self.topology_due.is_none_or(|due| due > Instant::now()) {
             return Ok(());
         }
-        self.dpi = dpi;
-        self.work = work;
-        self.rebuild()
+        self.topology_due = None;
+        let observed = native_window::monitors().and_then(|monitors| {
+            topology::settle(monitors)
+                .ok_or_else(|| Error::new(E_FAIL, "Display topology is changing."))
+        });
+        let next = match observed {
+            Ok(next) => next,
+            Err(error) => return self.retry_topology(error),
+        };
+        let (release, place) = topology::diff(&self.monitors, &next);
+        self.surfaces
+            .retain(|surface| !release.contains(&surface.monitor));
+        self.monitors = next;
+        let mut failure = None;
+        for monitor in place {
+            for kind in self.shown.clone() {
+                if let Err(error) = self.place(&monitor, kind) {
+                    // Forget the monitor so a later read places all of its surfaces again.
+                    self.surfaces.retain(|s| s.monitor != monitor.device);
+                    self.monitors.retain(|m| m.device != monitor.device);
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        failure.map_or(Ok(()), |error| self.retry_topology(error))
     }
-    /// Re-reads the Windows text size after its change event and rebuilds the notch at the new scale.
+    /// Schedules a bounded re-read. Once retries run out with no surface left, `error` ends the host
+    /// through the normal failure path instead of leaving it running invisibly.
+    fn retry_topology(&mut self, error: Error) -> Result<()> {
+        if self.topology_retries < TOPOLOGY_RETRIES {
+            self.topology_retries += 1;
+            self.topology_due = Some(Instant::now() + TOPOLOGY_RETRY);
+        } else if self.surfaces.is_empty() {
+            return Err(error);
+        } else {
+            // Remaining surfaces still forward the next display change, and Show commands re-read.
+            eprintln!("Display topology: {error}");
+        }
+        Ok(())
+    }
+    /// Schedules a fresh topology read with a full retry budget.
+    fn request_topology(&mut self) {
+        self.topology_due = Some(Instant::now());
+        self.topology_retries = 0;
+    }
+    /// Re-reads the Windows text size after its change event and rebuilds the notches at the new scale.
     fn rescale_text(&mut self) -> Result<()> {
         let factor = self.text.factor()?;
         if factor == self.text_factor {
             return Ok(());
         }
         self.text_factor = factor;
-        self.rebuild()
-    }
-    fn rebuild(&mut self) -> Result<()> {
-        self.dock_hover = None;
-        let kinds: Vec<_> = self.surfaces.iter().map(|surface| surface.kind).collect();
-        self.surfaces.clear();
-        for kind in kinds {
-            self.show(kind)?;
+        self.surfaces.retain(|s| s.kind != SurfaceKind::Notch);
+        if self.shown.contains(&SurfaceKind::Notch) {
+            self.show(SurfaceKind::Notch)?;
         }
         Ok(())
     }
@@ -619,6 +713,7 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
     let events = controls.handles();
     loop {
         catalog.service()?;
+        desktop.refresh_topology()?;
         if desktop.text.take_changed() {
             desktop.rescale_text()?;
         }
@@ -630,7 +725,10 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
                 desktop.picker.take();
             }
         }
-        let timeout = catalog.wait_milliseconds().min(clock_wait);
+        let timeout = catalog
+            .wait_milliseconds()
+            .min(clock_wait)
+            .min(desktop.topology_wait());
         let wake = if desktop.animate()? {
             next_frame(&events, timeout)
         } else {
@@ -655,7 +753,7 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
                 return Ok(());
             }
         }
-        if !drain_messages(desktop, catalog)? || desktop.surfaces.is_empty() {
+        if !drain_messages(desktop, catalog)? || desktop.shown.is_empty() {
             return Ok(());
         }
     }
@@ -734,20 +832,15 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 continue;
             }
             if message.message == WM_LBUTTONUP
-                && desktop
-                    .dock()
-                    .is_some_and(|dock| dock.window.0 == message.hwnd)
+                && let Some(dock) = desktop.dock_at(message.hwnd)
             {
-                let slot = desktop.dock_slot(message.lParam);
+                let slot = dock.dock_slot(message.lParam, desktop.dock_slots());
                 desktop.activate_slot(slot, catalog)?;
                 continue;
             }
-            if message.message == dock_uia::INVOKE
-                && desktop
-                    .dock()
-                    .is_some_and(|dock| dock.window.0 == message.hwnd)
-            {
-                desktop.invoke_dock(message.wParam.0, message.lParam.0 as u32, catalog)?;
+            if message.message == dock_uia::INVOKE && desktop.dock_at(message.hwnd).is_some() {
+                let (slot, version) = (message.wParam.0, message.lParam.0 as u32);
+                desktop.invoke_dock(message.hwnd, slot, version, catalog)?;
                 continue;
             }
             if let Some(picker) = &mut desktop.picker {
