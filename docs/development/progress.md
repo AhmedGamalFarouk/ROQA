@@ -637,3 +637,13 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Authorization/limits:** user now authorizes local commit and single-writer root integration, preserving/excluding user's root .gitignore; no push. After integration delegate next bounded M4 slice 3 controls to Opus 5.5 High, separate candidate/review/check gate. This is not milestone/council acceptance. Native GUI requires fresh desktop-free confirmation EACH run and foreground inspection; keyboard/accessibility explicitly DEFERRED/NOT RUN. Native performance, real shell/player and all other deferred evidence stay unpassed.
 
 - **Final pre-commit verification (2026-11-11 Africa/Cairo):** scripts/verify.ps1 -EvidenceDirectory artifacts/verification/icon-cache-1-precommit completed PASS (checks/release exit 0; 59 tests). Candidate source unchanged since independent guard; all 39 manifest entries revalidated before this run. Local source commit follows this gate; no native/GUI test or acceptance claim.
+
+## Icon cache candidate 1: integrated on root main (2026-11-11 Africa/Cairo)
+
+- **Integrator:** Claude Opus 5.5 High, delegated sole root writer; integration only, not review or acceptance. Record: `docs/development/icon-cache-integration-1.md`.
+- **Source:** `3d6ffc66b5a0bd52aa11ae8cd54efd46a74dc5a0` (Sol 6.1 Medium; guard APPROVE WITH NITS). Root `main` was `8eb909b`, not advanced; clean cherry-pick `--no-commit`, no conflict. Integrated commit `0e1105c8741576f34a46904ef9e6afe9ce1a8337`; tree identical to `3d6ffc66`.
+- **Encoding-only restoration:** 27 files (autocrlf CRLF checkout) restored byte-for-byte from the parent working tree after confirming each normalized blob equals the root index and `3d6ffc66` blob; no content change.
+- **Inputs:** manifest `icon-cache-candidate-1.inputs.sha256` (`1B4FADE4…55FF207D`) 39/39 OK on root before verification and before commit.
+- **Verify:** root `scripts/verify.ps1 -EvidenceDirectory artifacts/verification/icon-cache-1-integrated` PASS: checks (fmt, clippy, 59 passed, 0 failed) and release build. Root release `roqa.exe` `F55FAFCD006135E072E0EDA0BD39F95177ACE83027B8190AB58F327B0D3E70AD`, 666,112 bytes (differs by path/base from worktree build; not byte-compared).
+- **Preserved:** user root `.gitignore` modification untouched, unstaged, SHA-256 `48AAA74C…885313DAC` before and after.
+- **Deferred:** ICG1-1/2/3 unfixed by direction. Native GUI, keyboard/accessibility, runtime performance, council: DEFERRED/NOT RUN. No push. Next: parent delegates M4 slice 3 controls to Opus 5.5 High under its own gate.
