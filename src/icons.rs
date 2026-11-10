@@ -30,7 +30,7 @@ use windows::{
 
 const ICON_READY: u32 = WM_APP + 12;
 const QUEUE: usize = 64;
-// shortcut: whole-cache reset at this bound instead of LRU; upgrade if real sessions exceed it.
+// Bound retained pixels and admitted work together; closed apps are evicted on catalog changes.
 const CACHE_LIMIT: usize = 256;
 
 /// Premultiplied BGRA, top-down rows of `width * 4` bytes.
@@ -119,7 +119,10 @@ impl IconService {
         if let Some(icon) = self.cache.get(identity) {
             return icon.clone();
         }
-        if sources.is_empty() || self.pending.contains(identity) {
+        if sources.is_empty()
+            || self.pending.contains(identity)
+            || self.cache.len() + self.pending.len() >= CACHE_LIMIT
+        {
             return None;
         }
         let request = Request {
@@ -134,6 +137,12 @@ impl IconService {
         None
     }
 
+    /// Drops cached and pending identities that no longer belong to the dock.
+    pub fn retain(&mut self, keep: impl Fn(&Identity) -> bool) {
+        self.cache.retain(|identity, _| keep(identity));
+        self.pending.retain(|identity| keep(identity));
+    }
+
     /// Moves finished extractions into the cache; true when the dock should repaint.
     pub fn collect(&mut self) -> bool {
         let mut changed = false;
@@ -141,11 +150,7 @@ impl IconService {
             return false;
         };
         while let Ok((identity, size, icon)) = results.try_recv() {
-            self.pending.remove(&identity);
-            if size == self.size {
-                if self.cache.len() >= CACHE_LIMIT {
-                    self.cache.clear();
-                }
+            if size == self.size && self.pending.remove(&identity) {
                 self.cache.insert(identity, icon);
                 changed = true;
             }
@@ -287,6 +292,110 @@ pub fn sources(identity: &Identity, executable: Option<&str>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn service() -> (IconService, Receiver<Request>, SyncSender<Extracted>) {
+        let (requests, incoming) = mpsc::sync_channel(QUEUE);
+        let (completed, results) = mpsc::sync_channel(QUEUE);
+        (
+            IconService {
+                requests: Some(requests),
+                results: Some(results),
+                worker: None,
+                cache: HashMap::new(),
+                pending: HashSet::new(),
+                size: 40,
+            },
+            incoming,
+            completed,
+        )
+    }
+
+    fn identity(index: usize) -> Identity {
+        Identity::Executable(format!("app-{index}.exe"))
+    }
+
+    fn request(service: &mut IconService, id: &Identity, size: u32) {
+        service.icon(id, vec!["test.exe".into()], size);
+    }
+
+    #[test]
+    fn demand_beyond_capacity_settles_without_resetting_cache() {
+        let (mut service, incoming, completed) = service();
+        for _ in 0..(CACHE_LIMIT / QUEUE + 2) {
+            for index in 0..CACHE_LIMIT + 20 {
+                request(&mut service, &identity(index), 40);
+            }
+            for request in incoming.try_iter() {
+                completed
+                    .send((request.identity, request.size, None))
+                    .unwrap();
+            }
+            service.collect();
+        }
+        assert_eq!(service.cache.len(), CACHE_LIMIT);
+        assert!(service.pending.is_empty());
+        for index in 0..CACHE_LIMIT + 20 {
+            request(&mut service, &identity(index), 40);
+        }
+        assert!(incoming.try_recv().is_err());
+        assert!(!service.collect());
+    }
+
+    #[test]
+    fn retain_evicts_closed_cached_and_pending_apps() {
+        let (mut service, incoming, completed) = service();
+        for index in 0..3 {
+            request(&mut service, &identity(index), 40);
+        }
+        let requests: Vec<_> = incoming.try_iter().collect();
+        for request in &requests[..2] {
+            completed
+                .send((request.identity.clone(), 40, None))
+                .unwrap();
+        }
+        assert!(service.collect());
+        service.retain(|id| id == &identity(1));
+        assert_eq!(service.cache.len(), 1);
+        assert!(service.pending.is_empty());
+        completed.send((identity(2), 40, None)).unwrap();
+        assert!(!service.collect());
+        request(&mut service, &identity(1), 40);
+        assert!(incoming.try_recv().is_err());
+        request(&mut service, &identity(0), 40);
+        assert_eq!(incoming.try_recv().unwrap().identity, identity(0));
+    }
+
+    #[test]
+    fn old_size_completion_preserves_current_pending_request() {
+        let (mut service, incoming, completed) = service();
+        let id = identity(0);
+        request(&mut service, &id, 40);
+        request(&mut service, &id, 60);
+        assert_eq!(incoming.try_iter().count(), 2);
+        completed.send((id.clone(), 40, None)).unwrap();
+        assert!(!service.collect());
+        request(&mut service, &id, 60);
+        assert!(incoming.try_recv().is_err());
+        assert!(service.pending.contains(&id));
+        completed.send((id.clone(), 60, None)).unwrap();
+        assert!(service.collect());
+        assert!(service.cache.contains_key(&id));
+        assert!(service.pending.is_empty());
+    }
+
+    #[test]
+    fn full_request_queue_leaves_identity_retryable() {
+        let (mut service, incoming, _completed) = service();
+        for index in 0..QUEUE {
+            request(&mut service, &identity(index), 40);
+        }
+        let retry = identity(QUEUE);
+        request(&mut service, &retry, 40);
+        assert!(!service.pending.contains(&retry));
+        incoming.try_recv().unwrap();
+        request(&mut service, &retry, 40);
+        assert!(service.pending.contains(&retry));
+        assert!(incoming.try_iter().any(|request| request.identity == retry));
+    }
     #[test]
     fn normalizes_straight_premultiplied_and_alphaless_pixels() {
         let mut straight = vec![200, 100, 50, 128, 0, 0, 0, 0];

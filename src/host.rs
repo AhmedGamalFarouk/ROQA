@@ -661,6 +661,10 @@ impl Desktop {
             if !changed && !icons_arrived {
                 return Ok(());
             }
+            if changed {
+                self.icons
+                    .retain(|identity| items.iter().any(|item| &item.identity == identity));
+            }
             let resized = items.len() != self.dock_items.len();
             self.dock_items = items;
             if resized {
