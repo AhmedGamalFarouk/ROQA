@@ -66,7 +66,6 @@ impl NotchShadow {
     fn create(graphics: &Graphics, bounds: Bounds) -> Result<Self> {
         let window = NativeWindow::create_shadow(bounds)?;
         let canvas = Canvas::create(graphics, window.0, bounds)?;
-        window.show();
         Ok(Self { canvas, window })
     }
     fn paint(&self, scene: &NotchScene, notch: HWND) -> Result<()> {
@@ -102,6 +101,8 @@ struct Surface {
     dpi: u32,
     bounds: Bounds,
     hovered: bool,
+    /// False while a full-screen app covers this monitor; hidden surfaces keep their state.
+    visible: bool,
     /// Frames are painted only while set; `animate` clears it when motion settles.
     live: bool,
     /// Notch: 0 collapsed to 1 expanded. Dock: pointer-inside progress of the bar fill.
@@ -142,7 +143,7 @@ impl Surface {
             }
         };
         let canvas = Canvas::create(graphics, window.0, bounds)?;
-        window.show();
+        // Created hidden; the owner shows it after the first paint.
         Ok(Self {
             _accessible: accessible,
             shadow,
@@ -153,6 +154,7 @@ impl Surface {
             dpi,
             bounds,
             hovered: false,
+            visible: false,
             live: false,
             motion: Tween::rest(0.0),
             engaged: false,
@@ -162,6 +164,35 @@ impl Surface {
             slots: vec![Tween::rest(0.0); slots],
             uia,
         })
+    }
+    /// Hides or restores the surface (and the notch's shadow) without releasing anything.
+    fn set_visible(&mut self, visible: bool) {
+        if visible == self.visible {
+            return;
+        }
+        self.visible = visible;
+        let windows = self.shadow.iter().map(|shadow| &shadow.window);
+        for window in windows.chain([&self.window]) {
+            if visible {
+                window.show()
+            } else {
+                window.hide()
+            }
+        }
+        if !visible {
+            // A hidden window gets no leave notification; settle hover as if the pointer left.
+            self.leave();
+        }
+    }
+    fn leave(&mut self) {
+        if self.hovered {
+            self.hovered = false;
+            if self.kind == SurfaceKind::Dock {
+                self.hover_dock(None, false);
+            } else {
+                self.set_notch_hover(false);
+            }
+        }
     }
     /// Starts leave tracking on first entry; returns true only for that transition.
     fn track_pointer(&mut self) -> Result<bool> {
@@ -294,6 +325,10 @@ const NOTCH_SWELL: f32 = 0.07;
 /// Transient topology reads are retried this often, at most `TOPOLOGY_RETRIES` times per change.
 const TOPOLOGY_RETRY: Duration = Duration::from_millis(250);
 const TOPOLOGY_RETRIES: u32 = 8;
+/// Windows sends no notification when a full-screen app starts or stops, so the state is re-read on
+/// catalog changes (foreground, show/hide) and topology changes, and otherwise at this interval.
+// shortcut: a fixed poll adds one idle wake per interval; event-filtered location tracking could replace it if measured cost matters.
+const FULLSCREEN_POLL: Duration = Duration::from_secs(2);
 
 struct Desktop {
     surfaces: Vec<Surface>,
@@ -304,6 +339,11 @@ struct Desktop {
     /// When the next topology read is due, and how many transient reads this change has retried.
     topology_due: Option<Instant>,
     topology_retries: u32,
+    /// Monitor currently covered by a full-screen app; its surfaces are hidden, not released.
+    fullscreen: Option<String>,
+    /// Catalog generation seen by the last full-screen check, and when the next poll is due.
+    fullscreen_generation: Option<u64>,
+    fullscreen_due: Instant,
     graphics: Graphics,
     picker: Option<Picker>,
     icons: IconService,
@@ -329,6 +369,9 @@ impl Desktop {
             shown: Vec::new(),
             topology_due: None,
             topology_retries: 0,
+            fullscreen: native_window::fullscreen_device(),
+            fullscreen_generation: None,
+            fullscreen_due: Instant::now() + FULLSCREEN_POLL,
             graphics: Graphics::create()?,
             picker: None,
             icons: IconService::create()?,
@@ -382,14 +425,18 @@ impl Desktop {
             self.refresh_clock()?;
             surface.paint_notch(&self.clock, &self.date)?;
             self.surfaces.push(surface);
-            return Ok(());
+        } else {
+            surface.publish_accessibility(&self.dock_names, false);
+            self.surfaces.push(surface);
+            // Sized after the push: icons are extracted once, for the densest dock.
+            let icons = self.dock_icons();
+            self.surfaces[self.surfaces.len() - 1].paint_dock(&self.dock_items, &icons)?;
         }
-        surface.publish_accessibility(&self.dock_names, false);
-        self.surfaces.push(surface);
-        // Sized after the push: icons are extracted once, for the densest dock.
-        let icons = self.dock_icons();
-        let dock = &self.surfaces[self.surfaces.len() - 1];
-        dock.paint_dock(&self.dock_items, &icons)
+        // Shown after its first paint, and never on the monitor a full-screen app covers.
+        let visible = self.fullscreen.as_ref() != Some(&monitor.device);
+        let last = self.surfaces.len() - 1;
+        self.surfaces[last].set_visible(visible);
+        Ok(())
     }
     /// Repaints the notches only when the minute changed; returns how long until the next minute.
     fn refresh_clock(&mut self) -> Result<u32> {
@@ -600,19 +647,33 @@ impl Desktop {
                     surface.set_notch_hover(over);
                 }
             }
-            WM_MOUSELEAVE => {
-                if surface.hovered {
-                    surface.hovered = false;
-                    if surface.kind == SurfaceKind::Dock {
-                        surface.hover_dock(None, false);
-                    } else {
-                        surface.set_notch_hover(false);
-                    }
-                }
-            }
+            WM_MOUSELEAVE => surface.leave(),
             _ => {}
         }
         Ok(())
+    }
+    /// Re-reads the full-screen monitor when the catalog changed or the poll is due, then hides that
+    /// monitor's surfaces and restores the others.
+    fn refresh_fullscreen(&mut self, generation: u64) {
+        let now = Instant::now();
+        if self.fullscreen_generation == Some(generation) && now < self.fullscreen_due {
+            return;
+        }
+        (self.fullscreen_generation, self.fullscreen_due) =
+            (Some(generation), now + FULLSCREEN_POLL);
+        let fullscreen = native_window::fullscreen_device();
+        if fullscreen != self.fullscreen {
+            self.fullscreen = fullscreen;
+            for surface in &mut self.surfaces {
+                surface.set_visible(self.fullscreen.as_ref() != Some(&surface.monitor));
+            }
+        }
+    }
+    fn fullscreen_wait(&self) -> u32 {
+        let wait = self
+            .fullscreen_due
+            .saturating_duration_since(Instant::now());
+        wait.as_millis() as u32
     }
     /// Milliseconds until the pending topology read, or `INFINITE` without one.
     fn topology_wait(&self) -> u32 {
@@ -637,6 +698,10 @@ impl Desktop {
             Err(error) => return self.retry_topology(error),
         };
         let (release, place) = topology::diff(&self.monitors, &next);
+        if !release.is_empty() || !place.is_empty() {
+            // A monitor change can move or end a full-screen app; re-check on the next pass.
+            self.fullscreen_generation = None;
+        }
         self.surfaces
             .retain(|surface| !release.contains(&surface.monitor));
         self.monitors = next;
@@ -718,6 +783,7 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
             desktop.rescale_text()?;
         }
         desktop.refresh_dock(catalog.model())?;
+        desktop.refresh_fullscreen(catalog.model().generation);
         let clock_wait = desktop.refresh_clock()?;
         if let Some(picker) = &mut desktop.picker {
             picker.synchronize(catalog.model())?;
@@ -728,7 +794,8 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
         let timeout = catalog
             .wait_milliseconds()
             .min(clock_wait)
-            .min(desktop.topology_wait());
+            .min(desktop.topology_wait())
+            .min(desktop.fullscreen_wait());
         let wake = if desktop.animate()? {
             next_frame(&events, timeout)
         } else {

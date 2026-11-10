@@ -378,3 +378,18 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **DPI case.** The smoke `DpiChange` case now asserts the M3 contract: a synthetic `WM_DPICHANGED` with no real DPI change keeps the same notch HWND at the real DPI. Previously it asserted a rebuild at the fake DPI.
 - **Verification.** `NativeProbe.cs` compiles, all five scripts parse with 0 errors, and a read-only probe returned 0 surfaces. **The updated suites have NOT been run.** Their results on the M3 binary are unknown until a separately confirmed desktop-free run. The prior PASS counts (shell 329, picker/dock 226, catalog 67, packaged/hung 16) belong to the earlier binary.
 - **Commit.** At the user's request, this commit contains the M3 topology candidate 1 code, the scripts and the docs. The user's `.gitignore` edit is excluded and ignored artifacts stay local. This is not council or milestone acceptance.
+
+## M3 fullscreen suppression candidate 1 (2026-11-10 local)
+
+- **Request and scope.** The user said "wait on tests and go for the next feature". Native suites stay NOT RUN on purpose. Author: Claude Opus 5.5 High. Packet: `docs/development/m3-fullscreen-candidate-1.md`. Base commit `8a8c7ed`. Uncommitted.
+- **Change.** A monitor's notch, shadow and dock are hidden (HWNDs kept) while all three hold:
+  - `SHQueryUserNotificationState` reports BUSY or D3D full screen;
+  - the foreground window is foreign, visible and not the desktop;
+  - that window covers the monitor's whole rect.
+- **When it re-checks.** On catalog generation changes, topology changes, and a 2 s `shortcut:` poll. Microsoft documents that full-screen start and stop send no notification. No new hooks.
+- **Verification.** `verify.ps1` PASS: 28 tests plus the release build. Binary `1CC88A122F6A87F1B3890769CFE4786FA72331312B0C124641DCF22B5787D49A`.
+- **Clean-code-guard.** Independent non-author reviews:
+  - First review on `5BF7C8F2…79B8`: ACCEPT with MIN-1 and MIN-2.
+  - Author fixed both.
+  - Fresh recheck on `784CD0E22BF902E2E4653B04777AA16EC6896CDCD5614C3304138EFB56D3DD0E`: ACCEPT, no new findings.
+- **Open.** Native evidence for real full-screen apps, the multi-monitor foreground split, Presentation Settings, Store apps and the idle cost of the poll. The deferrals of council and accessibility checks are unchanged.

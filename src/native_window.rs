@@ -1,6 +1,7 @@
 use crate::{
+    dock,
     layout::{Bounds, SurfaceKind},
-    topology::Monitor,
+    topology::{self, Monitor},
 };
 use std::{
     mem::size_of,
@@ -10,11 +11,15 @@ use windows::Win32::{
     Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Gdi::{
         CombineRgn, CreateRectRgn, DeleteObject, EnumDisplayMonitors, GetMonitorInfoW, HDC,
-        HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, RGN_OR,
-        SetRectRgn, SetWindowRgn, ValidateRect,
+        HMONITOR, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW,
+        MonitorFromPoint, MonitorFromWindow, RGN_OR, SetRectRgn, SetWindowRgn, ValidateRect,
     },
     System::LibraryLoader::GetModuleHandleW,
-    UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::*},
+    UI::{
+        HiDpi::GetDpiForWindow,
+        Shell::{QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState},
+        WindowsAndMessaging::*,
+    },
 };
 use windows::core::{BOOL, Error, Result, w};
 
@@ -119,6 +124,12 @@ impl NativeWindow {
             let _ = ShowWindow(self.0, SW_SHOWNOACTIVATE);
         }
     }
+    pub fn hide(&self) {
+        // SAFETY: this owned HWND is live; hiding keeps it, its canvas and its UIA provider alive.
+        unsafe {
+            let _ = ShowWindow(self.0, SW_HIDE);
+        }
+    }
     /// Transfers a silhouette region to Windows; the scratch row and any failed result stay owned here.
     pub fn set_notch_region(&self, rows: &[Bounds]) -> Result<()> {
         // SAFETY: owned HWND; all rows are bounded window-relative pixels. Only a successful
@@ -210,23 +221,64 @@ pub fn monitors() -> Result<Vec<Monitor>> {
     handles
         .into_iter()
         .map(|handle| {
-            let mut info = MONITORINFOEXW::default();
-            info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
-            // SAFETY: cbSize selects the MONITORINFOEXW layout, which begins with MONITORINFO.
-            unsafe { GetMonitorInfoW(handle, &raw mut info as *mut MONITORINFO).ok()? };
-            let name = &info.szDevice;
-            let length = name
-                .iter()
-                .position(|&unit| unit == 0)
-                .unwrap_or(name.len());
-            let work = bounds(info.monitorInfo.rcWork);
+            let (device, info) = monitor_info(handle)?;
+            let work = bounds(info.rcWork);
             Ok(Monitor {
-                device: String::from_utf16_lossy(&name[..length]),
+                device,
                 work,
                 dpi: dpi_at(work)?,
             })
         })
         .collect()
+}
+
+/// Device name and geometry of one monitor; fails once its HMONITOR no longer exists.
+fn monitor_info(handle: HMONITOR) -> Result<(String, MONITORINFO)> {
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+    // SAFETY: cbSize selects the MONITORINFOEXW layout, which begins with MONITORINFO.
+    unsafe { GetMonitorInfoW(handle, &raw mut info as *mut MONITORINFO).ok()? };
+    let name = &info.szDevice;
+    let length = name
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(name.len());
+    Ok((String::from_utf16_lossy(&name[..length]), info.monitorInfo))
+}
+
+/// Device name of the monitor whose whole area the foreground window covers while Windows reports a
+/// full-screen app. Windows sends no notification when full-screen apps start or stop, so callers
+/// re-check on events and a slow schedule. Any failed query reads as "not full screen", which keeps
+/// the surfaces visible rather than hiding them on a guess.
+pub fn fullscreen_device() -> Option<String> {
+    // SAFETY: shell state query with an out value owned by the binding.
+    let state = unsafe { SHQueryUserNotificationState() }.ok()?;
+    if state != QUNS_BUSY && state != QUNS_RUNNING_D3D_FULL_SCREEN {
+        return None;
+    }
+    // Visible foreign top-level window only; ROQA's own windows never suppress ROQA.
+    let key = dock::foreground_key().filter(|key| dock::valid_target(*key))?;
+    let window = HWND(key.handle as *mut _);
+    // QUNS_BUSY also covers Presentation Settings, where the desktop spans every monitor.
+    // shortcut: a maximized window can still read as full screen under Presentation Settings
+    // when the work area equals the monitor (auto-hide taskbar); compare frames if users hit it.
+    let mut class = [0u16; 16];
+    // SAFETY: bounded writable buffer; a stale HWND yields 0 characters.
+    let length = unsafe { GetClassNameW(window, &mut class) }.max(0) as usize;
+    if matches!(
+        String::from_utf16_lossy(&class[..length]).as_str(),
+        "Progman" | "WorkerW"
+    ) {
+        return None;
+    }
+    let mut rect = RECT::default();
+    // SAFETY: scalar geometry queries on a transient foreign HWND; a stale one fails cleanly.
+    let monitor = unsafe {
+        GetWindowRect(window, &mut rect).ok()?;
+        MonitorFromWindow(window, MONITOR_DEFAULTTONULL)
+    };
+    let (device, info) = monitor_info(monitor).ok()?;
+    topology::covers(bounds(rect), bounds(info.rcMonitor)).then_some(device)
 }
 
 unsafe extern "system" fn collect_monitor(

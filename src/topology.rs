@@ -39,6 +39,15 @@ pub fn diff(current: &[Monitor], next: &[Monitor]) -> (Vec<String>, Vec<Monitor>
     (release, place)
 }
 
+/// A window that spans a whole monitor, borders included, hides the shell UI on it when Windows
+/// also reports a full-screen app.
+pub fn covers(window: Bounds, monitor: Bounds) -> bool {
+    window.x <= monitor.x
+        && window.y <= monitor.y
+        && window.x + window.width >= monitor.x + monitor.width
+        && window.y + window.height >= monitor.y + monitor.height
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +115,25 @@ mod tests {
             diff(&unplugged, &current),
             (vec![], vec![current[1].clone()])
         );
+    }
+
+    #[test]
+    fn full_screen_means_covering_the_whole_monitor_including_negative_origins() {
+        let left = monitor("L", -1920, -200, 96).work;
+        assert!(covers(left, left));
+        let oversized = Bounds {
+            x: left.x - 8,
+            y: left.y - 8,
+            width: left.width + 16,
+            height: left.height + 16,
+        };
+        assert!(covers(oversized, left));
+        let mut short = left;
+        short.height -= 1;
+        assert!(!covers(short, left));
+        let mut shifted = left;
+        shifted.x += 1;
+        assert!(!covers(shifted, left));
     }
 
     #[test]
