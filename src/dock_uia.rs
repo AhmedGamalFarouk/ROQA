@@ -1,4 +1,5 @@
-//! UI Automation for the custom-drawn dock: a ToolBar root with one Button (Invoke) per slot.
+//! UI Automation for the custom-drawn dock: a ToolBar root with one Button (Invoke) per slot, plus
+//! the per-HWND root registration and value helpers the notch's provider (`notch_uia`) shares.
 //! UIA calls these providers re-entrantly on the UI thread while it pumps messages, so they read only a
 //! small shared snapshot and post actions back to the host loop; they never touch host state directly.
 #![allow(non_upper_case_globals)] // Matching on Windows SDK constant names.
@@ -24,7 +25,8 @@ use windows::{
     core::{BSTR, Error, HRESULT, IUnknown, IUnknownImpl, Interface, Result, implement},
 };
 
-/// Posted to the dock HWND: wParam = slot, lParam = layout version the element belonged to.
+/// Posted to the dock or notch HWND: wParam = slot or control, lParam = layout version the element
+/// belonged to.
 pub const INVOKE: u32 = WM_APP + 4;
 
 #[derive(Default)]
@@ -44,23 +46,39 @@ fn read<T>(state: &Shared, view: impl FnOnce(&State) -> T) -> Result<T> {
         .map_err(|_| Error::new(E_FAIL, "Dock accessibility state unavailable."))
 }
 
-fn not_available() -> Error {
+pub(crate) fn not_available() -> Error {
     Error::from_hresult(HRESULT(UIA_E_ELEMENTNOTAVAILABLE as i32))
 }
 
 /// S_OK with a NULL result: UIA's convention for "no such pattern / no element in that direction".
-fn none<T>() -> Result<T> {
+pub(crate) fn none<T>() -> Result<T> {
     Err(Error::empty())
 }
 
-fn window_rect(hwnd: isize) -> Result<RECT> {
+pub(crate) fn window_rect(hwnd: isize) -> Result<RECT> {
     let mut rect = RECT::default();
     // SAFETY: scalar query of our own dock HWND; fails cleanly if the window is gone.
     unsafe { GetWindowRect(HWND(hwnd as *mut _), &mut rect)? };
     Ok(rect)
 }
 
-fn variant_i32(value: i32) -> VARIANT {
+/// A child element's runtime ID, unique under its HWND root: the layout version and its index.
+pub(crate) fn runtime_id(version: u32, index: usize) -> Result<*mut SAFEARRAY> {
+    let parts = [UiaAppendRuntimeId as i32, version as i32, index as i32];
+    // SAFETY: a VT_I4 vector of exactly parts.len() elements; ownership passes to the UIA caller.
+    unsafe {
+        let array = SafeArrayCreateVector(VT_I4, 0, parts.len() as u32);
+        if array.is_null() {
+            return Err(Error::from_hresult(E_OUTOFMEMORY));
+        }
+        for (index, part) in parts.iter().enumerate() {
+            SafeArrayPutElement(array, &(index as i32), (part as *const i32).cast())?;
+        }
+        Ok(array)
+    }
+}
+
+pub(crate) fn variant_i32(value: i32) -> VARIANT {
     let mut variant = VARIANT::default();
     // SAFETY: a fresh VT_EMPTY variant gets its tag and the matching union member.
     unsafe {
@@ -71,7 +89,7 @@ fn variant_i32(value: i32) -> VARIANT {
     variant
 }
 
-fn variant_bool(value: bool) -> VARIANT {
+pub(crate) fn variant_bool(value: bool) -> VARIANT {
     let mut variant = VARIANT::default();
     // SAFETY: as above; VARIANT_BOOL uses -1 for true.
     unsafe {
@@ -86,7 +104,7 @@ fn variant_bool(value: bool) -> VARIANT {
     variant
 }
 
-fn variant_text(text: &str) -> VARIANT {
+pub(crate) fn variant_text(text: &str) -> VARIANT {
     let mut variant = VARIANT::default();
     // SAFETY: as above; the BSTR's ownership passes to the caller, which clears the variant.
     unsafe {
@@ -263,22 +281,7 @@ impl IRawElementProviderFragment_Impl for Item_Impl {
     }
     fn GetRuntimeId(&self) -> Result<*mut SAFEARRAY> {
         self.current()?;
-        let parts = [
-            UiaAppendRuntimeId as i32,
-            self.version as i32,
-            self.index as i32,
-        ];
-        // SAFETY: a VT_I4 vector of exactly parts.len() elements; ownership passes to the UIA caller.
-        unsafe {
-            let array = SafeArrayCreateVector(VT_I4, 0, parts.len() as u32);
-            if array.is_null() {
-                return Err(Error::from_hresult(E_OUTOFMEMORY));
-            }
-            for (index, part) in parts.iter().enumerate() {
-                SafeArrayPutElement(array, &(index as i32), (part as *const i32).cast())?;
-            }
-            Ok(array)
-        }
+        runtime_id(self.version, self.index)
     }
     fn BoundingRectangle(&self) -> Result<UiaRect> {
         let (_, hwnd, dpi, count) = self.current()?;
@@ -332,7 +335,7 @@ thread_local! {
     static ROOTS: RefCell<Vec<(isize, IRawElementProviderSimple)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Answers UIA's WM_GETOBJECT for a registered dock; `None` lets DefWindowProc handle everything else.
+/// Answers UIA's WM_GETOBJECT for a registered surface; `None` lets DefWindowProc handle everything else.
 pub fn get_object(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
     if lparam.0 as i32 != UiaRootObjectId {
         return None;
@@ -349,30 +352,39 @@ pub fn get_object(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT>
     Some(unsafe { UiaReturnRawElementProvider(hwnd, wparam, lparam, &provider) })
 }
 
-/// Owns the dock's UIA root for one HWND lifetime; drop before destroying the window.
-pub struct DockAccessibility {
+/// Owns a surface's UIA root for one HWND lifetime; drop before destroying the window.
+pub struct Accessibility {
     hwnd: HWND,
     root: IRawElementProviderSimple,
 }
-impl DockAccessibility {
-    pub fn create(hwnd: HWND, state: &Shared) -> Result<Self> {
+impl Accessibility {
+    pub fn dock(hwnd: HWND, state: &Shared) -> Result<Self> {
         if let Ok(mut state) = state.lock() {
             state.hwnd = hwnd.0 as isize;
         }
-        let root: IRawElementProviderSimple = Root {
-            state: Arc::clone(state),
-        }
-        .into();
+        Self::register(
+            hwnd,
+            Root {
+                state: Arc::clone(state),
+            }
+            .into(),
+        )
+    }
+    /// Serves `root` for `hwnd`'s WM_GETOBJECT until dropped.
+    pub fn register(hwnd: HWND, root: IRawElementProviderSimple) -> Result<Self> {
         ROOTS.with(|roots| {
             roots
                 .try_borrow_mut()
                 .map(|mut roots| roots.push((hwnd.0 as isize, root.clone())))
-                .map_err(|_| Error::new(E_FAIL, "Dock accessibility registry busy."))
+                .map_err(|_| Error::new(E_FAIL, "Accessibility registry busy."))
         })?;
         Ok(Self { hwnd, root })
     }
+    pub fn root(&self) -> &IRawElementProviderSimple {
+        &self.root
+    }
 }
-impl Drop for DockAccessibility {
+impl Drop for Accessibility {
     fn drop(&mut self) {
         let hwnd = self.hwnd.0 as isize;
         ROOTS.with(|roots| {
@@ -384,7 +396,7 @@ impl Drop for DockAccessibility {
         unsafe {
             UiaReturnRawElementProvider(self.hwnd, WPARAM(0), LPARAM(0), None);
             if let Err(error) = UiaDisconnectProvider(&self.root) {
-                eprintln!("Dock accessibility cleanup: {error}");
+                eprintln!("Accessibility cleanup: {error}");
             }
         }
     }

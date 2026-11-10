@@ -2,7 +2,7 @@ use crate::{
     dock,
     icons::IconPixels,
     layout::{self, Bounds},
-    media::Track,
+    media::{PLAY_PAUSE, Track},
     motion,
 };
 use std::mem::ManuallyDrop;
@@ -144,6 +144,8 @@ pub struct NotchScene<'a> {
     /// 0 collapsed, 1 expanded; the open curve briefly overshoots 1.
     pub progress: f32,
     pub dpi: u32,
+    /// The media control with keyboard focus, drawn with a focus ring.
+    pub focus: Option<usize>,
 }
 
 /// Dock material (docs/design/roqa-visual-spec.md): black bar, white-alpha hover fill, whole-pixel icon lift.
@@ -477,7 +479,7 @@ fn notch_text(
         row(15.0 + 14.0 * open, 24.0),
         with_alpha(WHITE, 1.0),
     )?;
-    let date = motion::smooth((scene.progress - 0.35) / 0.45);
+    let date = motion::reveal(scene.progress);
     if date <= 0.0 {
         return Ok(());
     }
@@ -509,7 +511,8 @@ struct Line<'a> {
 }
 
 /// What the media notch draws for one frame, in physical pixels: the cover slot with its centred
-/// play-state glyph (a triangle while playing, two bars while paused), then the visible text lines.
+/// play-state glyph (a triangle while playing, two bars while paused), the visible text lines, then
+/// the panel's controls once they fade in.
 struct MediaPlan<'a> {
     cover: D2D1_ROUNDED_RECT,
     glyph: D2D_RECT_F,
@@ -517,6 +520,56 @@ struct MediaPlan<'a> {
     /// Glyph opacity, and a factor of the title's: 1 playing, 0.6 paused.
     dim: f32,
     lines: Vec<Line<'a>>,
+    chips: Vec<Chip>,
+    /// Around the control with keyboard focus.
+    ring: Option<Ring>,
+}
+
+/// One media control: a white glyph, or for play/pause a black glyph on a white circle. A control
+/// the player does not accept now is drawn at `DISABLED` opacity.
+struct Chip {
+    rect: D2D_RECT_F,
+    glyph: D2D_RECT_F,
+    shape: Glyph,
+    filled: bool,
+    alpha: f32,
+}
+struct Ring {
+    shape: D2D1_ROUNDED_RECT,
+    stroke: f32,
+    alpha: f32,
+}
+/// Opacity of a control the player does not accept now.
+const DISABLED: f32 = 0.30;
+/// Focus ring: stroke width and its gap from the control's edge, in DIPs.
+const FOCUS_STROKE: f32 = 2.0;
+const FOCUS_GAP: f32 = 2.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Glyph {
+    Play,
+    Pause,
+    Previous,
+    Next,
+}
+/// Glyph parts on a 10-unit grid: a triangle's x, y corners, and a bar's left, top, right, bottom.
+type Triangle = [(f32, f32); 3];
+type Bar = (f32, f32, f32, f32);
+impl Glyph {
+    fn parts(self) -> (Option<Triangle>, &'static [Bar]) {
+        match self {
+            Glyph::Play => (Some([(2.5, 1.0), (9.0, 5.0), (2.5, 9.0)]), &[]),
+            Glyph::Pause => (None, &[(2.0, 1.0, 4.2, 9.0), (5.8, 1.0, 8.0, 9.0)]),
+            Glyph::Previous => (
+                Some([(9.0, 1.0), (9.0, 9.0), (3.8, 5.0)]),
+                &[(1.5, 1.0, 3.1, 9.0)],
+            ),
+            Glyph::Next => (
+                Some([(1.0, 1.0), (6.2, 5.0), (1.0, 9.0)]),
+                &[(7.0, 1.0, 8.6, 9.0)],
+            ),
+        }
+    }
 }
 
 /// The media clock at `open` (`smooth(progress)`): the pill's 15 DIP bold clock settles into the
@@ -539,8 +592,8 @@ fn media_clock(open: f32, scale: f32) -> Font {
 /// moves by `smooth(p)` from its pill position to its panel position, in DIPs from the body's left
 /// and top edges (the clock from its right edge). The title column ends before the clock's measured
 /// width (`clock`, physical pixels) and never inverts. The artist fades in below the title as the
-/// date does. The progress, controls and volume rows (below 50 in the panel) stay empty until
-/// slices 3, 4 and 6. Empty text is skipped.
+/// date does, and so do the controls (`media_chips`). The progress and volume rows stay empty until
+/// slices 4 and 6. Empty text is skipped.
 fn media_plan<'a>(
     scene: &NotchScene<'a>,
     track: &'a Track,
@@ -552,16 +605,9 @@ fn media_plan<'a>(
     let at = |pill: f32, panel: f32| pill + (panel - pill) * open;
     // The close spring's undershoot briefly makes the pill shorter than 30: keep its row centred.
     let middle = (layout::notch_shape(scene.progress, true).height / 2.0).min(15.0);
-    // Whole physical pixels keep the slot and glyph as crisp as the whole-pixel body.
-    let square = |left: f32, top: f32, size: f32| D2D_RECT_F {
-        left: left.round(),
-        top: top.round(),
-        right: left.round() + size,
-        bottom: top.round() + size,
-    };
     // Cover: 20 at (10, middle - 10), radius 5 -> 72 at (16, 14), radius 10. Glyph: 10 -> 24.
     let size = (at(20.0, 72.0) * scale).round();
-    let cover = square(
+    let cover = pixel_square(
         body.left + at(10.0, 16.0) * scale,
         body.top + at(middle - 10.0, 14.0) * scale,
         size,
@@ -587,7 +633,7 @@ fn media_plan<'a>(
         align: DWRITE_TEXT_ALIGNMENT_LEADING,
     };
     let dim = if track.playing { 1.0 } else { 0.60 };
-    let artist = motion::smooth((scene.progress - 0.35) / 0.45);
+    let artist = motion::reveal(scene.progress);
     let lines = [
         Line {
             text: scene.time,
@@ -615,54 +661,103 @@ fn media_plan<'a>(
             alpha: 0.60 * artist,
         },
     ];
+    let chips = media_chips(scene, track, body);
+    let ring = scene
+        .focus
+        .and_then(|index| chips.get(index))
+        .map(|chip| focus_ring(chip, scale, motion::reveal(scene.progress)));
     MediaPlan {
         cover: rounded(cover, at(5.0, 10.0) * scale),
-        glyph: square(cover.left + inset, cover.top + inset, glyph),
+        glyph: pixel_square(cover.left + inset, cover.top + inset, glyph),
         playing: track.playing,
         dim,
         lines: lines
             .into_iter()
             .filter(|line| line.alpha > 0.0 && !line.text.is_empty())
             .collect(),
+        chips,
+        ring,
+    }
+}
+
+/// Previous, play/pause and next keep their panel place in the body, so the body clip reveals
+/// them as it opens; they fade in with the artist. None are planned while they are invisible.
+fn media_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip> {
+    let scale = scene.dpi as f32 / 96.0;
+    let reveal = motion::reveal(scene.progress);
+    if reveal <= 0.0 {
+        return Vec::new();
+    }
+    let toggle = if track.playing {
+        Glyph::Pause
+    } else {
+        Glyph::Play
+    };
+    layout::media_controls(scene.dpi)
+        .into_iter()
+        .zip([Glyph::Previous, toggle, Glyph::Next])
+        .enumerate()
+        .map(|(index, (control, shape))| {
+            let rect = D2D_RECT_F {
+                left: body.left + control.x as f32,
+                top: body.top + control.y as f32,
+                right: body.left + (control.x + control.width) as f32,
+                bottom: body.top + (control.y + control.height) as f32,
+            };
+            let filled = index == PLAY_PAUSE;
+            // A 12 DIP glyph inside the circle, 14 DIP on its own.
+            let size = (if filled { 12.0 } else { 14.0 } * scale).round();
+            let centre = |extent: i32| ((extent as f32 - size) / 2.0).round();
+            Chip {
+                rect,
+                glyph: pixel_square(
+                    rect.left + centre(control.width),
+                    rect.top + centre(control.height),
+                    size,
+                ),
+                shape,
+                filled,
+                alpha: reveal * if track.controls[index] { 1.0 } else { DISABLED },
+            }
+        })
+        .collect()
+}
+
+/// The keyboard focus ring around `chip`: a circle around play/pause, a rounded rect otherwise.
+fn focus_ring(chip: &Chip, scale: f32, alpha: f32) -> Ring {
+    let stroke = FOCUS_STROKE * scale;
+    // The stroke is centred on the path: its inner edge sits FOCUS_GAP outside the control.
+    let out = FOCUS_GAP * scale + stroke / 2.0;
+    let rect = D2D_RECT_F {
+        left: chip.rect.left - out,
+        top: chip.rect.top - out,
+        right: chip.rect.right + out,
+        bottom: chip.rect.bottom + out,
+    };
+    let radius = if chip.filled {
+        (rect.bottom - rect.top) / 2.0
+    } else {
+        8.0 * scale + out
+    };
+    Ring {
+        shape: rounded(rect, radius),
+        stroke,
+        alpha,
     }
 }
 
 fn media_text(context: &ID2D1DeviceContext, plan: &MediaPlan) -> Result<()> {
-    let glyph = plan.glyph;
-    // The glyph is drawn on a 10-unit grid inside its square.
-    let unit = (glyph.right - glyph.left) / 10.0;
-    let point = |x: f32, y: f32| Vector2 {
-        X: glyph.left + x * unit,
-        Y: glyph.top + y * unit,
-    };
-    // SAFETY: context is live between surface BeginDraw/EndDraw; brushes and the path geometry are
-    // local COM objects scoped to this draw, and the sink is closed before the fill.
+    // SAFETY: context is live between surface BeginDraw/EndDraw; brushes are scoped to this draw.
     unsafe {
         let slot = context.CreateSolidColorBrush(&with_alpha(WHITE, COVER_FILL), None)?;
         context.FillRoundedRectangle(&plan.cover, &slot);
-        let brush = context.CreateSolidColorBrush(&with_alpha(WHITE, plan.dim), None)?;
-        if plan.playing {
-            let path = context.GetFactory()?.CreatePathGeometry()?;
-            let sink = path.Open()?;
-            sink.BeginFigure(point(2.5, 1.0), D2D1_FIGURE_BEGIN_FILLED);
-            sink.AddLine(point(9.0, 5.0));
-            sink.AddLine(point(2.5, 9.0));
-            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-            sink.Close()?;
-            context.FillGeometry(&path, &brush, None);
-        } else {
-            for left in [2.0, 5.8] {
-                let (top_left, bottom_right) = (point(left, 1.0), point(left + 2.2, 9.0));
-                let bar = D2D_RECT_F {
-                    left: top_left.X.round(),
-                    top: top_left.Y.round(),
-                    right: bottom_right.X.round(),
-                    bottom: bottom_right.Y.round(),
-                };
-                context.FillRectangle(&bar, &brush);
-            }
-        }
     }
+    let state = if plan.playing {
+        Glyph::Play
+    } else {
+        Glyph::Pause
+    };
+    fill_glyph(context, plan.glyph, state, with_alpha(WHITE, plan.dim))?;
     for line in &plan.lines {
         draw_text(
             context,
@@ -671,6 +766,79 @@ fn media_text(context: &ID2D1DeviceContext, plan: &MediaPlan) -> Result<()> {
             line.rect,
             with_alpha(WHITE, line.alpha),
         )?;
+    }
+    for chip in &plan.chips {
+        let color = with_alpha(WHITE, chip.alpha);
+        if chip.filled {
+            let radius = (chip.rect.bottom - chip.rect.top) / 2.0;
+            // SAFETY: as above.
+            unsafe {
+                let circle = context.CreateSolidColorBrush(&color, None)?;
+                context.FillRoundedRectangle(&rounded(chip.rect, radius), &circle);
+            }
+            // Black on the circle; over the black body it vanishes as the circle fades.
+            fill_glyph(context, chip.glyph, chip.shape, rgba(0, 0, 0, 1.0))?;
+        } else {
+            fill_glyph(context, chip.glyph, chip.shape, color)?;
+        }
+    }
+    if let Some(ring) = &plan.ring {
+        // SAFETY: as above.
+        unsafe {
+            let brush = context.CreateSolidColorBrush(&with_alpha(WHITE, ring.alpha), None)?;
+            context.DrawRoundedRectangle(&ring.shape, &brush, ring.stroke, None);
+        }
+    }
+    Ok(())
+}
+
+/// A `size` square at whole physical pixels, as crisp as the whole-pixel body.
+fn pixel_square(left: f32, top: f32, size: f32) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: left.round(),
+        top: top.round(),
+        right: left.round() + size,
+        bottom: top.round() + size,
+    }
+}
+
+/// Fills `shape` on its 10-unit grid inside `square`; bars snap to whole pixels.
+fn fill_glyph(
+    context: &ID2D1DeviceContext,
+    square: D2D_RECT_F,
+    shape: Glyph,
+    color: D2D1_COLOR_F,
+) -> Result<()> {
+    let unit = (square.right - square.left) / 10.0;
+    let point = |(x, y): (f32, f32)| Vector2 {
+        X: square.left + x * unit,
+        Y: square.top + y * unit,
+    };
+    let (triangle, bars) = shape.parts();
+    // SAFETY: context is live between surface BeginDraw/EndDraw; the brush and path geometry are
+    // local COM objects scoped to this draw, and the sink is closed before the fill.
+    unsafe {
+        let brush = context.CreateSolidColorBrush(&color, None)?;
+        if let Some([first, second, third]) = triangle {
+            let path = context.GetFactory()?.CreatePathGeometry()?;
+            let sink = path.Open()?;
+            sink.BeginFigure(point(first), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLine(point(second));
+            sink.AddLine(point(third));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            context.FillGeometry(&path, &brush, None);
+        }
+        for &(left, top, right, bottom) in bars {
+            let (top_left, bottom_right) = (point((left, top)), point((right, bottom)));
+            let bar = D2D_RECT_F {
+                left: top_left.X.round(),
+                top: top_left.Y.round(),
+                right: bottom_right.X.round(),
+                bottom: bottom_right.Y.round(),
+            };
+            context.FillRectangle(&bar, &brush);
+        }
     }
     Ok(())
 }
@@ -966,12 +1134,22 @@ mod media_tests {
     }
     /// The scene `Desktop` builds from a media view, planned as `notch_text` plans it.
     fn plan<'a>(view: &'a View, time: &'a str, progress: f32, dpi: u32) -> MediaPlan<'a> {
+        focused(view, time, progress, dpi, None)
+    }
+    fn focused<'a>(
+        view: &'a View,
+        time: &'a str,
+        progress: f32,
+        dpi: u32,
+        focus: Option<usize>,
+    ) -> MediaPlan<'a> {
         let scene = NotchScene {
             time,
             date: "Tuesday",
             track: view.shown(),
             progress,
             dpi,
+            focus,
         };
         let clock = clock_width(time, progress, dpi);
         media_plan(&scene, scene.track.unwrap(), &body(dpi, progress), clock)
@@ -1025,6 +1203,9 @@ mod media_tests {
             (title.weight, title.align),
             (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING)
         );
+        // The pill draws no controls, even with keyboard focus on one.
+        let plan = focused(&song, "9:50 pm", 0.0, 96, Some(PLAY_PAUSE));
+        assert!(plan.chips.is_empty() && plan.ring.is_none());
     }
 
     #[test]
@@ -1059,8 +1240,98 @@ mod media_tests {
         );
         assert_eq!(plan.lines[0].font.weight, DWRITE_FONT_WEIGHT_NORMAL);
         assert_eq!(plan.lines[1].font.weight, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-        // The progress, controls and volume rows (from 50 DIP) stay empty in this slice.
+        // Text stays above the progress, controls and volume rows (from 50 DIP).
         assert!(plan.lines.iter().all(|line| line.rect.bottom <= 50.0));
+    }
+
+    #[test]
+    fn expanded_panel_draws_previous_play_pause_and_next_in_the_controls_row() {
+        let mut song = track("Song", "Artist", true);
+        if let View::Track(track) = &mut song {
+            track.controls = [false, true, true];
+        }
+        let panel = plan(&song, "9:50 pm", 1.0, 96);
+        // Body x 40..400; controls at 100, 148 and 200 DIP from its left, 66..98 from its top.
+        let drawn: Vec<_> = panel
+            .chips
+            .iter()
+            .map(|c| (c.rect, c.glyph, c.shape, c.filled, c.alpha))
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                (
+                    rect(140.0, 66.0, 168.0, 98.0),
+                    rect(147.0, 75.0, 161.0, 89.0),
+                    Glyph::Previous,
+                    false,
+                    DISABLED
+                ),
+                (
+                    rect(188.0, 66.0, 220.0, 98.0),
+                    rect(198.0, 76.0, 210.0, 88.0),
+                    Glyph::Pause,
+                    true,
+                    1.0
+                ),
+                (
+                    rect(240.0, 66.0, 268.0, 98.0),
+                    rect(247.0, 75.0, 261.0, 89.0),
+                    Glyph::Next,
+                    false,
+                    1.0
+                ),
+            ]
+        );
+        assert!(panel.ring.is_none());
+        // Paused, the middle control offers play.
+        let paused = track("Song", "Artist", false);
+        assert_eq!(plan_shapes(&paused)[1], Glyph::Play);
+        // The controls fade in with the artist and keep their place while the body grows.
+        let opening = plan(&song, "9:50 pm", 0.6, 96);
+        let reveal = motion::reveal(0.6);
+        assert!(reveal > 0.0 && reveal < 1.0);
+        let body = body(96, 0.6);
+        assert_eq!(opening.chips[1].rect.left, body.left + 148.0);
+        assert_eq!(opening.chips[1].alpha, reveal);
+        assert_eq!(opening.chips[0].alpha, reveal * DISABLED);
+    }
+
+    fn plan_shapes(view: &View) -> Vec<Glyph> {
+        plan(view, "9:50 pm", 1.0, 96)
+            .chips
+            .iter()
+            .map(|chip| chip.shape)
+            .collect()
+    }
+
+    #[test]
+    fn keyboard_focus_rings_the_focused_control_at_any_scale() {
+        let song = track("Song", "Artist", true);
+        let plan = focused(&song, "9:50 pm", 1.0, 96, Some(PLAY_PAUSE));
+        let ring = plan.ring.expect("a ring");
+        // 2 DIP stroke centred 3 DIP outside the 32 DIP circle: a 38 DIP circle.
+        assert_eq!(ring.shape.rect, rect(185.0, 63.0, 223.0, 101.0));
+        assert_eq!(
+            (ring.shape.radiusX, ring.stroke, ring.alpha),
+            (19.0, 2.0, 1.0)
+        );
+        let next = focused(&song, "9:50 pm", 1.0, 96, Some(2)).ring.unwrap();
+        assert_eq!(next.shape.rect, rect(237.0, 63.0, 271.0, 101.0));
+        assert_eq!(next.shape.radiusX, 11.0);
+        for dpi in [144, 192] {
+            let scale = dpi as f32 / 96.0;
+            let plan = focused(&song, "9:50 pm", 1.0, dpi, Some(0));
+            let (chip, ring) = (&plan.chips[0], plan.ring.unwrap());
+            assert_eq!(ring.stroke, 2.0 * scale);
+            assert_eq!(chip.rect.left - ring.shape.rect.left, 3.0 * scale);
+            // Every control and its ring stay inside the panel body.
+            let body = body(dpi, 1.0);
+            for item in plan.chips.iter().map(|c| c.rect).chain([ring.shape.rect]) {
+                assert!(item.left >= body.left && item.right <= body.right, "{dpi}");
+                assert!(item.top >= body.top && item.bottom <= body.bottom, "{dpi}");
+            }
+        }
     }
 
     #[test]

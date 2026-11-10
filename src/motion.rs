@@ -34,6 +34,12 @@ pub fn smooth(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Fade of the panel's secondary content (the date, the artist and the media controls) at an open
+/// progress: it starts once the body is about a third open and completes before it lands.
+pub fn reveal(progress: f32) -> f32 {
+    smooth((progress - 0.35) / 0.45)
+}
+
 impl Curve {
     /// `t` is the elapsed fraction of `duration` (both known by the caller).
     fn ease(self, t: f32, duration: Duration) -> f32 {
@@ -110,6 +116,10 @@ impl Tween {
         }
         let t = elapsed.as_secs_f32() / self.duration.as_secs_f32();
         self.from + (self.to - self.from) * self.curve.ease(t, self.duration)
+    }
+    /// Where the tween lands; the notch publishes it to UI Automation before the motion ends.
+    pub fn target(&self) -> f32 {
+        self.to
     }
     pub fn running(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.start) < self.duration

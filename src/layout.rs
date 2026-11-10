@@ -1,4 +1,4 @@
-use crate::dock;
+use crate::{dock, motion};
 
 /// Notch outline in DIPs: body size, bottom corner radius and the concave "ear" fillets that
 /// blend the top corners into the screen edge.
@@ -134,6 +134,44 @@ pub fn notch_hit(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32
     let left = notch_left(body, radius, (y - slop).max(0) as f32) - slop as f32;
     let right = (2 * body.left + body.width) as f32 - left;
     x as f32 >= left && (x as f32) < right
+}
+
+/// Previous, play/pause and next in the media panel's controls row (direction B), in DIPs from the
+/// body's left and top edges: x, y, width, height. The visualizer slot to their right stays empty.
+const MEDIA_CONTROLS: [(f32, f32, f32, f32); 3] = [
+    (100.0, 66.0, 28.0, 32.0),
+    (148.0, 66.0, 32.0, 32.0),
+    (200.0, 66.0, 28.0, 32.0),
+];
+
+/// The media controls in pixels from the body's left and top edges. They keep their panel position
+/// while the body morphs: the body clip reveals them, and they fade in with `motion::reveal`.
+pub fn media_controls(dpi: u32) -> [Bounds; 3] {
+    MEDIA_CONTROLS.map(|(x, y, width, height)| Bounds {
+        x: scaled(x, dpi),
+        y: scaled(y, dpi),
+        width: scaled(width, dpi),
+        height: scaled(height, dpi),
+    })
+}
+
+/// The media control under a window point at `progress`; none while the row is not drawn.
+pub fn media_control_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    x: i32,
+    y: i32,
+) -> Option<usize> {
+    if motion::reveal(progress) <= 0.0 {
+        return None;
+    }
+    let body = notch_body(window_width, dpi, notch_shape(progress, true));
+    media_controls(dpi).iter().position(|control| {
+        let left = body.left + control.x;
+        (left..left + control.width).contains(&x)
+            && (control.y..(control.y + control.height).min(body.height)).contains(&y)
+    })
 }
 
 fn scaled(dips: f32, dpi: u32) -> i32 {
@@ -300,6 +338,46 @@ mod tests {
                 assert_eq!(bounds.x + body.left, old_x + old.left);
                 assert_eq!((body.width, body.height), (old.width, old.height));
             }
+        }
+    }
+
+    #[test]
+    fn media_controls_hit_only_their_drawn_rows_once_revealed() {
+        // 360 x 120 panel centred in the 440 DIP window: body x 40..400.
+        let at = |progress, x, y| media_control_at(440, 96, progress, x, y);
+        assert_eq!(at(1.0, 140, 66), Some(0));
+        assert_eq!(at(1.0, 167, 97), Some(0));
+        assert_eq!(at(1.0, 168, 80), None); // The gap between previous and play/pause.
+        assert_eq!(at(1.0, 188, 80), Some(1));
+        assert_eq!(at(1.0, 219, 80), Some(1));
+        assert_eq!(at(1.0, 240, 80), Some(2));
+        assert_eq!(at(1.0, 268, 80), None);
+        assert_eq!(at(1.0, 240, 65), None);
+        assert_eq!(at(1.0, 240, 98), None);
+        // Collapsed, swelling or barely open: the row is not drawn, so nothing is hit.
+        for progress in [0.0, 0.07, 0.35] {
+            assert_eq!(at(progress, 188, 15), None);
+        }
+        // Opening: only the part of a chip the body already shows is a target.
+        let body = notch_body(440, 96, notch_shape(0.6, true));
+        assert!(body.height < 98);
+        let left = body.left + 148;
+        assert_eq!(at(0.6, left + 1, body.height - 1), Some(1));
+        assert_eq!(at(0.6, left + 1, body.height), None);
+        // Scaled with the notch DPI, which includes the text-size factor.
+        for dpi in [144, 192, 240] {
+            let window = scaled(440.0, dpi);
+            let body = notch_body(window, dpi, notch_shape(1.0, true));
+            let play = media_controls(dpi)[1];
+            let (x, y) = (body.left + play.x, play.y);
+            assert_eq!(media_control_at(window, dpi, 1.0, x, y), Some(1));
+            let (right, bottom) = (x + play.width, y + play.height);
+            assert_eq!(media_control_at(window, dpi, 1.0, right, y), None);
+            assert_eq!(media_control_at(window, dpi, 1.0, x, bottom), None);
+            assert!(
+                bottom <= body.height
+                    && body.left + media_controls(dpi)[2].x < body.left + body.width
+            );
         }
     }
 

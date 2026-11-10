@@ -65,9 +65,21 @@ The font is Segoe UI Variable, from the system; no font is bundled.
 - **Cover slot.** Album art arrives in slice 5 and will fill exactly this slot, so nothing moves when it does. Until then, and whenever a track has no art, the slot is a neutral rounded rect (white 20 %) with the play-state glyph centred in it. The glyph is drawn on a 10-unit grid: a triangle (2.5, 1)–(9, 5)–(2.5, 9) while playing, and two 2.2 × 8 bars at x 2 and 5.8 while paused. The mockup's corner badge belongs to the art layout and is not drawn without art.
 - **Clock column.** Its width is measured with DirectWrite for the current time text, font and scale, never a fixed column, because long locale designators are much wider than "9:50 pm". The title column ends before it. If a clock is wider than the whole row, the title column becomes empty rather than inverted.
 - **Artist.** It fades in by `smooth((p − 0.35) / 0.45)`, on the date's schedule, while settling 6 upward into place. An empty artist or title is skipped.
-- **Reserved panel rows.** Nothing is drawn below 50 yet, and there are no placeholder or fake controls:
+- **Controls row (slice 3, PROVISIONAL).** Previous, play/pause and next, at the mockup's direction-B places, in DIPs from the body's left and top (`layout::media_controls`):
+
+  | Control | Box | Look |
+  |---|---|---|
+  | Previous | 28 × 32 at (100, 66) | 14 DIP white glyph: bar (1.5–3.1) and left triangle (9, 1)–(9, 9)–(3.8, 5) |
+  | Play/pause | 32 × 32 at (148, 66) | White circle with a 12 DIP black glyph: the action, so pause bars while playing and the play triangle otherwise |
+  | Next | 28 × 32 at (200, 66) | 14 DIP white glyph: right triangle (1, 1)–(6.2, 5)–(1, 9) and bar (7–8.6) |
+
+  - The row keeps its panel place while the body morphs: the body clip reveals it, and it fades in on the artist's schedule (`motion::reveal`). The pill draws no controls.
+  - A control the player does not enable (GSMTC `IsPreviousEnabled`; `IsPauseEnabled` while playing, `IsPlayEnabled` otherwise; `IsNextEnabled`) is drawn at 30 % opacity, never hidden.
+  - The control with keyboard focus gets a white ring: 2 DIP stroke, 2 DIP outside the box, a circle around play/pause and radius 8 + 3 otherwise.
+  - There is no pointer hover or press state: a control changes only when the player reports the result.
+- **Reserved panel rows.** Nothing else is drawn below 50 yet, and there are no placeholders:
   - progress (elapsed, bar, duration), about 50–64, slice 4;
-  - controls (previous, play/pause, next) about 66–98, with the visualizer slot at its right, slices 3 and 7;
+  - the visualizer slot right of the controls, slice 7;
   - volume, about 101–115, slice 6.
 
 **Type.** Segoe UI Variable Text in every role. White on black is 21 : 1; white 60 % is about 7.4 : 1.
@@ -87,7 +99,7 @@ Weights switch at the midpoint of the morph. While paused, the glyph and the tit
   - The layout itself is not mirrored: the cover stays on the left and the clock on the right.
   - Mirroring for an RTL UI language is deferred.
 
-**Repaints.** A visible notch repaints only when the drawn track changes: session presence, title, artist or play state. Timeline and rate updates draw nothing. There is no media timer, deadline or frame loop. Collapsed static playback keeps only the clock's per-minute paint. Text layouts are not cached: static paints happen at most once a minute, and animation frames change the font sizes, so a cache would miss.
+**Repaints.** A visible notch repaints only when the drawn track changes: session presence, title, artist, play state or the controls' enabled states (`media::redraw`). Moving keyboard focus paints one frame for the ring. Timeline and rate updates draw nothing. There is no media timer, deadline or frame loop. Collapsed static playback keeps only the clock's per-minute paint. Text layouts are not cached: static paints happen at most once a minute, and animation frames change the font sizes, so a cache would miss.
 
 **Window.** The fixed HWND grows from 400 × 124 to 440 × 164. That is the media panel and its ears (392 wide) with the plain panel's 40 DIP from body to window side and 44 DIP of bottom room, for the open overshoot and the shadow.
 
@@ -134,6 +146,9 @@ Weights switch at the midpoint of the morph. While paused, the glyph and the tit
 ## Accessibility
 
 - **Dock.** UIA rectangles and hit-testing are unchanged; the picker remains the keyboard and Narrator route.
+- **Notch media controls (slice 3).** A ToolBar root ("ROQA Notch") with three Buttons while a session exists: "Previous track", "Pause, Title – Artist" or "Play, …", and "Next track". Invoke works whether or not the panel is open; a disabled control reports `IsEnabled` false and refuses Invoke and focus. Bounds are the open panel's while it is open or opening, and offscreen otherwise.
+  - **Keyboard (user decision, 2026-11-10).** Entry is only through UIA focus, such as Narrator moving to a control: the notch takes the foreground if Windows allows it and opens. Tab and Shift+Tab, and the arrow keys, move among enabled controls, wrapping; Enter and Space press the focused one; Escape closes the panel and gives the foreground back to the window that had it. No global hotkey, IPC command or picker entry.
+  - Pointer use stays nonactivating: a click on a control never takes focus.
 - **Contrast.** The time (white) is 21 : 1 and the date (60 % white) about 7.4 : 1 on black.
 - **Pointer targets.** The collapsed notch hit area equals its visible footprint.
 - **Motion.** Reduced motion is deliberately not honoured, by user decision. This is a known accessibility regression against the original brief, recorded in the ledger.

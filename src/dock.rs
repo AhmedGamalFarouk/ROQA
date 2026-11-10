@@ -140,6 +140,19 @@ pub fn valid_target(key: WindowKey) -> bool {
     }
 }
 
+/// After an explicit dismissal, gives the foreground back to `to` if ROQA's `from` window still
+/// holds it and `to` is still a valid target.
+pub fn restore_foreground(from: HWND, to: Option<WindowKey>) {
+    // SAFETY: scalar foreground query and request; `to` is revalidated immediately before.
+    unsafe {
+        if GetForegroundWindow() == from
+            && let Some(key) = to.filter(|key| valid_target(*key))
+        {
+            let _ = SetForegroundWindow(HWND(key.handle as *mut _));
+        }
+    }
+}
+
 /// Returns false when the target is gone or Windows refused foreground; never forces focus.
 pub fn perform(action: Action) -> bool {
     let (Action::Activate(key) | Action::Minimize(key)) = action;

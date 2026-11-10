@@ -27,6 +27,8 @@ use windows::core::{BOOL, Error, Result, w};
 pub const REPOSITION: u32 = WM_APP + 1;
 pub const CLOSE_SURFACE: u32 = WM_APP + 2;
 pub const PANIC_PROBE: u32 = WM_APP + 3;
+/// Posted when a surface loses the foreground; only a keyboard-focused notch ever has it.
+pub const DEACTIVATED: u32 = WM_APP + 6;
 pub const CLASS: windows::core::PCWSTR = w!("ROQA.NativeSurface.1");
 /// Explorer broadcasts this registered message to every top-level window when it (re)creates the
 /// taskbar. 0 until registered, and stays 0 if registration fails.
@@ -370,6 +372,12 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
             }
             WM_GETOBJECT => crate::dock_uia::get_object(hwnd, wparam, lparam)
                 .unwrap_or_else(|| DefWindowProcW(hwnd, message, wparam, lparam)),
+            WM_ACTIVATE => {
+                if wparam.0 & 0xffff == WA_INACTIVE as usize {
+                    let _ = PostMessageW(Some(hwnd), DEACTIVATED, WPARAM(0), LPARAM(0));
+                }
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
             PANIC_PROBE => panic!("Intentional callback-boundary probe"),
             _ => DefWindowProcW(hwnd, message, wparam, lparam),
         }

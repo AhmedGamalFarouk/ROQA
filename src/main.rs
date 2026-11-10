@@ -12,6 +12,7 @@ mod layout;
 mod media;
 mod motion;
 mod native_window;
+mod notch_uia;
 mod picker;
 mod picker_font;
 mod text_settings;

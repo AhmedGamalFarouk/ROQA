@@ -1,5 +1,5 @@
 use crate::{
-    dock::{foreground_key, valid_target},
+    dock::{foreground_key, restore_foreground, valid_target},
     native_window,
     picker_font::PickerFont,
     text_settings::TextSettings,
@@ -334,14 +334,8 @@ impl Picker {
     }
     fn dismiss(&mut self) {
         self.closed = true;
-        // SAFETY: return focus only after explicit dismissal while this panel still owns foreground.
-        unsafe {
-            if GetForegroundWindow() == self.window
-                && let Some(key) = self.return_to.filter(|key| valid_target(*key))
-            {
-                let _ = SetForegroundWindow(HWND(key.handle as *mut _));
-            }
-        }
+        // Return focus only after explicit dismissal while this panel still owns the foreground.
+        restore_foreground(self.window, self.return_to);
     }
     pub fn closed(&self) -> bool {
         self.closed

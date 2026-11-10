@@ -45,11 +45,19 @@ pub struct Timeline {
     pub updated: i64,
 }
 
+/// Indexes of `Track::controls`, in drawing and UI Automation order.
+pub const PREVIOUS: usize = 0;
+pub const PLAY_PAUSE: usize = 1;
+pub const NEXT: usize = 2;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Track {
     pub title: String,
     pub artist: String,
     pub playing: bool,
+    /// Whether the player accepts previous, play/pause and next. Play/pause is the action the
+    /// button performs now: pause while playing, play otherwise.
+    pub controls: [bool; 3],
     pub rate: f64,
     pub timeline: Timeline,
 }
@@ -97,12 +105,13 @@ impl View {
     }
 }
 
-/// Whether the notch must repaint: a session appeared or ended, or its title, artist or play state
-/// changed. Timeline and rate updates, and changes among the no-media views, draw nothing new.
+/// Whether the notch must repaint: a session appeared or ended, or its title, artist, play state or
+/// enabled controls changed. Timeline and rate updates, and changes among the no-media views, draw
+/// nothing new. Every track field the notch draws must be compared here.
 pub fn redraw(before: &View, after: &View) -> bool {
-    fn drawn(view: &View) -> Option<(&str, &str, bool)> {
+    fn drawn(view: &View) -> Option<(&str, &str, bool, [bool; 3])> {
         view.shown()
-            .map(|t| (t.title.as_str(), t.artist.as_str(), t.playing))
+            .map(|t| (t.title.as_str(), t.artist.as_str(), t.playing, t.controls))
     }
     drawn(before) != drawn(after)
 }
@@ -115,6 +124,7 @@ pub enum Change {
     Session(bool),
     Playback {
         playing: bool,
+        controls: [bool; 3],
         rate: f64,
         timeline: Timeline,
     },
@@ -152,11 +162,13 @@ impl State {
             }
             Change::Playback {
                 playing,
+                controls,
                 rate,
                 timeline,
             } => {
                 if let View::Track(track) = &mut self.view {
-                    (track.playing, track.rate, track.timeline) = (playing, rate, timeline);
+                    (track.playing, track.controls) = (playing, controls);
+                    (track.rate, track.timeline) = (rate, timeline);
                 }
             }
             Change::Properties {
@@ -178,7 +190,8 @@ impl State {
 fn differs(before: &View, after: &View) -> bool {
     match (before, after) {
         (View::Track(a), View::Track(b)) => {
-            (&a.title, &a.artist, a.playing, a.rate) != (&b.title, &b.artist, b.playing, b.rate)
+            (&a.title, &a.artist, a.playing, a.controls, a.rate)
+                != (&b.title, &b.artist, b.playing, b.controls, b.rate)
         }
         _ => before != after,
     }
@@ -305,10 +318,36 @@ impl<T: RuntimeType + Send + Sync + 'static> Request<T> {
             result,
         })
     }
-    fn cancel(self) {
-        // Best effort: the result is discarded either way.
+    fn cancel(&self) {
+        // Cancellation is a request, not evidence that the operation has terminated.
         let _ = self.operation.Cancel();
     }
+}
+
+/// A hung command keeps the single global budget, even after its session disappears.
+fn admit_command(
+    slot: &mut Option<Request<bool>>,
+    generation: u64,
+    wake: &Arc<Wake>,
+    start: impl FnOnce() -> Result<IAsyncOperation<bool>>,
+) -> Result<()> {
+    if slot.is_some() {
+        return Ok(());
+    }
+    let operation = start()?;
+    match Request::start(operation.clone(), generation, wake) {
+        Ok(request) => *slot = Some(request),
+        Err(error) => {
+            // Without a completion subscription we cannot safely reuse this budget until shutdown.
+            *slot = Some(Request {
+                operation,
+                generation,
+                result: Arc::new(OnceLock::new()),
+            });
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn bounded(text: HSTRING) -> String {
@@ -326,8 +365,21 @@ fn read_playback(session: &Session) -> Result<Change> {
     let timeline = session.GetTimelineProperties()?;
     // shortcut: a player that leaves PlaybackRate unset is taken as 1x; check real players before progress (slice 4).
     let rate = info.PlaybackRate().and_then(|rate| rate.Value());
+    let playing = info.PlaybackStatus()? == Status::Playing;
+    let controls = info.Controls()?;
+    // shortcut: a player offering only the play/pause toggle shows a disabled button; use TryTogglePlayPauseAsync if a real player does.
+    let play_pause = if playing {
+        controls.IsPauseEnabled()?
+    } else {
+        controls.IsPlayEnabled()?
+    };
     Ok(Change::Playback {
-        playing: info.PlaybackStatus()? == Status::Playing,
+        playing,
+        controls: [
+            controls.IsPreviousEnabled()?,
+            play_pause,
+            controls.IsNextEnabled()?,
+        ],
         rate: rate.unwrap_or(1.0),
         timeline: Timeline {
             start: timeline.StartTime()?.Duration,
@@ -356,6 +408,8 @@ pub struct Media {
     manager: Option<Subscribed<Manager>>,
     request: Option<Request<Manager>>,
     fetch: Option<Request<Properties>>,
+    /// One outstanding command globally; cancellation never releases this budget before completion.
+    command: Option<Request<bool>>,
     /// Properties changed while a read was in flight: read again when it lands.
     again: bool,
     state: State,
@@ -371,6 +425,7 @@ impl Media {
             manager: None,
             request: None,
             fetch: None,
+            command: None,
             again: false,
             state: State::default(),
             wake: Arc::new(Wake {
@@ -396,6 +451,33 @@ impl Media {
     pub fn view(&self) -> &View {
         &self.state.view
     }
+    /// The session generation; UI Automation elements from an older one are stale.
+    pub fn generation(&self) -> u64 {
+        self.state.generation
+    }
+    /// Sends `control` (`PREVIOUS`, `PLAY_PAUSE` or `NEXT`) to the current session if its player
+    /// enables it. The notch changes only when the player reports the outcome through its events.
+    pub fn command(&mut self, control: usize) {
+        let (Some(session), Some(track)) = (&self.session, self.state.view.shown()) else {
+            return;
+        };
+        if !track.controls.get(control).copied().unwrap_or(false) {
+            return;
+        }
+        let source = &session.source;
+        let start = || match control {
+            PREVIOUS => source.TrySkipPreviousAsync(),
+            PLAY_PAUSE if track.playing => source.TryPauseAsync(),
+            PLAY_PAUSE => source.TryPlayAsync(),
+            _ => source.TrySkipNextAsync(),
+        };
+        // shortcut: presses while a command is unfinished are ignored; no queue or replacement work.
+        if let Err(error) =
+            admit_command(&mut self.command, self.state.generation, &self.wake, start)
+        {
+            eprintln!("Media: command {control}: {error}");
+        }
+    }
     /// Applies pending media events and returns whether the drawn view changed. Without any events
     /// it costs one atomic swap: no polling, no deadline.
     pub fn refresh(&mut self) -> bool {
@@ -419,6 +501,14 @@ impl Media {
                     }
                 }
                 Err(error) => self.unavailable("RequestAsync", &error),
+            }
+        }
+        if let Some(outcome) = received(&self.command) {
+            self.command = None;
+            match outcome {
+                Ok(true) => {}
+                Ok(false) => eprintln!("Media: the player refused a command"),
+                Err(error) => eprintln!("Media: command: {error}"),
             }
         }
         if let Some(outcome) = received(&self.fetch) {
@@ -500,10 +590,13 @@ impl Media {
         self.session = next;
         PROPERTIES | PLAYBACK
     }
-    /// Cancels the session's pending read, then removes its tokens and releases it.
+    /// Cancels the session's pending read and command, then removes its tokens and releases it.
     fn end_session(&mut self) {
         if let Some(fetch) = self.fetch.take() {
             fetch.cancel();
+        }
+        if let Some(command) = &self.command {
+            command.cancel();
         }
         self.again = false;
         self.session = None;
@@ -521,10 +614,13 @@ impl Media {
         let name = match &self.state.view {
             View::Track(track) => {
                 return eprintln!(
-                    "Media: {} session={generation} title_utf16={} artist_utf16={} rate_milli={} position_s={} end_s={} wakes={wakes} callback_on_host={on_host}",
+                    "Media: {} session={generation} title_utf16={} artist_utf16={} controls={}{}{} rate_milli={} position_s={} end_s={} wakes={wakes} callback_on_host={on_host}",
                     if track.playing { "playing" } else { "paused" },
                     track.title.encode_utf16().count(),
                     track.artist.encode_utf16().count(),
+                    u8::from(track.controls[PREVIOUS]),
+                    u8::from(track.controls[PLAY_PAUSE]),
+                    u8::from(track.controls[NEXT]),
                     (track.rate * 1000.0) as i64,
                     track.position(now_ticks()) / 10_000_000,
                     track.timeline.end / 10_000_000,
@@ -589,6 +685,7 @@ mod tests {
         state.apply(properties(first, "One"));
         state.apply(Change::Playback {
             playing: true,
+            controls: [false, true, true],
             rate: 1.0,
             timeline: Timeline::default(),
         });
@@ -596,6 +693,7 @@ mod tests {
             panic!("expected a track");
         };
         assert_eq!((track.title.as_str(), track.playing), ("One", true));
+        assert_eq!(track.controls, [false, true, true]);
         state.apply(Change::Session(true));
         assert_eq!(state.generation, first + 1);
         assert_eq!(state.view, View::Track(Track::default()));
@@ -616,6 +714,7 @@ mod tests {
         state.apply(properties(generation, "Ghost"));
         state.apply(Change::Playback {
             playing: true,
+            controls: [true; 3],
             rate: 1.0,
             timeline: Timeline::default(),
         });
@@ -694,6 +793,11 @@ mod tests {
         let b = View::Track(track(true, 1.0, 0, 300 * SECOND, 21 * SECOND));
         assert!(!differs(&a, &b));
         assert!(differs(&a, &View::Track(track(false, 1.0, 0, 0, 0))));
+        let mut enabled = a.clone();
+        if let View::Track(track) = &mut enabled {
+            track.controls[NEXT] = true;
+        }
+        assert!(differs(&a, &enabled));
         assert!(differs(&a, &View::NoPlayer));
     }
 
@@ -719,6 +823,16 @@ mod tests {
         assert!(redraw(&playing, &with(|t| t.title = "Next".into())));
         assert!(redraw(&playing, &with(|t| t.artist.clear())));
         assert!(redraw(&playing, &with(|t| t.playing = false)));
+        // So is each control's enabled state.
+        assert!(redraw(&playing, &with(|t| t.controls = [true; 3])));
+        for control in [PREVIOUS, PLAY_PAUSE, NEXT] {
+            let enabled = with(|t| t.controls = [true; 3]);
+            let mut disabled = enabled.clone();
+            if let View::Track(track) = &mut disabled {
+                track.controls[control] = false;
+            }
+            assert!(redraw(&enabled, &disabled));
+        }
         assert!(redraw(&View::NoPlayer, &View::Track(Track::default())));
         assert!(redraw(&playing, &View::NoPlayer));
         // The no-media views all draw the plain clock notch.
@@ -739,6 +853,52 @@ mod tests {
             bounded(HSTRING::from(straddling.as_str())),
             "a".repeat(TEXT_LIMIT - 1)
         );
+    }
+
+    #[test]
+    fn cancel_ignoring_command_keeps_its_budget_across_presses_and_sessions() {
+        let mut media = Media::create();
+        let admitted = std::cell::Cell::new(0);
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        admit_command(&mut media.command, 0, &media.wake, || {
+            admitted.set(admitted.get() + 1);
+            Ok(IAsyncOperation::<bool>::spawn(move || {
+                let _ = held.recv();
+                Ok(true)
+            }))
+        })
+        .unwrap();
+        for _ in 0..128 {
+            // The test operation ignores Cancel. Changing sessions must not reset its budget.
+            media.end_session();
+            media.state.apply(Change::Session(true));
+            let generation = media.generation();
+            admit_command(&mut media.command, generation, &media.wake, || {
+                admitted.set(admitted.get() + 1);
+                Ok(IAsyncOperation::ready(Ok(true)))
+            })
+            .unwrap();
+        }
+        assert_eq!(admitted.get(), 1);
+        assert!(received(&media.command).is_none());
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while received(&media.command).is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the slow request never completed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // Completion is the only event that releases the global budget, even for an old session.
+        media.refresh();
+        assert!(media.command.is_none());
+        admit_command(&mut media.command, 129, &media.wake, || {
+            admitted.set(admitted.get() + 1);
+            Ok(IAsyncOperation::ready(Ok(true)))
+        })
+        .unwrap();
+        assert_eq!(admitted.get(), 2);
     }
 
     /// Stands in for a GSMTC object: records token removals and its own release.

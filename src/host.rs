@@ -2,19 +2,20 @@ use crate::{
     catalog_timing::milliseconds_until,
     clock,
     dock::{self, DockItem},
-    dock_uia::{self, DockAccessibility},
+    dock_uia::{self, Accessibility},
     graphics::{Canvas, DockScene, DockSlot, Graphics, NotchScene},
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
     layout::{self, Bounds, SurfaceKind, placement},
-    media::{Media, Track},
+    media::Media,
     motion::{self, Tween},
     native_window::{self, NativeWindow, WindowClass},
+    notch_uia,
     picker::Picker,
     text_settings::TextSettings,
     topology::{self, Monitor},
     window_catalog::Catalog,
-    window_model::WindowModel,
+    window_model::{WindowKey, WindowModel},
 };
 use std::{
     mem::size_of,
@@ -28,7 +29,10 @@ use windows::Win32::{
     System::Threading::INFINITE,
     UI::{
         Controls::WM_MOUSELEAVE,
-        Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent},
+        Input::KeyboardAndMouse::{
+            GetKeyState, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_DOWN,
+            VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+        },
         WindowsAndMessaging::*,
     },
 };
@@ -111,11 +115,23 @@ struct Surface {
     /// Notch: 0 collapsed to 1 expanded. Dock: pointer-inside progress of the bar fill.
     motion: Tween,
 }
+impl Drop for Surface {
+    fn drop(&mut self) {
+        self.release_focus();
+        if let Role::Notch { uia, .. } = &self.role {
+            notch_uia::invalidate(uia);
+        }
+    }
+}
 /// State only one surface kind needs.
 enum Role {
-    /// Pointer inside the hot band (not its shadow), the instant hover intent opens the notch, and
-    /// the window region last applied (it follows the drawn shape frame by frame).
+    /// UIA root and shared state, the media control with keyboard focus, pointer inside the hot
+    /// band (not its shadow), the instant hover intent opens the notch, and the window region last
+    /// applied (it follows the drawn shape frame by frame).
     Notch {
+        accessible: Accessibility,
+        uia: notch_uia::Shared,
+        focus: Option<Focus>,
         shadow: NotchShadow,
         engaged: bool,
         intent: Option<Instant>,
@@ -123,7 +139,7 @@ enum Role {
     },
     /// Hovered slot, per-slot hover progress and this dock's UIA geometry/names.
     Dock {
-        _accessible: DockAccessibility,
+        _accessible: Accessibility,
         hover: Option<usize>,
         slots: Vec<Tween>,
         uia: dock_uia::Shared,
@@ -148,20 +164,26 @@ impl Surface {
             None => {
                 let uia = dock_uia::Shared::default();
                 Role::Dock {
-                    _accessible: DockAccessibility::create(window.0, &uia)?,
+                    _accessible: Accessibility::dock(window.0, &uia)?,
                     hover: None,
                     slots: vec![Tween::rest(0.0); slots],
                     uia,
                 }
             }
             // The first paint, which always precedes showing the window, applies the input region
-            // of the plain or media pill.
-            Some(shadow) => Role::Notch {
-                shadow,
-                engaged: false,
-                intent: None,
-                area: Vec::new(),
-            },
+            // of the plain or media pill and publishes the UIA state.
+            Some(shadow) => {
+                let uia = notch_uia::Shared::default();
+                Role::Notch {
+                    accessible: notch_uia::accessibility(window.0, &uia)?,
+                    uia,
+                    focus: None,
+                    shadow,
+                    engaged: false,
+                    intent: None,
+                    area: Vec::new(),
+                }
+            }
         };
         let canvas = Canvas::create(graphics, window.0, bounds)?;
         // Created hidden; the owner shows it after the first paint.
@@ -190,6 +212,9 @@ impl Surface {
         if visible == self.visible {
             return;
         }
+        if !visible {
+            self.release_focus();
+        }
         self.visible = visible;
         let shadow = match &self.role {
             Role::Notch { shadow, .. } => Some(&shadow.window),
@@ -207,8 +232,18 @@ impl Surface {
             (self.hovered, self.live, self.motion) = (false, false, Tween::rest(0.0));
             match &mut self.role {
                 Role::Notch {
-                    engaged, intent, ..
-                } => (*engaged, *intent) = (false, None),
+                    engaged,
+                    intent,
+                    focus,
+                    uia,
+                    ..
+                } => {
+                    // A full-screen app took the foreground, and with it the keyboard focus.
+                    (*engaged, *intent, *focus) = (false, None, None);
+                    if let Ok(mut state) = uia.lock() {
+                        (state.focus, state.open) = (None, false);
+                    }
+                }
                 Role::Dock { hover, slots, .. } => {
                     *hover = None;
                     slots.fill(Tween::rest(0.0));
@@ -244,10 +279,38 @@ impl Surface {
         self.hovered = true;
         Ok(true)
     }
-    fn paint_notch(&mut self, time: &str, date: &str, track: Option<&Track>) -> Result<()> {
-        let Role::Notch { shadow, area, .. } = &mut self.role else {
+    /// Shares what the notch shows with UI Automation: the current session's controls, the focused
+    /// one, and whether the panel is open or opening, so clients see the target state before the
+    /// motion ends.
+    fn publish_notch(&self, media: &Media) {
+        if let Role::Notch { uia, focus, .. } = &self.role
+            && let Ok(mut state) = uia.lock()
+        {
+            state.dpi = self.dpi;
+            state.version = media.generation() as u32;
+            state.controls = media
+                .view()
+                .shown()
+                .map(notch_uia::controls)
+                .unwrap_or_default();
+            state.focus = focus.as_ref().map(|focus| focus.control);
+            state.open = self.motion.target() >= 1.0;
+        }
+    }
+    /// Draws one frame, publishing it to UI Automation first.
+    fn paint_notch(&mut self, time: &str, date: &str, media: &Media) -> Result<()> {
+        self.publish_notch(media);
+        let Role::Notch {
+            shadow,
+            area,
+            focus,
+            ..
+        } = &mut self.role
+        else {
             return Ok(());
         };
+        let track = media.view().shown();
+        let focus = focus.as_ref().map(|focus| focus.control);
         let progress = self.motion.value(Instant::now());
         // Input and drawing use the same frame progress and shape, without a speculative growth lead.
         let rows = layout::notch_rows(self.bounds, self.dpi, progress, track.is_some());
@@ -261,6 +324,7 @@ impl Surface {
             track,
             progress,
             dpi: self.dpi,
+            focus,
         };
         shadow.paint(&scene, self.window.0)?;
         self.canvas.paint_notch(&scene)
@@ -270,7 +334,10 @@ impl Surface {
     /// closes from wherever the motion is. The HWND itself never moves.
     fn set_notch_hover(&mut self, over: bool) {
         let Role::Notch {
-            engaged, intent, ..
+            engaged,
+            intent,
+            focus,
+            ..
         } = &mut self.role
         else {
             return;
@@ -281,7 +348,10 @@ impl Surface {
         *engaged = over;
         if !over {
             *intent = None;
-            self.motion.retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
+            // Keyboard focus holds the panel open; `blur` closes it.
+            if focus.is_none() {
+                self.motion.retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
+            }
         } else if self.motion.value(Instant::now()) > NOTCH_SWELL {
             // Re-entered while still closing: reopen directly.
             open_notch(intent, &mut self.motion);
@@ -291,6 +361,78 @@ impl Surface {
                 .retarget(NOTCH_SWELL, motion::INTENT_TIME, motion::EASE_OUT);
         }
         self.live = true;
+    }
+    /// Moves keyboard focus to media `control`: the panel opens, always animated, and stays open
+    /// until `blur`; the next frame draws the focus ring. `return_to` is kept from the first entry.
+    fn focus_control(&mut self, control: usize, return_to: Option<WindowKey>) {
+        let Role::Notch {
+            focus, intent, uia, ..
+        } = &mut self.role
+        else {
+            return;
+        };
+        let return_to = focus.as_ref().map_or(return_to, |focus| focus.return_to);
+        *focus = Some(Focus { control, return_to });
+        open_notch(intent, &mut self.motion);
+        self.live = true;
+        // Published now, not at the next frame, so the focus event reads the new state.
+        if let Ok(mut state) = uia.lock() {
+            (state.focus, state.open) = (Some(control), true);
+        }
+    }
+    /// Ends keyboard focus, closing the panel unless the pointer still holds it.
+    fn blur(&mut self) -> Option<Focus> {
+        let Role::Notch {
+            focus,
+            engaged,
+            uia,
+            ..
+        } = &mut self.role
+        else {
+            return None;
+        };
+        let ended = focus.take()?;
+        if !*engaged {
+            self.motion.retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
+        }
+        self.live = true;
+        if let Ok(mut state) = uia.lock() {
+            (state.focus, state.open) = (None, self.motion.target() >= 1.0);
+        }
+        Some(ended)
+    }
+    fn focused(&self) -> Option<&Focus> {
+        match &self.role {
+            Role::Notch { focus, .. } => focus.as_ref(),
+            Role::Dock { .. } => None,
+        }
+    }
+    /// Restore only while this HWND still owns foreground; another app's focus is never stolen.
+    fn release_focus(&mut self) {
+        if let Some(ended) = self.blur() {
+            dock::restore_foreground(self.window.0, ended.return_to);
+        }
+    }
+    fn dismiss_focus(&mut self) {
+        if let Role::Notch {
+            engaged, intent, ..
+        } = &mut self.role
+        {
+            (*engaged, *intent) = (false, None);
+        }
+        self.release_focus();
+    }
+    /// Tells UIA clients where keyboard focus now is.
+    fn announce_focus(&self) {
+        if let Role::Notch {
+            accessible,
+            uia,
+            focus: Some(focus),
+            ..
+        } = &self.role
+        {
+            notch_uia::focus_changed(accessible, uia, focus.control);
+        }
     }
     /// Highlights the hovered slot (or none) and the bar fill while the pointer is inside.
     fn hover_dock(&mut self, slot: Option<usize>, inside: bool) {
@@ -367,6 +509,38 @@ const NOTCH_SWELL: f32 = 0.07;
 fn open_notch(intent: &mut Option<Instant>, tween: &mut Tween) {
     *intent = None;
     tween.retarget(1.0, motion::OPEN_TIME, motion::OPEN);
+}
+/// Keyboard focus inside a notch: the focused media control, and the window that had the
+/// foreground before the notch took it, which gets it back on Escape.
+struct Focus {
+    control: usize,
+    return_to: Option<WindowKey>,
+}
+/// Client coordinates of a mouse message.
+fn point(lparam: LPARAM) -> (i32, i32) {
+    let x = i32::from((lparam.0 & 0xffff) as u16 as i16);
+    let y = i32::from((lparam.0 >> 16) as u16 as i16);
+    (x, y)
+}
+/// Brings our own notch to the foreground for keyboard focus, which only an explicit UIA focus
+/// request asks for; Windows may refuse, as for any app not in front.
+fn take_foreground(notch: HWND) -> bool {
+    // SAFETY: scalar foreground request for our own live notch HWND; never forced.
+    unsafe { SetForegroundWindow(notch).as_bool() || GetForegroundWindow() == notch }
+}
+/// The next enabled control after `from`, wrapping, or the first (last) enabled one without it.
+fn step(enabled: [bool; 3], from: Option<usize>, forward: bool) -> Option<usize> {
+    let count = enabled.len();
+    let start = from.unwrap_or(if forward { count - 1 } else { 0 });
+    (1..=count)
+        .map(|offset| {
+            if forward {
+                (start + offset) % count
+            } else {
+                (start + count - offset) % count
+            }
+        })
+        .find(|&control| enabled[control])
 }
 /// Transient topology reads are retried this often, at most `TOPOLOGY_RETRIES` times per change.
 const TOPOLOGY_RETRY: Duration = Duration::from_millis(250);
@@ -545,7 +719,7 @@ impl Desktop {
         if kind == SurfaceKind::Notch {
             // Advances every existing notch first, so all monitors show the same minute.
             self.refresh_clock()?;
-            surface.paint_notch(&self.clock, &self.date, self.media.view().shown())?;
+            surface.paint_notch(&self.clock, &self.date, &self.media)?;
             self.surfaces.push(surface);
         } else {
             surface.publish_accessibility(&self.dock_names, false);
@@ -578,13 +752,12 @@ impl Desktop {
     /// Repaints every visible notch with the current clock and media; hidden ones are painted before
     /// they are restored.
     fn paint_notches(&mut self) -> Result<()> {
-        let track = self.media.view().shown();
         for notch in self
             .surfaces
             .iter_mut()
             .filter(|s| s.kind() == SurfaceKind::Notch && s.visible)
         {
-            notch.paint_notch(&self.clock, &self.date, track)?;
+            notch.paint_notch(&self.clock, &self.date, &self.media)?;
         }
         Ok(())
     }
@@ -611,7 +784,7 @@ impl Desktop {
             if surface.live {
                 match surface.kind() {
                     SurfaceKind::Notch => {
-                        surface.paint_notch(&self.clock, &self.date, self.media.view().shown())?
+                        surface.paint_notch(&self.clock, &self.date, &self.media)?
                     }
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
@@ -770,6 +943,130 @@ impl Desktop {
         }
         Ok(!self.shown.is_empty())
     }
+    /// Media control input on a notch: a click on a control, a UIA Invoke or focus request, a key
+    /// while it has keyboard focus, or losing the foreground. Returns whether `message` is consumed.
+    fn notch_input(&mut self, message: &MSG) -> bool {
+        let Some(notch) = self
+            .surfaces
+            .iter()
+            .position(|s| s.kind() == SurfaceKind::Notch && s.window.0 == message.hwnd)
+        else {
+            return false;
+        };
+        // UIA posts the session generation its element was created for; older ones are ignored.
+        let current = message.lParam.0 as u32 == self.media.generation() as u32;
+        match message.message {
+            WM_LBUTTONUP => return self.click_control(notch, message.lParam),
+            WM_KEYDOWN => return self.notch_key(notch, message),
+            dock_uia::INVOKE if current => self.media.command(message.wParam.0),
+            notch_uia::FOCUS if current => self.enter_focus(notch, message.wParam.0),
+            dock_uia::INVOKE | notch_uia::FOCUS => {}
+            native_window::DEACTIVATED => {
+                // The user went elsewhere: focus is theirs to place, so nothing is restored.
+                self.surfaces[notch].blur();
+            }
+            _ => return false,
+        }
+        true
+    }
+    /// A click on a drawn media control sends its command; the notch stays nonactivating.
+    fn click_control(&mut self, notch: usize, lparam: LPARAM) -> bool {
+        let surface = &self.surfaces[notch];
+        let (x, y) = point(lparam);
+        let progress = surface.motion.value(Instant::now());
+        let (width, dpi) = (surface.bounds.width, surface.dpi);
+        let hit = self
+            .media
+            .view()
+            .shown()
+            .and_then(|_| layout::media_control_at(width, dpi, progress, x, y));
+        let Some(control) = hit else {
+            return false;
+        };
+        self.media.command(control);
+        true
+    }
+    /// A UIA client focused a media control, or the notch itself (`notch_uia::FIRST`): the notch
+    /// takes the foreground if Windows allows it, remembers the window it came from, and opens.
+    fn enter_focus(&mut self, notch: usize, requested: usize) {
+        let enabled = self.media.view().shown().map_or([false; 3], |t| t.controls);
+        let surface = &mut self.surfaces[notch];
+        let control = match requested {
+            notch_uia::FIRST => step(enabled, None, true),
+            control => Some(control).filter(|&c| enabled.get(c) == Some(&true)),
+        };
+        let Some(control) = control.filter(|_| surface.visible) else {
+            return;
+        };
+        let return_to = if surface.focused().is_some() {
+            None
+        } else {
+            let previous = dock::foreground_key();
+            if !take_foreground(surface.window.0) {
+                eprintln!("Notch: Windows kept another app in front; no keyboard focus");
+                return;
+            }
+            previous
+        };
+        surface.focus_control(control, return_to);
+        surface.announce_focus();
+    }
+    /// Keys while a notch has keyboard focus: Tab, Shift+Tab and the arrows move among enabled
+    /// controls, Enter and Space press the focused one, and Escape closes and returns the foreground.
+    fn notch_key(&mut self, notch: usize, message: &MSG) -> bool {
+        let enabled = self.media.view().shown().map_or([false; 3], |t| t.controls);
+        let surface = &mut self.surfaces[notch];
+        let Some(control) = surface.focused().map(|focus| focus.control) else {
+            return false;
+        };
+        // SAFETY: reads this thread's keyboard state as of the message being handled.
+        let shift = unsafe { GetKeyState(VK_SHIFT.0.into()) } < 0;
+        let next = match VIRTUAL_KEY(message.wParam.0 as u16) {
+            VK_TAB => step(enabled, Some(control), !shift),
+            VK_RIGHT | VK_DOWN => step(enabled, Some(control), true),
+            VK_LEFT | VK_UP => step(enabled, Some(control), false),
+            VK_RETURN | VK_SPACE => {
+                // Held keys repeat; one press is one command.
+                if message.lParam.0 & (1 << 30) == 0 {
+                    self.media.command(control);
+                }
+                return true;
+            }
+            VK_ESCAPE => {
+                surface.dismiss_focus();
+                return true;
+            }
+            _ => return false,
+        };
+        if let Some(next) = next.filter(|&next| next != control) {
+            surface.focus_control(next, None);
+            surface.announce_focus();
+        }
+        true
+    }
+    /// A player can disable the focused action or replace its entire session between input events.
+    fn reconcile_focus(&mut self) {
+        let enabled = self
+            .media
+            .view()
+            .shown()
+            .map_or([false; 3], |track| track.controls);
+        for notch in &mut self.surfaces {
+            notch.publish_notch(&self.media);
+            let Some(control) = notch.focused().map(|focus| focus.control) else {
+                continue;
+            };
+            if enabled.get(control) == Some(&true) {
+                continue;
+            }
+            if let Some(next) = step(enabled, Some(control), true) {
+                notch.focus_control(next, None);
+                notch.announce_focus();
+            } else {
+                notch.release_focus();
+            }
+        }
+    }
     fn message(&mut self, message: &MSG) -> Result<()> {
         if message.message == native_window::REPOSITION {
             // Every surface forwards display/DPI/settings/time changes, resume and taskbar recreation;
@@ -800,8 +1097,7 @@ impl Desktop {
                         surface.hover_dock(slot, true);
                     }
                 } else {
-                    let x = i32::from((message.lParam.0 & 0xffff) as u16 as i16);
-                    let y = i32::from((message.lParam.0 >> 16) as u16 as i16);
+                    let (x, y) = point(message.lParam);
                     let progress = surface.motion.value(Instant::now());
                     let width = surface.bounds.width;
                     let media = self.media.view().shown().is_some();
@@ -838,7 +1134,7 @@ impl Desktop {
             if visible && !surface.visible {
                 match surface.kind() {
                     SurfaceKind::Notch => {
-                        surface.paint_notch(&self.clock, &self.date, self.media.view().shown())?
+                        surface.paint_notch(&self.clock, &self.date, &self.media)?
                     }
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
@@ -920,7 +1216,12 @@ impl Desktop {
             self.rescale_text()?;
         }
         // One paint per visible notch, and only when the drawn track changed: no frames, no deadline.
-        if self.media.refresh() {
+        let generation = self.media.generation();
+        let redraw = self.media.refresh();
+        if redraw || generation != self.media.generation() {
+            self.reconcile_focus();
+        }
+        if redraw {
             self.paint_notches()?;
         }
         self.refresh_dock(model)?;
@@ -1152,6 +1453,9 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 desktop.invoke_dock(message.hwnd, slot, version, catalog)?;
                 continue;
             }
+            if desktop.notch_input(&message) {
+                continue;
+            }
             if let Some(picker) = &mut desktop.picker {
                 if picker.message(&message)? {
                     continue;
@@ -1171,6 +1475,23 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
 #[cfg(test)]
 mod clock_wait_tests {
     use super::*;
+    #[test]
+    fn keyboard_focus_steps_over_disabled_controls_and_wraps() {
+        let all = [true; 3];
+        assert_eq!(step(all, None, true), Some(0));
+        assert_eq!(step(all, None, false), Some(2));
+        assert_eq!(step(all, Some(2), true), Some(0));
+        assert_eq!(step(all, Some(0), false), Some(2));
+        // No previous track: focus enters on play/pause, and moving skips the disabled control.
+        let first = [false, true, true];
+        assert_eq!(step(first, None, true), Some(1));
+        assert_eq!(step(first, Some(2), true), Some(1));
+        assert_eq!(step(first, Some(1), false), Some(2));
+        // A lone enabled control keeps focus; with none, there is nothing to focus.
+        assert_eq!(step([false, true, false], Some(1), true), Some(1));
+        assert_eq!(step([false; 3], None, true), None);
+        assert_eq!(step([false; 3], Some(1), false), None);
+    }
     #[test]
     fn graphics_rebuilds_back_off_to_a_cap() {
         let delays: Vec<u128> = (0..8).map(|n| rebuild_delay(n).as_millis()).collect();
