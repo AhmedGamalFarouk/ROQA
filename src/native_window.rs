@@ -6,6 +6,7 @@ use crate::{
 use std::{
     mem::size_of,
     panic::{AssertUnwindSafe, catch_unwind},
+    sync::atomic::{AtomicU32, Ordering},
 };
 use windows::Win32::{
     Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
@@ -27,6 +28,9 @@ pub const REPOSITION: u32 = WM_APP + 1;
 pub const CLOSE_SURFACE: u32 = WM_APP + 2;
 pub const PANIC_PROBE: u32 = WM_APP + 3;
 pub const CLASS: windows::core::PCWSTR = w!("ROQA.NativeSurface.1");
+/// Explorer broadcasts this registered message to every top-level window when it (re)creates the
+/// taskbar. 0 until registered, and stays 0 if registration fails.
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 pub struct WindowClass(HINSTANCE);
 impl WindowClass {
@@ -44,6 +48,11 @@ impl WindowClass {
             if RegisterClassW(&descriptor) == 0 {
                 return Err(Error::from_thread());
             }
+            // On failure (0) an Explorer restart is still seen through the work-area/display messages.
+            TASKBAR_CREATED.store(
+                RegisterWindowMessageW(w!("TaskbarCreated")),
+                Ordering::Relaxed,
+            );
             Ok(Self(instance))
         }
     }
@@ -354,19 +363,59 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
                 let _ = PostMessageW(Some(hwnd), CLOSE_SURFACE, WPARAM(0), LPARAM(0));
                 LRESULT(0)
             }
-            WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_TIMECHANGE => {
-                let dpi = if message == WM_DPICHANGED {
-                    wparam
-                } else {
-                    WPARAM(0)
-                };
-                let _ = PostMessageW(Some(hwnd), REPOSITION, dpi, LPARAM(0));
-                LRESULT(0)
+            _ if repositions(message, wparam, TASKBAR_CREATED.load(Ordering::Relaxed)) => {
+                let _ = PostMessageW(Some(hwnd), REPOSITION, WPARAM(0), LPARAM(0));
+                // WM_POWERBROADCAST is handled by returning TRUE; the others by returning 0.
+                LRESULT(isize::from(message == WM_POWERBROADCAST))
             }
             WM_GETOBJECT => crate::dock_uia::get_object(hwnd, wparam, lparam)
                 .unwrap_or_else(|| DefWindowProcW(hwnd, message, wparam, lparam)),
             PANIC_PROBE => panic!("Intentional callback-boundary probe"),
             _ => DefWindowProcW(hwnd, message, wparam, lparam),
         }
+    }
+}
+
+/// Messages after which the host re-reads the topology and the clock: display, DPI, settings and
+/// time changes; resume, which re-arms the clock whether or not the monotonic clock counted the
+/// sleep (wait timeouts do not) and re-reads monitors changed while asleep; and a recreated
+/// taskbar (Explorer restart), which can change the work area. Every surface receives these
+/// broadcasts; the host coalesces the posts.
+fn repositions(message: u32, wparam: WPARAM, taskbar_created: u32) -> bool {
+    match message {
+        WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_TIMECHANGE => true,
+        // Sent on every resume, with or without a user present; suspend changes nothing visible.
+        WM_POWERBROADCAST => wparam.0 == PBT_APMRESUMEAUTOMATIC as usize,
+        _ => taskbar_created != 0 && message == taskbar_created,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn repositions_on_display_resume_and_taskbar_recreation_only() {
+        let taskbar = 0xC123;
+        for message in [
+            WM_DPICHANGED,
+            WM_DISPLAYCHANGE,
+            WM_SETTINGCHANGE,
+            WM_TIMECHANGE,
+        ] {
+            assert!(repositions(message, WPARAM(0), taskbar));
+        }
+        let resume = WPARAM(PBT_APMRESUMEAUTOMATIC as usize);
+        assert!(repositions(WM_POWERBROADCAST, resume, taskbar));
+        for event in [PBT_APMSUSPEND, PBT_APMRESUMESUSPEND, PBT_POWERSETTINGCHANGE] {
+            assert!(!repositions(
+                WM_POWERBROADCAST,
+                WPARAM(event as usize),
+                taskbar
+            ));
+        }
+        assert!(repositions(taskbar, WPARAM(0), taskbar));
+        // An unregistered message (0) must never match WM_NULL.
+        assert!(!repositions(WM_NULL, WPARAM(0), 0));
+        assert!(!repositions(WM_MOUSEMOVE, WPARAM(0), taskbar));
     }
 }

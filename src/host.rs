@@ -687,9 +687,10 @@ impl Desktop {
     }
     fn message(&mut self, message: &MSG) -> Result<()> {
         if message.message == native_window::REPOSITION {
-            // Every surface forwards display/DPI/settings/time changes; one coalesced read serves them all.
+            // Every surface forwards display/DPI/settings/time changes, resume and taskbar recreation;
+            // one coalesced read serves them all.
             self.request_topology();
-            // A clock, time-zone or locale change can alter the text before the minute ends.
+            // A clock, time-zone or locale change, or a resume, can alter the text before the deadline.
             self.clock_due = Instant::now();
             return Ok(());
         }
