@@ -2,6 +2,7 @@ use crate::{
     dock,
     icons::IconPixels,
     layout::{self, Bounds},
+    media::Track,
     motion,
 };
 use std::mem::ManuallyDrop;
@@ -36,9 +37,12 @@ use windows::Win32::{
         DirectWrite::{
             DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_RANGE,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+            DWRITE_READING_DIRECTION_RIGHT_TO_LEFT, DWRITE_TEXT_ALIGNMENT,
+            DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+            DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
             DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
-            DWriteCreateFactory, IDWriteFactory,
+            DWriteCreateFactory, IDWriteFactory, IDWriteTextLayout,
         },
         Dxgi::{
             Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM},
@@ -135,6 +139,8 @@ pub struct DockScene<'a> {
 pub struct NotchScene<'a> {
     pub time: &'a str,
     pub date: &'a str,
+    /// The media session's track, drawn in the wider media notch; `None` draws the plain clock notch.
+    pub track: Option<&'a Track>,
     /// 0 collapsed, 1 expanded; the open curve briefly overshoots 1.
     pub progress: f32,
     pub dpi: u32,
@@ -147,7 +153,7 @@ const ICON_LIFT_DIPS: f32 = 3.0;
 const WHITE: (u8, u8, u8) = (255, 255, 255);
 const TEXT_FONT: PCWSTR = w!("Segoe UI Variable Text");
 const DISPLAY_FONT: PCWSTR = w!("Segoe UI Variable Display");
-/// The time's digits lead; "pm" and similar designators sit smaller beside them (as measured on Nusa).
+/// The time's digits lead; "pm" and similar designators sit smaller beside them.
 const TIME_DESIGNATOR: f32 = 0.72;
 
 pub struct Canvas {
@@ -195,7 +201,7 @@ impl Canvas {
     /// Shadow is composed on a separate, input-transparent window.
     pub fn paint_notch_shadow(&self, scene: &NotchScene) -> Result<()> {
         let scale = scene.dpi as f32 / 96.0;
-        let shape = layout::notch_shape(scene.progress);
+        let shape = layout::notch_shape(scene.progress, scene.track.is_some());
         let pixels = layout::notch_body(self.width as i32, scene.dpi, shape);
         self.draw(|context, rect| {
             let body = D2D_RECT_F {
@@ -211,10 +217,10 @@ impl Canvas {
             Ok(())
         })
     }
-    /// Black notch with concave top ears and a persistent morphing clock.
+    /// Black notch with concave top ears, a persistent morphing clock and the media track, if any.
     pub fn paint_notch(&self, scene: &NotchScene) -> Result<()> {
         let scale = scene.dpi as f32 / 96.0;
-        let shape = layout::notch_shape(scene.progress);
+        let shape = layout::notch_shape(scene.progress, scene.track.is_some());
         // The same whole-pixel body that layout::notch_region and notch_hit use.
         let pixels = layout::notch_body(self.width as i32, scene.dpi, shape);
         self.draw(|context, rect| {
@@ -433,15 +439,21 @@ fn notch_shadow(
     Ok(())
 }
 
-/// One bold clock morphs from the pill into the panel (no crossfade gap, like Nusa's persistent clock):
+/// One bold clock morphs from the pill into the panel, never crossfading, so the time stays readable:
 /// it grows from 15 to 30 DIP and moves from the pill's middle to the panel's time row. Only the date
-/// fades in, settling 6 DIP downward once the body has opened.
+/// fades in, settling 6 DIP downward once the body has opened. A media track draws `media_plan`
+/// instead.
 fn notch_text(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
     body: &D2D_RECT_F,
     scale: f32,
 ) -> Result<()> {
+    if let Some(track) = scene.track {
+        let font = media_clock(motion::smooth(scene.progress), scale);
+        let clock = text_width(scene.time, &font)?;
+        return media_text(context, &media_plan(scene, track, body, clock));
+    }
     let open = motion::smooth(scene.progress);
     let row = |middle: f32, half: f32| D2D_RECT_F {
         left: body.left + 12.0 * scale,
@@ -456,6 +468,7 @@ fn notch_text(
         size: size * scale,
         weight: DWRITE_FONT_WEIGHT_BOLD,
         designator: TIME_DESIGNATOR,
+        align: DWRITE_TEXT_ALIGNMENT_CENTER,
     };
     draw_text(
         context,
@@ -473,6 +486,7 @@ fn notch_text(
         size: 13.0 * scale,
         weight: DWRITE_FONT_WEIGHT_NORMAL,
         designator: 1.0,
+        align: DWRITE_TEXT_ALIGNMENT_CENTER,
     };
     draw_text(
         context,
@@ -483,12 +497,192 @@ fn notch_text(
     )
 }
 
+/// Fill of the empty cover slot: no album art is drawn until slice 5, which keeps this geometry.
+const COVER_FILL: f32 = 0.20;
+
+/// One text element of the media notch, in physical pixels.
+struct Line<'a> {
+    text: &'a str,
+    font: Font,
+    rect: D2D_RECT_F,
+    alpha: f32,
+}
+
+/// What the media notch draws for one frame, in physical pixels: the cover slot with its centred
+/// play-state glyph (a triangle while playing, two bars while paused), then the visible text lines.
+struct MediaPlan<'a> {
+    cover: D2D1_ROUNDED_RECT,
+    glyph: D2D_RECT_F,
+    playing: bool,
+    /// Glyph opacity, and a factor of the title's: 1 playing, 0.6 paused.
+    dim: f32,
+    lines: Vec<Line<'a>>,
+}
+
+/// The media clock at `open` (`smooth(progress)`): the pill's 15 DIP bold clock settles into the
+/// panel's 12 DIP regular one, trailing-aligned so it is never trimmed.
+fn media_clock(open: f32, scale: f32) -> Font {
+    Font {
+        family: TEXT_FONT,
+        size: (15.0 - 3.0 * open) * scale,
+        weight: if open < 0.5 {
+            DWRITE_FONT_WEIGHT_BOLD
+        } else {
+            DWRITE_FONT_WEIGHT_NORMAL
+        },
+        designator: TIME_DESIGNATOR,
+        align: DWRITE_TEXT_ALIGNMENT_TRAILING,
+    }
+}
+
+/// Direction B ("Cover accent"; docs/design/roqa-visual-spec.md, "Media notch"). Every element
+/// moves by `smooth(p)` from its pill position to its panel position, in DIPs from the body's left
+/// and top edges (the clock from its right edge). The title column ends before the clock's measured
+/// width (`clock`, physical pixels) and never inverts. The artist fades in below the title as the
+/// date does. The progress, controls and volume rows (below 50 in the panel) stay empty until
+/// slices 3, 4 and 6. Empty text is skipped.
+fn media_plan<'a>(
+    scene: &NotchScene<'a>,
+    track: &'a Track,
+    body: &D2D_RECT_F,
+    clock: f32,
+) -> MediaPlan<'a> {
+    let scale = scene.dpi as f32 / 96.0;
+    let open = motion::smooth(scene.progress);
+    let at = |pill: f32, panel: f32| pill + (panel - pill) * open;
+    // The close spring's undershoot briefly makes the pill shorter than 30: keep its row centred.
+    let middle = (layout::notch_shape(scene.progress, true).height / 2.0).min(15.0);
+    // Whole physical pixels keep the slot and glyph as crisp as the whole-pixel body.
+    let square = |left: f32, top: f32, size: f32| D2D_RECT_F {
+        left: left.round(),
+        top: top.round(),
+        right: left.round() + size,
+        bottom: top.round() + size,
+    };
+    // Cover: 20 at (10, middle - 10), radius 5 -> 72 at (16, 14), radius 10. Glyph: 10 -> 24.
+    let size = (at(20.0, 72.0) * scale).round();
+    let cover = square(
+        body.left + at(10.0, 16.0) * scale,
+        body.top + at(middle - 10.0, 14.0) * scale,
+        size,
+    );
+    let glyph = (at(10.0, 24.0) * scale).round();
+    let inset = ((size - glyph) / 2.0).round();
+    // Clock: trailing edge 14 -> 16 from the right, centre middle -> 19. Title: from 38 -> 100,
+    // ending 8 -> 6 before the clock, centre middle -> 21.
+    let end = body.right - at(14.0, 16.0) * scale;
+    let leading = body.left + at(38.0, 100.0) * scale;
+    let title = (leading, (end - clock - at(8.0, 6.0) * scale).max(leading));
+    let row = |(left, right): (f32, f32), middle: f32, half: f32| D2D_RECT_F {
+        left,
+        top: body.top + (middle - half) * scale,
+        right,
+        bottom: body.top + (middle + half) * scale,
+    };
+    let font = |size: f32, weight| Font {
+        family: TEXT_FONT,
+        size: size * scale,
+        weight,
+        designator: 1.0,
+        align: DWRITE_TEXT_ALIGNMENT_LEADING,
+    };
+    let dim = if track.playing { 1.0 } else { 0.60 };
+    let artist = motion::smooth((scene.progress - 0.35) / 0.45);
+    let lines = [
+        Line {
+            text: scene.time,
+            font: media_clock(open, scale),
+            rect: row((cover.right, end), at(middle, 19.0), 12.0),
+            alpha: at(1.0, 0.60),
+        },
+        Line {
+            text: &track.title,
+            font: font(
+                at(12.0, 13.0),
+                if open < 0.5 {
+                    DWRITE_FONT_WEIGHT_NORMAL
+                } else {
+                    DWRITE_FONT_WEIGHT_SEMI_BOLD
+                },
+            ),
+            rect: row(title, at(middle, 21.0), 12.0),
+            alpha: at(0.85, 1.0) * dim,
+        },
+        Line {
+            text: &track.artist,
+            font: font(12.0, DWRITE_FONT_WEIGHT_NORMAL),
+            rect: row(title, 38.0 + 6.0 * (1.0 - artist), 10.0),
+            alpha: 0.60 * artist,
+        },
+    ];
+    MediaPlan {
+        cover: rounded(cover, at(5.0, 10.0) * scale),
+        glyph: square(cover.left + inset, cover.top + inset, glyph),
+        playing: track.playing,
+        dim,
+        lines: lines
+            .into_iter()
+            .filter(|line| line.alpha > 0.0 && !line.text.is_empty())
+            .collect(),
+    }
+}
+
+fn media_text(context: &ID2D1DeviceContext, plan: &MediaPlan) -> Result<()> {
+    let glyph = plan.glyph;
+    // The glyph is drawn on a 10-unit grid inside its square.
+    let unit = (glyph.right - glyph.left) / 10.0;
+    let point = |x: f32, y: f32| Vector2 {
+        X: glyph.left + x * unit,
+        Y: glyph.top + y * unit,
+    };
+    // SAFETY: context is live between surface BeginDraw/EndDraw; brushes and the path geometry are
+    // local COM objects scoped to this draw, and the sink is closed before the fill.
+    unsafe {
+        let slot = context.CreateSolidColorBrush(&with_alpha(WHITE, COVER_FILL), None)?;
+        context.FillRoundedRectangle(&plan.cover, &slot);
+        let brush = context.CreateSolidColorBrush(&with_alpha(WHITE, plan.dim), None)?;
+        if plan.playing {
+            let path = context.GetFactory()?.CreatePathGeometry()?;
+            let sink = path.Open()?;
+            sink.BeginFigure(point(2.5, 1.0), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLine(point(9.0, 5.0));
+            sink.AddLine(point(2.5, 9.0));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            context.FillGeometry(&path, &brush, None);
+        } else {
+            for left in [2.0, 5.8] {
+                let (top_left, bottom_right) = (point(left, 1.0), point(left + 2.2, 9.0));
+                let bar = D2D_RECT_F {
+                    left: top_left.X.round(),
+                    top: top_left.Y.round(),
+                    right: bottom_right.X.round(),
+                    bottom: bottom_right.Y.round(),
+                };
+                context.FillRectangle(&bar, &brush);
+            }
+        }
+    }
+    for line in &plan.lines {
+        draw_text(
+            context,
+            line.text,
+            &line.font,
+            line.rect,
+            with_alpha(WHITE, line.alpha),
+        )?;
+    }
+    Ok(())
+}
+
 struct Font {
     family: PCWSTR,
     size: f32,
     weight: DWRITE_FONT_WEIGHT,
     /// Size factor for an AM/PM designator around a time's digits; 1.0 leaves text unchanged.
     designator: f32,
+    /// Leading text also takes its reading direction from its first letter; see `text_layout`.
+    align: DWRITE_TEXT_ALIGNMENT,
 }
 
 fn draw_text(
@@ -498,43 +692,9 @@ fn draw_text(
     rect: D2D_RECT_F,
     color: D2D1_COLOR_F,
 ) -> Result<()> {
-    let mut locale = [0u16; 85];
-    let text: Vec<u16> = text.encode_utf16().collect();
-    // SAFETY: shared system factory; locale buffer is NUL-terminated by the API (zeroed on failure).
-    // Formats are created per paint: minute changes, hover changes and the frames of short animations.
+    let layout = text_layout(text, font, rect.right - rect.left, rect.bottom - rect.top)?;
+    // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw.
     unsafe {
-        GetUserDefaultLocaleName(&mut locale);
-        let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-        let format = factory.CreateTextFormat(
-            font.family,
-            None,
-            font.weight,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            font.size,
-            PCWSTR(locale.as_ptr()),
-        )?;
-        format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-        format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-        format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-        // Long localized dates end in an ellipsis instead of being cut mid-glyph by the body clip.
-        let ellipsis = factory.CreateEllipsisTrimmingSign(&format)?;
-        let trimming = DWRITE_TRIMMING {
-            granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-            ..Default::default()
-        };
-        format.SetTrimming(&trimming, &ellipsis)?;
-        let layout = factory.CreateTextLayout(
-            &text,
-            &format,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
-        )?;
-        if font.designator < 1.0 {
-            for range in designator_ranges(&text) {
-                layout.SetFontSize(font.size * font.designator, range)?;
-            }
-        }
         let brush = context.CreateSolidColorBrush(&color, None)?;
         context.DrawTextLayout(
             Vector2 {
@@ -547,6 +707,72 @@ fn draw_text(
         );
     }
     Ok(())
+}
+
+/// The untrimmed width of one line of `text`, in the font's units.
+fn text_width(text: &str, font: &Font) -> Result<f32> {
+    let mut metrics = DWRITE_TEXT_METRICS::default();
+    // SAFETY: a local layout and a valid output struct.
+    unsafe { text_layout(text, font, f32::MAX, font.size * 2.0)?.GetMetrics(&mut metrics)? };
+    Ok(metrics.width)
+}
+
+/// One vertically centred line that ends in an ellipsis when it does not fit.
+fn text_layout(text: &str, font: &Font, width: f32, height: f32) -> Result<IDWriteTextLayout> {
+    let mut locale = [0u16; 85];
+    let rtl = font.align == DWRITE_TEXT_ALIGNMENT_LEADING && right_to_left(text);
+    let text: Vec<u16> = text.encode_utf16().collect();
+    // SAFETY: shared system factory; locale buffer is NUL-terminated by the API (zeroed on failure).
+    // Formats and layouts are built per paint. Paints happen only on minute, media and hover changes
+    // and the frames of short animations, whose morphing sizes a cache would miss anyway.
+    unsafe {
+        GetUserDefaultLocaleName(&mut locale);
+        let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+        let format = factory.CreateTextFormat(
+            font.family,
+            None,
+            font.weight,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            font.size,
+            PCWSTR(locale.as_ptr()),
+        )?;
+        format.SetTextAlignment(font.align)?;
+        // A right-to-left media title starts at its column's right edge and is trimmed on its left.
+        // Centred and trailing text keep the accepted left-to-right paragraph.
+        if rtl {
+            format.SetReadingDirection(DWRITE_READING_DIRECTION_RIGHT_TO_LEFT)?;
+        }
+        format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        // Long localized dates end in an ellipsis instead of being cut mid-glyph by the body clip.
+        let ellipsis = factory.CreateEllipsisTrimmingSign(&format)?;
+        let trimming = DWRITE_TRIMMING {
+            granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+            ..Default::default()
+        };
+        format.SetTrimming(&trimming, &ellipsis)?;
+        let layout = factory.CreateTextLayout(&text, &format, width, height)?;
+        if font.designator < 1.0 {
+            for range in designator_ranges(&text) {
+                layout.SetFontSize(font.size * font.designator, range)?;
+            }
+        }
+        Ok(layout)
+    }
+}
+
+/// Whether text reads right to left: its first letter is from a right-to-left script block (Hebrew,
+/// Arabic, Syriac, Thaana, N'Ko and others). Digits, spaces, symbols and punctuation are skipped.
+// shortcut: script blocks stand in for the Unicode Bidi_Class table; use IDWriteTextAnalyzer if a real
+// title starts on the wrong side.
+fn right_to_left(text: &str) -> bool {
+    text.chars().find(|c| c.is_alphabetic()).is_some_and(|c| {
+        matches!(
+            u32::from(c),
+            0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF
+        )
+    })
 }
 
 /// UTF-16 ranges before the first and after the last digit of a formatted time, such as " pm" in
@@ -690,6 +916,290 @@ fn rgba(red: u8, green: u8, blue: u8, alpha: f32) -> D2D1_COLOR_F {
         g: f32::from(green) / 255.0,
         b: f32::from(blue) / 255.0,
         a: alpha,
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+    use crate::layout::{NOTCH, SurfaceKind};
+    use crate::media::View;
+    use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS;
+
+    fn rect(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
+        D2D_RECT_F {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+    /// The media body as `Canvas::paint_notch` places it in a window-sized surface at (0, 0).
+    fn body(dpi: u32, progress: f32) -> D2D_RECT_F {
+        let work = Bounds {
+            x: 0,
+            y: 0,
+            width: 3840,
+            height: 2160,
+        };
+        let window = layout::placement(work, dpi, SurfaceKind::Notch, 0).width;
+        let pixels = layout::notch_body(window, dpi, layout::notch_shape(progress, true));
+        rect(
+            pixels.left as f32,
+            0.0,
+            (pixels.left + pixels.width) as f32,
+            pixels.height as f32,
+        )
+    }
+    fn track(title: &str, artist: &str, playing: bool) -> View {
+        View::Track(Track {
+            title: title.into(),
+            artist: artist.into(),
+            playing,
+            ..Track::default()
+        })
+    }
+    /// The clock's measured width, as `notch_text` passes it.
+    fn clock_width(time: &str, progress: f32, dpi: u32) -> f32 {
+        let font = media_clock(motion::smooth(progress), dpi as f32 / 96.0);
+        text_width(time, &font).unwrap()
+    }
+    /// The scene `Desktop` builds from a media view, planned as `notch_text` plans it.
+    fn plan<'a>(view: &'a View, time: &'a str, progress: f32, dpi: u32) -> MediaPlan<'a> {
+        let scene = NotchScene {
+            time,
+            date: "Tuesday",
+            track: view.shown(),
+            progress,
+            dpi,
+        };
+        let clock = clock_width(time, progress, dpi);
+        media_plan(&scene, scene.track.unwrap(), &body(dpi, progress), clock)
+    }
+    /// Text, rectangle, size and opacity of each drawn line.
+    fn lines<'a>(plan: &MediaPlan<'a>) -> Vec<(&'a str, D2D_RECT_F, f32, f32)> {
+        plan.lines
+            .iter()
+            .map(|line| (line.text, line.rect, line.font.size, line.alpha))
+            .collect()
+    }
+
+    #[test]
+    fn no_player_views_draw_the_plain_clock_pill() {
+        for view in [View::NoPlayer, View::Permission, View::Error] {
+            assert!(view.shown().is_none());
+            assert_eq!(layout::notch_shape(0.0, view.shown().is_some()), NOTCH);
+        }
+    }
+
+    #[test]
+    fn collapsed_playing_pill_draws_cover_slot_title_and_clock() {
+        let song = track("Song", "Artist", true);
+        let plan = plan(&song, "9:50 pm", 0.0, 96);
+        // 262 x 30 body centred in the 440 DIP window: x 89..351.
+        assert_eq!(plan.cover.rect, rect(99.0, 5.0, 119.0, 25.0));
+        assert_eq!(plan.cover.radiusX, 5.0);
+        assert_eq!(plan.glyph, rect(104.0, 10.0, 114.0, 20.0));
+        assert!(plan.playing);
+        assert_eq!(plan.dim, 1.0);
+        // The title ends 8 before the clock's measured width; the artist is not laid out.
+        let title_end = 337.0 - clock_width("9:50 pm", 0.0, 96) - 8.0;
+        assert_eq!(
+            lines(&plan),
+            [
+                ("9:50 pm", rect(119.0, 3.0, 337.0, 27.0), 15.0, 1.0),
+                ("Song", rect(127.0, 3.0, title_end, 27.0), 12.0, 0.85),
+            ]
+        );
+        let clock = &plan.lines[0].font;
+        assert_eq!(
+            (clock.weight, clock.designator, clock.align),
+            (
+                DWRITE_FONT_WEIGHT_BOLD,
+                TIME_DESIGNATOR,
+                DWRITE_TEXT_ALIGNMENT_TRAILING
+            )
+        );
+        let title = &plan.lines[1].font;
+        assert_eq!(
+            (title.weight, title.align),
+            (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING)
+        );
+    }
+
+    #[test]
+    fn paused_dims_the_glyph_and_title_without_moving_anything() {
+        let (playing, paused) = (track("Song", "", true), track("Song", "", false));
+        let (a, b) = (
+            plan(&playing, "9:50 pm", 0.0, 96),
+            plan(&paused, "9:50 pm", 0.0, 96),
+        );
+        assert!(!b.playing);
+        assert_eq!((b.dim, b.lines[1].alpha), (0.60, 0.85 * 0.60));
+        assert_eq!((a.cover.rect, a.glyph), (b.cover.rect, b.glyph));
+        assert_eq!(a.lines[1].rect, b.lines[1].rect);
+    }
+
+    #[test]
+    fn expanded_panel_places_cover_title_artist_and_clock_above_the_reserved_rows() {
+        let song = track("Song", "Artist", true);
+        let plan = plan(&song, "9:50 pm", 1.0, 96);
+        // 360 x 120 body at x 40..400: cover 72 at (16, 14), title column from 100.
+        assert_eq!(plan.cover.rect, rect(56.0, 14.0, 128.0, 86.0));
+        assert_eq!(plan.cover.radiusX, 10.0);
+        assert_eq!(plan.glyph, rect(80.0, 38.0, 104.0, 62.0));
+        let title_end = 384.0 - clock_width("9:50 pm", 1.0, 96) - 6.0;
+        assert_eq!(
+            lines(&plan),
+            [
+                ("9:50 pm", rect(128.0, 7.0, 384.0, 31.0), 12.0, 0.60),
+                ("Song", rect(140.0, 9.0, title_end, 33.0), 13.0, 1.0),
+                ("Artist", rect(140.0, 28.0, title_end, 48.0), 12.0, 0.60),
+            ]
+        );
+        assert_eq!(plan.lines[0].font.weight, DWRITE_FONT_WEIGHT_NORMAL);
+        assert_eq!(plan.lines[1].font.weight, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        // The progress, controls and volume rows (from 50 DIP) stay empty in this slice.
+        assert!(plan.lines.iter().all(|line| line.rect.bottom <= 50.0));
+    }
+
+    #[test]
+    fn empty_artist_and_title_are_not_laid_out() {
+        let texts = |view: &View| -> Vec<String> {
+            let plan = plan(view, "9:50 pm", 1.0, 96);
+            plan.lines.iter().map(|l| l.text.to_owned()).collect()
+        };
+        assert_eq!(texts(&track("Song", "", true)), ["9:50 pm", "Song"]);
+        // Properties not read yet: cover slot, glyph and clock only.
+        assert_eq!(texts(&track("", "", true)), ["9:50 pm"]);
+    }
+
+    #[test]
+    fn media_rows_scale_and_stay_inside_the_body_at_100_150_and_200_percent() {
+        let song = track("Song", "Artist", true);
+        for dpi in [96, 144, 192] {
+            let scale = dpi as f32 / 96.0;
+            for progress in [0.0, 0.5, 1.0] {
+                let body = body(dpi, progress);
+                let open = motion::smooth(progress);
+                let plan = plan(&song, "9:50 pm", progress, dpi);
+                let (clock, title) = (plan.lines[0].rect, plan.lines[1].rect);
+                assert_eq!(clock.right, body.right - (14.0 + 2.0 * open) * scale);
+                assert_eq!(title.left, body.left + (38.0 + 62.0 * open) * scale);
+                assert_eq!(plan.lines[1].font.size, (12.0 + open) * scale);
+                let cover = plan.cover.rect;
+                assert_eq!(cover.right - cover.left, (20.0 + 52.0 * open) * scale);
+                for item in plan.lines.iter().map(|l| l.rect).chain([cover]) {
+                    assert!(item.left >= body.left && item.right <= body.right, "{dpi}");
+                    assert!(item.top >= body.top && item.bottom <= body.bottom, "{dpi}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_title_column_ends_before_the_measured_clock_and_never_inverts() {
+        let song = track("Song", "", true);
+        // English, Korean, German, Tamil and Malayalam afternoon formats, then one no locale has.
+        let long = "9:50 ante meridiem ante meridiem ante meridiem ante meridiem";
+        for time in [
+            "9:50 pm",
+            "\u{c624}\u{d6c4} 9:50",
+            "9:50 nachm.",
+            "\u{baa}\u{bbf}\u{bb1}\u{bcd}\u{baa}\u{b95}\u{bb2}\u{bcd} 9:50",
+            "\u{d09}\u{d1a}\u{d4d}\u{d1a}\u{d24}\u{d3f}\u{d30}\u{d3f}\u{d1e}\u{d4d}\u{d1e}\u{d4d} 9:50",
+            long,
+        ] {
+            for dpi in [96, 144, 192] {
+                let scale = dpi as f32 / 96.0;
+                for progress in [0.0, 0.5, 1.0] {
+                    let clock = clock_width(time, progress, dpi);
+                    let plan = plan(&song, time, progress, dpi);
+                    let title = plan.lines[1].rect;
+                    assert!(title.left >= plan.cover.rect.right, "{time} {dpi}");
+                    assert!(title.right >= title.left, "{time} {dpi} {progress}");
+                    let gap = (8.0 - 2.0 * motion::smooth(progress)) * scale;
+                    if time != long {
+                        // Real formats leave a title column.
+                        assert!(title.right - title.left > 40.0 * scale, "{time} {dpi}");
+                        assert_eq!(title.right, plan.lines[0].rect.right - clock - gap);
+                    }
+                }
+            }
+        }
+        // A clock wider than the row leaves an empty, not inverted, title column.
+        let plan = plan(&song, long, 0.0, 96);
+        assert_eq!(plan.lines[1].rect.right, plan.lines[1].rect.left);
+    }
+
+    fn metrics(
+        text: &str,
+        align: DWRITE_TEXT_ALIGNMENT,
+        width: f32,
+    ) -> (DWRITE_TEXT_METRICS, bool) {
+        let font = Font {
+            family: TEXT_FONT,
+            size: 13.0,
+            weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            designator: 1.0,
+            align,
+        };
+        let layout = text_layout(text, &font, width, 24.0).unwrap();
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        // SAFETY: a local layout and a valid output struct.
+        unsafe {
+            layout.GetMetrics(&mut metrics).unwrap();
+            let rtl = layout.GetReadingDirection() == DWRITE_READING_DIRECTION_RIGHT_TO_LEFT;
+            (metrics, rtl)
+        }
+    }
+
+    #[test]
+    fn long_titles_trim_to_one_line_within_their_column() {
+        // About the panel's title column beside a short clock (mockup: 190 DIP).
+        let column = 190.0;
+        for long in [
+            "An Extremely Long Song Title That Cannot Possibly Fit In The Notch (Remastered 2026)",
+            "\u{623}\u{63a}\u{646}\u{64a}\u{629} \u{637}\u{648}\u{64a}\u{644}\u{629} \u{62c}\u{62f}\u{627}\u{64b} \u{644}\u{627} \u{62a}\u{62a}\u{633}\u{639} \u{641}\u{64a} \u{627}\u{644}\u{634}\u{631}\u{64a}\u{637} \u{627}\u{644}\u{639}\u{644}\u{648}\u{64a} \u{645}\u{647}\u{645}\u{627} \u{62d}\u{627}\u{648}\u{644}\u{646}\u{627}",
+        ] {
+            let (natural, _) = metrics(long, DWRITE_TEXT_ALIGNMENT_LEADING, 10_000.0);
+            assert!(natural.width > column, "the sample must overflow");
+            let (trimmed, _) = metrics(long, DWRITE_TEXT_ALIGNMENT_LEADING, column);
+            assert_eq!(trimmed.lineCount, 1);
+            assert!(trimmed.left >= 0.0 && trimmed.left + trimmed.width <= column);
+        }
+    }
+
+    #[test]
+    fn rtl_titles_read_right_to_left_from_the_columns_right_edge() {
+        let arabic = "\u{623}\u{63a}\u{646}\u{64a}\u{629}";
+        let (metrics_rtl, rtl) = metrics(arabic, DWRITE_TEXT_ALIGNMENT_LEADING, 190.0);
+        assert!(rtl);
+        assert!(
+            metrics_rtl.left > 100.0,
+            "starts at the right: {}",
+            metrics_rtl.left
+        );
+        let (metrics_ltr, rtl) = metrics("Song", DWRITE_TEXT_ALIGNMENT_LEADING, 190.0);
+        assert!(!rtl);
+        assert!(metrics_ltr.left < 1.0);
+        // The accepted centred date and trailing clock keep their left-to-right paragraph.
+        for align in [DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_TRAILING] {
+            assert!(!metrics(arabic, align, 190.0).1);
+        }
+    }
+
+    #[test]
+    fn reading_direction_follows_the_first_letter() {
+        assert!(right_to_left("\u{623}\u{63a}\u{646}\u{64a}\u{629} - Song"));
+        assert!(right_to_left("\u{5e9}\u{5d9}\u{5e8}"));
+        // Digits, spaces and symbols before the first letter are skipped.
+        assert!(right_to_left(
+            "2026 \u{1F600} \u{623}\u{63a}\u{646}\u{64a}\u{629}"
+        ));
+        assert!(!right_to_left("Song - \u{623}\u{63a}\u{646}\u{64a}\u{629}"));
+        assert!(!right_to_left("\u{661}\u{662}"));
+        assert!(!right_to_left(""));
     }
 }
 

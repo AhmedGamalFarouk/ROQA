@@ -21,21 +21,40 @@ pub const NOTCH_EXPANDED: NotchShape = NotchShape {
     radius: 24.0,
     ears: 16.0,
 };
-/// The notch HWND never moves or resizes: the expanded body and ears plus room for the open
-/// overshoot and the soft shadow. `notch_region` bounds body input; a separate transparent HWND draws the shadow.
-pub const NOTCH_WINDOW: (i32, i32) = (400, 124);
+/// While a media session exists the pill widens for the cover slot and title, and the panel grows
+/// for the cover, title, progress, controls and volume rows (direction B, provisional;
+/// docs/design/roqa-visual-spec.md).
+pub const MEDIA_NOTCH: NotchShape = NotchShape {
+    width: 262.0,
+    ..NOTCH
+};
+pub const MEDIA_EXPANDED: NotchShape = NotchShape {
+    width: 360.0,
+    height: 120.0,
+    ..NOTCH_EXPANDED
+};
+/// The notch HWND never moves or resizes: the media panel and ears plus room for the open
+/// overshoot and the soft shadow, keeping the plain panel's 40 DIP of side and 44 DIP of bottom
+/// shadow room. `notch_region` bounds body input; a separate transparent HWND draws the shadow.
+pub const NOTCH_WINDOW: (i32, i32) = (440, 164);
 /// Pointer slop around the drawn body that still counts as hovering it.
 const NOTCH_HOVER_SLOP: f32 = 4.0;
 
-/// Shape at an animation progress: size follows the spring's overshoot; corners and ears never overshoot.
-pub fn notch_shape(progress: f32) -> NotchShape {
+/// Shape at an animation progress, for the media or the plain clock notch: size follows the
+/// spring's overshoot; corners and ears never overshoot.
+pub fn notch_shape(progress: f32, media: bool) -> NotchShape {
     let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let settled = progress.clamp(0.0, 1.0);
+    let (from, to) = if media {
+        (MEDIA_NOTCH, MEDIA_EXPANDED)
+    } else {
+        (NOTCH, NOTCH_EXPANDED)
+    };
     NotchShape {
-        width: lerp(NOTCH.width, NOTCH_EXPANDED.width, progress),
-        height: lerp(NOTCH.height, NOTCH_EXPANDED.height, progress),
-        radius: lerp(NOTCH.radius, NOTCH_EXPANDED.radius, settled),
-        ears: lerp(NOTCH.ears, NOTCH_EXPANDED.ears, settled),
+        width: lerp(from.width, to.width, progress),
+        height: lerp(from.height, to.height, progress),
+        radius: lerp(from.radius, to.radius, settled),
+        ears: lerp(from.ears, to.ears, settled),
     }
 }
 
@@ -84,8 +103,8 @@ pub fn notch_radius(body: NotchBody, shape: NotchShape, dpi: u32) -> f32 {
 
 /// One-pixel rows contain the anti-aliased outline, with at most a one-pixel edge fringe. They
 /// exclude the shadow and empty corners; the height is bounded by the actual HWND.
-pub fn notch_rows(window: Bounds, dpi: u32, progress: f32) -> Vec<Bounds> {
-    let shape = notch_shape(progress);
+pub fn notch_rows(window: Bounds, dpi: u32, progress: f32, media: bool) -> Vec<Bounds> {
+    let shape = notch_shape(progress, media);
     let body = notch_body(window.width, dpi, shape);
     let radius = notch_radius(body, shape, dpi);
     (0..body.height.min(window.height))
@@ -104,8 +123,8 @@ pub fn notch_rows(window: Bounds, dpi: u32, progress: f32) -> Vec<Bounds> {
 }
 
 /// Hover follows the silhouette with four DIP of slop; transparent side bands do not hold it open.
-pub fn notch_hit(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32) -> bool {
-    let shape = notch_shape(progress);
+pub fn notch_hit(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, y: i32) -> bool {
+    let shape = notch_shape(progress, media);
     let body = notch_body(window_width, dpi, shape);
     let slop = scaled(NOTCH_HOVER_SLOP, dpi);
     if !(0..body.height + slop).contains(&y) {
@@ -217,27 +236,89 @@ mod tests {
                 0
             ),
             Bounds {
-                x: 1520,
+                x: 1480,
                 y: 0,
-                width: 800,
-                height: 248
+                width: 880,
+                height: 328
             }
         );
     }
 
     #[test]
+    fn media_notch_fits_its_window_at_100_150_and_200_percent() {
+        let work = Bounds {
+            x: 0,
+            y: 0,
+            width: 3840,
+            height: 2160,
+        };
+        // (dpi, window, media pill, media panel) in physical pixels.
+        for (dpi, window, pill, panel) in [
+            (96, (440, 164), (262, 30), (360, 120)),
+            (144, (660, 246), (393, 45), (540, 180)),
+            (192, (880, 328), (524, 60), (720, 240)),
+        ] {
+            let bounds = placement(work, dpi, SurfaceKind::Notch, 0);
+            assert_eq!((bounds.width, bounds.height), window);
+            let size = |progress| {
+                let body = notch_body(bounds.width, dpi, notch_shape(progress, true));
+                (body.width, body.height)
+            };
+            assert_eq!(size(0.0), pill);
+            assert_eq!(size(1.0), panel);
+            // Undershoot, hover swell, open overshoot: body and ears stay inside the HWND.
+            for progress in [-0.09, 0.0, 0.07, 1.0, 1.07] {
+                for media in [false, true] {
+                    let body = notch_body(bounds.width, dpi, notch_shape(progress, media));
+                    assert!(body.left - body.ears >= 0, "{dpi} {progress} {media}");
+                    assert!(body.left + body.width + body.ears <= bounds.width);
+                    assert!(body.height <= bounds.height);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn plain_notch_keeps_its_accepted_shape_and_screen_position() {
+        assert_eq!(notch_shape(0.0, false), NOTCH);
+        assert_eq!(notch_shape(1.0, false), NOTCH_EXPANDED);
+        let work = Bounds {
+            x: -1920,
+            y: 0,
+            width: 1920,
+            height: 1040,
+        };
+        for dpi in [96, 144, 192] {
+            let bounds = placement(work, dpi, SurfaceKind::Notch, 0);
+            // Where the accepted 400 DIP window put the body on screen.
+            let old_width = dock::px(400, dpi);
+            let old_x = work.x + (work.width - old_width) / 2;
+            for progress in [0.0, 1.0] {
+                let shape = notch_shape(progress, false);
+                let body = notch_body(bounds.width, dpi, shape);
+                let old = notch_body(old_width, dpi, shape);
+                assert_eq!(bounds.x + body.left, old_x + old.left);
+                assert_eq!((body.width, body.height), (old.width, old.height));
+            }
+        }
+    }
+
+    #[test]
     fn silhouette_excludes_side_shadow_and_corners_during_motion() {
-        for dpi in [96, 120, 192, 384] {
+        for (dpi, media) in [96, 120, 192, 384]
+            .into_iter()
+            .flat_map(|dpi| [(dpi, false), (dpi, true)])
+        {
             let window = Bounds {
                 x: 0,
                 y: 0,
-                width: scaled(400.0, dpi),
-                height: scaled(124.0, dpi),
+                width: scaled(440.0, dpi),
+                height: scaled(164.0, dpi),
             };
             for progress in [-0.09, 0.0, 0.07, 0.3, 0.7, 1.0, 1.07] {
-                let shape = notch_shape(progress);
+                let shape = notch_shape(progress, media);
                 let body = notch_body(window.width, dpi, shape);
-                let rows = notch_rows(window, dpi, progress);
+                let rows = notch_rows(window, dpi, progress, media);
                 let contains = |x, y| {
                     rows.iter()
                         .any(|r| r.y == y && x >= r.x && x < r.x + r.width)
@@ -248,39 +329,50 @@ mod tests {
                     window.width,
                     dpi,
                     progress,
+                    media,
                     middle,
                     body.height / 2
                 ));
                 let side_x = body.left - scaled(8.0, dpi);
                 let side_y = body.ears + scaled(8.0, dpi);
                 assert!(!contains(side_x, side_y));
-                assert!(!notch_hit(window.width, dpi, progress, side_x, side_y));
+                assert!(!notch_hit(
+                    window.width,
+                    dpi,
+                    progress,
+                    media,
+                    side_x,
+                    side_y
+                ));
                 assert!(!contains(body.left, body.height - 1));
                 assert!(!notch_hit(
                     window.width,
                     dpi,
                     progress,
+                    media,
                     body.left - scaled(5.0, dpi),
                     body.height - 1
                 ));
                 assert!(!contains(middle, body.height + scaled(10.0, dpi)));
             }
         }
-        // Independent review's concrete regression point.
-        assert!(!notch_hit(400, 96, 1.0, 30, 40));
+        // Independent review's concrete regression point, 10 px beside the plain panel, moved with
+        // the window's 20 px wider sides.
+        assert!(!notch_hit(440, 96, 1.0, false, 50, 40));
         assert!(
             !notch_rows(
                 Bounds {
                     x: 0,
                     y: 0,
-                    width: 400,
-                    height: 124
+                    width: 440,
+                    height: 164
                 },
                 96,
-                1.0
+                1.0,
+                false
             )
             .iter()
-            .any(|r| r.y == 40 && r.x <= 30)
+            .any(|r| r.y == 40 && r.x <= 50)
         );
     }
 }

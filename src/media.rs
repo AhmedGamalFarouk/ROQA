@@ -1,5 +1,5 @@
-//! Media state from the Windows global media controls (GSMTC). M4 slice 1: state, events and
-//! diagnostics only; nothing is drawn yet.
+//! Media state from the Windows global media controls (GSMTC): state, events and diagnostics, and
+//! which part of it the notch draws.
 //!
 //! Every GSMTC read and mutation happens on the host (STA) thread. Event handlers and async
 //! completions may run on any thread: they only set dirty bits, fill their request's one-shot slot
@@ -86,6 +86,25 @@ pub enum View {
     /// The session manager could not be obtained for another reason.
     Error,
     Track(Track),
+}
+impl View {
+    /// The track the notch draws; every other view draws the plain clock notch.
+    pub fn shown(&self) -> Option<&Track> {
+        match self {
+            View::Track(track) => Some(track),
+            _ => None,
+        }
+    }
+}
+
+/// Whether the notch must repaint: a session appeared or ended, or its title, artist or play state
+/// changed. Timeline and rate updates, and changes among the no-media views, draw nothing new.
+pub fn redraw(before: &View, after: &View) -> bool {
+    fn drawn(view: &View) -> Option<(&str, &str, bool)> {
+        view.shown()
+            .map(|t| (t.title.as_str(), t.artist.as_str(), t.playing))
+    }
+    drawn(before) != drawn(after)
 }
 
 /// One observation from the owner, applied in order on the host thread.
@@ -374,11 +393,15 @@ impl Media {
             }
         }
     }
-    /// Applies pending media events. Without any it costs one atomic swap: no polling, no deadline.
-    pub fn refresh(&mut self) {
+    pub fn view(&self) -> &View {
+        &self.state.view
+    }
+    /// Applies pending media events and returns whether the drawn view changed. Without any events
+    /// it costs one atomic swap: no polling, no deadline.
+    pub fn refresh(&mut self) -> bool {
         let mut dirty = self.wake.dirty.swap(0, Ordering::Acquire);
         if dirty == 0 {
-            return;
+            return false;
         }
         self.wakes = self.wakes.wrapping_add(1);
         let before = self.state.view.clone();
@@ -441,6 +464,7 @@ impl Media {
         if differs(&before, &self.state.view) {
             self.log();
         }
+        redraw(&before, &self.state.view)
     }
     /// Re-reads the current session; on a change, ends the old one, starts a new generation and
     /// returns the reads the new session needs.
@@ -671,6 +695,37 @@ mod tests {
         assert!(!differs(&a, &b));
         assert!(differs(&a, &View::Track(track(false, 1.0, 0, 0, 0))));
         assert!(differs(&a, &View::NoPlayer));
+    }
+
+    #[test]
+    fn the_notch_repaints_only_when_the_drawn_view_changes() {
+        let playing = View::Track(Track {
+            title: "Song".into(),
+            artist: "Artist".into(),
+            ..track(true, 1.0, 0, 300 * SECOND, 20 * SECOND)
+        });
+        let with = |change: fn(&mut Track)| {
+            let mut view = playing.clone();
+            if let View::Track(track) = &mut view {
+                change(track);
+            }
+            view
+        };
+        // Timeline ticks and rate changes are not drawn.
+        assert!(!redraw(&playing, &with(|t| t.timeline.position += SECOND)));
+        assert!(!redraw(&playing, &with(|t| t.rate = 2.0)));
+        assert!(!redraw(&playing, &playing.clone()));
+        // Title, artist, play state and session presence are.
+        assert!(redraw(&playing, &with(|t| t.title = "Next".into())));
+        assert!(redraw(&playing, &with(|t| t.artist.clear())));
+        assert!(redraw(&playing, &with(|t| t.playing = false)));
+        assert!(redraw(&View::NoPlayer, &View::Track(Track::default())));
+        assert!(redraw(&playing, &View::NoPlayer));
+        // The no-media views all draw the plain clock notch.
+        assert!(!redraw(&View::NoPlayer, &View::Permission));
+        assert!(!redraw(&View::Error, &View::NoPlayer));
+        assert_eq!(View::Permission.shown(), None);
+        assert!(playing.shown().is_some_and(|t| t.title == "Song"));
     }
 
     #[test]

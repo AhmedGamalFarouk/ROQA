@@ -125,7 +125,7 @@ try {
             Assert-Check (Near ($r.Left - $work.Left) ([int][Math]::Floor(($work.Width - $r.Width) / 2))) "$($m.Device) $($pair[0]) is centred on its monitor"
         }
         # Text factor 1.0 was the last recorded setting; a mismatch here would expose a changed factor.
-        Assert-Check ($notch.Width -eq (Px 400 $dpi) -and $notch.Height -eq (Px 124 $dpi) -and $notch.Top -eq $work.Top) "$($m.Device) notch is flush with the top at $dpi DPI"
+        Assert-Check ($notch.Width -eq (Px 440 $dpi) -and $notch.Height -eq (Px 164 $dpi) -and $notch.Top -eq $work.Top) "$($m.Device) notch is flush with the top at $dpi DPI"
         Assert-Check ($dock.Height -eq (Px 64 $dpi) -and $dock.Bottom -eq ($work.Bottom - (Px 12 $dpi))) "$($m.Device) dock sits above the work-area bottom at $dpi DPI"
         Assert-Check ($shadow.Left -eq $notch.Left -and $shadow.Top -eq $notch.Top -and $shadow.Width -eq $notch.Width -and $shadow.Height -eq $notch.Height) "$($m.Device) shadow follows its notch"
     }

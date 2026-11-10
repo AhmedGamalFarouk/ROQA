@@ -67,6 +67,11 @@ function Assert-Foreground([IntPtr]$Expected, [string]$Name) {
     }
     Assert-Check ($actual -eq $Expected) $Name
 }
+# The plain-notch shape checks need no media session: another app's session switches the notch to the media shape.
+function Assert-NoMedia {
+    $states = @(Select-String -LiteralPath (Join-Path $evidence 'runtime.log') -Pattern '^Media: (playing|paused|no player|permission|error) ')
+    if ($states.Count -gt 0 -and $states[-1].Matches[0].Groups[1].Value -in @('playing', 'paused')) { throw 'INTERFERENCE: A media session is active; the plain-notch shape checks need none.' }
+}
 function Test-DockWidth([int]$Width, [int]$Dpi) {
     # Dock = 8-DIP padding each side plus one 56-DIP slot per item (picker + real app groups).
     foreach ($slots in 1..64) { if ($Width -eq [int][Math]::Floor(((16 + 56 * $slots) * $Dpi + 48) / 96)) { return $true } }
@@ -133,7 +138,7 @@ try {
     $dock = Wait-Surface 'ROQA Dock' $true
     Start-Sleep -Milliseconds 300
     Assert-Foreground $focusBaseline 'Launch does not steal focus'
-    foreach ($surface in @(@{ Window = $notch; Width = 400; Height = 124; Name = 'notch' }, @{ Window = $dock; Width = 0; Height = 64; Name = 'dock' })) {
+    foreach ($surface in @(@{ Window = $notch; Width = 440; Height = 164; Name = 'notch' }, @{ Window = $dock; Width = 0; Height = 64; Name = 'dock' })) {
         $rect = New-Object NativeProbe+Rect
         Assert-Check ([NativeProbe]::GetWindowRect($surface.Window, [ref]$rect)) "Read $($surface.Name) geometry"
         $dpi = [NativeProbe]::GetDpiForWindow($surface.Window)
@@ -161,10 +166,11 @@ try {
         $px = { param([double]$dips) [Math]::Floor(($dips * $dpi + 48) / 96) }
         $hoverX = $rect.Left + [int]($rect.Width / 2); $hoverY = $rect.Top + [int]($rect.Height / 2); $settle = 0
         if ($surface.Name -eq 'notch') {
-            # The HWND is a fixed 400x124 DIP (room for overshoot and shadow); its region limits input to the collapsed 150x30 body plus both 10-DIP ears.
+            # The HWND is a fixed 440x164 DIP (room for the media panel, overshoot and shadow); with no media session its region limits input to the collapsed 150x30 body plus both 10-DIP ears.
             $body = & $px 150; $ears = & $px 10; $bodyHeight = & $px 30
             $bodyLeft = [int][Math]::Floor(($rect.Width - $body) / 2)
             $restRegion = "$($bodyLeft - $ears),0,$($body + 2 * $ears),$bodyHeight"
+            Assert-NoMedia
             $observedRegion = [NativeProbe]::RegionBox($surface.Window)
             Assert-Check ($observedRegion -eq $restRegion) "Collapsed notch takes input only over its visible body and ears (expected $restRegion, observed $observedRegion)"
             $idlePoints = @(@{ Name = 'collapsed body'; X = [int]($bodyLeft + (& $px 6)); Y = [int]($bodyHeight / 2); Color = '0,0,0' })
@@ -187,6 +193,7 @@ try {
             # Only the body and ears own input; the shadow is a separate transparent HWND.
             $openEars = & $px 16
             $openRegion = "$($expandedLeft - $openEars),0,$((& $px 320) + 2 * $openEars),$(& $px 80)"
+            Assert-NoMedia
             $observedRegion = [NativeProbe]::RegionBox($surface.Window)
             Assert-Check ($observedRegion -eq $openRegion) "Open notch input excludes its shadow (expected $openRegion, observed $observedRegion)"
             $shadowPoint = New-Object NativeProbe+Point
@@ -202,6 +209,7 @@ try {
         if ($surface.Name -eq 'notch') {
             $underShadow = [NativeProbe]::WindowFromPoint($shadowPoint)
             Assert-Check ($underShadow -ne $surface.Window -and $underShadow -ne (Surface-Window 'ROQA Notch Shadow')) 'Collapsed shadow band resolves to an underlying window'
+            Assert-NoMedia
             $observedRegion = [NativeProbe]::RegionBox($surface.Window)
             Assert-Check ($observedRegion -eq $restRegion) "Pointer leave collapses the notch and restores its rest region (observed $observedRegion)"
             # Hover intent: touching the pill and leaving sideways within 320 ms must never open the panel.
@@ -209,6 +217,7 @@ try {
             Start-Sleep -Milliseconds 100
             Assert-Check ([NativeProbe]::SetCursorPos($rect.Left + (& $px 6), $rect.Top + (& $px 10))) 'Leave sideways along the screen edge'
             Start-Sleep -Milliseconds 800
+            Assert-NoMedia
             $observedRegion = [NativeProbe]::RegionBox($surface.Window)
             Assert-Check ($observedRegion -eq $restRegion) "A pointer passing over the pill does not open the panel (observed $observedRegion)"
         }
@@ -220,11 +229,11 @@ try {
                 # Each click must be received by this PowerShell process's fixture, not ROQA.
                 foreach ($case in @(
                     @{ Name = 'rest rounded corner'; Wait = 0; X = $bodyLeft + (& $px 1); Y = & $px 29 },
-                    @{ Name = 'hover intent side margin'; Wait = 120; X = & $px 30; Y = & $px 40 },
+                    @{ Name = 'hover intent side margin'; Wait = 120; X = & $px 50; Y = & $px 40 },
                     @{ Name = 'expanding side shadow'; Wait = 1; Expansion = $true },
-                    @{ Name = 'open side shadow'; Wait = 1100; X = & $px 30; Y = & $px 40 },
+                    @{ Name = 'open side shadow'; Wait = 1100; X = & $px 50; Y = & $px 40 },
                     @{ Name = 'open rounded corner'; Wait = 1100; X = $expandedLeft + (& $px 1); Y = & $px 79 },
-                    @{ Name = 'closing side shadow'; Wait = 1100; Close = $true; X = & $px 30; Y = & $px 40 },
+                    @{ Name = 'closing side shadow'; Wait = 1100; Close = $true; X = & $px 50; Y = & $px 40 },
                     @{ Name = 'closing rounded corner'; Wait = 1100; Close = $true; X = $expandedLeft + (& $px 1); Y = & $px 79 }
                 )) {
                     [void][NativeProbe]::SetCursorPos($awayX, $awayY)
@@ -296,7 +305,7 @@ try {
     $afterDpi = Wait-Surface 'ROQA Notch' $true
     $scaledRect = New-Object NativeProbe+Rect
     [void][NativeProbe]::GetWindowRect($afterDpi, [ref]$scaledRect)
-    Assert-Check ($afterDpi -eq $notch -and $scaledRect.Width -eq [int][Math]::Floor((400 * $realDpi + 48) / 96)) "Synthetic WM_DPICHANGED keeps the unchanged notch HWND at the real DPI (dpi=$realDpi, width=$($scaledRect.Width))"
+    Assert-Check ($afterDpi -eq $notch -and $scaledRect.Width -eq [int][Math]::Floor((440 * $realDpi + 48) / 96)) "Synthetic WM_DPICHANGED keeps the unchanged notch HWND at the real DPI (dpi=$realDpi, width=$($scaledRect.Width))"
     # Query a separate PMv2 HWND on the primary monitor, never GetDpiForSystem/sign-in scale.
     $currentPrimaryDpi = [NativeProbe]::GetDpiForWindow($anchor)
     Assert-Check ($currentPrimaryDpi -gt 0) 'Independent primary-monitor DPI query succeeds'
@@ -305,7 +314,7 @@ try {
         Start-Sleep -Milliseconds 250
         $notch = Wait-Surface 'ROQA Notch' $true
         $dock = Wait-Surface 'ROQA Dock' $true
-        foreach ($entry in @(@{ Window = $notch; Width = 400; Height = 124 }, @{ Window = $dock; Width = 0; Height = 64 })) {
+        foreach ($entry in @(@{ Window = $notch; Width = 440; Height = 164 }, @{ Window = $dock; Width = 0; Height = 64 })) {
             [void][NativeProbe]::GetWindowRect($entry.Window, [ref]$scaledRect)
             $widthOk = if ($entry.Width -eq 0) { Test-DockWidth $scaledRect.Width $currentPrimaryDpi } else { $scaledRect.Width -eq [int][Math]::Floor(($entry.Width * $currentPrimaryDpi + 48) / 96) }
             Assert-Check ($widthOk -and $scaledRect.Height -eq [int][Math]::Floor(($entry.Height * $currentPrimaryDpi + 48) / 96)) "Broadcast $broadcast reconciles both dimensions to current primary-monitor DPI"

@@ -7,7 +7,7 @@ use crate::{
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
     layout::{self, Bounds, SurfaceKind, placement},
-    media::Media,
+    media::{Media, Track},
     motion::{self, Tween},
     native_window::{self, NativeWindow, WindowClass},
     picker::Picker,
@@ -154,17 +154,14 @@ impl Surface {
                     uia,
                 }
             }
-            Some(shadow) => {
-                // Collapsed at rest: only the visible notch takes input.
-                let area = layout::notch_rows(bounds, dpi, 0.0);
-                window.set_notch_region(&area)?;
-                Role::Notch {
-                    shadow,
-                    engaged: false,
-                    intent: None,
-                    area,
-                }
-            }
+            // The first paint, which always precedes showing the window, applies the input region
+            // of the plain or media pill.
+            Some(shadow) => Role::Notch {
+                shadow,
+                engaged: false,
+                intent: None,
+                area: Vec::new(),
+            },
         };
         let canvas = Canvas::create(graphics, window.0, bounds)?;
         // Created hidden; the owner shows it after the first paint.
@@ -247,13 +244,13 @@ impl Surface {
         self.hovered = true;
         Ok(true)
     }
-    fn paint_notch(&mut self, time: &str, date: &str) -> Result<()> {
+    fn paint_notch(&mut self, time: &str, date: &str, track: Option<&Track>) -> Result<()> {
         let Role::Notch { shadow, area, .. } = &mut self.role else {
             return Ok(());
         };
         let progress = self.motion.value(Instant::now());
-        // Input and drawing use the same frame progress, without a speculative growth lead.
-        let rows = layout::notch_rows(self.bounds, self.dpi, progress);
+        // Input and drawing use the same frame progress and shape, without a speculative growth lead.
+        let rows = layout::notch_rows(self.bounds, self.dpi, progress, track.is_some());
         if *area != rows {
             self.window.set_notch_region(&rows)?;
             *area = rows;
@@ -261,6 +258,7 @@ impl Surface {
         let scene = NotchScene {
             time,
             date,
+            track,
             progress,
             dpi: self.dpi,
         };
@@ -362,7 +360,8 @@ impl Surface {
     }
 }
 
-/// Hover-intent swell: the pill grows ~11 x 3 DIP to acknowledge the pointer before opening.
+/// Hover-intent swell: the pill grows ~11 x 3 DIP (the media pill ~7 x 6) to acknowledge the
+/// pointer before opening.
 const NOTCH_SWELL: f32 = 0.07;
 /// Opens the notch fully, ending any pending hover intent.
 fn open_notch(intent: &mut Option<Instant>, tween: &mut Tween) {
@@ -461,8 +460,8 @@ struct Desktop {
     dock_items: Vec<DockItem>,
     dock_names: Vec<String>,
     dock_generation: Option<u64>,
-    /// Media session state, no UI yet. Declared before `text` so its WinRT objects and event tokens
-    /// are released before that field's `RoUninitialize`.
+    /// Media session state, drawn by the notches. Declared before `text` so its WinRT objects and
+    /// event tokens are released before that field's `RoUninitialize`.
     media: Media,
     /// Windows text size (Accessibility > Text size) scales the whole notch, whose only content is text.
     text: TextSettings,
@@ -546,7 +545,7 @@ impl Desktop {
         if kind == SurfaceKind::Notch {
             // Advances every existing notch first, so all monitors show the same minute.
             self.refresh_clock()?;
-            surface.paint_notch(&self.clock, &self.date)?;
+            surface.paint_notch(&self.clock, &self.date, self.media.view().shown())?;
             self.surfaces.push(surface);
         } else {
             surface.publish_accessibility(&self.dock_names, false);
@@ -571,16 +570,23 @@ impl Desktop {
             self.clock_due = now + Duration::from_millis(clock.next_minute_ms.into());
             if clock.time != self.clock || clock.date != self.date {
                 (self.clock, self.date) = (clock.time, clock.date);
-                for notch in self
-                    .surfaces
-                    .iter_mut()
-                    .filter(|s| s.kind() == SurfaceKind::Notch && s.visible)
-                {
-                    notch.paint_notch(&self.clock, &self.date)?;
-                }
+                self.paint_notches()?;
             }
         }
         Ok(milliseconds_until(self.clock_due, now))
+    }
+    /// Repaints every visible notch with the current clock and media; hidden ones are painted before
+    /// they are restored.
+    fn paint_notches(&mut self) -> Result<()> {
+        let track = self.media.view().shown();
+        for notch in self
+            .surfaces
+            .iter_mut()
+            .filter(|s| s.kind() == SurfaceKind::Notch && s.visible)
+        {
+            notch.paint_notch(&self.clock, &self.date, track)?;
+        }
+        Ok(())
     }
     /// Paints one frame of each running animation; returns true while any still runs.
     /// The final frame always lands exactly on the target before a surface goes idle.
@@ -604,7 +610,9 @@ impl Desktop {
             }
             if surface.live {
                 match surface.kind() {
-                    SurfaceKind::Notch => surface.paint_notch(&self.clock, &self.date)?,
+                    SurfaceKind::Notch => {
+                        surface.paint_notch(&self.clock, &self.date, self.media.view().shown())?
+                    }
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
                 surface.live = surface.motion.running(now)
@@ -792,7 +800,8 @@ impl Desktop {
                     let y = i32::from((message.lParam.0 >> 16) as u16 as i16);
                     let progress = surface.motion.value(Instant::now());
                     let width = surface.bounds.width;
-                    let over = layout::notch_hit(width, surface.dpi, progress, x, y);
+                    let media = self.media.view().shown().is_some();
+                    let over = layout::notch_hit(width, surface.dpi, progress, media, x, y);
                     surface.set_notch_hover(over);
                 }
             }
@@ -824,7 +833,9 @@ impl Desktop {
             let visible = self.fullscreen.as_ref() != Some(&surface.monitor);
             if visible && !surface.visible {
                 match surface.kind() {
-                    SurfaceKind::Notch => surface.paint_notch(&self.clock, &self.date)?,
+                    SurfaceKind::Notch => {
+                        surface.paint_notch(&self.clock, &self.date, self.media.view().shown())?
+                    }
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
             }
@@ -904,7 +915,10 @@ impl Desktop {
         if self.text.take_changed() {
             self.rescale_text()?;
         }
-        self.media.refresh();
+        // One paint per visible notch, and only when the drawn track changed: no frames, no deadline.
+        if self.media.refresh() {
+            self.paint_notches()?;
+        }
         self.refresh_dock(model)?;
         self.refresh_fullscreen(model.generation)?;
         let clock_wait = self.refresh_clock()?;

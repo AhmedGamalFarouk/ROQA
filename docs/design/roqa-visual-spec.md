@@ -19,7 +19,7 @@ Author: `/root`, 2026-11-09. Reference study: `nusa-reference.md`. All sizes are
 
 ### Window, hit area and region
 
-- **Window.** A fixed **400 × 124** HWND, centred and flush with the work-area top. It holds the expanded body plus ears, room for the open overshoot, and the shadow below and beside the body. It never moves or resizes.
+- **Window.** A fixed **440 × 164** HWND, centred and flush with the work-area top. It holds the larger media panel (below) plus ears, room for the open overshoot, and the shadow below and beside the body, keeping the plain panel's 40 DIP of side and 44 DIP of bottom room. It never moves or resizes. It was 400 × 124 before the media panel; the plain notch's on-screen position is unchanged wherever the 40-DIP growth scales to an even number of pixels, which includes 100, 150 and 200 %.
 - **Body region (`layout::notch_rows`).** Updated with the same progress used to draw each frame, with no speculative growth lead. One-pixel rows follow the circular concave ears and rounded bottom corners, using the same rounded body and radius clamp as drawing. Rows conservatively contain edge coverage within a one-pixel fringe.
 - **Shadow.** A separate layered, transparent, nonactivating HWND sits directly behind the body. It follows the same bounds and animation; input passes through it to other processes. Canvas and window ownership follow the notch lifetime.
 - **Hover (`layout::notch_hit`).** Uses the same silhouette edge with 4 DIP of slop, rather than a rectangular ear band.
@@ -37,6 +37,67 @@ The font is Segoe UI Variable, from the system; no font is bundled.
 
 - **Designator.** The am/pm designator is whatever text precedes the first or follows the last digit in any script, so the user-locale format is never re-ordered.
 - **Overflow.** Text is centred and clipped to the body; long dates end in an ellipsis.
+
+### Media notch: direction B, "Cover accent" (user choice 2026-11-10), PROVISIONAL
+
+**PROVISIONAL.** The user chose direction B from the four M4 mockups (`artifacts/m4-mockups/notch-variants.html`, section B, outside version control) on 2026-11-10. This section records B's geometry as slice 2 draws it. It reuses the tokens above and has had no separate design review; it is expected to change. The no-player notch above is unchanged.
+
+- **When.** The media notch is drawn while a media session exists (`media::View::Track`), playing or paused, even before its title arrives. No player, refused access and errors all draw the plain 150 × 30 clock notch. Permission and error text is deferred to a later slice.
+- **Shape changes are instant.** When a session appears or ends, the shape swaps in one paint, with no tween. Expanding and collapsing animate with the accepted springs to the media sizes. Play, pause and track changes never change the geometry.
+
+| Token | Media pill | Media panel |
+|---|---|---|
+| Body width × height | 262 × 30 | 360 × 120 |
+| Bottom radius, ears | 14, 10 | 24, 16 |
+| Fill, shadow | as the plain notch | as the plain notch |
+| Hover swell (progress 0.07) | about 269 × 36 | — |
+
+**Layout.** Values are DIPs from the body's left and top edges, or from its right edge where stated. Every element moves from its pill value to its panel value by `smooth(p)`. In the pill, rows are centred on the body's middle (15, or less during the close spring's undershoot).
+
+| Element | Pill | Panel |
+|---|---|---|
+| Cover slot | 20 × 20 at x 10, centred; radius 5 | 72 × 72 at (16, 14); radius 10 |
+| Play-state glyph | 10, centred in the slot | 24, centred in the slot |
+| Title | from x 38, ending 8 before the clock | from x 100, centre y 21, ending 6 before the clock |
+| Clock | trailing edge 14 from the right | trailing edge 16 from the right, centre y 19 |
+| Artist | not drawn | under the title column, centre y 38 |
+
+- **Cover slot.** Album art arrives in slice 5 and will fill exactly this slot, so nothing moves when it does. Until then, and whenever a track has no art, the slot is a neutral rounded rect (white 20 %) with the play-state glyph centred in it. The glyph is drawn on a 10-unit grid: a triangle (2.5, 1)–(9, 5)–(2.5, 9) while playing, and two 2.2 × 8 bars at x 2 and 5.8 while paused. The mockup's corner badge belongs to the art layout and is not drawn without art.
+- **Clock column.** Its width is measured with DirectWrite for the current time text, font and scale, never a fixed column, because long locale designators are much wider than "9:50 pm". The title column ends before it. If a clock is wider than the whole row, the title column becomes empty rather than inverted.
+- **Artist.** It fades in by `smooth((p − 0.35) / 0.45)`, on the date's schedule, while settling 6 upward into place. An empty artist or title is skipped.
+- **Reserved panel rows.** Nothing is drawn below 50 yet, and there are no placeholder or fake controls:
+  - progress (elapsed, bar, duration), about 50–64, slice 4;
+  - controls (previous, play/pause, next) about 66–98, with the visualizer slot at its right, slices 3 and 7;
+  - volume, about 101–115, slice 6.
+
+**Type.** Segoe UI Variable Text in every role. White on black is 21 : 1; white 60 % is about 7.4 : 1.
+
+| Role | Pill | Panel | Colour |
+|---|---|---|---|
+| Clock | 15 Bold, am/pm at 0.72× | 12 Regular, am/pm at 0.72× | white → white 60 % |
+| Title | 12 Regular | 13 SemiBold | white 85 % → white |
+| Artist | — | 12 Regular | white 60 % |
+
+Weights switch at the midpoint of the morph. While paused, the glyph and the title are drawn at 60 % of their opacity.
+
+**Truncation and direction.**
+
+- **One line each, no wrap.** Titles and artists end in a static character-granularity ellipsis. There is no marquee or scrolling, because those need a continuous repaint.
+- **Reading direction.** A title or artist whose first letter is from a right-to-left script (Hebrew, Arabic and others) is laid out right to left. It starts at its column's right edge, and its ellipsis falls on its logical end, the left.
+  - The layout itself is not mirrored: the cover stays on the left and the clock on the right.
+  - Mirroring for an RTL UI language is deferred.
+
+**Repaints.** A visible notch repaints only when the drawn track changes: session presence, title, artist or play state. Timeline and rate updates draw nothing. There is no media timer, deadline or frame loop. Collapsed static playback keeps only the clock's per-minute paint. Text layouts are not cached: static paints happen at most once a minute, and animation frames change the font sizes, so a cache would miss.
+
+**Window.** The fixed HWND grows from 400 × 124 to 440 × 164. That is the media panel and its ears (392 wide) with the plain panel's 40 DIP from body to window side and 44 DIP of bottom room, for the open overshoot and the shadow.
+
+**Cost of the larger window.** These are estimates of DirectComposition surface pixels, BGRA at 4 bytes per pixel; actual allocations were not measured.
+
+| Scale | Each surface, 440 × 164 DIP (was 400 × 124) | Change | Per monitor: notch plus shadow surface |
+|---|---|---|---|
+| 100 % | 440 × 164 px, 288,640 B (was 198,400) | +90,240 B | +180,480 B |
+| 150 % | 660 × 246 px, 649,440 B (was 446,400) | +203,040 B | +406,080 B |
+| 200 % | 880 × 328 px, 1,154,560 B (was 793,600) | +360,960 B | +721,920 B |
 
 ## Notch motion (`src/motion.rs`), fitted to the live Nusa capture
 

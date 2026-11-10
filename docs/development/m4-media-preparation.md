@@ -118,7 +118,7 @@ Each slice is one candidate with its own SHA-256 manifest, `check.ps1`/`verify.p
 2. **Media design addendum, then a static paint.**
    - **Build.** A short design addendum to `roqa-visual-spec.md` for media content only, reviewed separately. It does not redo the accepted notch. Then the play-state glyph in the collapsed scene, and title, artist and play state in the expanded scene, repainted only on view change.
    - **Tests.** Text layout overflow and RTL titles via the existing DirectWrite path, and a scene snapshot from the view.
-   - **Collapsed look.** The static playing glyph only, inside the accepted 150 × 30 pill geometry, with no title.
+   - **Collapsed look.** Superseded by open question 1 (DECIDED: the pill shows the title) and the user's choice of direction B on 2026-11-10: a 262 × 30 pill with a cover slot, play-state glyph, static end-ellipsis title and the clock. See the provisional media addendum in `docs/design/roqa-visual-spec.md`.
    - **Native evidence.** Screen capture of collapsed and expanded playback. Paint counts while collapsed and static must span at least one minute boundary, and show only the clock's single minute repaint and none from media.
    - **Non-goals.** Progress, art and controls.
 3. **Controls and accessible actions.**
