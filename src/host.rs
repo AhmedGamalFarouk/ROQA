@@ -1,4 +1,5 @@
 use crate::{
+    catalog_timing::milliseconds_until,
     clock,
     dock::{self, DockItem},
     dock_uia::{self, DockAccessibility},
@@ -165,7 +166,8 @@ impl Surface {
             uia,
         })
     }
-    /// Hides or restores the surface (and the notch's shadow) without releasing anything.
+    /// Hides or restores the surface (and the notch's shadow) without releasing anything. Hidden
+    /// surfaces are not painted, so callers paint before restoring one.
     fn set_visible(&mut self, visible: bool) {
         if visible == self.visible {
             return;
@@ -180,8 +182,11 @@ impl Surface {
             }
         }
         if !visible {
-            // A hidden window gets no leave notification; settle hover as if the pointer left.
-            self.leave();
+            // A hidden window gets no leave notification and needs no frames: settle at rest now.
+            (self.hovered, self.engaged, self.intent, self.hover) = (false, false, None, None);
+            self.live = false;
+            self.motion = Tween::rest(0.0);
+            self.slots.fill(Tween::rest(0.0));
         }
     }
     fn leave(&mut self) {
@@ -325,9 +330,11 @@ const NOTCH_SWELL: f32 = 0.07;
 /// Transient topology reads are retried this often, at most `TOPOLOGY_RETRIES` times per change.
 const TOPOLOGY_RETRY: Duration = Duration::from_millis(250);
 const TOPOLOGY_RETRIES: u32 = 8;
-/// Windows sends no notification when a full-screen app starts or stops, so the state is re-read on
-/// catalog changes (foreground, show/hide) and topology changes, and otherwise at this interval.
-// shortcut: a fixed poll adds one idle wake per interval; event-filtered location tracking could replace it if measured cost matters.
+/// Windows sends no notification when a full-screen app starts or stops. The foreground geometry is
+/// re-read on every catalog generation (foreground, show/hide, title, and the 30 s repair scan) and
+/// topology change; the shell state is polled at this interval only while the foreground window
+/// covers its whole monitor, so an ordinary desktop adds no wakes.
+// shortcut: an in-place resize to full screen with no other window event is seen at the next catalog generation (30 s worst case); a foreground-scoped location hook was rejected for its caret/cursor event volume.
 const FULLSCREEN_POLL: Duration = Duration::from_secs(2);
 
 struct Desktop {
@@ -341,9 +348,10 @@ struct Desktop {
     topology_retries: u32,
     /// Monitor currently covered by a full-screen app; its surfaces are hidden, not released.
     fullscreen: Option<String>,
-    /// Catalog generation seen by the last full-screen check, and when the next poll is due.
+    /// Catalog generation seen by the last full-screen check, and the next shell poll, armed only
+    /// while the foreground window covers its monitor.
     fullscreen_generation: Option<u64>,
-    fullscreen_due: Instant,
+    fullscreen_due: Option<Instant>,
     graphics: Graphics,
     picker: Option<Picker>,
     icons: IconService,
@@ -369,9 +377,10 @@ impl Desktop {
             shown: Vec::new(),
             topology_due: None,
             topology_retries: 0,
-            fullscreen: native_window::fullscreen_device(),
+            fullscreen: native_window::fullscreen_candidate()
+                .filter(|_| native_window::shell_fullscreen()),
             fullscreen_generation: None,
-            fullscreen_due: Instant::now() + FULLSCREEN_POLL,
+            fullscreen_due: None,
             graphics: Graphics::create()?,
             picker: None,
             icons: IconService::create()?,
@@ -446,7 +455,7 @@ impl Desktop {
             for notch in self
                 .surfaces
                 .iter_mut()
-                .filter(|s| s.kind == SurfaceKind::Notch)
+                .filter(|s| s.kind == SurfaceKind::Notch && s.visible)
             {
                 notch.paint_notch(&self.clock, &self.date)?;
             }
@@ -537,7 +546,11 @@ impl Desktop {
             }
         }
         let icons = self.dock_icons();
-        for dock in self.surfaces.iter().filter(|s| s.kind == SurfaceKind::Dock) {
+        for dock in self
+            .surfaces
+            .iter()
+            .filter(|s| s.kind == SurfaceKind::Dock && s.visible)
+        {
             dock.paint_dock(&self.dock_items, &icons)?;
         }
         Ok(())
@@ -652,34 +665,44 @@ impl Desktop {
         }
         Ok(())
     }
-    /// Re-reads the full-screen monitor when the catalog changed or the poll is due, then hides that
-    /// monitor's surfaces and restores the others.
-    fn refresh_fullscreen(&mut self, generation: u64) {
+    /// Re-checks the full-screen monitor when the catalog changed or the shell poll is due, then
+    /// hides that monitor's surfaces and restores the others, painted current before they appear.
+    fn refresh_fullscreen(&mut self, generation: u64) -> Result<()> {
         let now = Instant::now();
-        if self.fullscreen_generation == Some(generation) && now < self.fullscreen_due {
-            return;
+        let polled = self.fullscreen_due.is_some_and(|due| now >= due);
+        if self.fullscreen_generation == Some(generation) && !polled {
+            return Ok(());
         }
-        (self.fullscreen_generation, self.fullscreen_due) =
-            (Some(generation), now + FULLSCREEN_POLL);
-        let fullscreen = native_window::fullscreen_device();
-        if fullscreen != self.fullscreen {
-            self.fullscreen = fullscreen;
-            for surface in &mut self.surfaces {
-                surface.set_visible(self.fullscreen.as_ref() != Some(&surface.monitor));
+        self.fullscreen_generation = Some(generation);
+        // Geometry first: the shell is asked, and polled, only while a window covers its monitor.
+        let candidate = native_window::fullscreen_candidate();
+        self.fullscreen_due = candidate.as_ref().map(|_| now + FULLSCREEN_POLL);
+        let fullscreen = candidate.filter(|_| native_window::shell_fullscreen());
+        if fullscreen == self.fullscreen {
+            return Ok(());
+        }
+        self.fullscreen = fullscreen;
+        let icons = self.dock_icons();
+        for surface in &mut self.surfaces {
+            let visible = self.fullscreen.as_ref() != Some(&surface.monitor);
+            if visible && !surface.visible {
+                match surface.kind {
+                    SurfaceKind::Notch => surface.paint_notch(&self.clock, &self.date)?,
+                    SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
+                }
             }
+            surface.set_visible(visible);
         }
+        Ok(())
     }
     fn fullscreen_wait(&self) -> u32 {
-        let wait = self
-            .fullscreen_due
-            .saturating_duration_since(Instant::now());
-        wait.as_millis() as u32
+        self.fullscreen_due
+            .map_or(INFINITE, |due| milliseconds_until(due, Instant::now()))
     }
     /// Milliseconds until the pending topology read, or `INFINITE` without one.
     fn topology_wait(&self) -> u32 {
-        self.topology_due.map_or(INFINITE, |due| {
-            due.saturating_duration_since(Instant::now()).as_millis() as u32
-        })
+        self.topology_due
+            .map_or(INFINITE, |due| milliseconds_until(due, Instant::now()))
     }
     /// Applies a due topology read: releases surfaces of removed or changed monitors and places the
     /// shown kinds on added or changed ones. Unchanged monitors keep their surfaces and motion state.
@@ -783,7 +806,7 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
             desktop.rescale_text()?;
         }
         desktop.refresh_dock(catalog.model())?;
-        desktop.refresh_fullscreen(catalog.model().generation);
+        desktop.refresh_fullscreen(catalog.model().generation)?;
         let clock_wait = desktop.refresh_clock()?;
         if let Some(picker) = &mut desktop.picker {
             picker.synchronize(catalog.model())?;

@@ -393,3 +393,54 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
   - Author fixed both.
   - Fresh recheck on `784CD0E22BF902E2E4653B04777AA16EC6896CDCD5614C3304138EFB56D3DD0E`: ACCEPT, no new findings.
 - **Open.** Native evidence for real full-screen apps, the multi-monitor foreground split, Presentation Settings, Store apps and the idle cost of the poll. The deferrals of council and accessibility checks are unchanged.
+
+## Sol 6.1 Medium performance judgment of 1e47cc2 (2026-11-10 local)
+
+- **Reviewer.** Independent read-only Sol 6.1 Medium judge, briefed to rank performance and tiny footprint first, at the user's request: <t3-thread://v2/20b131d6-becb-42ea-b20c-104902347b7e/thread:delegated-task:command%3Amcp%3A744ae178-f93d-4e15-bed0-5b05a2a9a815%3Adelegate-task%3Ab0babab3-a2d3-4c1a-b3a2-403feae72e62>.
+- **Inputs.** HEAD `1e47cc22801a74bf8a982dd442887c28dd204d0f`. SHA-256: host.rs `D1EF23B1…21AB`, native_window.rs `8EE846F5…3A3D`, topology.rs `D2D49905…F778`. check.ps1 PASS.
+- **Verdict: REVISE.**
+  - **SOL-PERF-MAJ-1:** the timeout for the fullscreen poll truncates a sub-millisecond remainder to 0, which can busy-wait up to <1 ms per deadline. The author confirmed it. The same truncation exists in `topology_wait` from 8a8c7ed. `CatalogTiming` already rounds up.
+  - **SOL-PERF-MAJ-2:** the unconditional 2 s poll adds about 1,800 deadlines per hour without cost evidence. Recommended replacement:
+    - one `EVENT_OBJECT_LOCATIONCHANGE` subscription scoped to the foreground PID/TID, out-of-context, skipping ROQA's own process, retargeted on each foreground change;
+    - shell-state polling only while the foreground covers its monitor;
+    - existing catalog, topology and repair events as fallback.
+  - **SOL-PERF-MIN-1:** hidden surfaces still paint and commit.
+  - **SOL-PERF-MIN-2:** avoidable String allocations in the fullscreen check.
+  - **SOL-COR-MIN-1:** a failed class-name query is not fail-open.
+- **Open.** No fixes applied yet. All findings are open. Native idle and trace measurements remain unrun.
+
+## Sol findings confirmed by Opus; fixes submitted (2026-11-10 local)
+
+- **Opus confirmation.** The user asked for the Sol findings to be confirmed with Opus 5.5 High before fixing. A fresh independent read-only Opus 5.5 High verifier on the same HEAD/hashes ran check.ps1 (PASS) and reported:
+  - **MAJ-1:** confirmed. `topology_wait` has the same defect. While animating, the zero timeout also drives extra compositor frames.
+  - **MAJ-2:** facts confirmed, Major on wake count. Sol's foreground-scoped `EVENT_OBJECT_LOCATIONCHANGE` design was **disputed**, because out-of-context delivery still wakes ROQA for the foreground app's caret, cursor and scroll events. Opus recommended a geometry-first, candidate-gated poll instead.
+  - **MIN-1:** confirmed.
+  - **MIN-2:** confirmed, a nit.
+  - **SOL-COR-MIN-1:** partly confirmed, a nit.
+  - Also noted: only one fullscreen monitor is tracked, a documented scope limit.
+- **Author fixes (Claude Opus 5.5 High), uncommitted on top of 1e47cc2.**
+  - Shared round-up `catalog_timing::milliseconds_until`, used by the catalog, fullscreen and topology waits, with a test.
+  - `fullscreen_candidate()` (foreground geometry first) plus `shell_fullscreen()`. The 2 s shell poll is armed only while the foreground covers its monitor, which means 0 fullscreen wakes on an ordinary desktop. In-place resize detection waits for the next catalog generation, 30 s worst case; this is recorded as a `shortcut:`.
+  - Hidden surfaces settle at rest and skip paints, and are painted before they are shown again.
+  - Allocation-free class-name comparison. The device name is allocated only after the coverage check.
+  - A failed class-name query fails open.
+- **Verification.** `verify.ps1` PASS: 29 tests plus the release build. Binary `78CFE1E5938D2362B4DF5409270D8854E56DB7038D4C3D5EF782DD32E03E161A`. Manifest `artifacts/m3-fullscreen-2/inputs.sha256`, SHA-256 `66B76864B95F6A86CD2A601807C08AB23AA867E12DF89A7676D69F8589AFC4ED`.
+- **Pending.** Fresh independent Sol 6.1 Medium recheck, which also serves as clean-code-guard: <t3-thread://v2/20b131d6-becb-42ea-b20c-104902347b7e/thread:delegated-task:command%3Amcp%3A744ae178-f93d-4e15-bed0-5b05a2a9a815%3Adelegate-task%3Aafbb1cc2-2cf7-4463-8d10-a8b7920c899c>. No native run.
+
+## Sol recheck of the performance fixes: POLISHED (2026-11-10 local)
+
+- **Verdict.** The fresh independent Sol 6.1 Medium recheck returned **POLISHED** (no open blocker/major) on manifest `66B76864…C4ED`.
+- **Verification.** All 23 entries verified, check.ps1 PASS (29 tests).
+- **Findings.** MAJ-1, MAJ-2, MIN-1, MIN-2 and COR-MIN-1 are all resolved, and there are no new findings. The reviewer agreed with Opus's objection to `EVENT_OBJECT_LOCATIONCHANGE`: `SetWinEventHook` filters only by process or thread, so object filtering happens after delivery. The candidate-gated design is justified within its documented latency trade-off.
+- **Clean-code-guard.** The same pass covered it: 0 critical, 0 important, 0 nits.
+- **Pre-existing note, not a finding.** `clock::now()` locale-formats strings on every loop wake, including animation wakes.
+- **Scope.** This is static review only. CPU/wake counts, allocations, private bytes, GPU/DWM, hidden-surface quiescence, restore presentation and multi-monitor transitions need native measurement.
+- **Not done.** No council or milestone acceptance. Uncommitted.
+
+## M3 performance fixes committed (2026-11-10 local)
+
+- **Author.** Claude Opus 5.5 High commit worker, launched by the Chief Thread at the user's request to commit and push. Not a reviewer; this entry approves nothing.
+- **Stale-input check.** Manifest `artifacts/m3-fullscreen-2/inputs.sha256` SHA-256 `66B76864B95F6A86CD2A601807C08AB23AA867E12DF89A7676D69F8589AFC4ED` matches; all 23 entries match the working tree (0 mismatches).
+- **Verification.** `verify.ps1` PASS right before the commit: checks (29 passed, 0 failed) plus the release build. `roqa.exe` SHA-256 `78CFE1E5938D2362B4DF5409270D8854E56DB7038D4C3D5EF782DD32E03E161A`, identical to the recorded hash.
+- **Contents.** The POLISHED candidate, unchanged: `src/catalog_timing.rs`, `src/host.rs`, `src/native_window.rs`, plus this ledger entry. `.gitignore` is the user's own edit and is excluded.
+- **Still NOT RUN / deferred, not passed.** Native suites, idle and trace measurement, council review and accessibility.

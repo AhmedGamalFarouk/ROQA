@@ -57,12 +57,18 @@ impl CatalogTiming {
         let next = self
             .refresh_deadline()
             .map_or(self.repair, |deadline| deadline.min(self.repair));
-        // Round up: a sub-millisecond remainder must not turn the idle wait into a busy loop.
-        next.saturating_duration_since(now)
-            .as_nanos()
-            .div_ceil(1_000_000)
-            .min(u32::MAX as u128) as u32
+        milliseconds_until(next, now)
     }
+}
+
+/// Message-wait timeout for a deadline. Rounds up: a sub-millisecond remainder must not turn an
+/// idle wait into a busy loop that wakes before the deadline it is waiting for.
+pub fn milliseconds_until(deadline: Instant, now: Instant) -> u32 {
+    deadline
+        .saturating_duration_since(now)
+        .as_nanos()
+        .div_ceil(1_000_000)
+        .min(u32::MAX as u128) as u32
 }
 
 #[cfg(test)]
@@ -115,5 +121,17 @@ mod tests {
         timing.arm(start + SETTLE);
         assert!(!timing.refresh_due(start + SETTLE + Duration::from_millis(49)));
         assert!(timing.refresh_due(start + SETTLE + SETTLE));
+    }
+    #[test]
+    fn deadline_waits_never_round_a_remainder_to_zero() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(250);
+        assert_eq!(
+            milliseconds_until(deadline, deadline - Duration::from_micros(1)),
+            1
+        );
+        assert_eq!(milliseconds_until(deadline, start), 250);
+        assert_eq!(milliseconds_until(deadline, deadline), 0);
+        assert_eq!(milliseconds_until(start, deadline), 0);
     }
 }

@@ -221,10 +221,10 @@ pub fn monitors() -> Result<Vec<Monitor>> {
     handles
         .into_iter()
         .map(|handle| {
-            let (device, info) = monitor_info(handle)?;
-            let work = bounds(info.rcWork);
+            let info = monitor_info(handle)?;
+            let work = bounds(info.monitorInfo.rcWork);
             Ok(Monitor {
-                device,
+                device: device_name(&info),
                 work,
                 dpi: dpi_at(work)?,
             })
@@ -232,43 +232,42 @@ pub fn monitors() -> Result<Vec<Monitor>> {
         .collect()
 }
 
-/// Device name and geometry of one monitor; fails once its HMONITOR no longer exists.
-fn monitor_info(handle: HMONITOR) -> Result<(String, MONITORINFO)> {
+/// Geometry and device name of one monitor; fails once its HMONITOR no longer exists.
+fn monitor_info(handle: HMONITOR) -> Result<MONITORINFOEXW> {
     let mut info = MONITORINFOEXW::default();
     info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
     // SAFETY: cbSize selects the MONITORINFOEXW layout, which begins with MONITORINFO.
     unsafe { GetMonitorInfoW(handle, &raw mut info as *mut MONITORINFO).ok()? };
+    Ok(info)
+}
+
+fn device_name(info: &MONITORINFOEXW) -> String {
     let name = &info.szDevice;
     let length = name
         .iter()
         .position(|&unit| unit == 0)
         .unwrap_or(name.len());
-    Ok((String::from_utf16_lossy(&name[..length]), info.monitorInfo))
+    String::from_utf16_lossy(&name[..length])
 }
 
-/// Device name of the monitor whose whole area the foreground window covers while Windows reports a
-/// full-screen app. Windows sends no notification when full-screen apps start or stop, so callers
-/// re-check on events and a slow schedule. Any failed query reads as "not full screen", which keeps
-/// the surfaces visible rather than hiding them on a guess.
-pub fn fullscreen_device() -> Option<String> {
-    // SAFETY: shell state query with an out value owned by the binding.
-    let state = unsafe { SHQueryUserNotificationState() }.ok()?;
-    if state != QUNS_BUSY && state != QUNS_RUNNING_D3D_FULL_SCREEN {
-        return None;
-    }
+/// Device name of the monitor whose whole area the foreground window covers: the only window that
+/// can make a monitor full screen. Plain user32 geometry, so callers can run it before the shell
+/// query and poll only while it returns a candidate. Any failed query reads as "no candidate",
+/// which keeps the surfaces visible rather than hiding them on a guess.
+pub fn fullscreen_candidate() -> Option<String> {
     // Visible foreign top-level window only; ROQA's own windows never suppress ROQA.
     let key = dock::foreground_key().filter(|key| dock::valid_target(*key))?;
     let window = HWND(key.handle as *mut _);
-    // QUNS_BUSY also covers Presentation Settings, where the desktop spans every monitor.
+    // The desktop spans every monitor; under Presentation Settings (also QUNS_BUSY) it would read
+    // as full screen.
     // shortcut: a maximized window can still read as full screen under Presentation Settings
     // when the work area equals the monitor (auto-hide taskbar); compare frames if users hit it.
     let mut class = [0u16; 16];
     // SAFETY: bounded writable buffer; a stale HWND yields 0 characters.
-    let length = unsafe { GetClassNameW(window, &mut class) }.max(0) as usize;
-    if matches!(
-        String::from_utf16_lossy(&class[..length]).as_str(),
-        "Progman" | "WorkerW"
-    ) {
+    let length = usize::try_from(unsafe { GetClassNameW(window, &mut class) }).ok()?;
+    let class = &class[..length];
+    let named = |name: &str| name.encode_utf16().eq(class.iter().copied());
+    if length == 0 || named("Progman") || named("WorkerW") {
         return None;
     }
     let mut rect = RECT::default();
@@ -277,8 +276,17 @@ pub fn fullscreen_device() -> Option<String> {
         GetWindowRect(window, &mut rect).ok()?;
         MonitorFromWindow(window, MONITOR_DEFAULTTONULL)
     };
-    let (device, info) = monitor_info(monitor).ok()?;
-    topology::covers(bounds(rect), bounds(info.rcMonitor)).then_some(device)
+    let info = monitor_info(monitor).ok()?;
+    let area = bounds(info.monitorInfo.rcMonitor);
+    topology::covers(bounds(rect), area).then(|| device_name(&info))
+}
+
+/// Whether Windows reports a full-screen app (or exclusive Direct3D). Windows sends no notification
+/// when one starts or stops, and a failed query reads as false.
+pub fn shell_fullscreen() -> bool {
+    // SAFETY: shell state query with an out value owned by the binding.
+    unsafe { SHQueryUserNotificationState() }
+        .is_ok_and(|state| state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN)
 }
 
 unsafe extern "system" fn collect_monitor(
