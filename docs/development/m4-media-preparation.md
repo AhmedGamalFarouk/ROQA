@@ -76,11 +76,11 @@ No new crates. `windows-future` and `windows-collections` are already locked.
 ## Footprint-first design
 
 1. **No continuous render loop.** Media state changes cause one paint per visible notch, and only when the drawn view changes (same pattern as `refresh_clock`). No media work ever sets `live` or uses the compositor-clock frame path.
-2. **Collapsed look: static playing glyph (user decision, 2026-11-10; option A).** Media gives the collapsed notch no tick and no deadline, and adds zero collapsed repaints of its own. Play, pause and track changes can trigger a repaint, but only when the drawn glyph actually changes.
+2. **Collapsed look: static playing glyph plus static title (user decision, 2026-11-10; option A, title added 2026-11-10).** Media gives the collapsed notch no tick and no deadline, and adds zero collapsed repaints of its own. Play, pause and track changes can trigger a repaint, but only when the drawn glyph or title actually changes.
 
    The accepted pill still draws the clock. The existing `refresh_clock` (`src/host.rs`) repaints every visible notch once per minute when the time text changes; this is pre-existing, accepted behaviour, and the clock really is drawn while collapsed. Static collapsed playback therefore paints exactly once per minute, for the clock, and never for media. That is not a continuous render loop.
 
-   If the user wants literally zero collapsed paints, the clock must leave the pill. That would be a design change, not part of this plan. The progress ring (option B) is dropped. The accepted 150 × 30 pill and its geometry stay unchanged. It shows no title; title and artist appear only in the expanded panel. A collapsed title or wider pill is an open user question.
+   If the user wants literally zero collapsed paints, the clock must leave the pill. That would be a design change, not part of this plan. The progress ring (option B) is dropped. The collapsed notch shows the track title (user decision, 2026-11-10), which needs a wider pill than the accepted 150 × 30. The width and truncation rule go to the slice-2 media design addendum for separate review. Default for that addendum: static end-ellipsis, no marquee or scrolling, because a marquee needs a continuous repaint and breaks the zero-collapsed-repaint rule. The collapsed title repaints only when the track or the play state changes.
 3. **Expanded progress gate.** Progress ticks run only while the notch is `visible && expanded && Playing && rate > 0`. Hidden, fullscreen-suppressed, collapsed, paused or no-player states clear the deadline. While animating, the existing frame loop already repaints, and no extra tick is added.
 4. **Coarse cadence.** The position is `Position + (now − LastUpdatedTime) × PlaybackRate`, clamped to `[StartTime, EndTime]`. The next deadline is the moment the shown value changes: the next whole second of `m:ss`, or the next physical pixel of the bar, whichever is earlier. It is bounded to at least 1 s and rounded up with `milliseconds_until`. The clock already formats only on minute deadlines (`402941c`), so media ticks add no locale formatting.
 5. **Album-art cache.** One decoded entry, for the current track only, as premultiplied BGRA (`IconPixels`), keyed by session generation plus title and artist. Decode is capped at the drawn size in physical pixels, with a hard ceiling of 256 × 256 (≤256 KiB). Streams over 4 MiB (`Size()`) are rejected before decoding. A failure falls back to a no-art layout and is never retried for the same key.
@@ -89,7 +89,7 @@ No new crates. `windows-future` and `windows-collections` are already locked.
    - **Data source.** `IAudioMeterInformation` on the default render endpoint, already bound by slice 6. This measures the **whole endpoint**, all apps mixed, before volume. It is not a per-player level and not a spectrum; there is no FFT and no audio capture. It reads 0.0 for exclusive-mode streams without a hardware meter.
    - **Rate.** A host-loop deadline of at most 15 Hz (67 ms), not the compositor clock. That is more often than the Microsoft sample's 125 ms poll. Each sample is one `GetPeakValue` call, which returns the peak across all of the stream's channels. That makes it valid for mono, stereo and multichannel endpoints alike. `GetChannelsPeakValues` is not used: its count must equal the endpoint's metering channel count, and the pinned binding passes the slice length as that count. The bars come from a fixed array of the last few samples, with no allocation. It paints only when a bar's height, quantized to whole physical pixels, changes. So silence or steady levels cost samples but no paints.
    - **Bound.** At most 15 meter calls and at most 15 paints per second, only while expanded. That is about 900 per minute of continuous hover, and zero otherwise. The per-call CPU cost is UNVERIFIED.
-7. **Volume.** Event-driven only, with no polling. It re-reads the level on `OnNotify` and rebinds the endpoint on `OnDefaultDeviceChanged` (eRender/eConsole), outside the callback.
+7. **Volume.** Event-driven only, with no polling. It re-reads the level on `OnNotify` and rebinds the endpoint on `OnDefaultDeviceChanged` (eRender/eConsole), outside the callback. Volume is user-settable (user decision, 2026-11-10): setting it uses `IAudioEndpointVolume::SetMasterVolumeLevelScalar` on the default render endpoint, UNVERIFIED until slice 6 verifies it against the pinned crate. Where and how it appears goes to the design addendum; default: in the expanded panel.
 
 **Added footprint: estimates to be measured, not results.**
 
@@ -122,12 +122,12 @@ Each slice is one candidate with its own SHA-256 manifest, `check.ps1`/`verify.p
    - **Native evidence.** Screen capture of collapsed and expanded playback. Paint counts while collapsed and static must span at least one minute boundary, and show only the clock's single minute repaint and none from media.
    - **Non-goals.** Progress, art and controls.
 3. **Controls and accessible actions.**
-   - **Build.** Play/pause, previous and next chips, disabled per `Is*Enabled`. Pointer actions on the existing nonactivating notch. A notch UIA provider with Invoke, following the `dock_uia` pattern. A keyboard route (open question).
+   - **Build.** Play/pause, previous and next chips, disabled per `Is*Enabled`. Pointer actions on the existing nonactivating notch. A notch UIA provider with Invoke, following the `dock_uia` pattern. Keyboard route: Tab and arrow keys into the focused notch's controls through UIA (user decision, 2026-11-10).
    - **Tests.** Hit-testing and the enabled-state mapping.
    - **Native evidence.** Real player play/pause/skip, Narrator invoke and focus return.
    - **Non-goals.** Seek and volume.
 4. **Progress and seek.**
-   - **Build.** The gated, coarse progress deadline, for the expanded panel only. `TryChangePlaybackPositionAsync` from bar click and keyboard.
+   - **Build.** The gated, coarse progress deadline, for the expanded panel only. `TryChangePlaybackPositionAsync` from a click or tap on the bar (user decision, 2026-11-10).
    - **Tests.** The deadline math, gating (hidden, collapsed, paused, fullscreen) and clamping.
    - **Native evidence.** Wake counts while expanded and playing, compared with collapsed. Seek against a real player.
    - **Non-goals.** A visualizer.
@@ -187,9 +187,9 @@ Deterministic tests do not prove any of these. Council, accessibility checks, na
 
 ## Open questions for the user
 
-1. **Collapsed title or wider pill.** The accepted 150 px pill fits no title, so the plan keeps it title-free. Should the collapsed notch show a title, which would need a wider pill and a design change?
-2. **Visualizer source.** Is an endpoint-wide level, which includes all apps' audio, acceptable? A per-player level is UNVERIFIED and is not planned.
-3. **Panel size.** Does media need a larger expanded panel than 320 × 80, which could change the fixed 400 × 124 HWND?
-4. **Keyboard route.** A global hotkey is not allowed, so is the route the picker, a `roqa --media …` IPC command, or UIA only?
-5. **Volume.** Display it only, or also set it? Where is it shown?
-6. **Seek UI.** A click on the bar is enough, or full RangeValue keyboard adjustment?
+1. **Collapsed title or wider pill.** DECIDED (user decision, 2026-11-10): the collapsed notch shows the track title, which needs a wider pill. Width and truncation rule go to the slice-2 media design addendum (default: static end-ellipsis, no marquee). Media controls are confirmed in scope (slice 3, unchanged).
+2. **Visualizer source.** DECIDED (user decision, 2026-11-10): the endpoint-wide level, which includes all apps' audio, is acceptable. It still runs only while the panel is expanded, visible and playing. A per-player level is UNVERIFIED and is not planned.
+3. **Panel size.** DECIDED (user decision, 2026-11-10): the panel gets taller, about 360 × 120, with a title row, a controls row and a volume row. The exact size and its effect on the fixed 400 × 124 HWND go to the slice-2 media design addendum for separate review. This may grow the HWND, a small footprint cost that the addendum must state.
+4. **Keyboard route.** DECIDED (user decision, 2026-11-10): Tab and arrow keys move into the focused notch's controls, exposed through UIA. There is no global hotkey, no `roqa --media` IPC command and no picker entries.
+5. **Volume.** DECIDED (user decision, 2026-11-10): user-settable, not display-only. Where and how it appears goes to the design addendum (default: expanded panel).
+6. **Seek UI.** DECIDED (user decision, 2026-11-10): click or tap the progress bar to seek. Arrow-key adjustment through RangeValue is not planned.
