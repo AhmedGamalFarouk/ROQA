@@ -493,3 +493,26 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Open for the user:** collapsed title or wider pill; the endpoint-wide visualizer level; panel size; keyboard route; volume scope; seek UI.
 - **Still NOT RUN or deferred, not passed:** council, accessibility, Windows 10, compositor/GPU/DWM/power, and M4 native evidence.
 - **Committed by:** the commit worker (a Claude Sonnet 5.5 worker launched by the Chief Thread at the user's explicit request, "do all"), not a reviewer. The stale check passed 19/19 against the final manifest before commit.
+
+## M3 native validation 1: suites PASS, idle CPU inconclusive (2026-11-10 local)
+
+- **Author.** A Claude Opus 5.5 worker, launched by the Chief Thread. Evidence only: it approves nothing. Packet: `docs/development/m3-native-validation-1.md`. Evidence is in `artifacts/m3-native-1/`.
+- **Confirmations.** The user confirmed a free desktop twice ("yes the desktop is free", "do all"). Every script ran after a read-only pre-check: foreground, input-idle time, and no ROQA or cargo process.
+- **Suites.** All five passed on root `402941c` `595E7AA2B4CD993135B6EE50D6DFCC346CD59F875E0A1CC3AF1D1D2D3AD85581`, each with a graceful `--quit`:
+  - `topology-check.ps1`: 25/25 (two monitors, 6/6 surfaces);
+  - `smoke.ps1`: 329/329;
+  - `picker-smoke.ps1`: 226/226;
+  - `catalog-smoke.ps1`: 67/67;
+  - `packaged-hung-check.ps1`: 16/16.
+- **Baselines.** Built from `git archive` exports with the pinned toolchain:
+  - `1e47cc2`: `F00B5824…3B82`;
+  - `9e449d2`: `0DB85A44…67EC`;
+  - `402941c`: `796DB5C0…1C9C`.
+
+  The `402941c` archive build matches the root build except for 24 bytes of linker timestamp and PDB GUID; the code is identical.
+- **Idle observation.** `measure-idle.ps1` ran 3 interleaved repetitions per binary.
+  - CPU is **inconclusive**: every run was 0 to 3 ticks of 15.625 ms, at or below the 0.52 ms/s floor of a 30 s sample.
+  - Private bytes (about 17 to 21 MiB) and handles (435 or 436) are flat across commits.
+  - No performance gain is claimed.
+- **NOT RUN.** The `idle-matrix.ps1` helper (GDI/USER at idle, plus context switches as a wake proxy) did not run: its input gate stopped it, because the user was active. Also NOT RUN: the 15-minute trace and fullscreen cases.
+- **Deferred.** DWM, GPU, power, council review, accessibility and Windows 10.
