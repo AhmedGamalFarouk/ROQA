@@ -465,3 +465,31 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Verification.** `verify.ps1` PASS right before commit: checks (29 tests passed, 0 failed) and the locked release build. `roqa.exe` `595E7AA2B4CD993135B6EE50D6DFCC346CD59F875E0A1CC3AF1D1D2D3AD85581`, identical to the expected hash.
 - **Contents.** The POLISHED candidate, unchanged: `src/host.rs`, `src/native_window.rs`, plus the packet and this ledger entry. `.gitignore` is the user's own edit and is excluded.
 - **Still NOT RUN / deferred, not passed.** Native suites, idle and trace measurement, council review and accessibility.
+
+## M4 media preparation plan: POLISHED and committed (2026-11-10 local)
+
+- **Author:** a Claude Opus 5.5 High worker thread. Doc-only, base `402941c`.
+- **User decisions:**
+  - Always animate, including when reduced motion is on; PLAN.md amended. Focus return and accessible actions are still required.
+  - Collapsed look A, the static glyph: zero media repaints while collapsed; the existing once-a-minute clock repaint remains; the accepted 150×30 pill is unchanged with no title.
+  - The visualizer runs only while visible, expanded and playing.
+  - Reviewer plan: one Sol round, then Opus.
+- **Reviews:**
+  - Sol 6.1 Medium, stale start on `7431797E…`: REVISE, BLK-1 (input changed mid-review), superseded. Link: <t3-thread://v2/20b131d6-becb-42ea-b20c-104902347b7e/thread:delegated-task:command%3Amcp%3Ad8024b42-f1c4-4fc7-9f2b-2000f409518b%3Adelegate-task%3A01e6e9f5-d3c9-4e62-afcd-3e87a8aa357e>.
+  - Sol 6.1 Medium on `3BAE462E6D1D28B1D91E82243BACEEF8374352D701EA103400573CC709E28014`: REVISE, with MAJ-1 collapsed clock repaint, MAJ-2 `GetChannelsPeakValues` channel count, MAJ-3 non-Send thumbnail stream handoff, and MIN-1 progress deadline. Link: <t3-thread://v2/20b131d6-becb-42ea-b20c-104902347b7e/thread:delegated-task:command%3Amcp%3Ad8024b42-f1c4-4fc7-9f2b-2000f409518b%3Adelegate-task%3Aafd0e810-e083-43cb-b433-b6f1183ec264>.
+  - The author fixed all four.
+  - Fresh Opus 5.5 High recheck on `973DDBD23DD9183251153BC413F7A3FC5DCA1739EC4841F3D4E09933DB2D115F`: POLISHED, manifest 19/19 at both its start and end check. Link: <t3-thread://v2/20b131d6-becb-42ea-b20c-104902347b7e/thread:delegated-task:command%3Amcp%3Ad8024b42-f1c4-4fc7-9f2b-2000f409518b%3Adelegate-task%3Ab9dd2da9-263c-4a0b-a704-dfcc897eed38>.
+- **Open minor:** M4PREP-OPUS-MIN-1, a progress `m:ss` lag of ≤0.8 s, deferred to slice 4.
+- **UNVERIFIED:**
+  - unpackaged GSMTC access versus the `globalMediaControl` capability;
+  - handler and completion threads;
+  - blocking getters and thumbnail reads on a hung player;
+  - the `AgileReference` handoff;
+  - Core Audio and pool threads;
+  - player rate and last-updated fields;
+  - abort-on-panic at callbacks;
+  - meter cost;
+  - all footprint estimates.
+- **Open for the user:** collapsed title or wider pill; the endpoint-wide visualizer level; panel size; keyboard route; volume scope; seek UI.
+- **Still NOT RUN or deferred, not passed:** council, accessibility, Windows 10, compositor/GPU/DWM/power, and M4 native evidence.
+- **Committed by:** the commit worker (a Claude Sonnet 5.5 worker launched by the Chief Thread at the user's explicit request, "do all"), not a reviewer. The stale check passed 19/19 against the final manifest before commit.

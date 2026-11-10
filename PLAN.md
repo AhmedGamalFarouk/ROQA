@@ -82,7 +82,7 @@ Acceptance: reference hardware matrix and lifecycle scenarios pass; no stranded 
 
 Deliver: real GSMTC subscriptions, participating-player controls, bounded album-art decoding, volume/device events and clear no-player/permission/error states. Compact/expanded panel with focus return and accessible actions. Hidden progress/visualizer work stops. Proper event-token teardown and media-session replacement.
 
-Acceptance: tracks/player changes, seek/play/pause, app disappearance/hang, sleep/resume and audio-device changes tested. Reduced-motion settings remove nonessential expand/collapse motion; focus return and accessible actions remain usable. Static collapsed playback has no continuous app render loop. Real performance trace and independent reviews pass.
+Acceptance: tracks/player changes, seek/play/pause, app disappearance/hang, sleep/resume and audio-device changes tested. By user decision (2026-11-10) the notch and media panel always animate, even when Windows animation effects are turned off for reduced motion; focus return and accessible actions remain usable. Static collapsed playback has no continuous app render loop. Real performance trace and independent reviews pass.
 
 ## M5 — core product and performance proof
 
