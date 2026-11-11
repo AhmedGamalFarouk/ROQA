@@ -42,7 +42,7 @@ The font is Segoe UI Variable, from the system; no font is bundled.
 
 **PROVISIONAL.** The user chose direction B from the four M4 mockups (`artifacts/m4-mockups/notch-variants.html`, section B, outside version control) on 2026-11-10. This section records B's geometry as slice 2 draws it. It reuses the tokens above and has had no separate design review; it is expected to change. The no-player notch above is unchanged.
 
-- **When.** The media notch is drawn while a media session exists (`media::View::Track`), playing or paused, even before its title arrives. No player, refused access and errors all draw the plain 150 × 30 clock notch. Permission and error text is deferred to a later slice.
+- **When.** The media notch is drawn while a media session exists (`media::View::Track`), playing or paused, even before its title arrives. No player, refused access and errors all draw the plain 150 × 30 clock notch. Refused access and errors add one status line to the open plain panel (below).
 - **Shape changes are instant.** When a session appears or ends, the shape swaps in one paint, with no tween. Expanding and collapsing animate with the accepted springs to the media sizes. Play, pause and track changes never change the geometry.
 
 | Token | Media pill | Media panel |
@@ -106,6 +106,7 @@ The font is Segoe UI Variable, from the system; no font is bundled.
   - It is revealed and placed like the controls row: fixed panel place, body clip, `motion::reveal`. The pill draws none.
   - It samples only while a visible notch is open or opening and the track plays. Paused, the bars lie flat; collapsed, hidden, full-screen-suppressed, or with no player, endpoint or meter, nothing is sampled. Bars restart flat, never from old samples.
   - The bars are decorative: UI Automation does not expose them.
+- **Status line (M4 gate fix 1, PROVISIONAL).** `View::Permission` and `View::Error` draw one short line in the open plain 320 × 80 panel, under the date: "Windows blocked media access" or "Media controls unavailable". 11 DIP Segoe UI Variable Text regular, centred, white 60 %, revealed with the date (`motion::reveal`), in a row centred on y 72 (66–78), trimmed with an ellipsis. The pill, the media panel and `NoPlayer` draw none. The notch repaints when the status changes. This geometry has had no design review and may collide with the date row (48–68) at large text scales.
 - **Reserved panel rows.** Nothing else is drawn below 50, and there are no placeholders.
 
 **Type.** Segoe UI Variable Text in every role. White on black is 21 : 1; white 60 % is about 7.4 : 1.
@@ -176,7 +177,7 @@ Weights switch at the midpoint of the morph. While paused, the glyph and the tit
 ## Accessibility
 
 - **Dock.** UIA rectangles and hit-testing are unchanged; the picker remains the keyboard and Narrator route.
-- **Notch media controls (slice 3).** A ToolBar root ("ROQA Notch") with three Buttons while a session exists: "Previous track", "Pause, Title – Artist" or "Play, …", and "Next track". Slice 6 (PROVISIONAL) adds a fourth Button, the mute toggle: "Mute, volume 40%", or "Unmute, volume 40%" while muted, and "Volume unavailable, no audio device", disabled, without an endpoint. The level is read-only text in that name; there is no RangeValue and no arrow-key adjustment. Invoke works whether or not the panel is open; a disabled control reports `IsEnabled` false and refuses Invoke and focus. Bounds are the open panel's while it is open or opening, and offscreen otherwise.
+- **Notch media controls (slice 3).** A ToolBar root ("ROQA Notch"; "ROQA Notch, Windows blocked media access" or "…, Media controls unavailable" while the status line shows, PROVISIONAL) with three Buttons while a session exists: "Previous track", "Pause, Title – Artist" or "Play, …", and "Next track". Slice 6 (PROVISIONAL) adds a fourth Button, the mute toggle: "Mute, volume 40%", or "Unmute, volume 40%" while muted, and "Volume unavailable, no audio device", disabled, without an endpoint. The level is read-only text in that name; there is no RangeValue and no arrow-key adjustment. Invoke works whether or not the panel is open; a disabled control reports `IsEnabled` false and refuses Invoke and focus. Bounds are the open panel's while it is open or opening, and offscreen otherwise.
   - **Keyboard (user decision, 2026-11-10).** Entry is only through UIA focus, such as Narrator moving to a control: the notch takes the foreground if Windows allows it and opens. Tab and Shift+Tab, and the arrow keys, move among enabled controls, wrapping; Enter and Space press the focused one; Escape closes the panel and gives the foreground back to the window that had it. No global hotkey, IPC command or picker entry.
   - Pointer use stays nonactivating: a click on a control never takes focus.
   - **Position (slice 4).** While the progress row is drawn, the play/pause Button's `ItemStatus` is its text, such as "1:23 of 4:56"; otherwise it is empty. It is read-only: no RangeValue and no arrow-key seek (user decision). No property-changed event is raised as it advances.

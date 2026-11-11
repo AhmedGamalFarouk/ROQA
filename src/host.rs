@@ -117,6 +117,17 @@ impl NotchShadow {
     }
 }
 
+/// What one pass must repaint on a notch. Requests only grow within a pass, so a notch is painted
+/// once, by the strongest: a full paint covers a bars-only one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Repaint {
+    #[default]
+    Nothing,
+    /// Only the visualizer slot, for a settled open panel whose bar heights changed.
+    Meter,
+    Full,
+}
+
 struct Surface {
     // Declared first: UIA must release the dock before its HWND is destroyed.
     role: Role,
@@ -138,6 +149,8 @@ struct Surface {
     played: Option<Progress>,
     /// Notch: the visualizer bar heights last drawn.
     bars: [i32; audio::BARS],
+    /// Notch: what this pass has asked to repaint (`Desktop::paint_requested`).
+    repaint: Repaint,
 }
 impl Drop for Surface {
     fn drop(&mut self) {
@@ -224,7 +237,11 @@ impl Surface {
             motion: Tween::rest(0.0),
             played: None,
             bars: [0; audio::BARS],
+            repaint: Repaint::Nothing,
         })
+    }
+    fn request(&mut self, repaint: Repaint) {
+        self.repaint = self.repaint.max(repaint);
     }
     /// A visible notch that is open or opening; only these read and draw playback progress.
     fn expanded(&self) -> bool {
@@ -327,6 +344,7 @@ impl Surface {
                     controls
                 })
                 .unwrap_or_default();
+            state.status = media.view().status();
             state.focus = focus.as_ref().map(|focus| focus.control);
             state.open = self.motion.target() >= 1.0;
             state.position = self
@@ -381,7 +399,12 @@ impl Surface {
             bars: self.bars,
         };
         shadow.paint(&scene, self.window.0)?;
-        self.canvas.paint_notch(&scene)
+        self.canvas.paint_notch(&scene, media.view().status())
+    }
+    /// Repaints only the visualizer slot with the new bar heights; no UIA state changes with them.
+    fn paint_meter(&mut self, peaks: [f32; audio::BARS]) -> Result<()> {
+        self.bars = layout::meter_heights(peaks, self.dpi);
+        self.canvas.paint_meter(self.dpi, self.bars)
     }
     /// Pointer entered or left the notch. Entering swells the pill at once and opens it only after
     /// `INTENT_TIME` (a pointer passing along the screen edge never pops the panel open); leaving
@@ -595,6 +618,24 @@ fn step<const N: usize>(enabled: [bool; N], from: Option<usize>, forward: bool) 
             }
         })
         .find(|&control| enabled[control])
+}
+/// What `reconcile_focus` does for a notch whose keyboard focus is on `control`.
+#[derive(Debug, PartialEq, Eq)]
+enum Refocus {
+    Keep,
+    Announce,
+    Move(usize),
+    Release,
+}
+fn refocus(enabled: [bool; 4], control: usize, replaced: bool) -> Refocus {
+    if enabled.get(control) == Some(&true) {
+        return if replaced {
+            Refocus::Announce
+        } else {
+            Refocus::Keep
+        };
+    }
+    step(enabled, Some(control), true).map_or(Refocus::Release, Refocus::Move)
 }
 /// Transient topology reads are retried this often, at most `TOPOLOGY_RETRIES` times per change.
 const TOPOLOGY_RETRY: Duration = Duration::from_millis(250);
@@ -876,20 +917,32 @@ impl Desktop {
             self.clock_due = now + Duration::from_millis(clock.next_minute_ms.into());
             if clock.time != self.clock || clock.date != self.date {
                 (self.clock, self.date) = (clock.time, clock.date);
-                self.paint_notches()?;
+                self.request_notches(Repaint::Full, |_| true);
             }
         }
         Ok(milliseconds_until(self.clock_due, now))
     }
-    /// Repaints every visible notch with the current clock and media; hidden ones are painted before
-    /// they are restored.
-    fn paint_notches(&mut self) -> Result<()> {
-        for notch in self
-            .surfaces
-            .iter_mut()
-            .filter(|s| s.kind() == SurfaceKind::Notch && s.visible)
-        {
-            notch.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?;
+    /// Asks for `repaint` on every visible notch `wanted` accepts. Nothing is drawn until the pass
+    /// ends (`paint_requested`); hidden notches are painted before they are restored.
+    fn request_notches(&mut self, repaint: Repaint, wanted: impl Fn(&Surface) -> bool) {
+        for notch in &mut self.surfaces {
+            if notch.kind() == SurfaceKind::Notch && notch.visible && wanted(notch) {
+                notch.request(repaint);
+            }
+        }
+    }
+    /// Paints each visible notch once for whatever this pass asked of it.
+    fn paint_requested(&mut self) -> Result<()> {
+        let peaks = self.audio.peaks();
+        for notch in &mut self.surfaces {
+            match std::mem::take(&mut notch.repaint) {
+                _ if !notch.visible => {}
+                Repaint::Nothing => {}
+                Repaint::Meter => notch.paint_meter(peaks)?,
+                Repaint::Full => {
+                    notch.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?
+                }
+            }
         }
         Ok(())
     }
@@ -911,7 +964,7 @@ impl Desktop {
             let width = layout::media_progress(notch.dpi).width;
             // A running animation paints every frame already.
             if !notch.live && notch.played != track.progress(ticks, width) {
-                notch.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?;
+                notch.request(Repaint::Full);
             }
             let floor =
                 (self.progress_tick + Duration::from_secs(1)).saturating_duration_since(now);
@@ -923,8 +976,8 @@ impl Desktop {
         self.progress_due = next_due;
         Ok(next_due.map_or(INFINITE, |due| milliseconds_until(due, Instant::now())))
     }
-    /// Reads the endpoint meter once per due sample (`meter_due`) and repaints each settled open
-    /// notch whose bar heights changed; returns how long until the next sample. Stopped, it makes
+    /// Reads the endpoint meter once per due sample (`meter_due`) and asks to repaint the meter slot
+    /// of each settled open notch whose bar heights changed; returns how long until the next sample. Stopped, it makes
     /// no meter call, flattens the bars and has no deadline, and with no open notch paints nothing.
     #[inline(never)]
     fn refresh_meter(&mut self) -> Result<u32> {
@@ -941,10 +994,11 @@ impl Desktop {
             }
         }
         let peaks = self.audio.peaks();
+        let shown = self.media.view().shown().is_some();
         for notch in self.surfaces.iter_mut().filter(|s| s.expanded()) {
             // A running animation paints every frame already.
-            if !notch.live && notch.bars != layout::meter_heights(peaks, notch.dpi) {
-                notch.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?;
+            if shown && !notch.live && notch.bars != layout::meter_heights(peaks, notch.dpi) {
+                notch.request(Repaint::Meter);
             }
         }
         Ok(due.map_or(INFINITE, |_| milliseconds_until(now + METER_PERIOD, now)))
@@ -1060,8 +1114,8 @@ impl Desktop {
         }
         Ok(())
     }
-    /// Album art side to decode, in physical pixels: the panel cover on the densest notch, or at
-    /// 96 DPI while the notch is hidden, so a track that changes meanwhile still gets art.
+    /// Album art side to decode, in physical pixels: the panel cover on the densest notch (also while
+    /// it is hidden), or 0 with no notch surface, which skips the decode until one exists.
     // shortcut: art keeps its decode size after a DPI or text-size change until the track changes; re-decode if it looks soft.
     fn cover_pixels(&self) -> u32 {
         self.surfaces
@@ -1069,7 +1123,7 @@ impl Desktop {
             .filter(|s| s.kind() == SurfaceKind::Notch)
             .map(|s| (COVER_DIPS * s.dpi as f32 / 96.0).round() as u32)
             .max()
-            .unwrap_or(COVER_DIPS as u32)
+            .unwrap_or(0)
     }
     /// One icon set for every dock, extracted for the densest dock; lower-DPI docks scale it down.
     // shortcut: mixed-DPI docks resample icons; keep one cache size per DPI if that looks soft on hardware.
@@ -1348,21 +1402,22 @@ impl Desktop {
         true
     }
     /// A player can disable the focused action or replace its entire session between input events.
-    fn reconcile_focus(&mut self) {
+    fn reconcile_focus(&mut self, replaced: bool) {
         let enabled = self.enabled();
         for notch in &mut self.surfaces {
             notch.publish_notch(&self.media, &self.audio);
             let Some(control) = notch.focused().map(|focus| focus.control) else {
                 continue;
             };
-            if enabled.get(control) == Some(&true) {
-                continue;
-            }
-            if let Some(next) = step(enabled, Some(control), true) {
-                notch.focus_control(next, None);
-                notch.announce_focus();
-            } else {
-                notch.release_focus();
+            match refocus(enabled, control, replaced) {
+                Refocus::Keep => {}
+                // The retained element belonged to the old session: tell clients about the new one.
+                Refocus::Announce => notch.announce_focus(),
+                Refocus::Move(next) => {
+                    notch.focus_control(next, None);
+                    notch.announce_focus();
+                }
+                Refocus::Release => notch.release_focus(),
             }
         }
     }
@@ -1570,30 +1625,28 @@ impl Desktop {
         }
         self.media
             .set_expanded(self.surfaces.iter().any(Surface::expanded));
-        // One paint per visible notch when the drawn track changes or its pause grace expires.
+        // One paint per visible notch when the drawn track or status changes or its pause grace
+        // expires, whatever else this pass asks (`paint_requested`).
         let generation = self.media.generation();
-        let redraw = self.media.refresh(self.cover_pixels());
+        let status = self.media.view().status();
+        let redraw =
+            self.media.refresh(self.cover_pixels()) || status != self.media.view().status();
         let shown = self.media.view().shown().is_some();
         if shown {
             // Core Audio loads only once a media panel can show the volume row.
             self.audio.start();
         }
         let volume = self.audio.refresh();
-        if redraw || volume || generation != self.media.generation() {
-            self.reconcile_focus();
+        let replaced = generation != self.media.generation();
+        if redraw || volume || replaced {
+            self.reconcile_focus(replaced);
         }
         if redraw {
-            self.paint_notches()?;
+            self.request_notches(Repaint::Full, |_| true);
         } else if volume && shown {
             // Only an open or opening panel draws the volume row; a collapsed pill has nothing new.
             let now = Instant::now();
-            for notch in self.surfaces.iter_mut().filter(|s| {
-                s.kind() == SurfaceKind::Notch
-                    && s.visible
-                    && motion::reveal(s.motion.value(now)) > 0.0
-            }) {
-                notch.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?;
-            }
+            self.request_notches(Repaint::Full, |s| motion::reveal(s.motion.value(now)) > 0.0);
         }
         self.refresh_dock(model)?;
         self.refresh_fullscreen(model.generation)?;
@@ -1601,6 +1654,7 @@ impl Desktop {
             .refresh_clock()?
             .min(self.refresh_progress()?)
             .min(self.refresh_meter()?);
+        self.paint_requested()?;
         if let Some(picker) = &mut self.picker {
             picker.synchronize(model)?;
             if picker.closed() {
@@ -1649,6 +1703,9 @@ impl Desktop {
             // topology placement may have dropped a monitor: re-read both.
             self.request_topology();
             self.clock_due = Instant::now();
+            // The old window set may have missed media and audio events too, as at a resume.
+            self.media.reconnect();
+            self.audio.reconnect();
         }
         if self.rebuild.finish(rebuilt.is_ok(), Instant::now()) {
             Ok(())
@@ -1971,6 +2028,33 @@ mod clock_wait_tests {
         }
         assert_eq!(samples, [0, 67, 300, 367, 1000, 3_601_000, 3_601_067]);
         assert!(samples.windows(2).all(|pair| pair[1] - pair[0] >= 67));
+    }
+
+    #[test]
+    fn a_pass_paints_each_notch_once_by_its_strongest_request() {
+        // A tick, a meter sample and a minute in one pass: the full paint covers the bars.
+        let mut asked = Repaint::default();
+        assert_eq!(asked, Repaint::Nothing);
+        for request in [Repaint::Meter, Repaint::Full, Repaint::Meter] {
+            asked = asked.max(request);
+        }
+        assert_eq!(asked, Repaint::Full);
+        // A bars-only pass repaints only the meter slot, and taking the request resets it.
+        let mut asked = Repaint::Nothing.max(Repaint::Meter);
+        assert_eq!(std::mem::take(&mut asked), Repaint::Meter);
+        assert_eq!(asked, Repaint::Nothing);
+    }
+
+    #[test]
+    fn focus_is_reannounced_after_a_player_swap_and_moves_only_off_a_disabled_control() {
+        let all = [true; 4];
+        assert_eq!(refocus(all, 1, false), Refocus::Keep);
+        // The session was replaced and the focused index still exists: clients must hear of it.
+        assert_eq!(refocus(all, 1, true), Refocus::Announce);
+        let no_next = [true, true, false, true];
+        assert_eq!(refocus(no_next, 2, false), Refocus::Move(3));
+        assert_eq!(refocus(no_next, 2, true), Refocus::Move(3));
+        assert_eq!(refocus([false; 4], 1, true), Refocus::Release);
     }
 
     #[test]

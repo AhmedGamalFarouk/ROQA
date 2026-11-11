@@ -7,7 +7,7 @@
 //! host (STA) thread.
 use std::sync::{
     Arc,
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 use windows::{
     Win32::{
@@ -22,7 +22,7 @@ use windows::{
             MMDeviceEnumerator, eConsole, eRender,
         },
         System::{
-            Com::{CLSCTX_ALL, CoCreateInstance},
+            Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree},
             Threading::GetCurrentThreadId,
         },
         UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP},
@@ -72,12 +72,36 @@ fn percent(scalar: f32) -> u8 {
     (scalar.clamp(0.0, 1.0) * 100.0).round() as u8
 }
 
+/// A nonzero FNV-1a hash of an endpoint ID, so callbacks can compare IDs without locking.
+fn id_hash(id: &[u16]) -> u64 {
+    let hash = id.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &unit| {
+        (hash ^ u64::from(unit)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    hash.max(1)
+}
+
+/// Whether a device change can affect the bound endpoint: any change while none is known (`bound`
+/// 0), or one whose ID is unknown or the bound one's. Other devices' changes bind nothing new.
+fn affects(bound: u64, changed: Option<u64>) -> bool {
+    bound == 0 || changed.is_none_or(|changed| changed == bound)
+}
+
 /// The only state callbacks touch.
 struct Wake {
     dirty: AtomicU32,
+    /// `id_hash` of the bound endpoint, or 0 while none is.
+    bound: AtomicU64,
     host: u32,
 }
 impl Wake {
+    /// `raise(REBIND)` for a change to endpoint `id`, unless it cannot concern the bound one.
+    fn rebind_for(&self, id: &PCWSTR) {
+        // SAFETY: Core Audio passes a NUL-terminated endpoint ID valid for this call; null is skipped.
+        let changed = (!id.is_null()).then(|| id_hash(unsafe { id.as_wide() }));
+        if affects(self.bound.load(Ordering::Relaxed), changed) {
+            self.raise(REBIND);
+        }
+    }
     /// Callback side; posts only when no wake is pending already. A lost post leaves the bit set
     /// for the loop's next finite deadline (the clock's, at most a minute).
     fn raise(&self, bit: u32) {
@@ -91,17 +115,18 @@ impl Wake {
 #[implement(IMMNotificationClient)]
 struct DeviceEvents(Arc<Wake>);
 impl IMMNotificationClient_Impl for DeviceEvents_Impl {
-    // Any device arriving, leaving or changing state may change or restore the default endpoint.
-    fn OnDeviceStateChanged(&self, _: &PCWSTR, _: DEVICE_STATE) -> Result<()> {
-        self.0.raise(REBIND);
+    // The bound endpoint changing state, or any device while none is bound, may need a new bind;
+    // other devices (capture, Bluetooth flurries) change nothing. A default switch is the next event.
+    fn OnDeviceStateChanged(&self, id: &PCWSTR, _: DEVICE_STATE) -> Result<()> {
+        self.0.rebind_for(id);
         Ok(())
     }
-    fn OnDeviceAdded(&self, _: &PCWSTR) -> Result<()> {
-        self.0.raise(REBIND);
+    fn OnDeviceAdded(&self, id: &PCWSTR) -> Result<()> {
+        self.0.rebind_for(id);
         Ok(())
     }
-    fn OnDeviceRemoved(&self, _: &PCWSTR) -> Result<()> {
-        self.0.raise(REBIND);
+    fn OnDeviceRemoved(&self, id: &PCWSTR) -> Result<()> {
+        self.0.rebind_for(id);
         Ok(())
     }
     fn OnDefaultDeviceChanged(&self, flow: EDataFlow, role: ERole, _: &PCWSTR) -> Result<()> {
@@ -169,6 +194,9 @@ fn bind(devices: &IMMDeviceEnumerator, wake: &Arc<Wake>) -> Result<Endpoint> {
     // `events` stays alive in `Endpoint` until it is unregistered.
     unsafe {
         let device = devices.GetDefaultAudioEndpoint(eRender, eConsole)?;
+        let id = device.GetId()?;
+        wake.bound.store(id_hash(id.as_wide()), Ordering::Relaxed);
+        CoTaskMemFree(Some(id.0.cast_const().cast()));
         let volume: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None)?;
         volume.RegisterControlChangeNotify(&events)?;
         // The volume row works without a meter; the visualizer then stays flat.
@@ -218,13 +246,14 @@ impl Audio {
             peaks: [0.0; BARS],
             wake: Arc::new(Wake {
                 dirty: AtomicU32::new(0),
+                bound: AtomicU64::new(0),
                 // SAFETY: reads this thread's ID; no pointers.
                 host: unsafe { GetCurrentThreadId() },
             }),
         }
     }
     /// Subscribes to device changes once; the next `refresh` binds the default endpoint. A failure
-    /// leaves the row unavailable and is not retried.
+    /// leaves the row unavailable until the next `reconnect` allows another try.
     pub fn start(&mut self) {
         if std::mem::replace(&mut self.started, true) {
             return;
@@ -263,10 +292,13 @@ impl Audio {
         self.wake.dirty.load(Ordering::Relaxed) != 0
     }
     /// After resume or an Explorer restart, binds the default endpoint and its meter again, as a
-    /// device may have changed or been invalidated while events were missed. Not before `start`.
-    pub fn reconnect(&self) {
+    /// device may have changed or been invalidated while events were missed. After a failed `start`
+    /// (no enumerator, say while AudioSrv is down at logon), the next `start` tries again.
+    pub fn reconnect(&mut self) {
         if self.devices.is_some() {
             self.wake.dirty.fetch_or(REBIND, Ordering::Relaxed);
+        } else {
+            self.started = false;
         }
     }
     /// Reads one endpoint-wide peak (all channels and apps, before volume) into the newest bar. A
@@ -301,6 +333,7 @@ impl Audio {
         if dirty & REBIND != 0 {
             // The old callback is unregistered before the new endpoint is bound.
             self.endpoint = None;
+            self.wake.bound.store(0, Ordering::Relaxed);
             self.endpoint = self.devices.as_ref().and_then(|devices| {
                 bind(&devices.enumerator, &self.wake)
                     .inspect_err(|error| eprintln!("Audio: no render endpoint: {error}"))
@@ -356,14 +389,16 @@ impl Audio {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::Media::Audio::{
-        DEVICE_STATE_UNPLUGGED, eCapture, eCommunications, eMultimedia,
+    use windows::{
+        Win32::Media::Audio::{DEVICE_STATE_UNPLUGGED, eCapture, eCommunications, eMultimedia},
+        core::w,
     };
 
     fn wake() -> Arc<Wake> {
         // Thread 0 has no queue, so the posts below fail harmlessly; only the bits matter.
         Arc::new(Wake {
             dirty: AtomicU32::new(0),
+            bound: AtomicU64::new(0),
             host: 0,
         })
     }
@@ -403,6 +438,45 @@ mod tests {
                 .unwrap();
             assert_eq!(take(&wake), 0);
         }
+    }
+
+    #[test]
+    fn other_devices_changes_do_not_rebind_and_a_failed_start_retries_on_reconnect() {
+        let id = |text: &str| id_hash(&text.encode_utf16().collect::<Vec<_>>());
+        assert_ne!(id("{a}"), id("{b}"));
+        assert_ne!(id(""), 0);
+        assert!(affects(0, Some(id("{a}"))));
+        assert!(affects(id("{a}"), None));
+        assert!(affects(id("{a}"), Some(id("{a}"))));
+        assert!(!affects(id("{a}"), Some(id("{b}"))));
+        let wake = wake();
+        wake.bound.store(id("{bound}"), Ordering::Relaxed);
+        let client: IMMNotificationClient = DeviceEvents(Arc::clone(&wake)).into();
+        // SAFETY: calls into our own in-process callback object, which only touches `wake`.
+        unsafe {
+            client
+                .OnDeviceStateChanged(w!("{other}"), DEVICE_STATE_UNPLUGGED)
+                .unwrap();
+            client.OnDeviceAdded(w!("{other}")).unwrap();
+            client.OnDeviceRemoved(w!("{other}")).unwrap();
+            assert_eq!(take(&wake), 0);
+            client
+                .OnDeviceStateChanged(w!("{bound}"), DEVICE_STATE_UNPLUGGED)
+                .unwrap();
+            assert_eq!(take(&wake), REBIND);
+            client.OnDeviceRemoved(w!("{bound}")).unwrap();
+            assert_eq!(take(&wake), REBIND);
+        }
+        // Nothing bound: any device may be the one to bind.
+        wake.bound.store(0, Ordering::Relaxed);
+        // SAFETY: as above.
+        unsafe { client.OnDeviceAdded(w!("{other}")).unwrap() };
+        assert_eq!(take(&wake), REBIND);
+        // A start that never got an enumerator is tried again, with no wake queued.
+        let mut audio = Audio::create();
+        audio.started = true;
+        audio.reconnect();
+        assert!(!audio.started && !audio.pending());
     }
 
     #[test]

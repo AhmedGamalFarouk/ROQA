@@ -43,6 +43,8 @@ pub struct State {
     pub open: bool,
     /// The drawn position, such as "1:23 of 4:56"; empty while no progress row is drawn.
     pub position: String,
+    /// Why there is no media notch (`media::View::status`), when media access failed.
+    pub status: Option<&'static str>,
 }
 pub type Shared = Arc<Mutex<State>>;
 
@@ -54,6 +56,14 @@ pub fn invalidate(state: &Shared) {
         state.focus = None;
         state.open = false;
     }
+}
+
+/// The root's name: the status line, when there is one, is part of it, as it is part of the panel.
+fn root_name(status: Option<&str>) -> String {
+    status.map_or_else(
+        || "ROQA Notch".to_owned(),
+        |line| format!("ROQA Notch, {line}"),
+    )
 }
 
 /// Accessible names and enabled states, in drawing order. Play/pause names its action and the
@@ -189,10 +199,10 @@ impl IRawElementProviderSimple_Impl for Root_Impl {
         none()
     }
     fn GetPropertyValue(&self, property: UIA_PROPERTY_ID) -> Result<VARIANT> {
-        read(&self.state, |_| ())?;
+        let status = read(&self.state, |state| state.status)?;
         Ok(match property {
             UIA_ControlTypePropertyId => variant_i32(UIA_ToolBarControlTypeId.0),
-            UIA_NamePropertyId => variant_text("ROQA Notch"),
+            UIA_NamePropertyId => variant_text(&root_name(status)),
             UIA_AutomationIdPropertyId => variant_text("RoqaNotch"),
             _ => VARIANT::default(),
         })
@@ -419,6 +429,16 @@ impl IInvokeProvider_Impl for Item_Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_root_name_carries_the_status_line_only_when_there_is_one() {
+        use crate::media::View;
+        assert_eq!(root_name(View::NoPlayer.status()), "ROQA Notch");
+        for view in [View::Permission, View::Error] {
+            let line = view.status().unwrap();
+            assert_eq!(root_name(Some(line)), format!("ROQA Notch, {line}"));
+        }
+    }
 
     #[test]
     fn clock_fallback_removes_children_and_rejects_retained_focus_and_invoke() {

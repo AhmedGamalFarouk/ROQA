@@ -197,6 +197,15 @@ impl View {
             _ => None,
         }
     }
+    /// The one line the open plain panel shows when media access failed, so that notch is not
+    /// mistaken for "no player"; it is also the UIA root name's suffix.
+    pub fn status(&self) -> Option<&'static str> {
+        match self {
+            View::Permission => Some("Windows blocked media access"),
+            View::Error => Some("Media controls unavailable"),
+            _ => None,
+        }
+    }
 }
 
 /// Whether the notch must repaint: a session appeared or ended, or its title, artist, play state or
@@ -404,8 +413,9 @@ fn subscribe_session(session: Session, wake: &Arc<Wake>) -> Result<Subscribed<Se
     subscribed
         .tokens
         .push((token, Session::RemovePlaybackInfoChanged));
-    // No TimelinePropertiesChanged: players may raise it every second. The timeline is read only
-    // while a notch is open (`Media::set_expanded`) and extrapolated between reads.
+    // No TimelinePropertiesChanged: players may raise it every second. The timeline is read on
+    // opening a notch and after a command (`Media::set_expanded`), with every playback and (while
+    // open) properties event, and extrapolated between reads.
     Ok(subscribed)
 }
 
@@ -438,26 +448,34 @@ impl<T: RuntimeType + Send + Sync + 'static> Request<T> {
     }
 }
 
-/// A hung command keeps the single global budget, even after its session disappears.
+/// Cancelled commands that may still be running: a dead player's never completes, so at most this
+/// many are kept before new commands wait, instead of one hung command disabling every session.
+const ORPHANS: usize = 4;
+
+fn running(operation: &IAsyncOperation<bool>) -> bool {
+    operation.Status() == Ok(AsyncStatus::Started)
+}
+
+/// One command at a time for the current session, and at most `ORPHANS` unfinished ones from ended
+/// sessions; a late completion of an orphan lands in its own dropped slot and is ignored.
 fn admit_command(
     slot: &mut Option<Request<bool>>,
+    orphans: &mut Vec<IAsyncOperation<bool>>,
     generation: u64,
     wake: &Arc<Wake>,
     start: impl FnOnce() -> Result<IAsyncOperation<bool>>,
 ) -> Result<()> {
-    if slot.is_some() {
+    orphans.retain(running);
+    if slot.is_some() || orphans.len() >= ORPHANS {
         return Ok(());
     }
     let operation = start()?;
     match Request::start(operation.clone(), generation, wake) {
         Ok(request) => *slot = Some(request),
         Err(error) => {
-            // Without a completion subscription we cannot safely reuse this budget until shutdown.
-            *slot = Some(Request {
-                operation,
-                generation,
-                result: Arc::new(OnceLock::new()),
-            });
+            // No completion subscription: cancel, and count it until it finishes on its own.
+            let _ = operation.Cancel();
+            orphans.push(operation);
             return Err(error);
         }
     }
@@ -566,8 +584,13 @@ pub struct Media {
     manager: Option<Subscribed<Manager>>,
     request: Option<Request<Manager>>,
     fetch: Option<Request<Properties>>,
-    /// One outstanding command globally; cancellation never releases this budget before completion.
+    /// The current session's one outstanding command.
     command: Option<Request<bool>>,
+    /// Cancelled commands of ended sessions that may still run (`admit_command`).
+    orphans: Vec<IAsyncOperation<bool>>,
+    /// An album art read was skipped because no notch surface existed; the next pass with one
+    /// re-reads the properties.
+    art_skipped: bool,
     /// Properties changed while a read was in flight: read again when it lands.
     again: bool,
     /// A visible notch is open, so the drawn progress needs a current timeline.
@@ -593,6 +616,8 @@ impl Media {
             request: None,
             fetch: None,
             command: None,
+            orphans: Vec::new(),
+            art_skipped: false,
             again: false,
             expanded: false,
             seek: None,
@@ -672,9 +697,14 @@ impl Media {
             _ => source.TrySkipNextAsync(),
         };
         // shortcut: presses while a command is unfinished are ignored; no queue or replacement work.
-        if let Err(error) =
-            admit_command(&mut self.command, self.state.generation, &self.wake, start)
-        {
+        let generation = self.state.generation;
+        if let Err(error) = admit_command(
+            &mut self.command,
+            &mut self.orphans,
+            generation,
+            &self.wake,
+            start,
+        ) {
             eprintln!("Media: command {control}: {error}");
         }
     }
@@ -689,8 +719,15 @@ impl Media {
         };
         let idle = self.command.is_none();
         let start = || session.source.TryChangePlaybackPositionAsync(target);
-        match admit_command(&mut self.command, self.state.generation, &self.wake, start) {
-            Ok(()) if idle => self.seek = Some((target, now_ticks())),
+        let generation = self.state.generation;
+        match admit_command(
+            &mut self.command,
+            &mut self.orphans,
+            generation,
+            &self.wake,
+            start,
+        ) {
+            Ok(()) if idle && self.command.is_some() => self.seek = Some((target, now_ticks())),
             Ok(()) => {}
             Err(error) => eprintln!("Media: seek: {error}"),
         }
@@ -723,6 +760,10 @@ impl Media {
         let expired = self
             .deadline()
             .is_some_and(|_| self.state.expire(Instant::now()));
+        // A notch exists again: read the properties (and so the art) skipped without one.
+        if cover > 0 && std::mem::take(&mut self.art_skipped) {
+            self.wake.dirty.fetch_or(PROPERTIES, Ordering::Relaxed);
+        }
         let mut dirty = self.wake.dirty.swap(0, Ordering::Acquire);
         if dirty == 0 {
             return expired;
@@ -778,12 +819,17 @@ impl Media {
             {
                 Ok((title, artist, properties)) => {
                     let (title, artist) = (bounded(title), bounded(artist));
-                    // A track without title or artist is never shown, so it needs no art.
+                    // A track without title or artist is never shown, so it needs no art; with no
+                    // notch (`cover` 0) nothing draws it yet.
                     if generation == self.state.generation
                         && !(title.is_empty() && artist.is_empty())
                     {
-                        let key = (generation, title.clone(), artist.clone());
-                        self.read_art(key, || properties.Thumbnail(), cover);
+                        if cover == 0 {
+                            self.art_skipped = true;
+                        } else {
+                            let key = (generation, title.clone(), artist.clone());
+                            self.read_art(key, || properties.Thumbnail(), cover);
+                        }
                     }
                     self.state.apply(Change::Properties {
                         generation,
@@ -919,14 +965,17 @@ impl Media {
         PROPERTIES | PLAYBACK
     }
     /// Cancels the session's pending reads and command, drops its album art, then removes its tokens
-    /// and releases it.
+    /// and releases it. The command is orphaned, not kept: a hung one must not outlive its session's
+    /// budget (`admit_command`).
     fn end_session(&mut self) {
         if let Some(fetch) = self.fetch.take() {
             fetch.cancel();
         }
-        if let Some(command) = &self.command {
+        if let Some(command) = self.command.take() {
             command.cancel();
+            self.orphans.push(command.operation);
         }
+        self.seek = None;
         self.again = false;
         self.art = Art::default();
         self.session = None;
@@ -1632,50 +1681,130 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cancel_ignoring_command_keeps_its_budget_across_presses_and_sessions() {
-        let mut media = Media::create();
-        let admitted = std::cell::Cell::new(0);
+    /// A command that finishes only when `release` is sent, and ignores `Cancel`.
+    fn hung(admitted: &Cell<u32>) -> (std::sync::mpsc::Sender<()>, IAsyncOperation<bool>) {
+        admitted.set(admitted.get() + 1);
         let (release, held) = std::sync::mpsc::channel::<()>();
-        admit_command(&mut media.command, 0, &media.wake, || {
-            admitted.set(admitted.get() + 1);
-            Ok(IAsyncOperation::<bool>::spawn(move || {
-                let _ = held.recv();
-                Ok(true)
-            }))
-        })
-        .unwrap();
-        for _ in 0..128 {
-            // The test operation ignores Cancel. Changing sessions must not reset its budget.
-            media.end_session();
-            media.state.apply(Change::Session(true));
+        let operation = IAsyncOperation::<bool>::spawn(move || {
+            let _ = held.recv();
+            Ok(true)
+        });
+        (release, operation)
+    }
+
+    #[test]
+    fn a_hung_command_blocks_its_own_session_only_and_orphans_are_bounded() {
+        let mut media = Media::create();
+        let admitted = Cell::new(0);
+        let mut releases = Vec::new();
+        // One press at a time within a session, however often it is repeated.
+        let (release, operation) = hung(&admitted);
+        releases.push(release);
+        let mut spare = Some(operation);
+        for _ in 0..8 {
+            let start = || {
+                Ok(spare
+                    .take()
+                    .unwrap_or_else(|| IAsyncOperation::ready(Ok(true))))
+            };
             let generation = media.generation();
-            admit_command(&mut media.command, generation, &media.wake, || {
-                admitted.set(admitted.get() + 1);
-                Ok(IAsyncOperation::ready(Ok(true)))
-            })
+            admit_command(
+                &mut media.command,
+                &mut media.orphans,
+                generation,
+                &media.wake,
+                start,
+            )
             .unwrap();
         }
-        assert_eq!(admitted.get(), 1);
-        assert!(received(&media.command).is_none());
-        release.send(()).unwrap();
+        assert!(media.command.is_some() && media.orphans.is_empty());
+        // The player hangs and dies; its session is replaced: later sessions still get commands.
+        for round in 1..ORPHANS {
+            media.end_session();
+            media.state.apply(Change::Session(true));
+            assert_eq!(media.orphans.len(), round);
+            let (release, operation) = hung(&admitted);
+            releases.push(release);
+            let generation = media.generation();
+            admit_command(
+                &mut media.command,
+                &mut media.orphans,
+                generation,
+                &media.wake,
+                || Ok(operation),
+            )
+            .unwrap();
+            assert!(media.command.is_some(), "round {round}");
+        }
+        // At the bound, the next replacement leaves new commands waiting rather than piling up.
+        media.end_session();
+        assert_eq!(media.orphans.len(), ORPHANS);
+        admit_command(
+            &mut media.command,
+            &mut media.orphans,
+            9,
+            &media.wake,
+            || {
+                admitted.set(admitted.get() + 1);
+                Ok(IAsyncOperation::ready(Ok(true)))
+            },
+        )
+        .unwrap();
+        assert!(media.command.is_none());
+        assert_eq!(admitted.get(), ORPHANS as u32);
+        // One orphan finishing frees one place.
+        let first = media.orphans[0].clone();
+        releases.remove(0).send(()).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while received(&media.command).is_none() {
+        while running(&first) {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the slow request never completed"
+                "the orphan never completed"
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        // Completion is the only event that releases the global budget, even for an old session.
-        media.refresh(72);
-        assert!(media.command.is_none());
-        admit_command(&mut media.command, 129, &media.wake, || {
-            admitted.set(admitted.get() + 1);
-            Ok(IAsyncOperation::ready(Ok(true)))
-        })
+        admit_command(
+            &mut media.command,
+            &mut media.orphans,
+            9,
+            &media.wake,
+            || {
+                admitted.set(admitted.get() + 1);
+                Ok(IAsyncOperation::ready(Ok(true)))
+            },
+        )
         .unwrap();
-        assert_eq!(admitted.get(), 2);
+        assert!(media.command.is_some());
+        assert_eq!(media.orphans.len(), ORPHANS - 1);
+        // A seek that belonged to the ended session never carries over.
+        media.seek = Some((1, 2));
+        media.end_session();
+        assert_eq!(media.seek, None);
+    }
+
+    #[test]
+    fn media_access_failures_show_one_status_line_and_nothing_else_does() {
+        assert_eq!(
+            View::Permission.status(),
+            Some("Windows blocked media access")
+        );
+        assert_eq!(View::Error.status(), Some("Media controls unavailable"));
+        assert_eq!(View::NoPlayer.status(), None);
+        assert_eq!(View::Track(Track::default()).status(), None);
+    }
+
+    #[test]
+    fn album_art_skipped_without_a_notch_is_read_when_one_returns() {
+        let mut media = Media::create();
+        media.art_skipped = true;
+        // Still no notch: the flag stays and nothing is queued.
+        media.refresh(0);
+        assert!(media.art_skipped);
+        assert!(!media.pending());
+        // A notch exists: the properties are read again, once.
+        media.refresh(72);
+        assert!(!media.art_skipped);
+        assert!(!media.pending());
     }
 
     fn stream() -> IRandomAccessStream {

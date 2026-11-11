@@ -9,7 +9,7 @@ use crate::{
 use std::{borrow::Cow, cell::RefCell, mem::ManuallyDrop};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::{
-    Foundation::{D2DERR_RECREATE_TARGET, E_FAIL, HMODULE, HWND, POINT},
+    Foundation::{D2DERR_RECREATE_TARGET, E_FAIL, HMODULE, HWND, POINT, RECT},
     Graphics::{
         Direct2D::{
             CLSID_D2D1Shadow,
@@ -234,7 +234,8 @@ impl Canvas {
         })
     }
     /// Black notch with concave top ears, a persistent morphing clock and the media track, if any.
-    pub fn paint_notch(&self, scene: &NotchScene) -> Result<()> {
+    /// `status` is the one line a plain panel adds when media access failed.
+    pub fn paint_notch(&self, scene: &NotchScene, status: Option<&str>) -> Result<()> {
         let scale = scene.dpi as f32 / 96.0;
         let shape = layout::notch_shape(scene.progress, scene.track.is_some());
         // The same whole-pixel body that layout::notch_region and notch_hit use.
@@ -263,10 +264,45 @@ impl Canvas {
             let art = cached(&mut self.art.borrow_mut(), scene.art, |pixels| {
                 upload(context, pixels)
             });
-            let drawn = art.and_then(|art| notch_text(context, scene, &body, scale, art.as_ref()));
+            let drawn =
+                art.and_then(|art| notch_text(context, scene, &body, scale, art.as_ref(), status));
             // SAFETY: balances the PushAxisAlignedClip above on the same live context.
             unsafe { context.PopAxisAlignedClip() };
             drawn
+        })
+    }
+    /// Repaints only the visualizer slot of a settled, open media panel: the rest of the surface is
+    /// kept, so a bars-only change skips the text, brushes and full-surface draw of `paint_notch`.
+    pub fn paint_meter(&self, dpi: u32, bars: [i32; BARS]) -> Result<()> {
+        let update = meter_update(self.width as i32, dpi);
+        let left = layout::notch_body(self.width as i32, dpi, layout::notch_shape(1.0, true)).left;
+        self.draw_within(Some(update), |context, rect| {
+            let body = D2D_RECT_F {
+                left: rect.left + left as f32,
+                top: rect.top,
+                ..rect
+            };
+            // SAFETY: context is live between surface BeginDraw/EndDraw; brushes are scoped to this draw.
+            unsafe {
+                // The cleared slot sits inside the black panel body: refill it, then the bars.
+                let black = context.CreateSolidColorBrush(&rgba(0, 0, 0, 1.0), None)?;
+                context.FillRectangle(
+                    &D2D_RECT_F {
+                        left: rect.left + update.left as f32,
+                        top: rect.top + update.top as f32,
+                        right: rect.left + update.right as f32,
+                        bottom: rect.top + update.bottom as f32,
+                    },
+                    &black,
+                );
+                if let Some((bars, alpha)) = meter_rects(1.0, dpi, bars, &body) {
+                    let brush = context.CreateSolidColorBrush(&with_alpha(WHITE, alpha), None)?;
+                    for bar in &bars {
+                        context.FillRoundedRectangle(bar, &brush);
+                    }
+                }
+            }
+            Ok(())
         })
     }
     pub fn paint_dock(&self, scene: &DockScene) -> Result<()> {
@@ -307,19 +343,37 @@ impl Canvas {
         &self,
         content: impl FnOnce(&ID2D1DeviceContext, D2D_RECT_F) -> Result<()>,
     ) -> Result<()> {
+        self.draw_within(None, content)
+    }
+    /// Draws into the whole surface, or only `update` (surface pixels; the rest is kept). `content`
+    /// gets the rectangle of the whole surface in the context's coordinates either way.
+    fn draw_within(
+        &self,
+        update: Option<RECT>,
+        content: impl FnOnce(&ID2D1DeviceContext, D2D_RECT_F) -> Result<()>,
+    ) -> Result<()> {
         let mut offset = POINT::default();
         // SAFETY: surface has no outstanding draw; context is scoped to this draw and EndDraw always runs.
         unsafe {
-            let context: ID2D1DeviceContext = self.surface.BeginDraw(None, &mut offset)?;
+            let area = update.as_ref().map(|update| update as *const RECT);
+            let context: ID2D1DeviceContext = self.surface.BeginDraw(area, &mut offset)?;
             context.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            // `offset` is where the update rectangle's top left lands (the surface's, with none).
+            let origin = update.map_or((0, 0), |update| (update.left, update.top));
             let rect = D2D_RECT_F {
+                left: (offset.x - origin.0) as f32,
+                top: (offset.y - origin.1) as f32,
+                right: (offset.x - origin.0) as f32 + self.width as f32,
+                bottom: (offset.y - origin.1) as f32 + self.height as f32,
+            };
+            // Shapes have transparent surroundings; clear only this draw's update rectangle.
+            let cleared = update.map_or(rect, |update| D2D_RECT_F {
                 left: offset.x as f32,
                 top: offset.y as f32,
-                right: offset.x as f32 + self.width as f32,
-                bottom: offset.y as f32 + self.height as f32,
-            };
-            // Shapes have transparent surroundings; clear only this surface's update rectangle.
-            context.PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_ALIASED);
+                right: (offset.x + update.right - update.left) as f32,
+                bottom: (offset.y + update.bottom - update.top) as f32,
+            });
+            context.PushAxisAlignedClip(&cleared, D2D1_ANTIALIAS_MODE_ALIASED);
             context.Clear(Some(&rgba(0, 0, 0, 0.0)));
             context.PopAxisAlignedClip();
             let drawing = content(&context, rect);
@@ -468,6 +522,7 @@ fn notch_text(
     body: &D2D_RECT_F,
     scale: f32,
     art: Option<&ID2D1Bitmap1>,
+    status: Option<&str>,
 ) -> Result<()> {
     if let Some(track) = scene.track {
         let font = media_clock(motion::smooth(scene.progress), scale);
@@ -514,7 +569,21 @@ fn notch_text(
         &font,
         row(58.0 - 6.0 * (1.0 - date), 10.0),
         with_alpha(WHITE, 0.60 * date),
-    )
+    )?;
+    // PROVISIONAL: why there is no media notch, under the date, 11 DIP at the date's opacity.
+    match status {
+        Some(line) => draw_text(
+            context,
+            line,
+            &Font {
+                size: 11.0 * scale,
+                ..font
+            },
+            row(72.0, 6.0),
+            with_alpha(WHITE, 0.60 * date),
+        ),
+        None => Ok(()),
+    }
 }
 
 /// Fill of the cover slot when the track has no album art; art fills the same geometry.
@@ -771,21 +840,43 @@ fn media_plan<'a>(
     }
 }
 
+/// The visualizer slot in surface pixels for a surface `width` wide, with the open panel's body.
+fn meter_update(width: i32, dpi: u32) -> RECT {
+    let left = layout::notch_body(width, dpi, layout::notch_shape(1.0, true)).left;
+    let (slot, _) = layout::meter(dpi);
+    RECT {
+        left: left + slot.x,
+        top: slot.y,
+        right: left + slot.x + slot.width,
+        bottom: slot.y + slot.height,
+    }
+}
+
 /// The visualizer right of the controls row, placed and revealed like it: fully rounded bars spread
 /// across the slot (`layout::meter`), bottom-aligned at the scene's heights.
 fn meter_bars(scene: &NotchScene, body: &D2D_RECT_F) -> Option<([D2D1_ROUNDED_RECT; BARS], f32)> {
-    let reveal = motion::reveal(scene.progress);
+    meter_rects(scene.progress, scene.dpi, scene.bars, body)
+}
+
+/// `meter_bars` for bar `heights` at an animation `progress`, without a whole scene.
+fn meter_rects(
+    progress: f32,
+    dpi: u32,
+    heights: [i32; BARS],
+    body: &D2D_RECT_F,
+) -> Option<([D2D1_ROUNDED_RECT; BARS], f32)> {
+    let reveal = motion::reveal(progress);
     if reveal <= 0.0 {
         return None;
     }
-    let (slot, bar) = layout::meter(scene.dpi);
+    let (slot, bar) = layout::meter(dpi);
     let bottom = body.top + (slot.y + slot.height) as f32;
     let bars = std::array::from_fn(|index| {
         let left =
             body.left + (slot.x + index as i32 * (slot.width - bar) / (BARS as i32 - 1)) as f32;
         let rect = D2D_RECT_F {
             left,
-            top: bottom - scene.bars[index] as f32,
+            top: bottom - heights[index] as f32,
             right: left + bar as f32,
             bottom,
         };
@@ -1234,8 +1325,9 @@ fn text_layout(text: &str, font: &Font, width: f32, height: f32) -> Result<IDWri
     let rtl = font.align == DWRITE_TEXT_ALIGNMENT_LEADING && right_to_left(text);
     let text: Vec<u16> = text.encode_utf16().collect();
     // SAFETY: shared system factory; locale buffer is NUL-terminated by the API (zeroed on failure).
-    // Formats and layouts are built per paint. Paints happen only on minute, media and hover changes
-    // and the frames of short animations, whose morphing sizes a cache would miss anyway.
+    // Formats and layouts are built per paint. A bars-only change repaints the meter slot alone
+    // (`Canvas::paint_meter`), so full paints are minute, media, progress-tick, volume and hover
+    // changes and animation frames, whose morphing sizes a cache would miss anyway.
     unsafe {
         GetUserDefaultLocaleName(&mut locale);
         let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
@@ -1835,6 +1927,49 @@ mod media_tests {
         assert_eq!(bars[0].rect.bottom - bars[0].rect.top, 4.0);
         assert_eq!(meter(0.6).unwrap().1, METER_FILL * motion::reveal(0.6));
         assert!(meter(0.0).is_none());
+    }
+
+    #[test]
+    fn the_meter_update_rect_holds_every_bar_at_any_height_and_scale() {
+        let song = track("Song", "Artist", true);
+        for dpi in [96, 144, 192] {
+            let window = layout::placement(
+                Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 3840,
+                    height: 2160,
+                },
+                dpi,
+                SurfaceKind::Notch,
+                0,
+            )
+            .width;
+            let update = meter_update(window, dpi);
+            let (slot, _) = layout::meter(dpi);
+            for peak in [0.0, 0.5, 1.0] {
+                let heights = layout::meter_heights([peak; BARS], dpi);
+                let scene = NotchScene {
+                    time: "9:50 pm",
+                    date: "Tuesday",
+                    track: song.shown(),
+                    art: None,
+                    progress: 1.0,
+                    dpi,
+                    focus: None,
+                    played: None,
+                    volume: None,
+                    bars: heights,
+                };
+                let (bars, _) = meter_bars(&scene, &body(dpi, 1.0)).unwrap();
+                for bar in bars {
+                    let (left, top) = (update.left as f32, update.top as f32);
+                    assert!(bar.rect.left >= left && bar.rect.right <= update.right as f32);
+                    assert!(bar.rect.top >= top && bar.rect.bottom <= update.bottom as f32);
+                }
+            }
+            assert_eq!(update.bottom - update.top, slot.height);
+        }
     }
 
     #[test]

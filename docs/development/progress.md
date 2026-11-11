@@ -803,3 +803,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Verify:** `scripts/verify.ps1` PASS, **135 tests** (128 + 7). Release 858,112 B vs 809,984 B at S9 (+48,128 B, mostly previously dead-stripped S2/S3 code), SHA-256 `2E283876FEFBDD8B12D220247AFF803DD483985051A380B8436E7C8002C0D3FD`.
 - **Reviews:** REVIEW NOT RUN (paused by user). Not accepted.
 - **Native evidence:** all NOT RUN (real launch, drag, right-click, persistence across a restart, packaged app, mixed DPI, RTL). Deferred: pin from the picker, keyboard and Narrator reorder (S8), missing-target indicator, drag marker.
+
+## M4 gate 1 fixes: landed candidate (2026-11-11 Africa/Cairo)
+
+- **Fixes:** all of the independent review's I1-I3 and M1-M8 (`ab9eb630...d57f`), packet `docs/development/m4-gate-1-fixes.md`. Meter-only repaint of its slot with no UIA publish, one paint per notch per pass, orphaned commands bounded at 4, a PROVISIONAL status line and UIA root name for Permission/Error, plus the audio retry, rebind filter, graphics-rebuild reconnect, focus re-announce and skipped art decode.
+- **Verify:** `scripts/verify.ps1` PASS, **142 tests** (135 + 7); one existing test replaced because it asserted the I2 defect. Release 865,280 B (+7,168 B), SHA-256 `D7DF15FD5334E7AD1871AB0C1BA980A169833851996C9AEBF27206E5A7B0500F`.
+- **Deferred:** the per-canvas text-layout cache; full paints still publish UIA state.
+- **Reviews:** REVIEW NOT RUN (paused by user). Not accepted; M4 is not accepted.
+- **Native evidence:** all NOT RUN, including the meter update rect on a real DComp surface, a hung player, Narrator and the status line at larger text scales.
