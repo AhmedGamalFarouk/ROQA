@@ -4,7 +4,7 @@ use crate::{
     icons::IconPixels,
     layout::{self, Bounds},
     media::{PLAY_PAUSE, Progress, Track},
-    motion,
+    motion, timer,
 };
 use std::{borrow::Cow, cell::RefCell, mem::ManuallyDrop};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
@@ -156,6 +156,8 @@ pub struct NotchScene<'a> {
     pub volume: Option<Level>,
     /// The visualizer's bar heights in whole pixels (`layout::meter_heights`).
     pub bars: [i32; BARS],
+    /// The soonest countdown timer (S5, PROVISIONAL); `None` draws nothing.
+    pub timer: Option<&'a timer::View>,
 }
 
 /// Dock material (docs/design/roqa-visual-spec.md): black bar, white-alpha hover fill, whole-pixel icon lift.
@@ -524,6 +526,7 @@ fn notch_text(
     art: Option<&ID2D1Bitmap1>,
     status: Option<&str>,
 ) -> Result<()> {
+    timer_text(context, scene, body, scale)?;
     if let Some(track) = scene.track {
         let font = media_clock(motion::smooth(scene.progress), scale);
         let clock = text_width(scene.time, &font)?;
@@ -584,6 +587,53 @@ fn notch_text(
         ),
         None => Ok(()),
     }
+}
+
+/// PROVISIONAL (S5): the soonest timer in 12 DIP white 85 %. The panel text (`m:ss` and `+N`) fades in with
+/// the date; the plain pill's whole-minute text fades out as it does, so the two never share a frame at
+/// full strength. The media pill has no room and draws none. Slots: `layout::timer_panel`, `timer_pill`.
+fn timer_text(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    scale: f32,
+) -> Result<()> {
+    let Some(view) = scene.timer else {
+        return Ok(());
+    };
+    let (media, reveal) = (scene.track.is_some(), motion::reveal(scene.progress));
+    let draw = |text: &str, slot: Bounds, align, alpha: f32| {
+        let left = body.left + slot.x as f32;
+        let top = body.top + slot.y as f32;
+        let font = Font {
+            family: TEXT_FONT,
+            size: 12.0 * scale,
+            weight: DWRITE_FONT_WEIGHT_NORMAL,
+            designator: 1.0,
+            align,
+        };
+        let rect = D2D_RECT_F {
+            left,
+            top,
+            right: left + slot.width as f32,
+            bottom: top + slot.height as f32,
+        };
+        draw_text(context, text, &font, rect, with_alpha(WHITE, 0.85 * alpha))
+    };
+    if reveal > 0.0 {
+        let slot = layout::timer_panel(media, scene.dpi);
+        draw(&view.panel, slot, DWRITE_TEXT_ALIGNMENT_LEADING, reveal)?;
+    }
+    if !media && reveal < 1.0 {
+        let slot = layout::timer_pill(scene.dpi);
+        draw(
+            &view.pill,
+            slot,
+            DWRITE_TEXT_ALIGNMENT_TRAILING,
+            1.0 - reveal,
+        )?;
+    }
+    Ok(())
 }
 
 /// Fill of the cover slot when the track has no album art; art fills the same geometry.
@@ -1633,6 +1683,7 @@ mod media_tests {
             played,
             volume,
             bars: [0; BARS],
+            timer: None,
         };
         let clock = clock_width(time, progress, dpi);
         media_plan(&scene, scene.track.unwrap(), &body(dpi, progress), clock)
@@ -1658,6 +1709,7 @@ mod media_tests {
                 played: None,
                 volume: None,
                 bars: [0; BARS],
+                timer: None,
             };
             let clock = clock_width("9:50 pm", progress, 96);
             let plan = media_plan(&scene, scene.track.unwrap(), &body(96, progress), clock);
@@ -1913,6 +1965,7 @@ mod media_tests {
                 played: None,
                 volume: None,
                 bars: [4, 20, 12, 8, 4],
+                timer: None,
             };
             meter_bars(&scene, &body(96, progress))
         };
@@ -1960,6 +2013,7 @@ mod media_tests {
                     played: None,
                     volume: None,
                     bars: heights,
+                    timer: None,
                 };
                 let (bars, _) = meter_bars(&scene, &body(dpi, 1.0)).unwrap();
                 for bar in bars {

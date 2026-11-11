@@ -20,6 +20,7 @@ mod picker_font;
 mod pins;
 mod store;
 mod text_settings;
+mod timer;
 mod topology;
 mod window_catalog;
 mod window_model;

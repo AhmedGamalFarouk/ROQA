@@ -47,6 +47,8 @@ windows = { version = "=0.62.2", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Com",
+    # MessageBeep: the timer completion sound (slice S5).
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     # Private bytes for the diagnostics budget table (slice S9).

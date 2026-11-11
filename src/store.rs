@@ -24,6 +24,8 @@ pub struct Store {
     pub pins: Vec<String>,
     /// File-shelf references, in display order.
     pub shelf: Vec<String>,
+    /// Running countdown timers as absolute wall-clock expiries (Unix seconds), soonest first.
+    pub timers: Vec<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -147,6 +149,7 @@ fn parse(text: &str) -> Option<Store> {
         match line.split_once('=') {
             Some(("pin", value)) if !value.is_empty() => store.pins.push(value.into()),
             Some(("shelf", value)) if !value.is_empty() => store.shelf.push(value.into()),
+            Some(("timer", value)) => store.timers.extend(value.parse::<u64>()),
             _ => {} // Unknown keys and junk lines are ignored.
         }
     }
@@ -174,6 +177,9 @@ impl Store {
                 out.push_str(value);
                 out.push('\n');
             }
+        }
+        for expiry in &self.timers {
+            out.push_str(&format!("timer={expiry}\n"));
         }
         out.push_str("end\n");
         out
@@ -238,6 +244,7 @@ mod tests {
                 r"C:\Apps\a=b.exe".into(),
             ],
             shelf: vec![r"C:\Users\me\doc.txt".into()],
+            timers: vec![1_800_000_000, 1_800_000_060],
         }
     }
 
@@ -257,7 +264,7 @@ mod tests {
         let dir = Dir::new("newline");
         let store = Store {
             pins: vec!["a\nb".into(), "ok".into(), String::new()],
-            shelf: vec![],
+            ..Store::default()
         };
         store.save(&dir.file()).unwrap();
         assert_eq!(load(&dir.file()).0.pins, vec!["ok".to_string()]);
@@ -265,12 +272,13 @@ mod tests {
 
     #[test]
     fn unknown_fields_and_junk_lines_are_ignored() {
-        let text = "version=1\nfuture=1\npin=a\nno equals here\nshelf=b\nfuture2=x=y\nend\nafter end=ignored\n";
+        let text = "version=1\nfuture=1\npin=a\nno equals here\nshelf=b\ntimer=77\ntimer=x\ntimer=-1\nfuture2=x=y\nend\nafter end=ignored\n";
         assert_eq!(
             parse(text),
             Some(Store {
                 pins: vec!["a".into()],
-                shelf: vec!["b".into()]
+                shelf: vec!["b".into()],
+                timers: vec![77], // unparsable timer values are skipped
             })
         );
         assert_eq!(
@@ -342,7 +350,7 @@ mod tests {
         sample().save(&dir.file()).unwrap();
         let huge = Store {
             pins: vec!["y".repeat(MAX_BYTES as usize)],
-            shelf: vec![],
+            ..Store::default()
         };
         assert_eq!(
             huge.save(&dir.file()).unwrap_err().kind(),

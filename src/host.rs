@@ -16,6 +16,7 @@ use crate::{
     pins::Pins,
     store::{self, Flush, Pending, Store},
     text_settings::TextSettings,
+    timer::{self, Timers},
     topology::{self, Monitor},
     window_catalog::Catalog,
     window_model::{WindowKey, WindowModel},
@@ -29,6 +30,7 @@ use std::{
 use windows::Win32::{
     Foundation::{E_FAIL, HANDLE, HWND, LPARAM, WAIT_EVENT, WAIT_FAILED, WAIT_OBJECT_0, WPARAM},
     System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
+    System::Diagnostics::Debug::MessageBeep,
     System::LibraryLoader::{GetModuleHandleW, GetProcAddress},
     System::Threading::INFINITE,
     UI::{
@@ -298,6 +300,23 @@ impl Surface {
             }
         }
     }
+    /// Ends a timer completion's expansion: closes a notch nobody is pointing at or typing in. A pointer
+    /// or keyboard focus keeps it open, and the usual leave or blur closes it.
+    fn close_alert(&mut self) {
+        if self.expanded()
+            && matches!(
+                self.role,
+                Role::Notch {
+                    engaged: false,
+                    focus: None,
+                    ..
+                }
+            )
+        {
+            self.motion.retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
+            self.live = true;
+        }
+    }
     fn leave(&mut self) {
         if self.hovered {
             self.hovered = false;
@@ -329,11 +348,12 @@ impl Surface {
     /// Shares what the notch shows with UI Automation: the current session's controls, the focused
     /// one, and whether the panel is open or opening, so clients see the target state before the
     /// motion ends.
-    fn publish_notch(&self, media: &Media, audio: &Audio) {
+    fn publish_notch(&self, media: &Media, audio: &Audio, timer: Option<&timer::View>) {
         if let Role::Notch { uia, focus, .. } = &self.role
             && let Ok(mut state) = uia.lock()
         {
             state.dpi = self.dpi;
+            state.timer = timer.map_or_else(String::new, |view| view.name.clone());
             state.version = media.generation() as u32;
             state.controls = media
                 .view()
@@ -354,9 +374,17 @@ impl Surface {
         }
     }
     /// Draws one frame, publishing it to UI Automation first.
-    fn paint_notch(&mut self, time: &str, date: &str, media: &Media, audio: &Audio) -> Result<()> {
+    fn paint_notch(
+        &mut self,
+        time: &str,
+        date: &str,
+        media: &Media,
+        audio: &Audio,
+        timers: &Timers,
+    ) -> Result<()> {
         let track = media.view().shown();
         let progress = self.motion.value(Instant::now());
+        let timer = timers.view(Instant::now());
         // Only a revealed panel row reads the time; a collapsed notch draws no progress.
         self.played = track
             .filter(|_| motion::reveal(progress) > 0.0)
@@ -369,7 +397,7 @@ impl Surface {
             _ => [0.0; audio::BARS],
         };
         self.bars = layout::meter_heights(peaks, self.dpi);
-        self.publish_notch(media, audio);
+        self.publish_notch(media, audio, timer.as_ref());
         let Role::Notch {
             shadow,
             area,
@@ -397,6 +425,7 @@ impl Surface {
             played: self.played,
             volume: audio.level(),
             bars: self.bars,
+            timer: timer.as_ref(),
         };
         shadow.paint(&scene, self.window.0)?;
         self.canvas.paint_notch(&scene, media.view().status())
@@ -800,6 +829,12 @@ struct Desktop {
     progress_tick: Instant,
     /// When the visualizer last read the meter.
     sampled: Option<Instant>,
+    /// Countdown timers: restored once from the store and driven only by `refresh_timers`' deadline.
+    timers: Timers,
+    /// Play the system sound when a timer completes; the settings surface (S7) will own this.
+    timer_sound: bool,
+    /// The soonest timer's last requested panel text, so an expanded notch repaints only when it changes.
+    timer_shown: String,
 }
 impl Desktop {
     fn create(probe: &Probe) -> Result<Self> {
@@ -808,9 +843,13 @@ impl Desktop {
         let text = TextSettings::create()?;
         let text_factor = text.factor()?;
         let store_path = store::default_path();
-        let store = store_path
+        let mut store = store_path
             .as_deref()
             .map_or_else(Store::default, |path| store::load(path).0);
+        let now = Instant::now();
+        let timers = Timers::restore(&store.timers, timer::wall_now(), now);
+        // The section now mirrors what is running; stale entries leave the file with its next write.
+        timers.write_to(&mut store, &mut Pending::default(), now);
         let mut desktop = Self {
             surfaces: Vec::new(),
             monitors,
@@ -845,6 +884,9 @@ impl Desktop {
             progress_due: None,
             progress_tick: Instant::now(),
             sampled: None,
+            timers,
+            timer_sound: true,
+            timer_shown: String::new(),
         };
         desktop.show(SurfaceKind::Notch)?;
         if *probe == Probe::Initialization {
@@ -889,7 +931,13 @@ impl Desktop {
         if kind == SurfaceKind::Notch {
             // Advances every existing notch first, so all monitors show the same minute.
             self.refresh_clock()?;
-            surface.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?;
+            surface.paint_notch(
+                &self.clock,
+                &self.date,
+                &self.media,
+                &self.audio,
+                &self.timers,
+            )?;
             self.surfaces.push(surface);
         } else {
             surface.publish_accessibility(&self.dock_names, false);
@@ -939,9 +987,13 @@ impl Desktop {
                 _ if !notch.visible => {}
                 Repaint::Nothing => {}
                 Repaint::Meter => notch.paint_meter(peaks)?,
-                Repaint::Full => {
-                    notch.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?
-                }
+                Repaint::Full => notch.paint_notch(
+                    &self.clock,
+                    &self.date,
+                    &self.media,
+                    &self.audio,
+                    &self.timers,
+                )?,
             }
         }
         Ok(())
@@ -1003,6 +1055,53 @@ impl Desktop {
         }
         Ok(due.map_or(INFINITE, |_| milliseconds_until(now + METER_PERIOD, now)))
     }
+    /// Completes due timers, ends a finished alert, and asks an expanded notch to repaint when the
+    /// soonest timer's seconds changed; returns the wait until the timers' next deadline. With no timers
+    /// and no alert it does nothing and returns `INFINITE`: no wake, and collapsed notches get no tick.
+    #[inline(never)]
+    fn refresh_timers(&mut self) -> u32 {
+        let now = Instant::now();
+        if self.timers.take_done(now) {
+            self.timers
+                .write_to(&mut self.store, &mut self.pending, now);
+            self.complete_timer();
+            self.request_notches(Repaint::Full, |_| true);
+        }
+        if self.timers.alert_over(now) {
+            self.surfaces.iter_mut().for_each(Surface::close_alert);
+            self.request_notches(Repaint::Full, |_| true);
+        }
+        let expanded = self.surfaces.iter().any(Surface::expanded);
+        if expanded {
+            let panel = self.timers.view(now).map(|view| view.panel);
+            if panel.as_deref().unwrap_or("") != self.timer_shown {
+                self.timer_shown = panel.unwrap_or_default();
+                // A running animation paints every frame already.
+                self.request_notches(Repaint::Full, |s| s.expanded() && !s.live);
+            }
+        }
+        self.timers
+            .next_wake(expanded, now)
+            .map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+    /// A timer finished: every visible notch opens (once, however many finished together) and the
+    /// system sound plays if enabled. No toast: notification packaging is M6.
+    fn complete_timer(&mut self) {
+        for surface in &mut self.surfaces {
+            if surface.visible
+                && let Role::Notch { intent, .. } = &mut surface.role
+            {
+                open_notch(intent, &mut surface.motion);
+                surface.live = true;
+            }
+        }
+        if self.timer_sound {
+            // SAFETY: plays the user's own default sound asynchronously; no pointers.
+            unsafe {
+                let _ = MessageBeep(MB_ICONASTERISK);
+            }
+        }
+    }
     /// Paints one frame of each running animation; returns true while any still runs.
     /// The final frame always lands exactly on the target before a surface goes idle.
     fn animate(&mut self) -> Result<bool> {
@@ -1025,9 +1124,13 @@ impl Desktop {
             }
             if surface.live {
                 match surface.kind() {
-                    SurfaceKind::Notch => {
-                        surface.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?
-                    }
+                    SurfaceKind::Notch => surface.paint_notch(
+                        &self.clock,
+                        &self.date,
+                        &self.media,
+                        &self.audio,
+                        &self.timers,
+                    )?,
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
                 surface.live = surface.motion.running(now)
@@ -1404,8 +1507,9 @@ impl Desktop {
     /// A player can disable the focused action or replace its entire session between input events.
     fn reconcile_focus(&mut self, replaced: bool) {
         let enabled = self.enabled();
+        let timer = self.timers.view(Instant::now());
         for notch in &mut self.surfaces {
-            notch.publish_notch(&self.media, &self.audio);
+            notch.publish_notch(&self.media, &self.audio, timer.as_ref());
             let Some(control) = notch.focused().map(|focus| focus.control) else {
                 continue;
             };
@@ -1428,6 +1532,12 @@ impl Desktop {
             self.request_topology();
             // A clock, time-zone or locale change, or a resume, can alter the text before the deadline.
             self.clock_due = Instant::now();
+            // Countdowns keep their remaining time; only their stored wall-clock expiry moves.
+            let now = Instant::now();
+            if self.timers.resync(timer::wall_now(), now) {
+                self.timers
+                    .write_to(&mut self.store, &mut self.pending, now);
+            }
             if message.wParam.0 != 0 {
                 // Resume or a new taskbar: re-read what events may have missed. The bits coalesce, so
                 // the post from every surface costs one re-read.
@@ -1540,9 +1650,13 @@ impl Desktop {
                 .any(|(_, device)| device == &surface.monitor);
             if visible && !surface.visible {
                 match surface.kind() {
-                    SurfaceKind::Notch => {
-                        surface.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?
-                    }
+                    SurfaceKind::Notch => surface.paint_notch(
+                        &self.clock,
+                        &self.date,
+                        &self.media,
+                        &self.audio,
+                        &self.timers,
+                    )?,
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
             }
@@ -1653,7 +1767,8 @@ impl Desktop {
         let wait = self
             .refresh_clock()?
             .min(self.refresh_progress()?)
-            .min(self.refresh_meter()?);
+            .min(self.refresh_meter()?)
+            .min(self.refresh_timers());
         self.paint_requested()?;
         if let Some(picker) = &mut self.picker {
             picker.synchronize(model)?;

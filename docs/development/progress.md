@@ -811,3 +811,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Deferred:** the per-canvas text-layout cache; full paints still publish UIA state.
 - **Reviews:** REVIEW NOT RUN (paused by user). Not accepted; M4 is not accepted.
 - **Native evidence:** all NOT RUN, including the meter update rect on a real DComp surface, a hung player, Narrator and the status line at larger text scales.
+
+## M5 S5 timers: landed candidate (2026-11-11 Africa/Cairo)
+
+- **S5:** branch `feat/m5-s5-timers` on `65212ac`, packet `docs/development/m5-s5-timers.md`. `src/timer.rs` (pure): up to 3 countdowns, a monotonic deadline plus a persisted wall-clock expiry (`timer=` store lines), so they survive a restart and `WM_TIMECHANGE`. One term in the host wait minimum: `INFINITE` with none, completion only when collapsed, 1 s tick only while visible and expanded. Completion opens the notch once and plays the system sound (hook for S7); no toast, thread or wait handle.
+- **Display:** minimal text in the cover-accent style, PROVISIONAL (visual spec addendum); the UIA root name carries "Timer, 4:32 remaining".
+- **Verify:** `scripts/verify.ps1` PASS, **151 tests** (142 + 9). Release 884,736 B (+19,456 B), SHA-256 `AE535ABEC902897BCEA5CFDA5FFD1712B1FD7BF5030012BCAD395EC2881D61EA`.
+- **Reviews:** REVIEW NOT RUN (paused by user). Not accepted.
+- **Native evidence:** all NOT RUN (a real countdown, the sound, clock change, sleep across expiry, restart, minute-boundary wakes). Deferred: `--timer <seconds>` (needs a payload channel, so nothing starts a timer in the app yet), cancel, pause, the settings toggle.

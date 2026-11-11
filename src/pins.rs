@@ -236,7 +236,7 @@ mod tests {
             pins: (junk.iter().map(|s| s.to_string()))
                 .chain((0..MAX_PINS + 5).map(|n| format!("app:X{n}")))
                 .collect(),
-            shelf: vec![],
+            ..Store::default()
         };
         let pins = Pins::from_store(&store);
         assert_eq!(pins.items().len(), MAX_PINS);

@@ -194,6 +194,24 @@ pub fn meter_heights(peaks: [f32; BARS], dpi: u32) -> [i32; BARS] {
     peaks.map(|peak| bar + (peak * (slot.height - bar) as f32).round() as i32)
 }
 
+/// The timer's text slots (slice S5, PROVISIONAL, no design review), in DIPs from the body's left and top
+/// edges: x, y, width, height. Plain panel: left of the centred 30 DIP clock (about 100 wide, so x 16-88
+/// is free), centred on its row (y 29). Media panel: under the 72 DIP cover (it ends at y 86), left of the
+/// controls and volume rows (from x 100). Plain pill: right of the centred 15 DIP clock; the media pill is
+/// full (cover, title, clock) and shows none.
+const TIMER_PANEL: [(f32, f32, f32, f32); 2] = [(16.0, 21.0, 72.0, 16.0), (16.0, 92.0, 72.0, 16.0)];
+const TIMER_PILL: (f32, f32, f32, f32) = (108.0, 8.0, 30.0, 14.0);
+
+/// The panel timer slot in pixels from the body's left and top edges, for the plain or media panel.
+pub fn timer_panel(media: bool, dpi: u32) -> Bounds {
+    scaled_bounds(TIMER_PANEL[usize::from(media)], dpi)
+}
+
+/// The plain pill's minutes slot in pixels from the body's left and top edges.
+pub fn timer_pill(dpi: u32) -> Bounds {
+    scaled_bounds(TIMER_PILL, dpi)
+}
+
 /// The progress bar's target in the media panel (slice 4, provisional), in DIPs from the body's
 /// left and top edges: the drawn 4 DIP bar is centred in it, between the elapsed and total times.
 const MEDIA_PROGRESS: (f32, f32, f32, f32) = (140.0, 50.0, 164.0, 14.0);
@@ -635,6 +653,45 @@ mod tests {
                 .into_iter()
                 .chain([media_progress(dpi), volume_bar(dpi)]);
             assert!(!targets.any(overlaps), "{dpi}");
+        }
+    }
+
+    #[test]
+    fn timer_slots_stay_inside_their_body_and_overlap_no_other_element() {
+        let hit = |a: Bounds, b: Bounds| {
+            a.x < b.x + b.width
+                && b.x < a.x + a.width
+                && a.y < b.y + b.height
+                && b.y < a.y + a.height
+        };
+        for dpi in [96, 144, 192, 240] {
+            let fits = |slot: Bounds, shape: NotchShape| {
+                let body = notch_body(scaled(440.0, dpi), dpi, shape);
+                slot.x >= 0
+                    && slot.y >= 0
+                    && slot.x + slot.width <= body.width
+                    && slot.y + slot.height <= body.height
+            };
+            // Media panel: the cover (16,14,72), controls, progress, volume and visualizer slot.
+            let media = timer_panel(true, dpi);
+            assert!(fits(media, MEDIA_EXPANDED), "{dpi}");
+            let cover = scaled_bounds((16.0, 14.0, 72.0, 72.0), dpi);
+            let others = media_controls(dpi).into_iter().chain([
+                cover,
+                media_progress(dpi),
+                volume_bar(dpi),
+                meter(dpi).0,
+            ]);
+            assert!(!others.into_iter().any(|other| hit(media, other)), "{dpi}");
+            // Plain panel: above the date row (y 48-68) and left of the clock (from about x 100).
+            let plain = timer_panel(false, dpi);
+            assert!(fits(plain, NOTCH_EXPANDED), "{dpi}");
+            assert!(plain.y + plain.height <= scaled(48.0, dpi), "{dpi}");
+            assert!(plain.x + plain.width <= scaled(90.0, dpi), "{dpi}");
+            // Plain pill: right of the centred clock (about x 47-103 of 150).
+            let pill = timer_pill(dpi);
+            assert!(fits(pill, NOTCH), "{dpi}");
+            assert!(pill.x >= scaled(105.0, dpi), "{dpi}");
         }
     }
 }
