@@ -719,6 +719,7 @@ impl Media {
     /// atomic swap, plus a clock check only while a grace deadline exists; the caller's `cover`
     /// is a scan of a few surfaces.
     pub fn refresh(&mut self, cover: u32) -> bool {
+        crate::diagnostics::MEDIA_REFRESHES.fetch_add(1, Ordering::Relaxed);
         let expired = self
             .deadline()
             .is_some_and(|_| self.state.expire(Instant::now()));
@@ -728,6 +729,7 @@ impl Media {
         }
         let started = Instant::now();
         self.wakes = self.wakes.wrapping_add(1);
+        crate::diagnostics::MEDIA_WAKES.fetch_add(1, Ordering::Relaxed);
         let finished = |read: &mut IAsyncOperation<_>| read.Status() != Ok(AsyncStatus::Started);
         // A finished read keeps its result stream; dropping our reference frees it. Never `Close()`
         // it: the completion may still be about to call `GetResults()`.

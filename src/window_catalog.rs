@@ -1,6 +1,7 @@
 use crate::{
     catalog_timing::CatalogTiming,
-    window_model::{Identity, ScanSchedule, Snapshot, SourceStats, WindowModel},
+    diagnostics,
+    window_model::{ScanSchedule, Snapshot, SourceStats, WindowModel},
     window_source,
 };
 use std::{
@@ -343,37 +344,20 @@ impl Catalog {
         let Some(path) = &self.diagnostics else {
             return Ok(());
         };
-        // Explicit opt-in only. No titles, executable paths or other app content is written.
-        let windows = self.model.windows.iter().map(|window| format!(
-            "{{\"handle\":{},\"process\":{},\"title_utf16_length\":{},\"identity_available\":{},\"minimized\":{},\"foreground\":{}}}",
-            window.key.handle, window.key.process, window.title.encode_utf16().count(),
-            !matches!(window.identity, Identity::Unavailable(_)), window.minimized, window.foreground
-        )).collect::<Vec<_>>().join(",");
-        let output = format!(
-            "{{\"generation\":{},\"complete\":{},\"groups\":{},\"full_scans\":{},\"delta_batches\":{},\"inspected\":{},\"scans\":{},\"discarded\":{},\"invalidations\":{},\"reconciliations\":{},\"hooks_live\":{},\"stopped\":{},\"windows\":[{}]}}\n",
-            self.model.generation,
-            self.model.incomplete.is_none(),
-            self.model.groups().len(),
-            self.source_stats.full_scans,
-            self.source_stats.delta_batches,
-            self.source_stats.inspected,
-            self.scans,
-            self.discarded,
-            self.invalidations,
-            self.reconciliations,
-            self.hooks.len(),
-            stopped,
-            windows
-        );
-        let temporary = path.with_extension(format!("roqa-{}.tmp", std::process::id()));
-        std::fs::write(&temporary, output)
-            .and_then(|()| std::fs::rename(&temporary, path))
-            .map_err(|error| {
-                Error::new(
-                    E_FAIL,
-                    format!("Cannot save requested diagnostics: {error}"),
-                )
-            })
+        // Explicit opt-in only; the redacted format lives in `diagnostics`.
+        let view = diagnostics::CatalogView {
+            model: &self.model,
+            stats: self.source_stats,
+            scans: self.scans,
+            discarded: self.discarded,
+            invalidations: self.invalidations,
+            reconciliations: self.reconciliations,
+            hooks: self.hooks.len(),
+        };
+        diagnostics::write(
+            path,
+            diagnostics::report(&view, &diagnostics::Counters::read(), stopped),
+        )
     }
 }
 impl Drop for Catalog {

@@ -3,6 +3,7 @@
 mod audio;
 mod catalog_timing;
 mod clock;
+mod diagnostics;
 mod dock;
 mod dock_uia;
 mod graphics;

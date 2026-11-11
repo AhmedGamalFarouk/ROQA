@@ -43,7 +43,7 @@ use windows::{
 const ICON_READY: u32 = WM_APP + 12;
 const QUEUE: usize = 64;
 // Bound retained pixels and admitted work together; closed apps are evicted on catalog changes.
-const CACHE_LIMIT: usize = 256;
+pub const CACHE_LIMIT: usize = 256;
 /// Album-art streams larger than this are rejected before decoding.
 const ART_BYTES: u64 = 4 << 20;
 /// Decoded art is at most this many pixels a side (256 KiB of BGRA).
@@ -166,6 +166,7 @@ impl IconService {
             self.size = size;
             self.cache.clear();
             self.pending.clear();
+            self.publish();
         }
         if let Some(icon) = self.cache.get(identity) {
             return icon.clone();
@@ -197,6 +198,15 @@ impl IconService {
     pub fn retain(&mut self, keep: impl Fn(&Identity) -> bool) {
         self.cache.retain(|identity, _| keep(identity));
         self.pending.retain(|identity| keep(identity));
+        self.publish();
+    }
+
+    /// Cached-icon count for the diagnostics report.
+    fn publish(&self) {
+        crate::diagnostics::ICON_CACHE.store(
+            self.cache.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     /// Moves finished extractions into the cache; true when the dock should repaint.
@@ -210,6 +220,9 @@ impl IconService {
                 self.cache.insert(identity, icon);
                 changed = true;
             }
+        }
+        if changed {
+            self.publish();
         }
         changed
     }
