@@ -896,3 +896,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Size:** 1,048,576 to 803,840 B (-23.3%); SHA `D7592F2D06AE878377EB78F49B064AAA99E507D36578A1A24E47855D75029AC2`.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 185 tests, locked release). `smoke.ps1` now expects exit 70 for `--probe-panic`.
 - **NOT RUN:** real crash, error.log line, exit 70, debug smoke, all native/gates; reviews paused (REVIEW NOT RUN).
+
+## M5 S10: ROQA-only native run (2026-11-12 Africa/Cairo)
+
+- **Scope:** native tests and measurements on `118a6f8`; [results](m5-results.md). Binary 803,840 B SHA `1873E1F2C6227E569D3FA10732B27AC131E57FA906FE60A947CE4F40E6A9F2B9` (differs from `D7592F2D...` only by the embedded checkout path).
+- **Suites:** verify PASS (185 tests); catalog-smoke PASS 67 checks; packaged-hung PASS 16 checks; picker-smoke INTERFERENCE x2; smoke.ps1 NOT RUN (media session active).
+- **Measured:** start-warm 20.8 MiB private, 488 handles, 40 GDI, 25 USER, 20 threads (30 s, includes startup). Idle 15 min aborted by user input twice.
+- **NOT RUN:** idle, cold start, churn, media, S9 idle diagnostics (no paint counter), Nectar/Nusa comparison; every gate INCONCLUSIVE or NOT RUN. Reviews paused.
