@@ -1,13 +1,39 @@
-# -Executable measures another build (for example a saved baseline) instead of target/release.
-# -SampleSeconds lengthens the sample (for example 900 for a 15-minute run); default 30 keeps the M1 sample length.
-param([switch]$SkipBuild, [string]$EvidenceDirectory = 'artifacts/m1', [string]$Executable = '', [ValidateRange(1, 86400)][int]$SampleSeconds = 30)
+# Scenario runner; one invocation is one repetition and needs its own fresh user confirmation. See docs/development/m5-harness.md.
+# -Executable measures another build (for example a saved baseline) instead of target/release; -Executable never triggers a build.
+# -Competitor <name> measures a competitor build: it needs -Executable and -ExpectedSha256 (the pinned SHA-256) or it fails before launching.
+# -Scenario: idle (default), start-warm, start-cold (counters from launch), churn and media (a person drives the stimulus; input abort is off, -Note is required).
+# -SampleSeconds lengthens the sample (for example 900 for the 15-minute static gate); default 30 keeps the M1 sample length.
+# -DryRun validates arguments and prints the plan without launching, building or reading counters.
+param(
+    [switch]$SkipBuild, [switch]$DryRun, [string]$EvidenceDirectory = 'artifacts/m1', [string]$Executable = '',
+    [ValidatePattern('^[0-9A-Fa-f]{64}$')][string]$ExpectedSha256 = '', [string]$Competitor = '',
+    [ValidateSet('idle', 'start-warm', 'start-cold', 'churn', 'media')][string]$Scenario = 'idle',
+    [string]$Note = '', [ValidateRange(1, 99)][int]$Repetition = 1, [ValidateRange(1, 86400)][int]$SampleSeconds = 30
+)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-if (!$SkipBuild) { & "$PSScriptRoot/cargo.ps1" build --locked --release }
+. "$PSScriptRoot/verdict.ps1"
+if ($Competitor -and ($Competitor -notmatch '^[A-Za-z0-9._-]+$' -or !$Executable -or !$ExpectedSha256)) { throw 'Competitor mode needs a file-name-safe -Competitor plus both -Executable (a pinned path) and -ExpectedSha256; nothing was launched.' }
+if ($Scenario -in 'churn', 'media', 'start-cold' -and !$Note) { throw "-Scenario $Scenario needs -Note (the stimulus performed, or the attested cold-start state)." }
+$isStart = $Scenario -like 'start-*'
+$inputGuard = $Scenario -notin 'churn', 'media'
+$label = if ($Competitor) { $Competitor } else { 'roqa' }
+if (!$SkipBuild -and !$DryRun -and !$Executable) { & "$PSScriptRoot/cargo.ps1" build --locked --release }
 $evidence = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $EvidenceDirectory))
+$executable = if ($Executable) { (Resolve-Path -LiteralPath $Executable).Path } elseif ($DryRun) { Join-Path $projectRoot 'target/release/roqa.exe' } else { (Resolve-Path -LiteralPath (Join-Path $projectRoot 'target/release/roqa.exe')).Path }
+$binarySha = if (Test-Path -LiteralPath $executable) { (Get-FileHash -Algorithm SHA256 -LiteralPath $executable).Hash } else { $null }
+if ($ExpectedSha256 -and $binarySha -ne $ExpectedSha256) { throw "Pinned SHA-256 mismatch for $executable (got $binarySha); nothing was launched." }
+$outputPath = Join-Path $evidence "$Scenario-$label-r$Repetition.json"
+# A second instance of the same executable would be counted as a descendant or make a single-instance build exit.
+$running = @(Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($executable)) -ErrorAction SilentlyContinue)
+if ($running.Count) { if ($DryRun) { Write-Warning "$($running.Count) process(es) with this name are already running." } else { throw "$($running.Count) process(es) with this name are already running; stop them first." } }
+if ($DryRun) {
+    [ordered]@{ DryRun = $true; Scenario = $Scenario; Build = $label; Executable = $executable; BinarySha256 = $binarySha; SampleSeconds = $SampleSeconds; InputGuard = $inputGuard; Output = $outputPath } | ConvertTo-Json
+    return
+}
 New-Item -ItemType Directory -Force -Path $evidence | Out-Null
-$executable = if ($Executable) { (Resolve-Path -LiteralPath $Executable).Path } else { Join-Path $projectRoot 'target/release/roqa.exe' }
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type -Namespace RoqaIdle -Name Native -MemberDefinition @'
 [DllImport("kernel32.dll", SetLastError = true)] static extern bool QueryProcessCycleTime(System.IntPtr process, out ulong cycles);
 [DllImport("user32.dll", SetLastError = true)] public static extern uint GetGuiResources(System.IntPtr process, uint flags);
@@ -44,6 +70,9 @@ $machine = [ordered]@{
     Os = (Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber)
     Cpu = (Get-CimInstance Win32_Processor | Select-Object Name, NumberOfLogicalProcessors, MaxClockSpeed)
     Gpu = @(Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion, CurrentHorizontalResolution, CurrentVerticalResolution, CurrentRefreshRate)
+    MonitorCount = [System.Windows.Forms.Screen]::AllScreens.Count
+    # shortcut: AppliedDPI is the system scale at sign-in; per-monitor scales are not read, record them by hand.
+    AppliedDpi = (Get-Item 'HKCU:\Control Panel\Desktop\WindowMetrics').GetValue('AppliedDPI', $null)
 }
 $nominalMegahertz = [double](@($machine.Cpu)[0].MaxClockSpeed)
 if ($nominalMegahertz -le 0) { throw 'Win32_Processor.MaxClockSpeed is missing; cannot label cycles.' }
@@ -64,14 +93,53 @@ $idleLimitSeconds = ($machine.IdleTimeouts.DisplayOffSeconds, $screenSaverSecond
 if ($idleLimitSeconds -and [RoqaIdle.Native]::IdleMilliseconds() / 1000 + 5 + $SampleSeconds + 30 -ge $idleLimitSeconds) {
     throw "STOP: an idle timeout of $idleLimitSeconds s (display off or screen saver) would fall inside the run; shorten -SampleSeconds or start sooner after input."
 }
+# The measured scope is the launched process plus its descendants (WebView2, helpers), found by one Win32_Process read.
+# shortcut: a grandchild whose parent already exited is missed and a reused PID can mislink; both are rare for a launcher tree.
+function Get-TreeIds([int]$RootId) {
+    $rows = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId)
+    $ids = @($RootId)
+    for ($i = 0; $i -lt $ids.Count; $i++) { $ids += @($rows | Where-Object { $_.ParentProcessId -eq $ids[$i] -and [int]$_.ProcessId -notin $ids } | ForEach-Object { [int]$_.ProcessId }) }
+    return $ids
+}
+# A descendant that cannot be read (exited, elevated) is counted, and the run is then reported incomplete instead of understated.
+function Read-Tree([int]$RootId) {
+    $procs = @{}
+    $unreadable = 0
+    foreach ($id in Get-TreeIds $RootId) {
+        try {
+            $p = [System.Diagnostics.Process]::GetProcessById($id)
+            try {
+                $procs[$id] = @{
+                    Cycles = [RoqaIdle.Native]::Cycles($p.Handle); CpuMs = $p.TotalProcessorTime.TotalMilliseconds
+                    Private = $p.PrivateMemorySize64; Handles = $p.HandleCount; Threads = $p.Threads.Count
+                    Gdi = [RoqaIdle.Native]::GetGuiResources($p.Handle, 0)
+                    User = if ($id -eq $RootId) { [RoqaIdle.Native]::UserObjects($p.Handle) } else { [RoqaIdle.Native]::GetGuiResources($p.Handle, 1) }
+                }
+            }
+            finally { $p.Dispose() }
+        }
+        catch { if ($id -eq $RootId) { throw }; $unreadable++ }
+    }
+    return @{ Procs = $procs; Unreadable = $unreadable }
+}
+function Sum-Tree($Tree, [string]$Key) { return [double](@($Tree.Procs.Values | ForEach-Object { $_[$Key] } | Measure-Object -Sum).Sum) }
+# Processes alive at both reads add their difference; processes born between reads add their whole value (a start scenario has no start read).
+function Measure-TreeDelta($Start, $End, [string]$Key) {
+    $sum = 0.0
+    foreach ($id in $End.Procs.Keys) {
+        $before = $Start.Procs[$id]
+        $sum += if ($null -ne $before -and $End.Procs[$id][$Key] -ge $before[$Key]) { $End.Procs[$id][$Key] - $before[$Key] } else { $End.Procs[$id][$Key] }
+    }
+    return $sum
+}
 # Wake proxy: raw ContextSwitchesPersec is each live thread's cumulative switch count. One WMI read takes seconds,
 # so reads sit outside the CPU window; each is timed by its midpoint because the snapshot instant inside it is unknown.
-function Read-ContextSwitches([int]$ProcessId) {
+function Read-ContextSwitches([int[]]$ProcessIds) {
     $begin = [System.Diagnostics.Stopwatch]::GetTimestamp()
-    $rows = @(Get-CimInstance Win32_PerfRawData_PerfProc_Thread -Filter "IDProcess = $ProcessId" -Property IDThread, ContextSwitchesPersec)
+    $rows = @(Get-CimInstance Win32_PerfRawData_PerfProc_Thread -Filter (($ProcessIds | ForEach-Object { "IDProcess = $_" }) -join ' OR ') -Property IDThread, ContextSwitchesPersec)
     $end = [System.Diagnostics.Stopwatch]::GetTimestamp()
     # A live ROQA always has threads, so no rows means the counter source failed, not zero wakes.
-    if (!$rows.Count) { throw "WMI returned no threads for process $ProcessId; performance counters may be disabled." }
+    if (!$rows.Count) { throw "WMI returned no threads for process $($ProcessIds[0]); performance counters may be disabled." }
     $counts = @{}
     foreach ($row in $rows) { $counts[[long]$row.IDThread] = [long]$row.ContextSwitchesPersec }
     return @{ Counts = $counts; Midpoint = ($begin + $end) / 2; ReadSeconds = ($end - $begin) / [System.Diagnostics.Stopwatch]::Frequency }
@@ -87,64 +155,84 @@ function Measure-SwitchDelta([hashtable]$Start, [hashtable]$End) {
     return @{ Switches = $switches; Exited = @($Start.Keys | Where-Object { !$End.ContainsKey($_) }).Count; Born = @($End.Keys | Where-Object { !$Start.ContainsKey($_) }).Count }
 }
 $inputBeforeLaunch = [RoqaIdle.Native]::LastInputTick()
+function Assert-NoInput([string]$When) { if ($inputGuard -and [RoqaIdle.Native]::LastInputTick() -ne $inputBeforeLaunch) { throw "STOP: user input arrived during $When; nothing was recorded." } }
 $idleSecondsAtLaunch = [RoqaIdle.Native]::IdleMilliseconds() / 1000
+$sampler = [System.Diagnostics.Process]::GetCurrentProcess()
 $launchClock = [System.Diagnostics.Stopwatch]::StartNew()
-$measuredHost = Start-Process -FilePath $executable -PassThru -WindowStyle Hidden
+$launchTimestamp = [System.Diagnostics.Stopwatch]::GetTimestamp()
+# Hidden is ROQA's own launch mode; a competitor starts with its default window state, whose effect is unverified.
+$measuredHost = if ($Competitor) { Start-Process -FilePath $executable -PassThru } else { Start-Process -FilePath $executable -PassThru -WindowStyle Hidden }
 try {
-    if ($measuredHost.WaitForExit(5000)) { throw 'ROQA exited during the five-second settle period.' }
-    $switchesStart = Read-ContextSwitches $measuredHost.Id
-    $measuredHost.Refresh()
-    $startCpu = $measuredHost.TotalProcessorTime.TotalMilliseconds
-    $startPrivate = $measuredHost.PrivateMemorySize64
-    $startHandles = $measuredHost.HandleCount
-    $startGdi = [RoqaIdle.Native]::GetGuiResources($measuredHost.Handle, 0)
-    $startUser = [RoqaIdle.Native]::UserObjects($measuredHost.Handle)
-    $startCycles = [RoqaIdle.Native]::Cycles($measuredHost.Handle)
-    $sampleClock = [System.Diagnostics.Stopwatch]::StartNew()
-    $settleSeconds = $launchClock.Elapsed.TotalSeconds
-    # Polls the sampler (not ROQA) once a second so user input stops a long run early.
-    while (($remaining = $SampleSeconds * 1000 - $sampleClock.ElapsedMilliseconds) -gt 0) {
-        if ($measuredHost.WaitForExit([int][Math]::Min(1000, $remaining))) { throw "ROQA exited during the $SampleSeconds-second sample." }
-        if ([RoqaIdle.Native]::LastInputTick() -ne $inputBeforeLaunch) { throw 'STOP: user input arrived during the settle or sample; nothing was recorded.' }
+    $empty = @{ Procs = @{}; Unreadable = 0 }
+    if ($isStart) {
+        # A start scenario counts from process creation, so the start counters are empty by construction.
+        $treeStart = $empty
+        $switchesStart = @{ Counts = @{}; Midpoint = $launchTimestamp; ReadSeconds = 0 }
+        $sampleClock = $launchClock
     }
-    $endCycles = [RoqaIdle.Native]::Cycles($measuredHost.Handle)
+    else {
+        if ($measuredHost.WaitForExit(5000)) { throw 'The measured build exited during the five-second settle period.' }
+        $treeStart = Read-Tree $measuredHost.Id
+        $switchesStart = Read-ContextSwitches @($treeStart.Procs.Keys)
+        $sampleClock = [System.Diagnostics.Stopwatch]::StartNew()
+    }
+    $startSamplerCycles = [RoqaIdle.Native]::Cycles($sampler.Handle)
+    $settleSeconds = $launchClock.Elapsed.TotalSeconds
+    # Polls the sampler (not the build) once a second so user input stops a long run early.
+    while (($remaining = $SampleSeconds * 1000 - $sampleClock.ElapsedMilliseconds) -gt 0) {
+        if ($measuredHost.WaitForExit([int][Math]::Min(1000, $remaining))) { throw "The measured build exited during the $SampleSeconds-second sample." }
+        Assert-NoInput 'the settle or sample'
+    }
+    $treeEnd = Read-Tree $measuredHost.Id
+    $endSamplerCycles = [RoqaIdle.Native]::Cycles($sampler.Handle)
     $sampleClock.Stop()
-    $measuredHost.Refresh()
-    $cpuMilliseconds = $measuredHost.TotalProcessorTime.TotalMilliseconds - $startCpu
-    $endPrivate = $measuredHost.PrivateMemorySize64
-    $endHandles = $measuredHost.HandleCount
-    $endGdi = [RoqaIdle.Native]::GetGuiResources($measuredHost.Handle, 0)
-    $endUser = [RoqaIdle.Native]::UserObjects($measuredHost.Handle)
-    $switchesEnd = Read-ContextSwitches $measuredHost.Id
-    if ([RoqaIdle.Native]::LastInputTick() -ne $inputBeforeLaunch) { throw 'STOP: user input arrived during the final reads; nothing was recorded.' }
+    $switchesEnd = Read-ContextSwitches @($treeEnd.Procs.Keys)
+    Assert-NoInput 'the final reads'
     if ($idleLimitSeconds -and $idleSecondsAtLaunch + $launchClock.Elapsed.TotalSeconds -ge $idleLimitSeconds) { throw "STOP: the $idleLimitSeconds s idle timeout passed during the run; nothing was recorded." }
     $seconds = $sampleClock.Elapsed.TotalSeconds
-    $cycles = $endCycles - $startCycles
+    $cycles = Measure-TreeDelta $treeStart $treeEnd 'Cycles'
+    $cpuMilliseconds = Measure-TreeDelta $treeStart $treeEnd 'CpuMs'
     $wake = Measure-SwitchDelta $switchesStart.Counts $switchesEnd.Counts
     $wakeSeconds = ($switchesEnd.Midpoint - $switchesStart.Midpoint) / [System.Diagnostics.Stopwatch]::Frequency
+    $processesExited = @($treeStart.Procs.Keys | Where-Object { !$treeEnd.Procs.ContainsKey($_) }).Count
+    $unreadable = [Math]::Max($treeStart.Unreadable, $treeEnd.Unreadable)
+    $complete = $processesExited -eq 0 -and $unreadable -eq 0
+    $processCount = [Math]::Max($treeStart.Procs.Count, $treeEnd.Procs.Count)
     $observation = [ordered]@{
-        Label = 'Idle observation only; no product-budget or competitor verdict'
+        Label = 'Observation only; CpuVerdict is INCONCLUSIVE below the counter floor and, for idle, compares CPU with the proposed 1 ms/s gate; no product-budget or comparison verdict'
         Utc = [DateTime]::UtcNow.ToString('o')
-        BinarySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $executable).Hash
-        Method = "Release build; five-second settle plus one WMI read (SettleSeconds, about 10 s; M1 used 5 s); $SampleSeconds-second wait; System.Diagnostics.Process start/end counters; QueryProcessCycleTime start/end; GetGuiResources start/end; per-thread WMI context switches read just outside the CPU window; refuses to run into the display-off or screen-saver timeout; stops on any user input (GetLastInputInfo) from launch to the final read"
+        Scenario = $Scenario
+        Build = $label
+        Repetition = $Repetition
+        Note = $Note
+        Competitor = if ($Competitor) { [ordered]@{ Name = $Competitor; Executable = $executable; PinnedSha256 = $ExpectedSha256.ToUpperInvariant() } } else { $null }
+        BinarySha256 = $binarySha
+        Method = "Scope is the launched process plus descendants (one Win32_Process read); $(if ($isStart) { 'counters run from process creation, so every *Start value is 0 by construction' } else { 'five-second settle plus one WMI read (SettleSeconds, about 10 s; M1 used 5 s)' }); $SampleSeconds-second wait; System.Diagnostics.Process counters summed over the tree; QueryProcessCycleTime; GetGuiResources; per-thread WMI context switches read just outside the CPU window; sampler cycles recorded; refuses to run into the display-off or screen-saver timeout; $(if ($inputGuard) { 'stops on any user input (GetLastInputInfo) from launch to the final read' } else { 'user input is expected (churn or media stimulus) and does not stop the run' }); no working-set trimming"
         Machine = $machine
+        Complete = $complete
+        ProcessesStart = $treeStart.Procs.Count
+        ProcessesEnd = $treeEnd.Procs.Count
+        ProcessesExited = $processesExited
+        UnreadableProcesses = $unreadable
+        CpuVerdict = Get-CpuVerdict ($cpuMilliseconds / $seconds) $seconds $processCount $complete ($Scenario -eq 'idle')
         DurationSeconds = $seconds
         CpuMilliseconds = $cpuMilliseconds
         CpuMillisecondsPerSecond = $cpuMilliseconds / $seconds
-        PrivateBytesStart = $startPrivate
-        PrivateBytesEnd = $endPrivate
-        HandlesStart = $startHandles
-        HandlesEnd = $endHandles
+        PrivateBytesStart = Sum-Tree $treeStart 'Private'
+        PrivateBytesEnd = Sum-Tree $treeEnd 'Private'
+        HandlesStart = Sum-Tree $treeStart 'Handles'
+        HandlesEnd = Sum-Tree $treeEnd 'Handles'
         SettleSeconds = $settleSeconds
         IdleSecondsAtLaunch = $idleSecondsAtLaunch
         CpuCycles = $cycles
         CpuCyclesPerSecond = $cycles / $seconds
         NominalClockMegahertz = $nominalMegahertz
         ApproxCpuMillisecondsPerSecondFromCycles = $cycles / ($nominalMegahertz * 1000) / $seconds
-        GdiObjectsStart = $startGdi
-        GdiObjectsEnd = $endGdi
-        UserObjectsStart = $startUser
-        UserObjectsEnd = $endUser
+        GdiObjectsStart = Sum-Tree $treeStart 'Gdi'
+        GdiObjectsEnd = Sum-Tree $treeEnd 'Gdi'
+        UserObjectsStart = Sum-Tree $treeStart 'User'
+        UserObjectsEnd = Sum-Tree $treeEnd 'User'
+        SamplerCyclesPerSecond = ($endSamplerCycles - $startSamplerCycles) / $seconds
         WakeProxyContextSwitches = $wake.Switches
         WakeProxySeconds = $wakeSeconds
         WakeProxyContextSwitchesPerSecond = $wake.Switches / $wakeSeconds
@@ -153,18 +241,25 @@ try {
         ThreadsEnd = $switchesEnd.Counts.Count
         ThreadsExited = $wake.Exited
         ThreadsBorn = $wake.Born
-        Limits = 'CpuMilliseconds moves in scheduler ticks (15.625 ms by default), so it is coarse at idle. CpuCycles has no tick quantization; ApproxCpuMillisecondsPerSecondFromCycles assumes cycles tick at NominalClockMegahertz (WMI MaxClockSpeed), which is unverified; the QueryThreadCycleTime docs advise against converting cycles to time, so it is approximate; compare builds by CpuCyclesPerSecond. WakeProxyContextSwitches is a wake proxy, not a wake count: it is matched per thread ID, threads that exit between reads lose their in-window switches (so it can understate; see ThreadsExited, and a reused thread ID can hide an exit and understate further), and its window is WakeProxySeconds give or take half the sum of WakeProxyReadSeconds because the snapshot instant inside each WMI read is unknown. SettleSeconds is longer than the M1 five seconds. Group-policy screen-saver and lock timeouts and the system sleep timeout are not read; a screen saver without ScreenSaveTimeOut is treated as never. Two endpoint queries per counter; sampler outside target; DWM/GPU/power/shared allocations not attributed; other desktop applications remain running.'
+        Limits = 'CpuMilliseconds moves in scheduler ticks (15.625 ms by default) per process, so it is coarse at idle. CpuCycles has no tick quantization; ApproxCpuMillisecondsPerSecondFromCycles assumes cycles tick at NominalClockMegahertz (WMI MaxClockSpeed), which is unverified; the QueryThreadCycleTime docs advise against converting cycles to time, so it is approximate; compare builds by CpuCyclesPerSecond. WakeProxyContextSwitches is a wake proxy, not a wake count: it is matched per thread ID, threads that exit between reads lose their in-window switches (so it can understate; see ThreadsExited, and a reused thread ID can hide an exit and understate further), and its window is WakeProxySeconds give or take half the sum of WakeProxyReadSeconds because the snapshot instant inside each WMI read is unknown. SettleSeconds is longer than the M1 five seconds. Group-policy screen-saver and lock timeouts and the system sleep timeout are not read; a screen saver without ScreenSaveTimeOut is treated as never. Two endpoint queries per counter; SamplerCyclesPerSecond covers only the wait loop, not the WMI reads; DWM/GPU/power/shared allocations not attributed; other desktop applications remain running. Complete is false when a descendant exited or could not be read between the reads; its CPU is then lost and the verdict is INCONCLUSIVE.'
     }
-    $observation | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $evidence 'idle.json')
+    $observation | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $outputPath
 }
 finally {
     if (!$measuredHost.HasExited) {
-        $quit = Start-Process -FilePath $executable -ArgumentList '--quit' -WindowStyle Hidden -PassThru
-        if (!$quit.WaitForExit(5000) -or $quit.ExitCode -ne 0) { Write-Warning 'Idle sample quit signaling failed.' }
-        $quit.Dispose()
-        if (!$measuredHost.WaitForExit(5000)) { $measuredHost.Kill(); throw 'Forced cleanup after idle sample; graceful shutdown failed.' }
-        if ($measuredHost.ExitCode -ne 0) { throw "Measured host exited with $($measuredHost.ExitCode)." }
+        if ($Competitor) {
+            # A competitor has no known --quit: ask its main window to close, then end only the owned process tree.
+            [void]$measuredHost.CloseMainWindow()
+            if (!$measuredHost.WaitForExit(5000)) { & taskkill.exe /PID $measuredHost.Id /T /F | Out-Null; [void]$measuredHost.WaitForExit(5000) }
+        }
+        else {
+            $quit = Start-Process -FilePath $executable -ArgumentList '--quit' -WindowStyle Hidden -PassThru
+            if (!$quit.WaitForExit(5000) -or $quit.ExitCode -ne 0) { Write-Warning 'Idle sample quit signaling failed.' }
+            $quit.Dispose()
+            if (!$measuredHost.WaitForExit(5000)) { $measuredHost.Kill(); throw 'Forced cleanup after idle sample; graceful shutdown failed.' }
+            if ($measuredHost.ExitCode -ne 0) { throw "Measured host exited with $($measuredHost.ExitCode)." }
+        }
     }
     $measuredHost.Dispose()
 }
-Write-Host "Idle observation saved to $evidence/idle.json."
+Write-Host "Observation saved to $outputPath."
