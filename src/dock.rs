@@ -1,3 +1,4 @@
+use crate::pins::{self, Pins};
 use crate::window_model::{Identity, WindowKey, WindowModel};
 use windows::Win32::{
     Foundation::HWND,
@@ -47,10 +48,54 @@ pub fn items(model: &WindowModel) -> Vec<DockItem> {
     items
 }
 
+/// Pins first, in pin order (running group or a launcher with no windows), then unpinned groups in `items` order.
+/// An `Executable` pin also claims a group whose AUMID identity has the same exe, so a pin survives that upgrade.
+/// With no pins this equals `items(model)`.
+#[allow(dead_code)] // S4 switches the host to this.
+pub fn items_with_pins(model: &WindowModel, pins: &Pins) -> Vec<DockItem> {
+    let mut running: Vec<Option<DockItem>> = items(model).into_iter().map(Some).collect();
+    let find = |running: &[Option<DockItem>], matches: &dyn Fn(&DockItem) -> bool| {
+        running
+            .iter()
+            .position(|item| item.as_ref().is_some_and(matches))
+    };
+    let mut merged = Vec::with_capacity(pins.items().len() + running.len());
+    for pin in pins.items() {
+        let found = find(&running, &|item| item.identity == *pin).or_else(|| match pin {
+            Identity::Executable(path) => {
+                find(&running, &|item| item.executable.as_deref() == Some(path))
+            }
+            _ => None,
+        });
+        merged.push(
+            found
+                .and_then(|at| running[at].take())
+                .unwrap_or_else(|| DockItem {
+                    identity: pin.clone(),
+                    executable: match pin {
+                        Identity::Executable(path) => Some(path.clone()),
+                        _ => None,
+                    },
+                    windows: Vec::new(),
+                    active: false,
+                }),
+        );
+    }
+    merged.extend(running.into_iter().flatten());
+    merged
+}
+
 /// Accessible names per slot: the picker, then each group's first real window title with count and state.
 pub fn names(items: &[DockItem], model: &WindowModel) -> Vec<String> {
     let mut names = vec!["All windows".to_string()];
     for item in items {
+        if item.windows.is_empty() {
+            names.push(format!(
+                "{}, pinned, not running",
+                pins::display_name(&item.identity)
+            ));
+            continue;
+        }
         let title = item
             .windows
             .first()
@@ -95,11 +140,16 @@ pub fn slot_at(x_px: i32, width_px: i32, dpi: u32, slots: usize) -> Option<usize
 pub enum Action {
     Activate(WindowKey),
     Minimize(WindowKey),
+    /// Shell target of a pinned app with no window; `perform` does nothing with it until S4 wires the launch.
+    Launch(String),
 }
 
 /// Taskbar-like click: focus the group, cycle within an already focused group, minimize a lone focused window.
+/// A pinned item with no windows launches instead.
 pub fn action(item: &DockItem, foreground: Option<WindowKey>) -> Option<Action> {
-    let first = *item.windows.first()?;
+    let Some(&first) = item.windows.first() else {
+        return pins::launch_target(&item.identity).map(Action::Launch);
+    };
     let Some(position) = foreground.and_then(|key| item.windows.iter().position(|w| *w == key))
     else {
         return Some(Action::Activate(first));
@@ -155,7 +205,9 @@ pub fn restore_foreground(from: HWND, to: Option<WindowKey>) {
 
 /// Returns false when the target is gone or Windows refused foreground; never forces focus.
 pub fn perform(action: Action) -> bool {
-    let (Action::Activate(key) | Action::Minimize(key)) = action;
+    let (Action::Activate(key) | Action::Minimize(key)) = action else {
+        return false; // Launch: the shell launch is S4's.
+    };
     if !valid_target(key) {
         return false;
     }
@@ -170,6 +222,7 @@ pub fn perform(action: Action) -> bool {
                 }
                 SetForegroundWindow(window).as_bool()
             }
+            Action::Launch(_) => false,
         }
     }
 }
@@ -224,6 +277,126 @@ mod tests {
             names(&items, &model),
             vec!["All windows", "w3", "w5, 2 windows, active", "w7"]
         );
+    }
+
+    fn pins_of(identities: &[Identity]) -> Pins {
+        let mut pins = Pins::default();
+        for identity in identities {
+            pins.add(identity.clone()).unwrap();
+        }
+        pins
+    }
+
+    fn sample_model() -> WindowModel {
+        WindowModel {
+            generation: 1,
+            windows: vec![
+                record(9, Identity::Executable("c:\\9.exe".into()), false),
+                record(3, Identity::Application("Contoso.Mail".into()), true),
+                record(5, Identity::Executable("c:\\5.exe".into()), false),
+                record(7, Identity::Unavailable(7), false),
+            ],
+            incomplete: None,
+        }
+    }
+
+    #[test]
+    fn empty_pins_equal_todays_items() {
+        let model = sample_model();
+        assert_eq!(items_with_pins(&model, &Pins::default()), items(&model));
+        assert!(items_with_pins(&WindowModel::default(), &Pins::default()).is_empty());
+    }
+
+    #[test]
+    fn merge_orders_pinned_first_then_running_in_stable_order() {
+        let model = sample_model();
+        let missing = Identity::Executable("c:\\gone.exe".into());
+        let pinned = [
+            Identity::Executable("c:\\9.exe".into()), // running, pinned
+            missing.clone(),                          // pinned only
+            Identity::Application("Contoso.Mail".into()),
+        ];
+        let merged = items_with_pins(&model, &pins_of(&pinned));
+        let ids: Vec<_> = merged.iter().map(|i| i.identity.clone()).collect();
+        // Pin order, then unpinned running (5.exe, Unavailable) in the old identity order.
+        assert_eq!(
+            ids,
+            [
+                pinned[0].clone(),
+                missing.clone(),
+                pinned[2].clone(),
+                Identity::Executable("c:\\5.exe".into()),
+                Identity::Unavailable(7)
+            ]
+        );
+        assert_eq!(merged[0].windows, vec![key(9)]);
+        assert!(merged[1].windows.is_empty() && !merged[1].active);
+        assert_eq!(merged[1].executable.as_deref(), Some("c:\\gone.exe"));
+        assert!(merged[2].active);
+        // Stable: the same inputs give the same order, and a window churn does not reorder pins.
+        assert_eq!(merged, items_with_pins(&model, &pins_of(&pinned)));
+        let mut fewer = sample_model();
+        fewer.windows.retain(|w| w.key != key(9));
+        let ids: Vec<_> = items_with_pins(&fewer, &pins_of(&pinned))
+            .iter()
+            .map(|i| i.identity.clone())
+            .collect();
+        assert_eq!(ids[..3], pinned);
+    }
+
+    #[test]
+    fn executable_pin_claims_a_group_that_gained_an_aumid() {
+        let mut model = WindowModel::default();
+        model
+            .windows
+            .push(record(4, Identity::Application("Vendor.App".into()), false));
+        model.windows[0].executable = Some("c:\\vendor.exe".into());
+        let merged = items_with_pins(
+            &model,
+            &pins_of(&[Identity::Executable("C:\\Vendor.exe".into())]),
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].windows, vec![key(4)]);
+        // An exact identity match wins and a group is claimed once.
+        model.windows.push(record(
+            6,
+            Identity::Executable("c:\\vendor.exe".into()),
+            false,
+        ));
+        let pins = pins_of(&[Identity::Executable("c:\\vendor.exe".into())]);
+        let merged = items_with_pins(&model, &pins);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].windows, vec![key(6)]);
+        assert_eq!(merged[1].windows, vec![key(4)]);
+    }
+
+    #[test]
+    fn launcher_items_get_names_and_a_launch_action() {
+        let pins = pins_of(&[
+            Identity::Application("Contoso.Mail_abc!App".into()),
+            Identity::Executable("c:\\tools\\edit.exe".into()),
+        ]);
+        let model = WindowModel::default();
+        let merged = items_with_pins(&model, &pins);
+        assert_eq!(
+            names(&merged, &model),
+            [
+                "All windows",
+                "Contoso.Mail, pinned, not running",
+                "edit, pinned, not running"
+            ]
+        );
+        assert_eq!(
+            action(&merged[0], None),
+            Some(Action::Launch(
+                "shell:AppsFolder\\Contoso.Mail_abc!App".into()
+            ))
+        );
+        assert_eq!(
+            action(&merged[1], Some(key(1))),
+            Some(Action::Launch("c:\\tools\\edit.exe".into()))
+        );
+        assert!(!perform(Action::Launch("c:\\tools\\edit.exe".into()))); // S4 wires the launch
     }
 
     #[test]

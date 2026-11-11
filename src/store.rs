@@ -3,7 +3,7 @@
 //! Format is a hand-rolled `key=value` text file (no new crate): `version=N`, repeated `pin=`/`shelf=` lines,
 //! and a closing `end` line that makes truncation detectable. Unknown keys are skipped, so a newer build's
 //! extra fields survive an older reader; a *newer version* is set aside instead, so a downgrade never rewrites it.
-#![allow(dead_code)] // S3, S4 and S6 wire the host; until then only the tests call this module.
+#![allow(dead_code)] // S3's `pins` models the pin section; S4 and S6 wire the host, so only tests call this module yet.
 
 use std::io;
 use std::path::{Path, PathBuf};
