@@ -77,8 +77,19 @@ The font is Segoe UI Variable, from the system; no font is bundled.
   - A control the player does not enable (GSMTC `IsPreviousEnabled`; `IsPauseEnabled` while playing, `IsPlayEnabled` otherwise; `IsNextEnabled`) is drawn at 30 % opacity, never hidden.
   - The control with keyboard focus gets a white ring: 2 DIP stroke, 2 DIP outside the box, a circle around play/pause and radius 8 + 3 otherwise.
   - There is no pointer hover or press state: a control changes only when the player reports the result.
+- **Progress row (slice 4, PROVISIONAL).** The addendum reserved 50–64 but did not pin the geometry; this minimal placement has had no design review. In DIPs from the body's left and top (`layout::media_progress`), centred on y 57:
+
+  | Element | Box | Look |
+  |---|---|---|
+  | Elapsed | 100–136, leading | `m:ss`, 11 Regular, white 60 % |
+  | Bar | target 164 × 14 at (140, 50); drawn 4 tall, centred | Track white 20 %, filled part white, radius 2; the fill is whole physical pixels, floor(elapsed × width ÷ length) |
+  | Total | 308–344, trailing (16 from the right, like the clock) | `m:ss`, 11 Regular, white 60 % |
+
+  - It keeps its panel place while the body morphs and fades in with the controls (`motion::reveal`). The pill draws none.
+  - Drawn only while the player reports a length (`EndTime` after `StartTime`, at most 1000 hours); without one there is no row and no seek. Times are whole seconds, floored; a track over an hour reads, for example, `62:05`.
+  - The shown position is `Position + (now − LastUpdatedTime) × rate`, clamped to the timeline. It holds still while paused.
+  - **Seek.** A click or tap inside the bar's target, when the player enables `IsPlaybackPositionEnabled`, asks for that fraction of the length; the left edge is the start. There is no hover, drag or keyboard seek (user decision, 2026-11-10). When the player accepts it, the timeline is read again; if that read still predates the request, the row shows the target until the player reports a newer timeline.
 - **Reserved panel rows.** Nothing else is drawn below 50 yet, and there are no placeholders:
-  - progress (elapsed, bar, duration), about 50–64, slice 4;
   - the visualizer slot right of the controls, slice 7;
   - volume, about 101–115, slice 6.
 
@@ -99,7 +110,10 @@ Weights switch at the midpoint of the morph. While paused, the glyph and the tit
   - The layout itself is not mirrored: the cover stays on the left and the clock on the right.
   - Mirroring for an RTL UI language is deferred.
 
-**Repaints.** A visible notch repaints only when the drawn track changes: session presence, title, artist, play state or the controls' enabled states (`media::redraw`). Moving keyboard focus paints one frame for the ring. Timeline and rate updates draw nothing. There is no media timer, deadline or frame loop. Collapsed static playback keeps only the clock's per-minute paint. Text layouts are not cached: static paints happen at most once a minute, and animation frames change the font sizes, so a cache would miss.
+**Repaints.** A visible notch repaints only when the drawn track changes: session presence, title, artist, play state or the controls' enabled states (`media::redraw`). Moving keyboard focus paints one frame for the ring. A collapsed notch draws no timeline, so timeline and rate updates draw nothing there, and there is no media timer, deadline or frame loop for it. Collapsed static playback keeps only the clock's per-minute paint. Text layouts are not cached: static paints happen at most once a minute collapsed and about once a second open, and animation frames change the font sizes, so a cache would miss.
+
+- **Open panel (slice 4).** An open, visible notch repaints when its progress row's shown seconds or filled pixels change. While the track plays forward, one host deadline falls at the next whole second or bar pixel, whichever is first. At rate 1 or below a whole second is never deferred, so the time neither lags nor skips; a pixel-only change waits until a second after the previous tick's scheduled time (not its late wake, so latency never accumulates) and is drawn on its own only if the next second is still a second later. Above rate 1 every change waits for that floor. Ticks are therefore at least a second apart after the first one. A seek or other read repaints at once. Paused, rate 0, no length (or one over 1000 hours), collapsed, hidden or full-screen-suppressed: no deadline.
+- **Timeline reads.** There is no timeline event subscription. The timeline is read with the playback info, when a notch opens, and while one is open after a track change or a finished command such as a seek.
 
 **Window.** The fixed HWND grows from 400 × 124 to 440 × 164. That is the media panel and its ears (392 wide) with the plain panel's 40 DIP from body to window side and 44 DIP of bottom room, for the open overshoot and the shadow.
 
@@ -149,6 +163,7 @@ Weights switch at the midpoint of the morph. While paused, the glyph and the tit
 - **Notch media controls (slice 3).** A ToolBar root ("ROQA Notch") with three Buttons while a session exists: "Previous track", "Pause, Title – Artist" or "Play, …", and "Next track". Invoke works whether or not the panel is open; a disabled control reports `IsEnabled` false and refuses Invoke and focus. Bounds are the open panel's while it is open or opening, and offscreen otherwise.
   - **Keyboard (user decision, 2026-11-10).** Entry is only through UIA focus, such as Narrator moving to a control: the notch takes the foreground if Windows allows it and opens. Tab and Shift+Tab, and the arrow keys, move among enabled controls, wrapping; Enter and Space press the focused one; Escape closes the panel and gives the foreground back to the window that had it. No global hotkey, IPC command or picker entry.
   - Pointer use stays nonactivating: a click on a control never takes focus.
+  - **Position (slice 4).** While the progress row is drawn, the play/pause Button's `ItemStatus` is its text, such as "1:23 of 4:56"; otherwise it is empty. It is read-only: no RangeValue and no arrow-key seek (user decision). No property-changed event is raised as it advances.
 - **Contrast.** The time (white) is 21 : 1 and the date (60 % white) about 7.4 : 1 on black.
 - **Pointer targets.** The collapsed notch hit area equals its visible footprint.
 - **Motion.** Reduced motion is deliberately not honoured, by user decision. This is a known accessibility regression against the original brief, recorded in the ledger.

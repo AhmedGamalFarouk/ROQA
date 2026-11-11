@@ -7,7 +7,7 @@ use crate::{
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
     layout::{self, Bounds, SurfaceKind, placement},
-    media::Media,
+    media::{self, Media, Progress},
     motion::{self, Tween},
     native_window::{self, NativeWindow, WindowClass},
     notch_uia,
@@ -130,6 +130,8 @@ struct Surface {
     live: bool,
     /// Notch: 0 collapsed to 1 expanded. Dock: pointer-inside progress of the bar fill.
     motion: Tween,
+    /// Notch: the progress row last drawn, if any.
+    played: Option<Progress>,
 }
 impl Drop for Surface {
     fn drop(&mut self) {
@@ -214,7 +216,12 @@ impl Surface {
             visible: false,
             live: false,
             motion: Tween::rest(0.0),
+            played: None,
         })
+    }
+    /// A visible notch that is open or opening; only these read and draw playback progress.
+    fn expanded(&self) -> bool {
+        self.visible && self.kind() == SurfaceKind::Notch && self.motion.target() >= 1.0
     }
     fn kind(&self) -> SurfaceKind {
         match self.role {
@@ -311,10 +318,22 @@ impl Surface {
                 .unwrap_or_default();
             state.focus = focus.as_ref().map(|focus| focus.control);
             state.open = self.motion.target() >= 1.0;
+            state.position = self
+                .played
+                .map(|played| played.times().join(" of "))
+                .unwrap_or_default();
         }
     }
     /// Draws one frame, publishing it to UI Automation first.
     fn paint_notch(&mut self, time: &str, date: &str, media: &Media) -> Result<()> {
+        let track = media.view().shown();
+        let progress = self.motion.value(Instant::now());
+        // Only a revealed panel row reads the time; a collapsed notch draws no progress.
+        self.played = track
+            .filter(|_| motion::reveal(progress) > 0.0)
+            .and_then(|track| {
+                track.progress(media::now_ticks(), layout::media_progress(self.dpi).width)
+            });
         self.publish_notch(media);
         let Role::Notch {
             shadow,
@@ -325,9 +344,7 @@ impl Surface {
         else {
             return Ok(());
         };
-        let track = media.view().shown();
         let focus = focus.as_ref().map(|focus| focus.control);
-        let progress = self.motion.value(Instant::now());
         // Input and drawing use the same frame progress and shape, without a speculative growth lead.
         let rows = layout::notch_rows(self.bounds, self.dpi, progress, track.is_some());
         if *area != rows {
@@ -341,6 +358,7 @@ impl Surface {
             progress,
             dpi: self.dpi,
             focus,
+            played: self.played,
         };
         shadow.paint(&scene, self.window.0)?;
         self.canvas.paint_notch(&scene)
@@ -661,6 +679,10 @@ struct Desktop {
     date: String,
     /// Just after the next minute boundary; until then a wake reuses the drawn text unformatted.
     clock_due: Instant,
+    /// The next progress tick, and the scheduled time of the last one that came due: the 1 s
+    /// floor counts from that, not from its late wake, so wake latency never accumulates.
+    progress_due: Option<Instant>,
+    progress_tick: Instant,
 }
 impl Desktop {
     fn create(probe: &Probe) -> Result<Self> {
@@ -693,6 +715,8 @@ impl Desktop {
             clock: String::new(),
             date: String::new(),
             clock_due: Instant::now(),
+            progress_due: None,
+            progress_tick: Instant::now(),
         };
         desktop.show(SurfaceKind::Notch)?;
         if *probe == Probe::Initialization {
@@ -781,6 +805,36 @@ impl Desktop {
             notch.paint_notch(&self.clock, &self.date, &self.media)?;
         }
         Ok(())
+    }
+    /// Repaints each open notch whose progress row changed, such as after a seek, and returns how
+    /// long until a playing track's row should tick next (`Track::next_tick`, with its 1 s floor).
+    /// Collapsed and hidden notches cost nothing here.
+    // Out of line: inlined into `update`, it cost about 12 KB more release binary (measured).
+    #[inline(never)]
+    fn refresh_progress(&mut self) -> Result<u32> {
+        let mut next_due = None::<Instant>;
+        for notch in self.surfaces.iter_mut().filter(|s| s.expanded()) {
+            let Some(track) = self.media.view().shown() else {
+                break;
+            };
+            let (now, ticks) = (Instant::now(), media::now_ticks());
+            if let Some(due) = self.progress_due.filter(|&due| due <= now) {
+                self.progress_tick = due;
+            }
+            let width = layout::media_progress(notch.dpi).width;
+            // A running animation paints every frame already.
+            if !notch.live && notch.played != track.progress(ticks, width) {
+                notch.paint_notch(&self.clock, &self.date, &self.media)?;
+            }
+            let floor =
+                (self.progress_tick + Duration::from_secs(1)).saturating_duration_since(now);
+            if let Some(wait) = track.next_tick(ticks, width, floor) {
+                let due = now + wait;
+                next_due = Some(next_due.map_or(due, |next| next.min(due)));
+            }
+        }
+        self.progress_due = next_due;
+        Ok(next_due.map_or(INFINITE, |due| milliseconds_until(due, Instant::now())))
     }
     /// Paints one frame of each running animation; returns true while any still runs.
     /// The final frame always lands exactly on the target before a surface goes idle.
@@ -990,21 +1044,23 @@ impl Desktop {
         }
         true
     }
-    /// A click on a drawn media control sends its command; the notch stays nonactivating.
+    /// A click on a drawn media control sends its command, and one on the progress bar seeks; the
+    /// notch stays nonactivating.
     fn click_control(&mut self, notch: usize, lparam: LPARAM) -> bool {
         let surface = &self.surfaces[notch];
         let (x, y) = point(lparam);
         let progress = surface.motion.value(Instant::now());
         let (width, dpi) = (surface.bounds.width, surface.dpi);
-        let hit = self
-            .media
-            .view()
-            .shown()
-            .and_then(|_| layout::media_control_at(width, dpi, progress, x, y));
-        let Some(control) = hit else {
+        if self.media.view().shown().is_none() {
             return false;
-        };
-        self.media.command(control);
+        }
+        if let Some(control) = layout::media_control_at(width, dpi, progress, x, y) {
+            self.media.command(control);
+        } else if let Some(fraction) = layout::media_seek_at(width, dpi, progress, x, y) {
+            self.media.seek(fraction);
+        } else {
+            return false;
+        }
         true
     }
     /// A UIA client focused a media control, or the notch itself (`notch_uia::FIRST`): the notch
@@ -1250,12 +1306,15 @@ impl Desktop {
         self.topology_due = Some(Instant::now());
         self.topology_retries = 0;
     }
-    /// One pass of state refreshes and frames; returns the clock wait and whether animation runs.
+    /// One pass of state refreshes and frames; returns the clock and progress wait and whether
+    /// animation runs.
     fn update(&mut self, model: &WindowModel) -> Result<(u32, bool)> {
         self.refresh_topology()?;
         if self.text.take_changed() {
             self.rescale_text()?;
         }
+        self.media
+            .set_expanded(self.surfaces.iter().any(Surface::expanded));
         // One paint per visible notch when the drawn track changes or its pause grace expires.
         let generation = self.media.generation();
         let redraw = self.media.refresh();
@@ -1267,14 +1326,14 @@ impl Desktop {
         }
         self.refresh_dock(model)?;
         self.refresh_fullscreen(model.generation)?;
-        let clock_wait = self.refresh_clock()?;
+        let wait = self.refresh_clock()?.min(self.refresh_progress()?);
         if let Some(picker) = &mut self.picker {
             picker.synchronize(model)?;
             if picker.closed() {
                 self.picker.take();
             }
         }
-        Ok((clock_wait, self.animate()?))
+        Ok((wait, self.animate()?))
     }
     /// A device loss schedules a rebuild and yields `fallback`; any other failure still ends the host.
     fn survive<T>(&mut self, result: Result<T>, fallback: T) -> Result<T> {

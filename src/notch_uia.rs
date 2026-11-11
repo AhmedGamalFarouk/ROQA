@@ -39,6 +39,8 @@ pub struct State {
     pub focus: Option<usize>,
     /// The panel is open or opening, so the controls have screen bounds.
     pub open: bool,
+    /// The drawn position, such as "1:23 of 4:56"; empty while no progress row is drawn.
+    pub position: String,
 }
 pub type Shared = Arc<Mutex<State>>;
 
@@ -317,6 +319,15 @@ impl IRawElementProviderSimple_Impl for Item_Impl {
             UIA_IsEnabledPropertyId | UIA_IsKeyboardFocusablePropertyId => variant_bool(enabled),
             UIA_HasKeyboardFocusPropertyId => variant_bool(focused),
             UIA_IsOffscreenPropertyId => variant_bool(!open),
+            // Read-only: the position is shown and spoken, not adjusted with keys (user decision).
+            UIA_ItemStatusPropertyId if self.index == PLAY_PAUSE => {
+                let position = self.current(|state, _| state.position.clone())?;
+                if position.is_empty() {
+                    VARIANT::default()
+                } else {
+                    variant_text(&position)
+                }
+            }
             _ => VARIANT::default(),
         })
     }
@@ -515,6 +526,39 @@ mod tests {
                 not_available().code()
             );
         }
+    }
+
+    #[test]
+    fn play_pause_reports_the_drawn_position_as_its_status() {
+        let state = Shared::default();
+        {
+            let mut state = state.lock().unwrap();
+            state.hwnd = 1; // A sentinel only: no method below calls a window API.
+            state.controls = controls(&Track::default());
+        }
+        let root: IRawElementProviderFragmentRoot = Root {
+            state: Arc::clone(&state),
+        }
+        .into();
+        let item = |index| -> IRawElementProviderSimple {
+            Item {
+                state: Arc::clone(&state),
+                root: root.clone(),
+                index,
+                version: 0,
+            }
+            .into()
+        };
+        let status = |index| {
+            // SAFETY: a local provider that only reads the shared snapshot.
+            let value = unsafe { item(index).GetPropertyValue(UIA_ItemStatusPropertyId) };
+            value.unwrap().to_string()
+        };
+        assert_eq!(status(PLAY_PAUSE), "");
+        state.lock().unwrap().position = "1:23 of 4:56".into();
+        assert_eq!(status(PLAY_PAUSE), "1:23 of 4:56");
+        assert_eq!(status(PREVIOUS), "");
+        assert_eq!(status(NEXT), "");
     }
 
     #[test]

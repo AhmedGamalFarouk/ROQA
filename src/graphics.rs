@@ -2,10 +2,10 @@ use crate::{
     dock,
     icons::IconPixels,
     layout::{self, Bounds},
-    media::{PLAY_PAUSE, Track},
+    media::{PLAY_PAUSE, Progress, Track},
     motion,
 };
-use std::mem::ManuallyDrop;
+use std::{borrow::Cow, mem::ManuallyDrop};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::{
     Foundation::{D2DERR_RECREATE_TARGET, E_FAIL, HMODULE, HWND, POINT},
@@ -146,6 +146,8 @@ pub struct NotchScene<'a> {
     pub dpi: u32,
     /// The media control with keyboard focus, drawn with a focus ring.
     pub focus: Option<usize>,
+    /// The panel's progress row; none while collapsed or without a track duration.
+    pub played: Option<Progress>,
 }
 
 /// Dock material (docs/design/roqa-visual-spec.md): black bar, white-alpha hover fill, whole-pixel icon lift.
@@ -504,7 +506,7 @@ const COVER_FILL: f32 = 0.20;
 
 /// One text element of the media notch, in physical pixels.
 struct Line<'a> {
-    text: &'a str,
+    text: Cow<'a, str>,
     font: Font,
     rect: D2D_RECT_F,
     alpha: f32,
@@ -520,6 +522,8 @@ struct MediaPlan<'a> {
     /// Glyph opacity, and a factor of the title's: 1 playing, 0.6 paused.
     dim: f32,
     lines: Vec<Line<'a>>,
+    /// The progress bar's track and filled part, and their opacity.
+    bar: Option<([D2D1_ROUNDED_RECT; 2], f32)>,
     chips: Vec<Chip>,
     /// Around the control with keyboard focus.
     ring: Option<Ring>,
@@ -592,8 +596,8 @@ fn media_clock(open: f32, scale: f32) -> Font {
 /// moves by `smooth(p)` from its pill position to its panel position, in DIPs from the body's left
 /// and top edges (the clock from its right edge). The title column ends before the clock's measured
 /// width (`clock`, physical pixels) and never inverts. The artist fades in below the title as the
-/// date does, and so do the controls (`media_chips`). The progress and volume rows stay empty until
-/// slices 4 and 6. Empty text is skipped.
+/// date does, and so do the controls (`media_chips`) and the progress row (`progress_row`). The
+/// volume row stays empty until slice 6. Empty text is skipped.
 fn media_plan<'a>(
     scene: &NotchScene<'a>,
     track: &'a Track,
@@ -634,15 +638,15 @@ fn media_plan<'a>(
     };
     let dim = if track.playing { 1.0 } else { 0.60 };
     let artist = motion::reveal(scene.progress);
-    let lines = [
+    let mut lines = vec![
         Line {
-            text: scene.time,
+            text: scene.time.into(),
             font: media_clock(open, scale),
             rect: row((cover.right, end), at(middle, 19.0), 12.0),
             alpha: at(1.0, 0.60),
         },
         Line {
-            text: &track.title,
+            text: track.title.as_str().into(),
             font: font(
                 at(12.0, 13.0),
                 if open < 0.5 {
@@ -655,12 +659,13 @@ fn media_plan<'a>(
             alpha: at(0.85, 1.0) * dim,
         },
         Line {
-            text: &track.artist,
+            text: track.artist.as_str().into(),
             font: font(12.0, DWRITE_FONT_WEIGHT_NORMAL),
             rect: row(title, 38.0 + 6.0 * (1.0 - artist), 10.0),
             alpha: 0.60 * artist,
         },
     ];
+    let bar = progress_row(&mut lines, scene, body);
     let chips = media_chips(scene, track, body);
     let ring = scene
         .focus
@@ -675,9 +680,63 @@ fn media_plan<'a>(
             .into_iter()
             .filter(|line| line.alpha > 0.0 && !line.text.is_empty())
             .collect(),
+        bar,
         chips,
         ring,
     }
+}
+
+/// The panel's progress row (`layout::media_progress`), fading in with the controls: the elapsed
+/// time in 11 DIP from x 100, the 4 DIP bar centred in its target, and the total time trailing at
+/// 16 from the right, all centred on y 57. Adds the times to `lines` and returns the bar's track,
+/// fill and opacity; none while the row is hidden or the scene has none.
+fn progress_row(
+    lines: &mut Vec<Line>,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+) -> Option<([D2D1_ROUNDED_RECT; 2], f32)> {
+    let reveal = motion::reveal(scene.progress);
+    let played = scene.played.filter(|_| reveal > 0.0)?;
+    let scale = scene.dpi as f32 / 96.0;
+    let target = layout::media_progress(scene.dpi);
+    let thickness = (4.0 * scale).round();
+    let left = body.left + target.x as f32;
+    let top = (body.top + target.y as f32 + (target.height as f32 - thickness) / 2.0).round();
+    let track = D2D_RECT_F {
+        left,
+        top,
+        right: left + target.width as f32,
+        bottom: top + thickness,
+    };
+    let fill = D2D_RECT_F {
+        right: left + played.filled as f32,
+        ..track
+    };
+    let [elapsed, total] = played.times();
+    for (text, from, to, align) in [
+        (elapsed, 100.0, 136.0, DWRITE_TEXT_ALIGNMENT_LEADING),
+        (total, 308.0, 344.0, DWRITE_TEXT_ALIGNMENT_TRAILING),
+    ] {
+        lines.push(Line {
+            text: text.into(),
+            font: Font {
+                family: TEXT_FONT,
+                size: 11.0 * scale,
+                weight: DWRITE_FONT_WEIGHT_NORMAL,
+                designator: 1.0,
+                align,
+            },
+            rect: D2D_RECT_F {
+                left: body.left + from * scale,
+                top: body.top + 49.0 * scale,
+                right: body.left + to * scale,
+                bottom: body.top + 65.0 * scale,
+            },
+            alpha: 0.60 * reveal,
+        });
+    }
+    let radius = thickness / 2.0;
+    Some(([rounded(track, radius), rounded(fill, radius)], reveal))
 }
 
 /// Previous, play/pause and next keep their panel place in the body, so the body clip reveals
@@ -758,10 +817,22 @@ fn media_text(context: &ID2D1DeviceContext, plan: &MediaPlan) -> Result<()> {
         Glyph::Pause
     };
     fill_glyph(context, plan.glyph, state, with_alpha(WHITE, plan.dim))?;
+    if let Some(([track, fill], alpha)) = &plan.bar {
+        // SAFETY: as above.
+        unsafe {
+            let brush =
+                context.CreateSolidColorBrush(&with_alpha(WHITE, COVER_FILL * alpha), None)?;
+            context.FillRoundedRectangle(track, &brush);
+            if fill.rect.right > fill.rect.left {
+                let brush = context.CreateSolidColorBrush(&with_alpha(WHITE, *alpha), None)?;
+                context.FillRoundedRectangle(fill, &brush);
+            }
+        }
+    }
     for line in &plan.lines {
         draw_text(
             context,
-            line.text,
+            &line.text,
             &line.font,
             line.rect,
             with_alpha(WHITE, line.alpha),
@@ -1143,6 +1214,16 @@ mod media_tests {
         dpi: u32,
         focus: Option<usize>,
     ) -> MediaPlan<'a> {
+        played(view, time, progress, dpi, focus, None)
+    }
+    fn played<'a>(
+        view: &'a View,
+        time: &'a str,
+        progress: f32,
+        dpi: u32,
+        focus: Option<usize>,
+        played: Option<Progress>,
+    ) -> MediaPlan<'a> {
         let scene = NotchScene {
             time,
             date: "Tuesday",
@@ -1150,15 +1231,16 @@ mod media_tests {
             progress,
             dpi,
             focus,
+            played,
         };
         let clock = clock_width(time, progress, dpi);
         media_plan(&scene, scene.track.unwrap(), &body(dpi, progress), clock)
     }
     /// Text, rectangle, size and opacity of each drawn line.
-    fn lines<'a>(plan: &MediaPlan<'a>) -> Vec<(&'a str, D2D_RECT_F, f32, f32)> {
+    fn lines<'a>(plan: &'a MediaPlan) -> Vec<(&'a str, D2D_RECT_F, f32, f32)> {
         plan.lines
             .iter()
-            .map(|line| (line.text, line.rect, line.font.size, line.alpha))
+            .map(|line| (line.text.as_ref(), line.rect, line.font.size, line.alpha))
             .collect()
     }
 
@@ -1291,6 +1373,51 @@ mod media_tests {
     }
 
     #[test]
+    fn the_panel_draws_elapsed_bar_and_total_between_the_text_and_the_controls() {
+        let song = track("Song", "Artist", true);
+        let row = Progress {
+            elapsed: 83,
+            total: 296,
+            filled: 41,
+        };
+        let panel = played(&song, "9:50 pm", 1.0, 96, None, Some(row));
+        // Body x 40..400: elapsed from 100, bar 140..304 centred on y 57, total trailing at 344.
+        let ([track, fill], alpha) = panel.bar.expect("a bar");
+        assert_eq!(track.rect, rect(180.0, 55.0, 344.0, 59.0));
+        assert_eq!(fill.rect, rect(180.0, 55.0, 221.0, 59.0));
+        assert_eq!((track.radiusX, alpha), (2.0, 1.0));
+        assert_eq!(
+            lines(&panel)[3..],
+            [
+                ("1:23", rect(140.0, 49.0, 176.0, 65.0), 11.0, 0.60),
+                ("4:56", rect(348.0, 49.0, 384.0, 65.0), 11.0, 0.60),
+            ]
+        );
+        let total = &panel.lines[4].font;
+        assert_eq!(total.align, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        // Above the controls row and inside the body at every scale.
+        assert!(panel.chips.iter().all(|chip| chip.rect.top >= 65.0));
+        for dpi in [144, 192] {
+            let panel = played(&song, "9:50 pm", 1.0, dpi, None, Some(row));
+            let body = body(dpi, 1.0);
+            let ([track, _], _) = panel.bar.unwrap();
+            for item in panel.lines.iter().map(|l| l.rect).chain([track.rect]) {
+                assert!(item.left >= body.left && item.right <= body.right, "{dpi}");
+            }
+        }
+        // It fades in with the controls; collapsed or without a row, nothing is drawn.
+        let opening = played(&song, "9:50 pm", 0.6, 96, None, Some(row));
+        assert_eq!(opening.bar.unwrap().1, motion::reveal(0.6));
+        assert!(
+            played(&song, "9:50 pm", 0.0, 96, None, Some(row))
+                .bar
+                .is_none()
+        );
+        let plain = plan(&song, "9:50 pm", 1.0, 96);
+        assert!(plain.bar.is_none() && plain.lines.len() == 3);
+    }
+
+    #[test]
     fn keyboard_focus_rings_the_focused_control_at_any_scale() {
         let song = track("Song", "Artist", true);
         let plan = focused(&song, "9:50 pm", 1.0, 96, Some(PLAY_PAUSE));
@@ -1323,7 +1450,7 @@ mod media_tests {
     fn empty_artist_and_title_are_not_laid_out() {
         let texts = |view: &View| -> Vec<String> {
             let plan = plan(view, "9:50 pm", 1.0, 96);
-            plan.lines.iter().map(|l| l.text.to_owned()).collect()
+            plan.lines.iter().map(|l| l.text.to_string()).collect()
         };
         assert_eq!(texts(&track("Song", "", true)), ["9:50 pm", "Song"]);
         assert_eq!(texts(&track("", "Artist", true)), ["9:50 pm", "Artist"]);

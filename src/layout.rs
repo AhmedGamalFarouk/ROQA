@@ -155,6 +155,40 @@ pub fn media_controls(dpi: u32) -> [Bounds; 3] {
     })
 }
 
+/// The progress bar's target in the media panel (slice 4, provisional), in DIPs from the body's
+/// left and top edges: the drawn 4 DIP bar is centred in it, between the elapsed and total times.
+const MEDIA_PROGRESS: (f32, f32, f32, f32) = (140.0, 50.0, 164.0, 14.0);
+
+/// The progress bar's target in pixels from the body's left and top edges; like the controls, it
+/// keeps its panel place while the body morphs.
+pub fn media_progress(dpi: u32) -> Bounds {
+    let (x, y, width, height) = MEDIA_PROGRESS;
+    Bounds {
+        x: scaled(x, dpi),
+        y: scaled(y, dpi),
+        width: scaled(width, dpi),
+        height: scaled(height, dpi),
+    }
+}
+
+/// A window point's x offset inside `target` (pixels from the body's left and top) at `progress`;
+/// none while the panel rows are not drawn, or outside the part of `target` the body shows.
+fn panel_offset(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    target: Bounds,
+    (x, y): (i32, i32),
+) -> Option<i32> {
+    if motion::reveal(progress) <= 0.0 {
+        return None;
+    }
+    let body = notch_body(window_width, dpi, notch_shape(progress, true));
+    let x = x - body.left - target.x;
+    let rows = target.y..(target.y + target.height).min(body.height);
+    ((0..target.width).contains(&x) && rows.contains(&y)).then_some(x)
+}
+
 /// The media control under a window point at `progress`; none while the row is not drawn.
 pub fn media_control_at(
     window_width: i32,
@@ -163,15 +197,16 @@ pub fn media_control_at(
     x: i32,
     y: i32,
 ) -> Option<usize> {
-    if motion::reveal(progress) <= 0.0 {
-        return None;
-    }
-    let body = notch_body(window_width, dpi, notch_shape(progress, true));
-    media_controls(dpi).iter().position(|control| {
-        let left = body.left + control.x;
-        (left..left + control.width).contains(&x)
-            && (control.y..(control.y + control.height).min(body.height)).contains(&y)
-    })
+    media_controls(dpi)
+        .into_iter()
+        .position(|control| panel_offset(window_width, dpi, progress, control, (x, y)).is_some())
+}
+
+/// Where a window point falls along the progress bar, from 0 at its left edge towards 1.
+pub fn media_seek_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32) -> Option<f64> {
+    let bar = media_progress(dpi);
+    panel_offset(window_width, dpi, progress, bar, (x, y))
+        .map(|offset| f64::from(offset) / f64::from(bar.width))
 }
 
 fn scaled(dips: f32, dpi: u32) -> i32 {
@@ -379,6 +414,43 @@ mod tests {
                     && body.left + media_controls(dpi)[2].x < body.left + body.width
             );
         }
+    }
+
+    #[test]
+    fn the_progress_bar_maps_clicks_to_its_fraction_beside_the_controls() {
+        // Body x 40..400 at 100 %: bar from 180 to 344, rows 50..64; controls from 66.
+        let seek = |progress, x, y| media_seek_at(440, 96, progress, x, y);
+        assert_eq!(seek(1.0, 180, 57), Some(0.0));
+        assert_eq!(seek(1.0, 221, 50), Some(0.25));
+        assert_eq!(seek(1.0, 343, 63), Some(163.0 / 164.0));
+        for (x, y) in [(179, 57), (344, 57), (221, 49), (221, 64), (188, 80)] {
+            assert_eq!(seek(1.0, x, y), None, "{x} {y}");
+        }
+        // No point is both a control and the bar, at any scale.
+        for dpi in [96, 144, 192] {
+            let window = scaled(440.0, dpi);
+            let bar = media_progress(dpi);
+            let controls = media_controls(dpi);
+            assert!(controls.iter().all(|c| c.y >= bar.y + bar.height), "{dpi}");
+            let body = notch_body(window, dpi, notch_shape(1.0, true));
+            for y in 0..body.height {
+                for x in (body.left..body.left + body.width).step_by(3) {
+                    let both = media_seek_at(window, dpi, 1.0, x, y).is_some()
+                        && media_control_at(window, dpi, 1.0, x, y).is_some();
+                    assert!(!both, "{dpi} {x} {y}");
+                }
+            }
+            assert!(body.left + bar.x + bar.width <= body.left + body.width);
+        }
+        // Collapsed or barely open: the row is not drawn. Opening: only the shown part is a target.
+        for progress in [0.0, 0.07, 0.35] {
+            assert_eq!(seek(progress, 221, 57), None);
+        }
+        let body = notch_body(440, 96, notch_shape(0.36, true));
+        assert!(body.height > 50 && body.height < 64);
+        let left = body.left + 140;
+        assert_eq!(seek(0.36, left, body.height - 1), Some(0.0));
+        assert_eq!(seek(0.36, left, body.height), None);
     }
 
     #[test]

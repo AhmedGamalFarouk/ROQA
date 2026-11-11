@@ -37,6 +37,11 @@ const READY: u32 = 8;
 /// Title and artist are cut to this many UTF-16 units, so one session holds at most a few KiB.
 const TEXT_LIMIT: usize = 512;
 const PAUSED_GRACE: Duration = Duration::from_secs(5 * 60);
+/// One second in WinRT 100 ns ticks.
+const SECOND: i64 = 10_000_000;
+/// Longer reported lengths (up to `i64::MAX` from a live stream, say) count as none: no bar and no
+/// seek. Keeps ticks times bar pixels far inside i64.
+const MAX_LENGTH: i64 = 1000 * 3600 * SECOND;
 
 /// WinRT 100 ns ticks; `updated` is a UTC `DateTime` (ticks since 1601).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -62,9 +67,27 @@ pub struct Track {
     /// Whether the player accepts previous, play/pause and next. Play/pause is the action the
     /// button performs now: pause while playing, play otherwise.
     pub controls: [bool; 3],
+    /// The player accepts a new playback position (`IsPlaybackPositionEnabled`).
+    pub seekable: bool,
     pub rate: f64,
     pub timeline: Timeline,
 }
+
+/// What the panel's progress row draws: whole seconds elapsed and in total, and the bar's filled
+/// pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub elapsed: i64,
+    pub total: i64,
+    pub filled: i32,
+}
+impl Progress {
+    /// Elapsed and total time as `m:ss`.
+    pub fn times(self) -> [String; 2] {
+        [self.elapsed, self.total].map(|seconds| format!("{}:{:02}", seconds / 60, seconds % 60))
+    }
+}
+
 impl Track {
     /// Position at `now` (UTC ticks): `Position` is current as of `LastUpdatedTime`, so a playing
     /// track advances by the elapsed time times the rate. The result stays within the timeline; an
@@ -85,6 +108,62 @@ impl Track {
             position
         };
         position.max(timeline.start)
+    }
+    /// The track length; a player that reports no usable `EndTime` gets no bar and no seek.
+    fn duration(&self) -> Option<i64> {
+        Some(self.timeline.end.saturating_sub(self.timeline.start))
+            .filter(|total| (1..=MAX_LENGTH).contains(total))
+    }
+    /// The progress row at `now` (UTC ticks) for a bar `width` pixels wide.
+    pub fn progress(&self, now: i64, width: i32) -> Option<Progress> {
+        let total = self.duration()?;
+        let elapsed = self.position(now) - self.timeline.start;
+        Some(Progress {
+            elapsed: elapsed / SECOND,
+            total: total / SECOND,
+            filled: (elapsed * i64::from(width.max(0)) / total) as i32,
+        })
+    }
+    /// How long until the progress row at `now` should repaint: its next whole second or bar pixel,
+    /// at the playback rate. At rate 1 or below a whole second never waits, so the time neither
+    /// lags nor skips; a pixel-only change waits for `floor` (a second after the previous tick) and
+    /// is taken only if the next second is still a second after it, so ticks stay a second apart.
+    /// Above rate 1 every change waits for `floor`. None while the row cannot advance: paused, a
+    /// rate of 0 or below, no `LastUpdatedTime` or length to extrapolate within, or at the end.
+    pub fn next_tick(&self, now: i64, width: i32, floor: Duration) -> Option<Duration> {
+        let usable = self.playing && self.rate > 0.0 && self.timeline.updated > 0;
+        let total = self.duration().filter(|_| usable)?;
+        let elapsed = self.position(now) - self.timeline.start;
+        if elapsed >= total {
+            return None;
+        }
+        let width = i64::from(width.max(1));
+        // The first tick at which floor(elapsed * width / total) grows by one pixel.
+        let pixel = ((elapsed * width / total + 1) * total + width - 1) / width;
+        let wait = |next: i64| {
+            let ticks = next.min(total) - elapsed;
+            Duration::from_nanos((ticks as f64 * 100.0 / self.rate).ceil() as u64)
+        };
+        let (second, pixel) = (wait((elapsed / SECOND + 1) * SECOND), wait(pixel));
+        Some(if self.rate > 1.0 {
+            second.min(pixel).max(floor)
+        } else if pixel.max(floor) + Duration::from_secs(1) <= second {
+            pixel.max(floor)
+        } else {
+            second
+        })
+    }
+    /// The position at `fraction` (0 to 1) of the bar; none without a duration.
+    pub fn seek_target(&self, fraction: f64) -> Option<i64> {
+        let total = self.duration()?;
+        Some(self.timeline.start + (total as f64 * fraction.clamp(0.0, 1.0)) as i64)
+    }
+    /// A seek to `target`, asked for at `asked` (UTC ticks), was accepted. A player may report the
+    /// new timeline only after that: until it does, show the target from `now`.
+    fn sought(&mut self, target: i64, asked: i64, now: i64) {
+        if self.timeline.updated < asked {
+            (self.timeline.position, self.timeline.updated) = (target, now);
+        }
     }
 }
 
@@ -136,6 +215,7 @@ pub enum Change {
         status: Status,
         observed: Instant,
         controls: [bool; 3],
+        seekable: bool,
         rate: f64,
         timeline: Timeline,
     },
@@ -175,6 +255,7 @@ impl State {
                 status,
                 observed,
                 controls,
+                seekable,
                 rate,
                 timeline,
             } => {
@@ -186,7 +267,7 @@ impl State {
                         // Playback was known to continue until this pause/stop observation.
                         track.paused_until = Some(observed + PAUSED_GRACE);
                     }
-                    (track.playing, track.controls) = (playing, controls);
+                    (track.playing, track.controls, track.seekable) = (playing, controls, seekable);
                     (track.rate, track.timeline) = (rate, timeline);
                 }
             }
@@ -315,7 +396,8 @@ fn subscribe_session(session: Session, wake: &Arc<Wake>) -> Result<Subscribed<Se
     subscribed
         .tokens
         .push((token, Session::RemovePlaybackInfoChanged));
-    // shortcut: timeline subscription waits until slice 4 draws progress.
+    // No TimelinePropertiesChanged: players may raise it every second. The timeline is read only
+    // while a notch is open (`Media::set_expanded`) and extrapolated between reads.
     Ok(subscribed)
 }
 
@@ -384,9 +466,18 @@ fn bounded(text: HSTRING) -> String {
     String::from_utf16_lossy(&units[..end])
 }
 
+fn read_timeline(session: &Session) -> Result<Timeline> {
+    let timeline = session.GetTimelineProperties()?;
+    Ok(Timeline {
+        start: timeline.StartTime()?.Duration,
+        end: timeline.EndTime()?.Duration,
+        position: timeline.Position()?.Duration,
+        updated: timeline.LastUpdatedTime()?.UniversalTime,
+    })
+}
+
 fn read_playback(session: &Session, observed: Instant) -> Result<Change> {
     let info = session.GetPlaybackInfo()?;
-    let timeline = session.GetTimelineProperties()?;
     // shortcut: a player that leaves PlaybackRate unset is taken as 1x; check real players before progress (slice 4).
     let rate = info.PlaybackRate().and_then(|rate| rate.Value());
     let status = info.PlaybackStatus()?;
@@ -406,17 +497,14 @@ fn read_playback(session: &Session, observed: Instant) -> Result<Change> {
             play_pause,
             controls.IsNextEnabled()?,
         ],
+        seekable: controls.IsPlaybackPositionEnabled()?,
         rate: rate.unwrap_or(1.0),
-        timeline: Timeline {
-            start: timeline.StartTime()?.Duration,
-            end: timeline.EndTime()?.Duration,
-            position: timeline.Position()?.Duration,
-            updated: timeline.LastUpdatedTime()?.UniversalTime,
-        },
+        timeline: read_timeline(session)?,
     })
 }
 
-fn now_ticks() -> i64 {
+/// Now as a WinRT `DateTime` (UTC ticks), the clock `Track::position` extrapolates against.
+pub fn now_ticks() -> i64 {
     // WinRT DateTime counts 100 ns from 1601-01-01 UTC, 11,644,473,600 s before the Unix epoch.
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -438,6 +526,10 @@ pub struct Media {
     command: Option<Request<bool>>,
     /// Properties changed while a read was in flight: read again when it lands.
     again: bool,
+    /// A visible notch is open, so the drawn progress needs a current timeline.
+    expanded: bool,
+    /// The target and request time (UTC ticks) of the seek in `command`, if it is one.
+    seek: Option<(i64, i64)>,
     state: State,
     wake: Arc<Wake>,
     /// Media wakes handled, for diagnostics.
@@ -453,6 +545,8 @@ impl Media {
             fetch: None,
             command: None,
             again: false,
+            expanded: false,
+            seek: None,
             state: State::default(),
             wake: Arc::new(Wake {
                 dirty: AtomicU32::new(0),
@@ -513,6 +607,42 @@ impl Media {
             eprintln!("Media: command {control}: {error}");
         }
     }
+    /// Seeks the current session to `fraction` (0 to 1) of the track when its player accepts it.
+    /// While a notch is open, the new position is read when the command completes.
+    pub fn seek(&mut self, fraction: f64) {
+        let (Some(session), Some(track)) = (&self.session, self.state.view.shown()) else {
+            return;
+        };
+        let Some(target) = track.seek_target(fraction).filter(|_| track.seekable) else {
+            return;
+        };
+        let idle = self.command.is_none();
+        let start = || session.source.TryChangePlaybackPositionAsync(target);
+        match admit_command(&mut self.command, self.state.generation, &self.wake, start) {
+            Ok(()) if idle => self.seek = Some((target, now_ticks())),
+            Ok(()) => {}
+            Err(error) => eprintln!("Media: seek: {error}"),
+        }
+    }
+    /// Whether any visible notch is open. Opening reads the timeline once: no event keeps it
+    /// current, and a collapsed notch draws no progress.
+    pub fn set_expanded(&mut self, expanded: bool) {
+        if expanded && !self.expanded && self.state.view.shown().is_some() {
+            let started = Instant::now();
+            self.reread_timeline();
+            slow("timeline read", started);
+        }
+        self.expanded = expanded;
+    }
+    fn reread_timeline(&mut self) {
+        let (Some(session), View::Track(track)) = (&self.session, &mut self.state.view) else {
+            return;
+        };
+        match read_timeline(&session.source) {
+            Ok(timeline) => track.timeline = timeline,
+            Err(error) => eprintln!("Media: timeline: {error}"),
+        }
+    }
     /// Applies pending media events and returns whether the drawn view changed. Without any events
     /// it costs one atomic swap, plus a clock check only while a grace deadline exists.
     pub fn refresh(&mut self) -> bool {
@@ -542,10 +672,19 @@ impl Media {
                 Err(error) => self.unavailable("RequestAsync", &error),
             }
         }
+        // While open, a track change or a finished command (a seek or skip) may move the position
+        // without a playback-info event.
+        let mut timeline = self.expanded && dirty & PROPERTIES != 0;
+        let mut sought = None;
         if let Some(outcome) = received(&self.command) {
-            self.command = None;
+            let generation = self.command.take().map_or(0, |command| command.generation);
+            let seek = self
+                .seek
+                .take()
+                .filter(|_| generation == self.state.generation);
+            timeline |= self.expanded;
             match outcome {
-                Ok(true) => {}
+                Ok(true) => sought = seek,
                 Ok(false) => eprintln!("Media: the player refused a command"),
                 Err(error) => eprintln!("Media: command: {error}"),
             }
@@ -590,13 +729,16 @@ impl Media {
                 }
             }
         }
+        if timeline && dirty & PLAYBACK == 0 {
+            self.reread_timeline();
+        }
+        if let (Some((target, asked)), View::Track(track)) = (sought, &mut self.state.view) {
+            track.sought(target, asked, now_ticks());
+        }
         if differs(&before, &self.state.view) {
             self.log();
         }
-        let elapsed = started.elapsed();
-        if elapsed > Duration::from_millis(8) {
-            eprintln!("Media: slow host refresh {elapsed:?}");
-        }
+        slow("host refresh", started);
         expired || redraw(&before, &self.state.view)
     }
     /// Re-reads the current session; on a change, ends the old one, starts a new generation and
@@ -686,6 +828,14 @@ impl Drop for Media {
     }
 }
 
+/// Logs host-thread GSMTC work that took long enough to delay input or frames.
+fn slow(work: &str, started: Instant) {
+    let elapsed = started.elapsed();
+    if elapsed > Duration::from_millis(8) {
+        eprintln!("Media: slow {work} {elapsed:?}");
+    }
+}
+
 /// A completed request's outcome, if it has arrived.
 fn received<T: RuntimeType + 'static>(request: &Option<Request<T>>) -> Option<Result<T>> {
     request.as_ref()?.result.get().cloned()
@@ -696,8 +846,6 @@ mod tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
     use windows::Win32::Foundation::E_FAIL;
-
-    const SECOND: i64 = 10_000_000;
 
     fn track(playing: bool, rate: f64, start: i64, end: i64, position: i64) -> Track {
         Track {
@@ -730,13 +878,17 @@ mod tests {
             status: Status::Playing,
             observed: Instant::now(),
             controls: [false, true, true],
+            seekable: true,
             rate: 1.0,
             timeline: Timeline::default(),
         });
         let View::Track(track) = &state.view else {
             panic!("expected a track");
         };
-        assert_eq!((track.title.as_str(), track.playing), ("One", true));
+        assert_eq!(
+            (track.title.as_str(), track.playing, track.seekable),
+            ("One", true, true)
+        );
         assert_eq!(track.controls, [false, true, true]);
         state.apply(Change::Session(true));
         assert_eq!(state.generation, first + 1);
@@ -760,6 +912,7 @@ mod tests {
             status: Status::Playing,
             observed: Instant::now(),
             controls: [true; 3],
+            seekable: true,
             rate: 1.0,
             timeline: Timeline::default(),
         });
@@ -830,6 +983,256 @@ mod tests {
             track(true, 1.0, 50 * SECOND, 0, 0).position(1000 * SECOND),
             50 * SECOND
         );
+    }
+
+    #[test]
+    fn progress_shows_whole_seconds_and_floored_pixels_and_needs_a_duration() {
+        // Started 20 s in, stamped at 1000 s; 2:00 long on a 120 px bar.
+        let playing = track(true, 1.0, 0, 120 * SECOND, 20 * SECOND);
+        let at = |seconds: f64| 1000 * SECOND + (seconds * SECOND as f64) as i64;
+        let shown = playing.progress(at(10.5), 120).unwrap();
+        assert_eq!(
+            shown,
+            Progress {
+                elapsed: 30,
+                total: 120,
+                filled: 30
+            }
+        );
+        assert_eq!(shown.times(), ["0:30", "2:00"]);
+        // Clamped at both ends of the timeline.
+        assert_eq!(playing.progress(at(500.0), 120).unwrap().filled, 120);
+        let rewound = track(true, -4.0, 0, 120 * SECOND, 20 * SECOND);
+        assert_eq!(rewound.progress(at(10.0), 120).unwrap().elapsed, 0);
+        // A late StartTime shifts both the time and the bar.
+        let offset = track(false, 1.0, 60 * SECOND, 180 * SECOND, 90 * SECOND);
+        let shown = offset.progress(0, 240).unwrap();
+        assert_eq!((shown.elapsed, shown.filled), (30, 60));
+        assert_eq!(
+            Progress {
+                elapsed: 3725,
+                total: 59,
+                filled: 0
+            }
+            .times(),
+            ["62:05", "0:59"]
+        );
+        // No EndTime, or one not after StartTime: no bar, no deadline and no seek.
+        for (start, end) in [(0, 0), (60 * SECOND, 30 * SECOND), (5, 5)] {
+            let unbounded = track(true, 1.0, start, end, 20 * SECOND);
+            assert_eq!(unbounded.progress(at(1.0), 120), None);
+            assert_eq!(unbounded.next_tick(at(1.0), 120, Duration::ZERO), None);
+            assert_eq!(unbounded.seek_target(0.5), None);
+        }
+    }
+
+    #[test]
+    fn without_a_floor_ticks_land_on_the_next_second_or_a_pixel_well_before_it() {
+        let at = |seconds: f64| 1000 * SECOND + (seconds * SECOND as f64) as i64;
+        let millis = |duration: Option<Duration>| duration.map(|d| d.as_millis());
+        // 2:00 on 120 px: one pixel per second, so both change together on the second.
+        let even = track(true, 1.0, 0, 120 * SECOND, 20 * SECOND);
+        assert_eq!(
+            millis(even.next_tick(at(0.25), 120, Duration::ZERO)),
+            Some(750)
+        );
+        // 10:00 on 120 px: a pixel per 5 s, so the second comes first.
+        let long = track(true, 1.0, 0, 600 * SECOND, 20 * SECOND);
+        assert_eq!(
+            millis(long.next_tick(at(0.25), 120, Duration::ZERO)),
+            Some(750)
+        );
+        // 0:30 on 120 px: four pixels a second, each under a second before the next whole second,
+        // so they wait for it.
+        let short = track(true, 1.0, 0, 30 * SECOND, 0);
+        assert_eq!(
+            millis(short.next_tick(at(0.1), 120, Duration::ZERO)),
+            Some(900)
+        );
+        assert_eq!(
+            millis(short.next_tick(at(0.25), 120, Duration::ZERO)),
+            Some(750)
+        );
+        // At half speed a second lasts 2 s, so a pixel 0.4 s away still leaves a full second.
+        let half = track(true, 0.5, 0, 30 * SECOND, 0);
+        assert_eq!(
+            millis(half.next_tick(at(0.1), 120, Duration::ZERO)),
+            Some(400)
+        );
+        // Exactly on a boundary, the next one is a full step away.
+        assert_eq!(
+            millis(even.next_tick(at(0.0), 120, Duration::ZERO)),
+            Some(1000)
+        );
+        // Twice the rate halves the wait; a slow rate stretches it.
+        let fast = track(true, 2.0, 0, 120 * SECOND, 20 * SECOND);
+        assert_eq!(
+            millis(fast.next_tick(at(0.25), 120, Duration::ZERO)),
+            Some(250)
+        );
+        let slow = track(true, 0.5, 0, 120 * SECOND, 20 * SECOND);
+        assert_eq!(
+            millis(slow.next_tick(at(0.0), 120, Duration::ZERO)),
+            Some(2000)
+        );
+        // The end is the last change; after it nothing moves.
+        let ending = track(true, 1.0, 0, 20 * SECOND + SECOND / 2, 20 * SECOND);
+        assert_eq!(
+            millis(ending.next_tick(at(0.0), 1, Duration::ZERO)),
+            Some(500)
+        );
+        assert_eq!(ending.next_tick(at(0.5), 1, Duration::ZERO), None);
+        assert_eq!(ending.next_tick(at(30.0), 120, Duration::ZERO), None);
+        // Only playback forward with a LastUpdatedTime advances.
+        assert_eq!(
+            track(false, 1.0, 0, 120 * SECOND, 0).next_tick(at(0.0), 120, Duration::ZERO),
+            None
+        );
+        assert_eq!(
+            track(true, 0.0, 0, 120 * SECOND, 0).next_tick(at(0.0), 120, Duration::ZERO),
+            None
+        );
+        assert_eq!(
+            track(true, -1.0, 0, 120 * SECOND, 60).next_tick(at(0.0), 120, Duration::ZERO),
+            None
+        );
+        let mut unstamped = even.clone();
+        unstamped.timeline.updated = 0;
+        assert_eq!(unstamped.next_tick(at(0.0), 120, Duration::ZERO), None);
+        // A zero-width bar still changes on each second.
+        assert_eq!(
+            millis(long.next_tick(at(0.25), 0, Duration::ZERO)),
+            Some(750)
+        );
+    }
+
+    #[test]
+    fn the_floor_defers_pixels_and_fast_rates_but_never_a_second() {
+        let at = |seconds: f64| 1000 * SECOND + (seconds * SECOND as f64) as i64;
+        let millis = |duration: Option<Duration>| duration.map(|d| d.as_millis());
+        let floor = Duration::from_secs(1);
+        // 0:30 on 120 px: the second at 1 s never waits for the floor.
+        let short = track(true, 1.0, 0, 30 * SECOND, 0);
+        assert_eq!(millis(short.next_tick(at(0.1), 120, floor)), Some(900));
+        // At half speed the pixel waits for the floor, and then the second is too close: it wins.
+        let half = track(true, 0.5, 0, 30 * SECOND, 0);
+        assert_eq!(millis(half.next_tick(at(0.1), 120, floor / 2)), Some(500));
+        assert_eq!(millis(half.next_tick(at(0.1), 120, floor)), Some(1900));
+        // At twice real time every change waits for the floor.
+        let fast = track(true, 2.0, 0, 120 * SECOND, 20 * SECOND);
+        assert_eq!(millis(fast.next_tick(at(0.25), 120, floor)), Some(1000));
+    }
+
+    #[test]
+    fn late_wakes_never_skip_or_delay_a_shown_second_and_ticks_stay_a_second_apart() {
+        // Each tick wakes 15 ms late and anchors the next floor at its scheduled time, as the host
+        // does. Slow and fast pixels, at real time and below it.
+        let late = 150_000;
+        for (length, width, rate) in [
+            (1800, 164, 1.0),
+            (60, 164, 1.0),
+            (60, 328, 1.0),
+            (30, 120, 0.9),
+            (240, 164, 0.9),
+            (60, 164, 0.75),
+            (60, 164, 0.5),
+        ] {
+            let case = format!("{length} s, {width} px, {rate}x");
+            let song = track(true, rate, 0, length * SECOND, 0);
+            let mut now = 1000 * SECOND + 3 * SECOND / 10;
+            let mut anchor = None::<i64>;
+            let mut shown = song.progress(now, width).unwrap().elapsed;
+            let mut ticks = 0;
+            while let Some(wait) = {
+                let last = anchor.unwrap_or(now - SECOND);
+                let floor = Duration::from_nanos(((last + SECOND - now).max(0) * 100) as u64);
+                song.next_tick(now, width, floor)
+            } {
+                let due = now + (wait.as_nanos() / 100) as i64;
+                if let Some(last) = anchor {
+                    assert!(due - last >= SECOND, "{case}: ticks {} apart", due - last);
+                }
+                (anchor, now) = (Some(due), due + late);
+                let next = song.progress(now, width).unwrap().elapsed;
+                assert!(next - shown <= 1, "{case}: {shown} -> {next}");
+                // A whole second is drawn within the wake latency of its boundary.
+                let played = ((now - 1000 * SECOND) as f64 * rate) as i64;
+                assert!(next == shown || played % SECOND <= late, "{case}");
+                (shown, ticks) = (next, ticks + 1);
+            }
+            assert_eq!(shown, length, "{case}");
+            assert!(
+                ticks as f64 <= length as f64 / rate + 2.0,
+                "{case}: {ticks}"
+            );
+        }
+    }
+
+    #[test]
+    fn absurd_lengths_count_as_none() {
+        for start in [0, 5 * SECOND, i64::MIN] {
+            let live = track(true, 1.0, start, i64::MAX, 20 * SECOND);
+            assert_eq!(live.progress(1000 * SECOND, 164), None);
+            assert_eq!(live.next_tick(1000 * SECOND, 164, Duration::ZERO), None);
+            assert_eq!(live.seek_target(1.0), None);
+        }
+        // The longest length allowed, a second before its end, on a bar wider than any real one.
+        let longest = track(true, 1.0, 0, MAX_LENGTH, MAX_LENGTH - SECOND);
+        let wide = 4096;
+        assert_eq!(
+            longest.progress(1000 * SECOND, wide).unwrap().filled,
+            wide - 1
+        );
+        let wait = longest.next_tick(1000 * SECOND, wide, Duration::ZERO);
+        assert!(wait.is_some_and(|wait| wait <= Duration::from_secs(1)));
+        assert_eq!(longest.seek_target(1.0), Some(MAX_LENGTH));
+    }
+
+    #[test]
+    fn an_accepted_seek_shows_its_target_until_the_player_reports_a_newer_timeline() {
+        // The read at completion still predates the request: show the target from now.
+        let mut stale = track(true, 1.0, 0, 120 * SECOND, 20 * SECOND);
+        stale.sought(90 * SECOND, 1001 * SECOND, 1002 * SECOND);
+        assert_eq!(
+            (stale.timeline.position, stale.timeline.updated),
+            (90 * SECOND, 1002 * SECOND)
+        );
+        assert_eq!(stale.progress(1003 * SECOND, 120).unwrap().elapsed, 91);
+        // The player already reported its new position: keep it.
+        let mut fresh = track(true, 1.0, 0, 120 * SECOND, 88 * SECOND);
+        fresh.timeline.updated = 1001 * SECOND + 1;
+        fresh.sought(90 * SECOND, 1001 * SECOND, 1002 * SECOND);
+        assert_eq!(fresh.timeline.position, 88 * SECOND);
+    }
+
+    #[test]
+    fn seek_targets_clamp_to_the_timeline() {
+        let offset = track(true, 1.0, 60 * SECOND, 180 * SECOND, 90 * SECOND);
+        assert_eq!(offset.seek_target(0.0), Some(60 * SECOND));
+        assert_eq!(offset.seek_target(0.25), Some(90 * SECOND));
+        assert_eq!(offset.seek_target(1.0), Some(180 * SECOND));
+        assert_eq!(offset.seek_target(-0.5), Some(60 * SECOND));
+        assert_eq!(offset.seek_target(7.0), Some(180 * SECOND));
+    }
+
+    #[test]
+    fn seeks_need_a_session_a_shown_track_and_a_player_that_accepts_them() {
+        let mut media = Media::create();
+        media.state.view = View::Track(Track {
+            title: "Song".into(),
+            playing: true,
+            seekable: true,
+            ..track(true, 1.0, 0, 120 * SECOND, 0)
+        });
+        // No session object: nothing is sent and the command budget stays free.
+        media.seek(0.5);
+        assert!(media.command.is_none());
+        // Opening with no session reads nothing and keeps the timeline.
+        media.set_expanded(true);
+        assert!(media.expanded);
+        assert!(matches!(&media.state.view, View::Track(t) if t.timeline.end == 120 * SECOND));
+        media.set_expanded(false);
+        assert!(!media.expanded);
     }
 
     #[test]
@@ -925,6 +1328,7 @@ mod tests {
             status,
             observed,
             controls: [true; 3],
+            seekable: false,
             rate: 1.0,
             timeline: Timeline::default(),
         }
