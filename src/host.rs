@@ -3,7 +3,7 @@ use crate::{
     clock,
     dock::{self, DockItem},
     dock_uia::{self, Accessibility},
-    graphics::{Canvas, DockScene, DockSlot, Graphics, NotchScene},
+    graphics::{COVER_DIPS, Canvas, DockScene, DockSlot, Graphics, NotchScene},
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
     layout::{self, Bounds, SurfaceKind, placement},
@@ -355,6 +355,7 @@ impl Surface {
             time,
             date,
             track,
+            art: media.art(),
             progress,
             dpi: self.dpi,
             focus,
@@ -664,13 +665,14 @@ struct Desktop {
     graphics: Graphics,
     rebuild: Rebuild,
     picker: Option<Picker>,
-    icons: IconService,
     dock_items: Vec<DockItem>,
     dock_names: Vec<String>,
     dock_generation: Option<u64>,
     /// Media session state, drawn by the notches. Declared before `text` so its WinRT objects and
-    /// event tokens are released before that field's `RoUninitialize`.
+    /// event tokens are released before that field's `RoUninitialize`, and before `icons`, whose
+    /// worker stops only once media's handle to its queue is gone.
     media: Media,
+    icons: IconService,
     /// Windows text size (Accessibility > Text size) scales the whole notch, whose only content is text.
     text: TextSettings,
     text_factor: f64,
@@ -728,7 +730,7 @@ impl Desktop {
         desktop.show(SurfaceKind::Dock)?;
         // After the first paints, so loading the media component never delays them. WinRT is
         // already initialized on this thread by `TextSettings`.
-        desktop.media.start();
+        desktop.media.start(desktop.icons.jobs());
         Ok(desktop)
     }
     fn dock_slots(&self) -> usize {
@@ -946,6 +948,17 @@ impl Desktop {
             dock.paint_dock(&self.dock_items, &icons)?;
         }
         Ok(())
+    }
+    /// Album art side to decode, in physical pixels: the panel cover on the densest notch, or at
+    /// 96 DPI while the notch is hidden, so a track that changes meanwhile still gets art.
+    // shortcut: art keeps its decode size after a DPI or text-size change until the track changes; re-decode if it looks soft.
+    fn cover_pixels(&self) -> u32 {
+        self.surfaces
+            .iter()
+            .filter(|s| s.kind() == SurfaceKind::Notch)
+            .map(|s| (COVER_DIPS * s.dpi as f32 / 96.0).round() as u32)
+            .max()
+            .unwrap_or(COVER_DIPS as u32)
     }
     /// One icon set for every dock, extracted for the densest dock; lower-DPI docks scale it down.
     // shortcut: mixed-DPI docks resample icons; keep one cache size per DPI if that looks soft on hardware.
@@ -1317,7 +1330,7 @@ impl Desktop {
             .set_expanded(self.surfaces.iter().any(Surface::expanded));
         // One paint per visible notch when the drawn track changes or its pause grace expires.
         let generation = self.media.generation();
-        let redraw = self.media.refresh();
+        let redraw = self.media.refresh(self.cover_pixels());
         if redraw || generation != self.media.generation() {
             self.reconcile_focus();
         }

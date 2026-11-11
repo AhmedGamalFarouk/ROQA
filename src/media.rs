@@ -4,9 +4,11 @@
 //! Every GSMTC read and mutation happens on the host (STA) thread. Event handlers and async
 //! completions may run on any thread: they only set dirty bits, fill their request's one-shot slot
 //! and post one scalar wake, so they never block, panic or touch `Desktop`, HWNDs or Direct2D.
+use crate::icons::{IconPixels, Job};
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicU32, Ordering},
+    mpsc::SyncSender,
 };
 use std::time::{Duration, Instant};
 use windows::{
@@ -17,14 +19,17 @@ use windows::{
         GlobalSystemMediaTransportControlsSessionMediaProperties as Properties,
         GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
     },
+    Storage::Streams::{
+        IRandomAccessStream, IRandomAccessStreamReference, IRandomAccessStreamWithContentType,
+    },
     Win32::{
         Foundation::{E_ACCESSDENIED, LPARAM, WPARAM},
         System::Threading::GetCurrentThreadId,
         UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP},
     },
-    core::{Error, HRESULT, HSTRING, IUnknown, Interface, Result, RuntimeType},
+    core::{AgileReference, Error, HRESULT, HSTRING, IUnknown, Interface, Result, RuntimeType},
 };
-use windows_future::IAsyncOperation;
+use windows_future::{AsyncStatus, IAsyncOperation};
 
 /// Thread message that only wakes the host loop; the pending work is in `Wake::dirty`.
 const WAKE: u32 = WM_APP + 50;
@@ -513,6 +518,42 @@ pub fn now_ticks() -> i64 {
         })
 }
 
+/// The current track's album art, the only entry kept. Replacing it cancels its read and orphans
+/// its slot, so a late decode for an older track is never drawn.
+#[derive(Default)]
+struct Art {
+    /// Session generation, title and artist of the track it belongs to.
+    key: (u64, String, String),
+    read: Option<IAsyncOperation<IRandomAccessStreamWithContentType>>,
+    /// Filled once, on the icon worker, when decoding succeeds; a failed track stays empty.
+    pixels: Arc<OnceLock<IconPixels>>,
+    /// The host has handled the pixels' arrival, which repaints exactly once. The worker fills the
+    /// slot before its wake, so comparing the slot across one refresh would miss it.
+    seen: bool,
+}
+impl Drop for Art {
+    fn drop(&mut self) {
+        if let Some(read) = &self.read {
+            // A request only: a read that still completes decodes into an orphaned slot.
+            let _ = read.Cancel();
+        }
+    }
+}
+
+/// Completion side of a thumbnail read: queues the opened stream for decoding without blocking.
+/// A reference that cannot be created, or a full queue, drops the request, so the track keeps the
+/// no-art layout. The worker calls `done` with the decoded pixels.
+fn hand_off(
+    opened: Result<AgileReference<IRandomAccessStream>>,
+    jobs: &SyncSender<Job>,
+    side: u32,
+    done: Box<dyn FnOnce(IconPixels) + Send>,
+) {
+    if let Ok(stream) = opened {
+        let _ = jobs.try_send(Job::Art { stream, side, done });
+    }
+}
+
 /// Host-thread owner of the GSMTC manager, the current session and their event tokens.
 /// Must be dropped on the host thread before its `RoInitialize` and COM apartment guards.
 pub struct Media {
@@ -530,6 +571,9 @@ pub struct Media {
     expanded: bool,
     /// The target and request time (UTC ticks) of the seek in `command`, if it is one.
     seek: Option<(i64, i64)>,
+    art: Art,
+    /// The icon worker's queue, which decodes album art; none until `start`.
+    jobs: Option<SyncSender<Job>>,
     state: State,
     wake: Arc<Wake>,
     /// Media wakes handled, for diagnostics.
@@ -547,6 +591,8 @@ impl Media {
             again: false,
             expanded: false,
             seek: None,
+            art: Art::default(),
+            jobs: None,
             state: State::default(),
             wake: Arc::new(Wake {
                 dirty: AtomicU32::new(0),
@@ -558,8 +604,10 @@ impl Media {
         }
     }
     /// Requests the session manager; the caller must be the WinRT-initialized host STA. Never
-    /// fails: refused access becomes the permission view, and nothing is retried.
-    pub fn start(&mut self) {
+    /// fails: refused access becomes the permission view, and nothing is retried. Album art is
+    /// decoded by `jobs`, or not drawn without it.
+    pub fn start(&mut self, jobs: Option<SyncSender<Job>>) {
+        self.jobs = jobs;
         match Manager::RequestAsync().and_then(|request| Request::start(request, 0, &self.wake)) {
             Ok(request) => self.request = Some(request),
             Err(error) => {
@@ -570,6 +618,10 @@ impl Media {
     }
     pub fn view(&self) -> &View {
         &self.state.view
+    }
+    /// The shown track's album art, once decoded.
+    pub fn art(&self) -> Option<&IconPixels> {
+        self.state.view.shown().and(self.art.pixels.get())
     }
     /// One host wake at grace expiry, and none for a view with nothing to show.
     pub fn deadline(&self) -> Option<Instant> {
@@ -643,9 +695,11 @@ impl Media {
             Err(error) => eprintln!("Media: timeline: {error}"),
         }
     }
-    /// Applies pending media events and returns whether the drawn view changed. Without any events
-    /// it costs one atomic swap, plus a clock check only while a grace deadline exists.
-    pub fn refresh(&mut self) -> bool {
+    /// Applies pending media events and returns whether the drawn view or its album art changed.
+    /// A new track's art is decoded for a `cover` pixels square. Without any events it costs one
+    /// atomic swap, plus a clock check only while a grace deadline exists; the caller's `cover`
+    /// is a scan of a few surfaces.
+    pub fn refresh(&mut self, cover: u32) -> bool {
         let expired = self
             .deadline()
             .is_some_and(|_| self.state.expire(Instant::now()));
@@ -655,6 +709,10 @@ impl Media {
         }
         let started = Instant::now();
         self.wakes = self.wakes.wrapping_add(1);
+        let finished = |read: &mut IAsyncOperation<_>| read.Status() != Ok(AsyncStatus::Started);
+        // A finished read keeps its result stream; dropping our reference frees it. Never `Close()`
+        // it: the completion may still be about to call `GetResults()`.
+        self.art.read.take_if(finished);
         let before = self.state.view.clone();
         if let Some(outcome) = received(&self.request) {
             self.request = None;
@@ -694,12 +752,24 @@ impl Media {
             if std::mem::take(&mut self.again) {
                 dirty |= PROPERTIES;
             }
-            match outcome.and_then(|properties| Ok((properties.Title()?, properties.Artist()?))) {
-                Ok((title, artist)) => self.state.apply(Change::Properties {
-                    generation,
-                    title: bounded(title),
-                    artist: bounded(artist),
-                }),
+            match outcome
+                .and_then(|properties| Ok((properties.Title()?, properties.Artist()?, properties)))
+            {
+                Ok((title, artist, properties)) => {
+                    let (title, artist) = (bounded(title), bounded(artist));
+                    // A track without title or artist is never shown, so it needs no art.
+                    if generation == self.state.generation
+                        && !(title.is_empty() && artist.is_empty())
+                    {
+                        let key = (generation, title.clone(), artist.clone());
+                        self.read_art(key, || properties.Thumbnail(), cover);
+                    }
+                    self.state.apply(Change::Properties {
+                        generation,
+                        title,
+                        artist,
+                    });
+                }
                 Err(error) => eprintln!("Media: properties: {error}"),
             }
         }
@@ -739,7 +809,54 @@ impl Media {
             self.log();
         }
         slow("host refresh", started);
-        expired || redraw(&before, &self.state.view)
+        let arrived = !self.art.seen && self.art.pixels.get().is_some();
+        self.art.seen |= arrived;
+        // Art for a track that is not drawn changes nothing on screen.
+        expired
+            || redraw(&before, &self.state.view)
+            || (arrived && self.state.view.shown().is_some())
+    }
+    /// Starts reading a new track's `thumbnail` for a `side` pixels decode. Any step that fails
+    /// leaves the track without art, and the same track is never read again.
+    fn read_art(
+        &mut self,
+        key: (u64, String, String),
+        thumbnail: impl FnOnce() -> Result<IRandomAccessStreamReference>,
+        side: u32,
+    ) {
+        if key == self.art.key {
+            return;
+        }
+        self.art = Art {
+            key,
+            read: None,
+            pixels: Arc::default(),
+            seen: false,
+        };
+        let Some(jobs) = self.jobs.clone() else {
+            return;
+        };
+        let (pixels, landed) = (Arc::clone(&self.art.pixels), Arc::clone(&self.wake));
+        let done = Box::new(move |art| {
+            let _ = pixels.set(art);
+            landed.raise(READY);
+        });
+        let wake = Arc::clone(&self.wake);
+        let read = thumbnail()
+            .and_then(|thumbnail| thumbnail.OpenReadAsync())
+            .and_then(|read| {
+                read.when(move |opened| {
+                    let opened = opened.and_then(|stream| AgileReference::new(&stream.cast()?));
+                    hand_off(opened, &jobs, side, done);
+                    // Lets the host release the finished read, which holds the stream, at once.
+                    wake.raise(READY);
+                })?;
+                Ok(read)
+            });
+        match read {
+            Ok(read) => self.art.read = Some(read),
+            Err(error) => eprintln!("Media: no album art: {error}"),
+        }
     }
     /// Re-reads the current session; on a change, ends the old one, starts a new generation and
     /// returns the reads the new session needs.
@@ -775,7 +892,8 @@ impl Media {
         self.session = next;
         PROPERTIES | PLAYBACK
     }
-    /// Cancels the session's pending read and command, then removes its tokens and releases it.
+    /// Cancels the session's pending reads and command, drops its album art, then removes its tokens
+    /// and releases it.
     fn end_session(&mut self) {
         if let Some(fetch) = self.fetch.take() {
             fetch.cancel();
@@ -784,6 +902,7 @@ impl Media {
             command.cancel();
         }
         self.again = false;
+        self.art = Art::default();
         self.session = None;
     }
     fn unavailable(&mut self, step: &str, error: &Error) {
@@ -844,8 +963,15 @@ fn received<T: RuntimeType + 'static>(request: &Option<Request<T>>) -> Option<Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, rc::Rc};
-    use windows::Win32::Foundation::E_FAIL;
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+        sync::mpsc::{Receiver, sync_channel},
+    };
+    use windows::{
+        Storage::Streams::{InMemoryRandomAccessStream, RandomAccessStreamReference},
+        Win32::Foundation::E_FAIL,
+    };
 
     fn track(playing: bool, rate: f64, start: i64, end: i64, position: i64) -> Track {
         Track {
@@ -1407,9 +1533,9 @@ mod tests {
             ..Track::default()
         });
         assert!(media.view().shown().is_none());
-        assert!(media.refresh());
+        assert!(media.refresh(72));
         assert_eq!(media.deadline(), None);
-        assert!(!media.refresh());
+        assert!(!media.refresh(72));
     }
 
     #[test]
@@ -1461,7 +1587,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         // Completion is the only event that releases the global budget, even for an old session.
-        media.refresh();
+        media.refresh(72);
         assert!(media.command.is_none());
         admit_command(&mut media.command, 129, &media.wake, || {
             admitted.set(admitted.get() + 1);
@@ -1469,6 +1595,87 @@ mod tests {
         })
         .unwrap();
         assert_eq!(admitted.get(), 2);
+    }
+
+    fn stream() -> IRandomAccessStream {
+        InMemoryRandomAccessStream::new().unwrap().into()
+    }
+    fn thumbnail() -> Result<IRandomAccessStreamReference> {
+        RandomAccessStreamReference::CreateFromStream(&stream())?.cast()
+    }
+    /// The next art decode handed to the worker queue, with a reference that resolves.
+    fn art_job(incoming: &Receiver<Job>) -> (u32, Box<dyn FnOnce(IconPixels) + Send>) {
+        match incoming.recv_timeout(Duration::from_secs(10)) {
+            Ok(Job::Art { stream, side, done }) => {
+                assert!(stream.resolve().is_ok());
+                (side, done)
+            }
+            _ => panic!("no album art was handed off"),
+        }
+    }
+    fn pixels() -> IconPixels {
+        IconPixels {
+            width: 1,
+            height: 1,
+            pixels: vec![0; 4],
+        }
+    }
+
+    #[test]
+    fn album_art_is_one_entry_per_track_and_a_failed_track_is_never_read_again() {
+        let (jobs, incoming) = sync_channel(4);
+        let mut media = Media::create();
+        media.jobs = Some(jobs);
+        media.state.apply(Change::Session(true));
+        let generation = media.generation();
+        media.state.apply(properties(generation, "One"));
+        media.state.apply(playback(Status::Playing, Instant::now()));
+        let key = |title: &str| (generation, title.to_string(), "Artist".to_string());
+        let reads = Cell::new(0);
+        let missing = || {
+            reads.set(reads.get() + 1);
+            Err(E_FAIL.into())
+        };
+        // No thumbnail: the no-art layout, and the same track is not read again.
+        media.read_art(key("One"), missing, 72);
+        media.read_art(key("One"), missing, 72);
+        assert_eq!(reads.get(), 1);
+        assert!(media.art().is_none());
+        // A new track's stream reaches the worker for a decode at the drawn side.
+        media.read_art(key("Two"), thumbnail, 108);
+        let (side, stale) = art_job(&incoming);
+        assert_eq!(side, 108);
+        // The track changes before that decode lands: its result is discarded.
+        media.read_art(key("Three"), thumbnail, 108);
+        let (_, current) = art_job(&incoming);
+        stale(pixels());
+        assert!(!media.refresh(72));
+        assert!(media.art().is_none());
+        // The finished read, which holds the opened stream, is released on the next wake.
+        assert!(media.art.read.is_none());
+        // The current track's art repaints once when it arrives.
+        current(pixels());
+        assert!(media.refresh(72));
+        assert!(media.art().is_some());
+        assert!(!media.refresh(72));
+        media.read_art(key("Three"), missing, 72);
+        assert_eq!(reads.get(), 1);
+        assert!(media.art().is_some());
+        // Ending the session drops the entry.
+        media.end_session();
+        assert!(media.art().is_none());
+    }
+
+    #[test]
+    fn album_art_is_skipped_without_a_reference_or_queue_room() {
+        let (jobs, incoming) = sync_channel(1);
+        let hand = |opened| hand_off(opened, &jobs, 72, Box::new(|_| {}));
+        hand(Err(E_FAIL.into()));
+        assert!(incoming.try_recv().is_err());
+        let stream = stream();
+        hand(AgileReference::new(&stream));
+        hand(AgileReference::new(&stream));
+        assert_eq!(incoming.try_iter().count(), 1);
     }
 
     /// Stands in for a GSMTC object: records token removals and its own release.

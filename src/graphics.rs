@@ -18,12 +18,13 @@ use windows::Win32::{
                 D2D1_PIXEL_FORMAT,
             },
             D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT,
-            D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1,
-            D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+            D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_BRUSH_PROPERTIES1, D2D1_BITMAP_OPTIONS_NONE,
+            D2D1_BITMAP_PROPERTIES1, D2D1_BRUSH_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE,
+            D2D1_EXTEND_MODE_CLAMP, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
             D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_VECTOR4,
             D2D1_ROUNDED_RECT, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
             D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
-            D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateDevice, ID2D1DeviceContext,
+            D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateDevice, ID2D1Bitmap1, ID2D1DeviceContext,
             ID2D1PathGeometry,
         },
         Direct3D::D3D_DRIVER_TYPE_HARDWARE,
@@ -52,7 +53,7 @@ use windows::Win32::{
     },
 };
 use windows::core::{Error, HRESULT, Interface, PCWSTR, Result, w};
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 #[derive(Clone)]
 pub struct Graphics {
@@ -141,6 +142,8 @@ pub struct NotchScene<'a> {
     pub date: &'a str,
     /// The media session's track, drawn in the wider media notch; `None` draws the plain clock notch.
     pub track: Option<&'a Track>,
+    /// The track's album art, drawn in its cover slot.
+    pub art: Option<&'a IconPixels>,
     /// 0 collapsed, 1 expanded; the open curve briefly overshoots 1.
     pub progress: f32,
     pub dpi: u32,
@@ -501,8 +504,10 @@ fn notch_text(
     )
 }
 
-/// Fill of the empty cover slot: no album art is drawn until slice 5, which keeps this geometry.
+/// Fill of the cover slot when the track has no album art; art fills the same geometry.
 const COVER_FILL: f32 = 0.20;
+/// Side of the panel cover, the largest drawn album art; the host decodes art for it.
+pub const COVER_DIPS: f32 = 72.0;
 
 /// One text element of the media notch, in physical pixels.
 struct Line<'a> {
@@ -517,6 +522,10 @@ struct Line<'a> {
 /// the panel's controls once they fade in.
 struct MediaPlan<'a> {
     cover: D2D1_ROUNDED_RECT,
+    /// Album art fills the cover in place of the slot and its glyph.
+    art: Option<&'a IconPixels>,
+    /// The pill's play-state badge on the art.
+    badge: Option<Badge>,
     glyph: D2D_RECT_F,
     playing: bool,
     /// Glyph opacity, and a factor of the title's: 1 playing, 0.6 paused.
@@ -527,6 +536,13 @@ struct MediaPlan<'a> {
     chips: Vec<Chip>,
     /// Around the control with keyboard focus.
     ring: Option<Ring>,
+}
+
+/// A black circle carrying the play-state glyph at the art's bottom-right corner, faded by `alpha`.
+struct Badge {
+    circle: D2D1_ROUNDED_RECT,
+    glyph: D2D_RECT_F,
+    alpha: f32,
 }
 
 /// One media control: a white glyph, or for play/pause a black glyph on a white circle. A control
@@ -609,8 +625,8 @@ fn media_plan<'a>(
     let at = |pill: f32, panel: f32| pill + (panel - pill) * open;
     // The close spring's undershoot briefly makes the pill shorter than 30: keep its row centred.
     let middle = (layout::notch_shape(scene.progress, true).height / 2.0).min(15.0);
-    // Cover: 20 at (10, middle - 10), radius 5 -> 72 at (16, 14), radius 10. Glyph: 10 -> 24.
-    let size = (at(20.0, 72.0) * scale).round();
+    // Cover: 20 at (10, middle - 10), radius 5 -> COVER_DIPS at (16, 14), radius 10. Glyph: 10 -> 24.
+    let size = (at(20.0, COVER_DIPS) * scale).round();
     let cover = pixel_square(
         body.left + at(10.0, 16.0) * scale,
         body.top + at(middle - 10.0, 14.0) * scale,
@@ -618,6 +634,23 @@ fn media_plan<'a>(
     );
     let glyph = (at(10.0, 24.0) * scale).round();
     let inset = ((size - glyph) / 2.0).round();
+    // Badge: 11 with a 6 glyph, 4 past the cover's right and bottom edges. Only the pill has one;
+    // it fades out as the panel opens, whose play/pause control shows the state.
+    let badge = (scene.art.is_some() && open < 1.0).then(|| {
+        let side = (11.0 * scale).round();
+        let circle = pixel_square(
+            cover.right + 4.0 * scale - side,
+            cover.bottom + 4.0 * scale - side,
+            side,
+        );
+        let glyph = (6.0 * scale).round();
+        let inset = ((side - glyph) / 2.0).round();
+        Badge {
+            circle: rounded(circle, side / 2.0),
+            glyph: pixel_square(circle.left + inset, circle.top + inset, glyph),
+            alpha: 1.0 - open,
+        }
+    });
     // Clock: trailing edge 14 -> 16 from the right, centre middle -> 19. Title: from 38 -> 100,
     // ending 8 -> 6 before the clock, centre middle -> 21.
     let end = body.right - at(14.0, 16.0) * scale;
@@ -673,6 +706,8 @@ fn media_plan<'a>(
         .map(|chip| focus_ring(chip, scale, motion::reveal(scene.progress)));
     MediaPlan {
         cover: rounded(cover, at(5.0, 10.0) * scale),
+        art: scene.art,
+        badge,
         glyph: pixel_square(cover.left + inset, cover.top + inset, glyph),
         playing: track.playing,
         dim,
@@ -806,17 +841,30 @@ fn focus_ring(chip: &Chip, scale: f32, alpha: f32) -> Ring {
 }
 
 fn media_text(context: &ID2D1DeviceContext, plan: &MediaPlan) -> Result<()> {
-    // SAFETY: context is live between surface BeginDraw/EndDraw; brushes are scoped to this draw.
-    unsafe {
-        let slot = context.CreateSolidColorBrush(&with_alpha(WHITE, COVER_FILL), None)?;
-        context.FillRoundedRectangle(&plan.cover, &slot);
-    }
     let state = if plan.playing {
         Glyph::Play
     } else {
         Glyph::Pause
     };
-    fill_glyph(context, plan.glyph, state, with_alpha(WHITE, plan.dim))?;
+    if let Some(art) = plan.art {
+        fill_art(context, &plan.cover, art, plan.dim)?;
+    } else {
+        // SAFETY: context is live between surface BeginDraw/EndDraw; brushes are scoped to this draw.
+        unsafe {
+            let slot = context.CreateSolidColorBrush(&with_alpha(WHITE, COVER_FILL), None)?;
+            context.FillRoundedRectangle(&plan.cover, &slot);
+        }
+        fill_glyph(context, plan.glyph, state, with_alpha(WHITE, plan.dim))?;
+    }
+    if let Some(badge) = &plan.badge {
+        // SAFETY: as above.
+        unsafe {
+            let circle = context.CreateSolidColorBrush(&rgba(0, 0, 0, badge.alpha), None)?;
+            context.FillRoundedRectangle(&badge.circle, &circle);
+        }
+        let color = with_alpha(WHITE, plan.dim * badge.alpha);
+        fill_glyph(context, badge.glyph, state, color)?;
+    }
     if let Some(([track, fill], alpha)) = &plan.bar {
         // SAFETY: as above.
         unsafe {
@@ -861,6 +909,73 @@ fn media_text(context: &ID2D1DeviceContext, plan: &MediaPlan) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Album art scaled into the cover square. A bitmap brush clips it to the rounded rect directly,
+/// with no layer or geometry mask.
+// shortcut: the art is uploaded on every notch paint (its arrival, track changes, clock minutes, open/close frames); cache the bitmap per canvas if profiling shows cost.
+fn fill_art(
+    context: &ID2D1DeviceContext,
+    cover: &D2D1_ROUNDED_RECT,
+    art: &IconPixels,
+    opacity: f32,
+) -> Result<()> {
+    let scale = (cover.rect.right - cover.rect.left) / art.width as f32;
+    let properties = D2D1_BITMAP_BRUSH_PROPERTIES1 {
+        extendModeX: D2D1_EXTEND_MODE_CLAMP,
+        extendModeY: D2D1_EXTEND_MODE_CLAMP,
+        interpolationMode: D2D1_INTERPOLATION_MODE_LINEAR,
+    };
+    let placement = D2D1_BRUSH_PROPERTIES {
+        opacity,
+        transform: Matrix3x2 {
+            M11: scale,
+            M12: 0.0,
+            M21: 0.0,
+            M22: scale,
+            M31: cover.rect.left,
+            M32: cover.rect.top,
+        },
+    };
+    // SAFETY: context is live between surface BeginDraw/EndDraw; the bitmap and brush are scoped
+    // to this draw.
+    unsafe {
+        let brush = context.CreateBitmapBrush(
+            &upload(context, art)?,
+            Some(&properties),
+            Some(&placement),
+        )?;
+        // Cubic downscaling where the brush supports it; an unsupported mode is ignored, not an error.
+        brush.SetInterpolationMode1(D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+        context.FillRoundedRectangle(cover, &brush);
+    }
+    Ok(())
+}
+
+/// A device bitmap copied from premultiplied BGRA pixels.
+fn upload(context: &ID2D1DeviceContext, pixels: &IconPixels) -> Result<ID2D1Bitmap1> {
+    let properties = D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+        colorContext: ManuallyDrop::new(None),
+    };
+    // SAFETY: the buffer holds `height` rows of `width * 4` bytes and is copied before returning.
+    unsafe {
+        context.CreateBitmap(
+            D2D_SIZE_U {
+                width: pixels.width,
+                height: pixels.height,
+            },
+            Some(pixels.pixels.as_ptr().cast()),
+            pixels.width * 4,
+            &properties,
+        )
+    }
 }
 
 /// A `size` square at whole physical pixels, as crisp as the whole-pixel body.
@@ -1097,27 +1212,8 @@ fn draw_slot(
             }
         } else if let Some(pixels) = slot.icon {
             // shortcut: bitmaps are rebuilt per paint (catalog/icon/hover changes and the frames of a ~0.2 s hover animation); cache per device if profiling shows cost.
-            let properties = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
-                colorContext: ManuallyDrop::new(None),
-            };
-            let bitmap = context.CreateBitmap(
-                D2D_SIZE_U {
-                    width: pixels.width,
-                    height: pixels.height,
-                },
-                Some(pixels.pixels.as_ptr().cast()),
-                pixels.width * 4,
-                &properties,
-            )?;
             context.DrawBitmap(
-                &bitmap,
+                &upload(context, pixels)?,
                 Some(&frame),
                 1.0,
                 D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
@@ -1228,6 +1324,7 @@ mod media_tests {
             time,
             date: "Tuesday",
             track: view.shown(),
+            art: None,
             progress,
             dpi,
             focus,
@@ -1235,6 +1332,47 @@ mod media_tests {
         };
         let clock = clock_width(time, progress, dpi);
         media_plan(&scene, scene.track.unwrap(), &body(dpi, progress), clock)
+    }
+
+    #[test]
+    fn album_art_fills_the_cover_slot_and_only_the_pill_carries_a_badge() {
+        let song = track("Song", "Artist", true);
+        let art = IconPixels {
+            width: 72,
+            height: 72,
+            pixels: vec![0; 72 * 72 * 4],
+        };
+        let planned = |progress| {
+            let scene = NotchScene {
+                time: "9:50 pm",
+                date: "Tuesday",
+                track: song.shown(),
+                art: Some(&art),
+                progress,
+                dpi: 96,
+                focus: None,
+                played: None,
+            };
+            let clock = clock_width("9:50 pm", progress, 96);
+            let plan = media_plan(&scene, scene.track.unwrap(), &body(96, progress), clock);
+            (plan.cover, plan.art.is_some(), plan.badge)
+        };
+        let (cover, drawn, badge) = planned(0.0);
+        // The art takes exactly the no-art slot; nothing else moves.
+        assert_eq!(cover, plan(&song, "9:50 pm", 0.0, 96).cover);
+        assert!(drawn);
+        // An 11 badge 4 past the cover's corner (99, 5)-(119, 25), with a centred 6 glyph.
+        let badge = badge.unwrap();
+        assert_eq!(badge.circle.rect, rect(112.0, 18.0, 123.0, 29.0));
+        assert_eq!(badge.circle.radiusX, 5.5);
+        assert_eq!(badge.glyph, rect(115.0, 21.0, 121.0, 27.0));
+        assert_eq!(badge.alpha, 1.0);
+        let (cover, drawn, badge) = planned(1.0);
+        // The panel cover, 72 at (16, 14), has no badge: its play/pause control shows the state.
+        let left = body(96, 1.0).left;
+        assert_eq!(cover.rect, rect(left + 16.0, 14.0, left + 88.0, 86.0));
+        assert!(drawn && badge.is_none());
+        assert!(plan(&song, "9:50 pm", 0.0, 96).badge.is_none());
     }
     /// Text, rectangle, size and opacity of each drawn line.
     fn lines<'a>(plan: &'a MediaPlan) -> Vec<(&'a str, D2D_RECT_F, f32, f32)> {

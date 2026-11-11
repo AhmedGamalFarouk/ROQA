@@ -10,28 +10,48 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::{
+    Storage::Streams::IRandomAccessStream,
     Win32::{
         Foundation::{E_FAIL, LPARAM, SIZE, WPARAM},
-        Graphics::Gdi::{
-            BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC,
-            GetDIBits, GetObjectW, HBITMAP, ReleaseDC,
+        Graphics::{
+            Gdi::{
+                BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC,
+                GetDIBits, GetObjectW, HBITMAP, ReleaseDC,
+            },
+            Imaging::{
+                CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
+                WICBitmapDitherTypeNone, WICBitmapInterpolationModeFant,
+                WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand, WICRect,
+            },
         },
         System::{
-            Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
+            Com::{
+                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+                CoUninitialize, IStream,
+            },
             Threading::GetCurrentThreadId,
+            WinRT::CreateStreamOverRandomAccessStream,
         },
         UI::{
             Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY},
             WindowsAndMessaging::{PostThreadMessageW, WM_APP},
         },
     },
-    core::{Error, HSTRING, Result},
+    core::{AgileReference, Error, HSTRING, Result},
 };
 
 const ICON_READY: u32 = WM_APP + 12;
 const QUEUE: usize = 64;
 // Bound retained pixels and admitted work together; closed apps are evicted on catalog changes.
 const CACHE_LIMIT: usize = 256;
+/// Album-art streams larger than this are rejected before decoding.
+const ART_BYTES: u64 = 4 << 20;
+/// Decoded art is at most this many pixels a side (256 KiB of BGRA).
+const ART_SIDE: u32 = 256;
+/// Frames with a larger side are rejected from the header alone: a small stream can still declare a
+/// huge frame, which WIC may buffer whole (about 36 MiB of BGRA at this cap). 3000 x 3000 store
+/// artwork still fits.
+const ART_FRAME: u32 = 3072;
 
 /// Premultiplied BGRA, top-down rows of `width * 4` bytes.
 pub struct IconPixels {
@@ -42,14 +62,26 @@ pub struct IconPixels {
 
 type Extracted = (Identity, u32, Option<Arc<IconPixels>>);
 
-struct Request {
+pub struct Request {
     identity: Identity,
     sources: Vec<String>,
     size: u32,
 }
 
+/// Work for the icon worker, run one at a time in queue order.
+pub enum Job {
+    Icon(Request),
+    /// Album art: the opened thumbnail stream, the side it is drawn at in physical pixels, and
+    /// where the pixels go. `done` runs on the worker, and only when decoding succeeds.
+    Art {
+        stream: AgileReference<IRandomAccessStream>,
+        side: u32,
+        done: Box<dyn FnOnce(IconPixels) + Send>,
+    },
+}
+
 pub struct IconService {
-    requests: Option<SyncSender<Request>>,
+    requests: Option<SyncSender<Job>>,
     results: Option<Receiver<Extracted>>,
     worker: Option<JoinHandle<()>>,
     /// `None` records a definitive failure so it is not retried every refresh.
@@ -62,14 +94,31 @@ impl IconService {
     pub fn create() -> Result<Self> {
         // SAFETY: scalar thread ID of the UI thread that owns the message queue for wakes.
         let target = unsafe { GetCurrentThreadId() };
-        let (request_tx, request_rx) = mpsc::sync_channel::<Request>(QUEUE);
+        let (request_tx, request_rx) = mpsc::sync_channel::<Job>(QUEUE);
         let (result_tx, result_rx) = mpsc::sync_channel(QUEUE);
         let worker = thread::Builder::new()
             .name("roqa-icons".into())
             .spawn(move || {
                 // SAFETY: worker-owned STA for in-process shell item objects; balanced below on this thread.
                 let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
-                while let Ok(request) = request_rx.recv() {
+                while let Ok(job) = request_rx.recv() {
+                    let request = match job {
+                        Job::Icon(request) => request,
+                        Job::Art { stream, side, done } => {
+                            let pixels = if com {
+                                art(stream.resolve(), side)
+                            } else {
+                                None
+                            };
+                            // The resolved stream is already released; release its reference too
+                            // before replying.
+                            drop(stream);
+                            if let Some(pixels) = pixels {
+                                done(pixels);
+                            }
+                            continue;
+                        }
+                    };
                     let icon = if com {
                         request
                             .sources
@@ -88,6 +137,8 @@ impl IconService {
                     // SAFETY: scalar wake only; the UI loop also polls results on every pass.
                     let _ = unsafe { PostThreadMessageW(target, ICON_READY, WPARAM(0), LPARAM(0)) };
                 }
+                // Jobs still queued after an early exit hold agile references: release them before COM.
+                drop(request_rx);
                 if com {
                     // SAFETY: balances the successful initialization above; all COM objects were released.
                     unsafe { CoUninitialize() };
@@ -131,10 +182,15 @@ impl IconService {
             size,
         };
         // A full queue is retried on a later dock refresh; it never blocks the UI thread.
-        if self.requests.as_ref()?.try_send(request).is_ok() {
+        if self.requests.as_ref()?.try_send(Job::Icon(request)).is_ok() {
             self.pending.insert(identity.clone());
         }
         None
+    }
+
+    /// The worker's queue, for album art. The worker stops only once every clone is dropped.
+    pub fn jobs(&self) -> Option<SyncSender<Job>> {
+        self.requests.clone()
     }
 
     /// Drops cached and pending identities that no longer belong to the dock.
@@ -192,6 +248,73 @@ fn extract(source: &str, size: u32) -> Result<IconPixels> {
         let _ = DeleteObject(bitmap.into());
         pixels
     }
+}
+
+/// Decoded album art, or `None` when the stream cannot be resolved, is over a cap or fails to
+/// decode. The reason is logged, never the content.
+fn art(stream: Result<IRandomAccessStream>, side: u32) -> Option<IconPixels> {
+    stream
+        .and_then(|stream| decode_art(&stream, side))
+        .inspect_err(|error| eprintln!("Album art skipped: {error}"))
+        .ok()
+}
+
+fn decode_art(stream: &IRandomAccessStream, side: u32) -> Result<IconPixels> {
+    if stream.Size()? > ART_BYTES {
+        return Err(Error::new(E_FAIL, "Album art stream over 4 MiB."));
+    }
+    // SAFETY: COM is initialized on this thread; every WIC object is released on return, and the
+    // output buffer holds exactly `side` rows of `side * 4` bytes.
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let source: IStream = CreateStreamOverRandomAccessStream(stream)?;
+        let frame = factory
+            .CreateDecoderFromStream(&source, std::ptr::null(), WICDecodeMetadataCacheOnDemand)?
+            .GetFrame(0)?;
+        let (mut width, mut height) = (0, 0);
+        frame.GetSize(&mut width, &mut height)?;
+        let (crop, side) = art_square(width, height, side)
+            .ok_or_else(|| Error::new(E_FAIL, "Album art frame size out of range."))?;
+        let clipper = factory.CreateBitmapClipper()?;
+        clipper.Initialize(&frame, &crop)?;
+        // Premultiply before scaling, so transparent edges do not pick up dark fringes.
+        let converter = factory.CreateFormatConverter()?;
+        converter.Initialize(
+            &clipper,
+            &GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapDitherTypeNone,
+            None,
+            0.0,
+            WICBitmapPaletteTypeCustom,
+        )?;
+        let scaler = factory.CreateBitmapScaler()?;
+        scaler.Initialize(&converter, side, side, WICBitmapInterpolationModeFant)?;
+        let mut pixels = vec![0u8; (side * side * 4) as usize];
+        scaler.CopyPixels(std::ptr::null(), side * 4, &mut pixels)?;
+        Ok(IconPixels {
+            width: side,
+            height: side,
+            pixels,
+        })
+    }
+}
+
+/// The centred square crop of a `width` x `height` frame that fills the cover slot, and the side to
+/// decode it at: the drawn `side`, but never above the crop or `ART_SIDE`. `None` for an empty or
+/// oversized frame.
+fn art_square(width: u32, height: u32, side: u32) -> Option<(WICRect, u32)> {
+    if width == 0 || height == 0 || width > ART_FRAME || height > ART_FRAME || side == 0 {
+        return None;
+    }
+    let square = width.min(height);
+    let crop = WICRect {
+        X: ((width - square) / 2) as i32,
+        Y: ((height - square) / 2) as i32,
+        Width: square as i32,
+        Height: square as i32,
+    };
+    Some((crop, side.min(square).min(ART_SIDE)))
 }
 
 fn bitmap_pixels(bitmap: HBITMAP) -> Result<IconPixels> {
@@ -292,7 +415,7 @@ pub fn sources(identity: &Identity, executable: Option<&str>) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn service() -> (IconService, Receiver<Request>, SyncSender<Extracted>) {
+    fn service() -> (IconService, Receiver<Job>, SyncSender<Extracted>) {
         let (requests, incoming) = mpsc::sync_channel(QUEUE);
         let (completed, results) = mpsc::sync_channel(QUEUE);
         (
@@ -317,6 +440,121 @@ mod tests {
         service.icon(id, vec!["test.exe".into()], size);
     }
 
+    fn icon(job: Job) -> Request {
+        match job {
+            Job::Icon(request) => request,
+            Job::Art { .. } => panic!("expected an icon request"),
+        }
+    }
+
+    #[test]
+    fn art_crops_the_centred_square_and_caps_the_decoded_side() {
+        let square = |width, height, side| {
+            art_square(width, height, side).map(|(c, side)| (c.X, c.Y, c.Width, c.Height, side))
+        };
+        // A 16:9 video thumbnail fills the slot from its centre; the drawn side is decoded.
+        assert_eq!(square(1280, 720, 108), Some((280, 0, 720, 720, 108)));
+        assert_eq!(square(300, 500, 72), Some((0, 100, 300, 300, 72)));
+        // Never upscaled past the source, never above 256 x 256.
+        assert_eq!(square(64, 64, 108), Some((0, 0, 64, 64, 64)));
+        assert_eq!(
+            square(ART_FRAME, ART_FRAME, 324),
+            Some((0, 0, 3072, 3072, ART_SIDE))
+        );
+        // Empty or oversized frames, and a zero side, are rejected.
+        for (width, height, side) in [
+            (0, 10, 72),
+            (10, 0, 72),
+            (ART_FRAME + 1, 10, 72),
+            (10, 10, 0),
+        ] {
+            assert_eq!(square(width, height, side), None);
+        }
+    }
+
+    #[test]
+    fn art_over_the_stream_cap_or_unresolved_is_skipped_before_decoding() {
+        // Activating the stream first joins this test thread to the implicit MTA that WIC needs.
+        use windows::Storage::Streams::InMemoryRandomAccessStream;
+        let stream = |bytes| -> IRandomAccessStream {
+            let stream = InMemoryRandomAccessStream::new().unwrap();
+            stream.SetSize(bytes).unwrap();
+            stream.into()
+        };
+        let error = decode_art(&stream(ART_BYTES + 1), 72).err().unwrap();
+        assert_eq!(error.message(), "Album art stream over 4 MiB.");
+        // At the cap the stream reaches the decoder, which rejects zero bytes as an image.
+        let error = decode_art(&stream(ART_BYTES), 72).err().unwrap();
+        assert_ne!(error.message(), "Album art stream over 4 MiB.");
+        assert!(art(Ok(stream(ART_BYTES + 1)), 72).is_none());
+        // An agile reference that cannot be resolved skips the art.
+        assert!(art(Err(E_FAIL.into()), 72).is_none());
+    }
+
+    /// A 2 x 1 24-bit BMP: blue-green-red (10, 20, 30) then (40, 50, 60), rows padded to 8 bytes.
+    fn bmp() -> IRandomAccessStream {
+        let mut bytes = b"BM".to_vec();
+        for field in [62u32, 0, 54, 40, 2, 1] {
+            bytes.extend(field.to_le_bytes());
+        }
+        bytes.extend([1, 0, 24, 0]); // planes, bits per pixel
+        for field in [0u32, 8, 2835, 2835, 0, 0] {
+            bytes.extend(field.to_le_bytes());
+        }
+        bytes.extend([10, 20, 30, 40, 50, 60, 0, 0]);
+        let stream: IRandomAccessStream =
+            windows::Storage::Streams::InMemoryRandomAccessStream::new()
+                .unwrap()
+                .into();
+        // SAFETY: the bridge stream is used only here; `bytes` outlives the write it is read by.
+        unsafe {
+            let writer: IStream = CreateStreamOverRandomAccessStream(&stream).unwrap();
+            writer
+                .Write(bytes.as_ptr().cast(), bytes.len() as u32, None)
+                .ok()
+                .unwrap();
+        }
+        stream.Seek(0).unwrap();
+        stream
+    }
+
+    #[test]
+    fn art_decodes_the_centred_square_as_premultiplied_bgra() {
+        // `bmp()` activates a WinRT stream first, and windows-core then joins this uninitialized
+        // test thread to the implicit MTA, which WIC needs. Keep activation before decoding.
+        let art = decode_art(&bmp(), 72).unwrap();
+        // The centred 1 x 1 crop of a 2 x 1 frame is its left pixel, never upscaled; opaque.
+        assert_eq!((art.width, art.height), (1, 1));
+        assert_eq!(art.pixels, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn the_worker_replies_to_art_only_when_decoding_succeeds() {
+        let service = IconService::create().unwrap();
+        let jobs = service.jobs().unwrap();
+        let (decoded, replies) = mpsc::channel();
+        for stream in [
+            IRandomAccessStream::from(
+                windows::Storage::Streams::InMemoryRandomAccessStream::new().unwrap(),
+            ),
+            bmp(),
+        ] {
+            let decoded = decoded.clone();
+            let job = Job::Art {
+                stream: AgileReference::new(&stream).unwrap(),
+                side: 72,
+                done: Box::new(move |art: IconPixels| decoded.send(art.pixels).unwrap()),
+            };
+            jobs.send(job).unwrap();
+        }
+        // The empty stream fails without a reply; the queue runs in order, so the first reply is the BMP.
+        let first = replies.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(first, [10, 20, 30, 255]);
+        drop((jobs, decoded));
+        drop(service);
+        assert!(replies.try_recv().is_err());
+    }
+
     #[test]
     fn demand_beyond_capacity_settles_without_resetting_cache() {
         let (mut service, incoming, completed) = service();
@@ -324,7 +562,7 @@ mod tests {
             for index in 0..CACHE_LIMIT + 20 {
                 request(&mut service, &identity(index), 40);
             }
-            for request in incoming.try_iter() {
+            for request in incoming.try_iter().map(icon) {
                 completed
                     .send((request.identity, request.size, None))
                     .unwrap();
@@ -346,7 +584,7 @@ mod tests {
         for index in 0..3 {
             request(&mut service, &identity(index), 40);
         }
-        let requests: Vec<_> = incoming.try_iter().collect();
+        let requests: Vec<_> = incoming.try_iter().map(icon).collect();
         for request in &requests[..2] {
             completed
                 .send((request.identity.clone(), 40, None))
@@ -361,7 +599,7 @@ mod tests {
         request(&mut service, &identity(1), 40);
         assert!(incoming.try_recv().is_err());
         request(&mut service, &identity(0), 40);
-        assert_eq!(incoming.try_recv().unwrap().identity, identity(0));
+        assert_eq!(icon(incoming.try_recv().unwrap()).identity, identity(0));
     }
 
     #[test]
@@ -394,7 +632,12 @@ mod tests {
         incoming.try_recv().unwrap();
         request(&mut service, &retry, 40);
         assert!(service.pending.contains(&retry));
-        assert!(incoming.try_iter().any(|request| request.identity == retry));
+        assert!(
+            incoming
+                .try_iter()
+                .map(icon)
+                .any(|request| request.identity == retry)
+        );
     }
     #[test]
     fn normalizes_straight_premultiplied_and_alphaless_pixels() {

@@ -711,3 +711,33 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Deferred:** R3-NIT-2 addendum wording ("at least a second apart" holds in steady playback; once after a seek, resume, rate or track change it may not); R3-NIT-3 no above-1x late-wake simulation; R2-NIT-2 test duplicates the host anchor arithmetic; host gate has no direct test (R1-MIN-1, statically reviewed). Limits: a periodic timeline push can fool the post-seek freshness check (R2-MIN-1); a track change while open may keep the old timeline until the next read; external seeks while open are unseen until the next read; `GetTimelineProperties` is synchronous on the host thread (timed, logged over 8 ms).
 - **NOT RUN:** all native evidence: wake/paint counts open vs collapsed (including 0.75x/0.9x), gate cases, real-player seek (including a periodically updating player), timeline freshness, Narrator ItemStatus, hung player on open, five suites and 30 s idle. Every native run needs fresh desktop-free user confirmation via the Chief.
 - Commit worker Claude Sonnet 5.5 (commit/push only, not a reviewer; approves nothing): stale check passed 133/133 manifest entries; manifest SHA-256 E96A4B32FDAB6A069FC6062B1683AA0C172C0137C460E65B33614B047A74DD36 matched; pinned verify result recorded in the commit message. Native evidence remains NOT RUN.
+
+## M4 slice 5 album art: integrated onto slice 4, static accepted with nits; runtime open (2026-11-11)
+
+- Author: Claude Opus 5.5 worker launched by the Chief. Branch feat/m4-album-art, HEAD = base 624e14f (slice 4); the candidate is uncommitted. No commit to main, no push. progress.md unchanged; user .gitignore untouched. Packet: docs/development/m4-media-art-candidate-1.md.
+- Slice 5 behaviour:
+  - On a track change (generation + title + artist), Thumbnail().OpenReadAsync runs through the existing `when` + media wake. The stream goes in an AgileReference to the existing roqa-icons STA worker.
+  - The worker rejects Size() > 4 MiB before WIC and frames over 3072 a side, then centre-crops, converts to PBGRA and Fant-scales to the drawn side (at most 256).
+  - One OnceLock entry. Stale results are discarded through orphaned slots. Every failure keeps the no-art layout, and the same key is never read again. Finished reads are dropped on the next wake (never Close()d).
+  - A D2D bitmap brush fills the existing cover rounded rect in pill and panel. A pill-only play-state badge is drawn with art.
+  - One arrival repaint, only when the track is shown. No new thread, timer, poll, crate or dependency. New features: Storage_Streams and Win32_Graphics_Imaging.
+- Integration onto 624e14f:
+  - Conflicts in media.rs, graphics.rs and the visual spec were resolved keeping slice 4's seek, set_expanded, timeline reread, refresh_progress, bar hit-test and deadlines unchanged. Paint order: cover/art, badge, bar, text, controls.
+  - The art cover (16,14)-(88,86) and the bar (x 140-304, y 50-64) do not overlap.
+  - Round-3 MIN-1 folded in: drop(request_rx) before CoUninitialize in the icon worker.
+  - The accepted state is saved as artifacts/m4-art-1/pre-rebase.diff (identical to round 3) plus pre-rebase-src/.
+- Pinned verify PASS: fmt, clippy, 89 tests (82 + 7), release. Binary 774,144 B, +18,432 B (+2.44 %) vs 624e14f's 755,712 B. SHA-256 1F80554FCC79A5F50153076C1F813563F90537C0092A07CE228134F01812A84D. Manifest: 146 raw inputs, SHA-256 C0880DC49B6464A38A06A1DE8DDB56DE7FAE32F174B3EF859B5C9F97149E5413, at artifacts/m4-art-1/integration-1/inputs.sha256.
+- Independent Claude Opus 5.5 High clean-code-guard reviews, a fresh delegate each, no Sol:
+  - Slice rounds on 450d46c:
+    - Round 1: CHANGES REQUIRED (1 important, 4 minor, 4 nits). Report EF76AB43...ACA5AF.
+    - Round 2: CHANGES REQUIRED (1 important, 1 minor, 3 nits). Report B884DA87...6E9221.
+    - Round 3: ACCEPT WITH NITS (1 minor, 1 nit). Report BA216A42...5F4158.
+  - Integration 1: ACCEPT WITH NITS, 0 critical, 0 important, 0 minor, 1 nit. Report artifacts/m4-art-1/integration-1/review-opus.md, SHA-256 FA7B498B7ECC0D902BC78002DD352341E88B85AFB9B5030A7F267E3651260E82. Slice 4 semantics unchanged, the COM fix sufficient, and the rest equal to round 3.
+  - Static only; the author approves nothing.
+- Deferred:
+  - I1 NIT-1: the merged Media::refresh is about 116 lines; extracting the properties-outcome handling is an optional follow-up.
+  - R1 MIN-1: never-retry can leave a track with no art or the previous cover when a player sends the thumbnail late.
+  - R1 MIN-4: a hung player stream blocks the shared icon worker; an in-flight read at quit can use the 1 s worker detach.
+  - Cubic brush sampling and stream agility are UNVERIFIED. The 3072-squared transient decode peak is unmeasured.
+- All native evidence is NOT RUN or deferred: real players including a Chromium/Edge tab, track churn memory and handles, over-cap/corrupt/non-square art, collapsed paint counts, mixed DPI and text scale, quit during a read or a stall, device-loss rebuild, and art with the progress row. Every native run needs fresh desktop-free user confirmation via the Chief. No system changes; no native or GUI runs.
+- Commit worker Claude Sonnet 5.5 (commit/push only, not a reviewer; approves nothing): stale check passed, all 146 manifest entries matched the working tree, manifest SHA-256 C0880DC49B6464A38A06A1DE8DDB56DE7FAE32F174B3EF859B5C9F97149E5413 matched, Cargo.lock unchanged; pinned scripts/verify.ps1 PASS (checks + release build), 89 tests passed, binary 774,144 B SHA-256 1F80554FCC79A5F50153076C1F813563F90537C0092A07CE228134F01812A84D, equal to the expected values. Native evidence remains NOT RUN.
