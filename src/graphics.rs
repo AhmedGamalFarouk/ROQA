@@ -6,7 +6,7 @@ use crate::{
     media::{PLAY_PAUSE, Progress, Track},
     motion,
 };
-use std::{borrow::Cow, mem::ManuallyDrop};
+use std::{borrow::Cow, cell::RefCell, mem::ManuallyDrop};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::{
     Foundation::{D2DERR_RECREATE_TARGET, E_FAIL, HMODULE, HWND, POINT},
@@ -143,8 +143,8 @@ pub struct NotchScene<'a> {
     pub date: &'a str,
     /// The media session's track, drawn in the wider media notch; `None` draws the plain clock notch.
     pub track: Option<&'a Track>,
-    /// The track's album art, drawn in its cover slot.
-    pub art: Option<&'a IconPixels>,
+    /// The track's album art, drawn in its cover slot, and its entry number (`Media::art`).
+    pub art: Option<(u64, &'a IconPixels)>,
     /// 0 collapsed, 1 expanded; the open curve briefly overshoots 1.
     pub progress: f32,
     pub dpi: u32,
@@ -175,6 +175,9 @@ pub struct Canvas {
     graphics: Graphics,
     width: u32,
     height: u32,
+    /// The album art's device bitmap and its entry number. Reused while the entry is unchanged and
+    /// released with the canvas, which a device loss or rebuild replaces.
+    art: RefCell<Option<(u64, ID2D1Bitmap1)>>,
 }
 impl Canvas {
     pub fn create(graphics: &Graphics, hwnd: HWND, bounds: Bounds) -> Result<Self> {
@@ -192,6 +195,7 @@ impl Canvas {
                 graphics: graphics.clone(),
                 width: bounds.width as u32,
                 height: bounds.height as u32,
+                art: RefCell::default(),
             };
             // Transparent until the host paints real content, so no placeholder rectangle flashes.
             canvas.draw(|_, _| Ok(()))?;
@@ -256,7 +260,10 @@ impl Canvas {
                 context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
                 context.PushAxisAlignedClip(&body, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             }
-            let drawn = notch_text(context, scene, &body, scale);
+            let art = cached(&mut self.art.borrow_mut(), scene.art, |pixels| {
+                upload(context, pixels)
+            });
+            let drawn = art.and_then(|art| notch_text(context, scene, &body, scale, art.as_ref()));
             // SAFETY: balances the PushAxisAlignedClip above on the same live context.
             unsafe { context.PopAxisAlignedClip() };
             drawn
@@ -460,11 +467,12 @@ fn notch_text(
     scene: &NotchScene,
     body: &D2D_RECT_F,
     scale: f32,
+    art: Option<&ID2D1Bitmap1>,
 ) -> Result<()> {
     if let Some(track) = scene.track {
         let font = media_clock(motion::smooth(scene.progress), scale);
         let clock = text_width(scene.time, &font)?;
-        return media_text(context, &media_plan(scene, track, body, clock));
+        return media_text(context, &media_plan(scene, track, body, clock), art);
     }
     let open = motion::smooth(scene.progress);
     let row = |middle: f32, half: f32| D2D_RECT_F {
@@ -746,7 +754,7 @@ fn media_plan<'a>(
         .map(|chip| focus_ring(chip, scale, motion::reveal(scene.progress)));
     MediaPlan {
         cover: rounded(cover, at(5.0, 10.0) * scale),
-        art: scene.art,
+        art: scene.art.map(|(_, pixels)| pixels),
         badge,
         glyph: pixel_square(cover.left + inset, cover.top + inset, glyph),
         playing: track.playing,
@@ -948,14 +956,18 @@ fn focus_ring(chip: &Chip, scale: f32, alpha: f32) -> Ring {
     }
 }
 
-fn media_text(context: &ID2D1DeviceContext, plan: &MediaPlan) -> Result<()> {
+fn media_text(
+    context: &ID2D1DeviceContext,
+    plan: &MediaPlan,
+    bitmap: Option<&ID2D1Bitmap1>,
+) -> Result<()> {
     let state = if plan.playing {
         Glyph::Play
     } else {
         Glyph::Pause
     };
-    if let Some(art) = plan.art {
-        fill_art(context, &plan.cover, art, plan.dim)?;
+    if let (Some(art), Some(bitmap)) = (plan.art, bitmap) {
+        fill_art(context, &plan.cover, art.width, bitmap, plan.dim)?;
     } else {
         // SAFETY: context is live between surface BeginDraw/EndDraw; brushes are scoped to this draw.
         unsafe {
@@ -1037,16 +1049,39 @@ fn media_text(context: &ID2D1DeviceContext, plan: &MediaPlan) -> Result<()> {
     Ok(())
 }
 
-/// Album art scaled into the cover square. A bitmap brush clips it to the rounded rect directly,
-/// with no layer or geometry mask.
-// shortcut: the art is uploaded on every notch paint (its arrival, track changes, clock minutes, open/close frames, and up to 15 visualizer repaints a second while open and playing); cache the bitmap per canvas if profiling shows cost.
+/// The bitmap for `art` from `slot`, uploading it only when its entry changed; no art releases the
+/// held bitmap. A failed upload leaves the slot empty, so the next paint retries.
+fn cached<T: Clone>(
+    slot: &mut Option<(u64, T)>,
+    art: Option<(u64, &IconPixels)>,
+    upload: impl FnOnce(&IconPixels) -> Result<T>,
+) -> Result<Option<T>> {
+    let Some((key, pixels)) = art else {
+        *slot = None;
+        return Ok(None);
+    };
+    if let Some((held, bitmap)) = slot.as_ref()
+        && *held == key
+    {
+        return Ok(Some(bitmap.clone()));
+    }
+    // The old bitmap is released before the new one is created.
+    *slot = None;
+    let bitmap = upload(pixels)?;
+    *slot = Some((key, bitmap.clone()));
+    Ok(Some(bitmap))
+}
+
+/// Album art, `side` pixels square, scaled into the cover square. A bitmap brush clips it to the
+/// rounded rect directly, with no layer or geometry mask.
 fn fill_art(
     context: &ID2D1DeviceContext,
     cover: &D2D1_ROUNDED_RECT,
-    art: &IconPixels,
+    side: u32,
+    bitmap: &ID2D1Bitmap1,
     opacity: f32,
 ) -> Result<()> {
-    let scale = (cover.rect.right - cover.rect.left) / art.width as f32;
+    let scale = (cover.rect.right - cover.rect.left) / side as f32;
     let properties = D2D1_BITMAP_BRUSH_PROPERTIES1 {
         extendModeX: D2D1_EXTEND_MODE_CLAMP,
         extendModeY: D2D1_EXTEND_MODE_CLAMP,
@@ -1063,14 +1098,10 @@ fn fill_art(
             M32: cover.rect.top,
         },
     };
-    // SAFETY: context is live between surface BeginDraw/EndDraw; the bitmap and brush are scoped
-    // to this draw.
+    // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw,
+    // and the bitmap belongs to the same device.
     unsafe {
-        let brush = context.CreateBitmapBrush(
-            &upload(context, art)?,
-            Some(&properties),
-            Some(&placement),
-        )?;
+        let brush = context.CreateBitmapBrush(bitmap, Some(&properties), Some(&placement))?;
         // Cubic downscaling where the brush supports it; an unsupported mode is ignored, not an error.
         brush.SetInterpolationMode1(D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
         context.FillRoundedRectangle(cover, &brush);
@@ -1387,6 +1418,38 @@ mod media_tests {
     use crate::media::View;
     use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS;
 
+    #[test]
+    fn art_uploads_once_per_entry_and_no_art_or_a_failed_upload_releases_it() {
+        let art = IconPixels {
+            width: 1,
+            height: 1,
+            pixels: vec![0; 4],
+        };
+        let mut slot = None;
+        let mut uploads = 0;
+        let mut paint = |slot: &mut Option<(u64, u32)>, entry: Option<u64>| {
+            cached(slot, entry.map(|entry| (entry, &art)), |_| {
+                uploads += 1;
+                Ok(uploads)
+            })
+            .unwrap()
+        };
+        // Repaints of unchanged art (progress ticks, visualizer, clock) upload nothing more.
+        for _ in 0..15 {
+            assert_eq!(paint(&mut slot, Some(1)), Some(1));
+        }
+        // A new entry uploads once; no art releases it, and its return uploads again.
+        assert_eq!(paint(&mut slot, Some(2)), Some(2));
+        assert_eq!(paint(&mut slot, Some(2)), Some(2));
+        assert_eq!(paint(&mut slot, None), None);
+        assert_eq!(slot, None);
+        assert_eq!(paint(&mut slot, Some(2)), Some(3));
+        // A failed upload holds nothing, so the next paint retries.
+        let failed = cached(&mut slot, Some((4, &art)), |_| Err::<u32, _>(E_FAIL.into()));
+        assert!(failed.is_err());
+        assert_eq!(slot, None);
+    }
+
     fn rect(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
         D2D_RECT_F {
             left,
@@ -1496,7 +1559,7 @@ mod media_tests {
                 time: "9:50 pm",
                 date: "Tuesday",
                 track: song.shown(),
-                art: Some(&art),
+                art: Some((1, &art)),
                 progress,
                 dpi: 96,
                 focus: None,

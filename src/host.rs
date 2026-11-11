@@ -1242,6 +1242,12 @@ impl Desktop {
             self.request_topology();
             // A clock, time-zone or locale change, or a resume, can alter the text before the deadline.
             self.clock_due = Instant::now();
+            if message.wParam.0 != 0 {
+                // Resume or a new taskbar: re-read what events may have missed. The bits coalesce, so
+                // the post from every surface costs one re-read.
+                self.media.reconnect();
+                self.audio.reconnect();
+            }
             return Ok(());
         }
         let slots = self.dock_slots();
@@ -1552,6 +1558,12 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
                     .map_or(INFINITE, |due| milliseconds_until(due, Instant::now())),
             )
             .min(desktop.rebuild.wait(Instant::now()));
+        // Bits set after this pass's refresh whose wake was lost or not posted: run again now.
+        let timeout = if desktop.media.pending() || desktop.audio.pending() {
+            0
+        } else {
+            timeout
+        };
         let wake = if animating {
             next_frame(&events, timeout)
         } else {
@@ -1738,6 +1750,11 @@ mod clock_wait_tests {
             (366, true),
             (367, true),
             (1000, true),
+            // Resumed an hour later: one sample, not a catch-up burst, then the period again.
+            (3_601_000, true),
+            (3_601_001, true),
+            (3_601_066, true),
+            (3_601_067, true),
         ] {
             let at = now + Duration::from_millis(wake);
             if meter_due(open, true, true, sampled, at).is_some_and(|due| due <= at) {
@@ -1745,7 +1762,7 @@ mod clock_wait_tests {
                 samples.push(wake);
             }
         }
-        assert_eq!(samples, [0, 67, 300, 367, 1000]);
+        assert_eq!(samples, [0, 67, 300, 367, 1000, 3_601_000, 3_601_067]);
         assert!(samples.windows(2).all(|pair| pair[1] - pair[0] >= 67));
     }
 

@@ -258,6 +258,17 @@ impl Audio {
     pub fn peaks(&self) -> [f32; BARS] {
         self.peaks
     }
+    /// Work is pending that no wake may have announced (see `Media::pending`).
+    pub fn pending(&self) -> bool {
+        self.wake.dirty.load(Ordering::Relaxed) != 0
+    }
+    /// After resume or an Explorer restart, binds the default endpoint and its meter again, as a
+    /// device may have changed or been invalidated while events were missed. Not before `start`.
+    pub fn reconnect(&self) {
+        if self.devices.is_some() {
+            self.wake.dirty.fetch_or(REBIND, Ordering::Relaxed);
+        }
+    }
     /// Reads one endpoint-wide peak (all channels and apps, before volume) into the newest bar. A
     /// failed read drops the meter until the next rebind, so a lost device is not polled.
     pub fn sample(&mut self) {

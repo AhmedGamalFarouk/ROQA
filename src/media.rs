@@ -256,6 +256,9 @@ impl State {
                     View::NoPlayer
                 };
             }
+            // A transient state between tracks or loads: keep what is shown, so it neither flickers
+            // the notch nor ends the paused grace early.
+            Change::Playback { status, .. } if status == Status::Changing => {}
             Change::Playback {
                 status,
                 observed,
@@ -572,6 +575,8 @@ pub struct Media {
     /// The target and request time (UTC ticks) of the seek in `command`, if it is one.
     seek: Option<(i64, i64)>,
     art: Art,
+    /// Album art entries started; the current entry's number keys its uploaded bitmap.
+    arts: u64,
     /// The icon worker's queue, which decodes album art; none until `start`.
     jobs: Option<SyncSender<Job>>,
     state: State,
@@ -592,6 +597,7 @@ impl Media {
             expanded: false,
             seek: None,
             art: Art::default(),
+            arts: 0,
             jobs: None,
             state: State::default(),
             wake: Arc::new(Wake {
@@ -619,9 +625,22 @@ impl Media {
     pub fn view(&self) -> &View {
         &self.state.view
     }
-    /// The shown track's album art, once decoded.
-    pub fn art(&self) -> Option<&IconPixels> {
-        self.state.view.shown().and(self.art.pixels.get())
+    /// The shown track's album art, once decoded, and its entry number, which changes with the art.
+    pub fn art(&self) -> Option<(u64, &IconPixels)> {
+        let pixels = self.state.view.shown().and(self.art.pixels.get())?;
+        Some((self.arts, pixels))
+    }
+    /// Work is pending that no wake may have announced: a post can fail, or be consumed by a modal
+    /// loop, while the bits stay set.
+    pub fn pending(&self) -> bool {
+        self.wake.dirty.load(Ordering::Relaxed) != 0
+    }
+    /// After resume or an Explorer restart, events may have been missed: re-reads the current
+    /// session, its playback state and timeline, and its properties (new art only for a new track).
+    pub fn reconnect(&self) {
+        self.wake
+            .dirty
+            .fetch_or(SESSION | PROPERTIES | PLAYBACK, Ordering::Relaxed);
     }
     /// One host wake at grace expiry, and none for a view with nothing to show.
     pub fn deadline(&self) -> Option<Instant> {
@@ -795,7 +814,11 @@ impl Media {
             if dirty & PLAYBACK != 0 {
                 match read_playback(&session.source, started) {
                     Ok(change) => self.state.apply(change),
-                    Err(error) => eprintln!("Media: playback: {error}"),
+                    Err(error) => {
+                        eprintln!("Media: playback: {error}");
+                        // A session failing its reads may be gone without an event: check it once.
+                        self.wake.raise(SESSION);
+                    }
                 }
             }
         }
@@ -827,6 +850,7 @@ impl Media {
         if key == self.art.key {
             return;
         }
+        self.arts += 1;
         self.art = Art {
             key,
             read: None,
@@ -1461,6 +1485,61 @@ mod tests {
     }
 
     #[test]
+    fn changing_keeps_the_shown_state_and_the_grace_deadline() {
+        let now = Instant::now();
+        let mut media = Media::create();
+        media.state.apply(Change::Session(true));
+        media.state.apply(properties(media.generation(), "Song"));
+        media.state.apply(playback(Status::Playing, now));
+        let before = media.view().clone();
+        // Between tracks while playing: no flicker, not even its controls.
+        let mut changing = playback(Status::Changing, now);
+        if let Change::Playback { controls, .. } = &mut changing {
+            *controls = [false; 3];
+        }
+        media.state.apply(changing);
+        assert_eq!(media.view(), &before);
+        // While paused within the grace: the single deadline survives.
+        media.state.apply(playback(Status::Paused, now));
+        let due = Some(now + PAUSED_GRACE);
+        assert_eq!(media.deadline(), due);
+        media
+            .state
+            .apply(playback(Status::Changing, now + PAUSED_GRACE / 2));
+        assert_eq!(media.deadline(), due);
+        assert!(media.view().shown().is_some());
+        // Any other non-paused status still ends it.
+        media.state.apply(playback(Status::Closed, now));
+        assert_eq!((media.deadline(), media.view().shown()), (None, None));
+    }
+
+    #[test]
+    fn a_resume_long_after_the_grace_expires_it_once_and_reconnect_rereads_everything() {
+        let now = Instant::now();
+        let mut media = Media::create();
+        media.state.apply(Change::Session(true));
+        media.state.apply(properties(media.generation(), "Song"));
+        media.state.apply(playback(Status::Playing, now));
+        media.state.apply(playback(Status::Paused, now));
+        // Hours asleep: one expiry and repaint, then nothing more.
+        let resumed = now + Duration::from_secs(8 * 3600);
+        assert!(media.state.expire(resumed));
+        assert!(!media.state.expire(resumed));
+        assert_eq!(media.deadline(), None);
+        // Reconnect queues the session, playback and properties reads, picked up by the next pass.
+        assert!(!media.pending());
+        media.reconnect();
+        assert!(media.pending());
+        assert_eq!(
+            media.wake.dirty.load(Ordering::Relaxed),
+            SESSION | PROPERTIES | PLAYBACK
+        );
+        // Without a manager or session, the pass reads nothing and settles.
+        assert!(!media.refresh(72));
+        assert!(!media.pending());
+    }
+
+    #[test]
     fn recent_pause_or_stop_keeps_controls_until_one_deadline_and_resume_clears_it() {
         let now = Instant::now();
         for status in [Status::Paused, Status::Stopped] {
@@ -1656,11 +1735,13 @@ mod tests {
         // The current track's art repaints once when it arrives.
         current(pixels());
         assert!(media.refresh(72));
-        assert!(media.art().is_some());
+        let entry = media.art().map(|(entry, _)| entry);
+        assert!(entry.is_some());
         assert!(!media.refresh(72));
         media.read_art(key("Three"), missing, 72);
         assert_eq!(reads.get(), 1);
-        assert!(media.art().is_some());
+        // The same entry keeps its number, so its uploaded bitmap is reused.
+        assert_eq!(media.art().map(|(entry, _)| entry), entry);
         // Ending the session drops the entry.
         media.end_session();
         assert!(media.art().is_none());

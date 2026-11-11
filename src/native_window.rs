@@ -398,6 +398,13 @@ unsafe extern "system" fn window_proc(
 fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // SAFETY: callback HWND/parameters come from Windows; no pointer parameters are dereferenced here.
     unsafe {
+        if let Some(reconnect) =
+            repositions(message, wparam, TASKBAR_CREATED.load(Ordering::Relaxed))
+        {
+            let _ = PostMessageW(Some(hwnd), REPOSITION, WPARAM(reconnect.into()), LPARAM(0));
+            // WM_POWERBROADCAST is handled by returning TRUE; the others by returning 0.
+            return LRESULT(isize::from(message == WM_POWERBROADCAST));
+        }
         match message {
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_ERASEBKGND => LRESULT(1),
@@ -408,11 +415,6 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
             WM_CLOSE => {
                 let _ = PostMessageW(Some(hwnd), CLOSE_SURFACE, WPARAM(0), LPARAM(0));
                 LRESULT(0)
-            }
-            _ if repositions(message, wparam, TASKBAR_CREATED.load(Ordering::Relaxed)) => {
-                let _ = PostMessageW(Some(hwnd), REPOSITION, WPARAM(0), LPARAM(0));
-                // WM_POWERBROADCAST is handled by returning TRUE; the others by returning 0.
-                LRESULT(isize::from(message == WM_POWERBROADCAST))
             }
             WM_GETOBJECT => crate::dock_uia::get_object(hwnd, wparam, lparam)
                 .unwrap_or_else(|| DefWindowProcW(hwnd, message, wparam, lparam)),
@@ -432,13 +434,14 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
 /// time changes; resume, which re-arms the clock whether or not the monotonic clock counted the
 /// sleep (wait timeouts do not) and re-reads monitors changed while asleep; and a recreated
 /// taskbar (Explorer restart), which can change the work area. Every surface receives these
-/// broadcasts; the host coalesces the posts.
-fn repositions(message: u32, wparam: WPARAM, taskbar_created: u32) -> bool {
+/// broadcasts; the host coalesces the posts. `Some(true)` for resume and a new taskbar, after which
+/// media and audio may have missed events and reconnect.
+fn repositions(message: u32, wparam: WPARAM, taskbar_created: u32) -> Option<bool> {
     match message {
-        WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_TIMECHANGE => true,
+        WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_TIMECHANGE => Some(false),
         // Sent on every resume, with or without a user present; suspend changes nothing visible.
-        WM_POWERBROADCAST => wparam.0 == PBT_APMRESUMEAUTOMATIC as usize,
-        _ => taskbar_created != 0 && message == taskbar_created,
+        WM_POWERBROADCAST => (wparam.0 == PBT_APMRESUMEAUTOMATIC as usize).then_some(true),
+        _ => (taskbar_created != 0 && message == taskbar_created).then_some(true),
     }
 }
 
@@ -446,7 +449,7 @@ fn repositions(message: u32, wparam: WPARAM, taskbar_created: u32) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn repositions_on_display_resume_and_taskbar_recreation_only() {
+    fn repositions_on_display_resume_and_taskbar_recreation_and_only_the_last_two_reconnect() {
         let taskbar = 0xC123;
         for message in [
             WM_DPICHANGED,
@@ -454,20 +457,18 @@ mod tests {
             WM_SETTINGCHANGE,
             WM_TIMECHANGE,
         ] {
-            assert!(repositions(message, WPARAM(0), taskbar));
+            assert_eq!(repositions(message, WPARAM(0), taskbar), Some(false));
         }
+        // Only resume and a new taskbar also reconnect media and audio.
         let resume = WPARAM(PBT_APMRESUMEAUTOMATIC as usize);
-        assert!(repositions(WM_POWERBROADCAST, resume, taskbar));
+        assert_eq!(repositions(WM_POWERBROADCAST, resume, taskbar), Some(true));
         for event in [PBT_APMSUSPEND, PBT_APMRESUMESUSPEND, PBT_POWERSETTINGCHANGE] {
-            assert!(!repositions(
-                WM_POWERBROADCAST,
-                WPARAM(event as usize),
-                taskbar
-            ));
+            let event = WPARAM(event as usize);
+            assert_eq!(repositions(WM_POWERBROADCAST, event, taskbar), None);
         }
-        assert!(repositions(taskbar, WPARAM(0), taskbar));
+        assert_eq!(repositions(taskbar, WPARAM(0), taskbar), Some(true));
         // An unregistered message (0) must never match WM_NULL.
-        assert!(!repositions(WM_NULL, WPARAM(0), 0));
-        assert!(!repositions(WM_MOUSEMOVE, WPARAM(0), taskbar));
+        assert_eq!(repositions(WM_NULL, WPARAM(0), 0), None);
+        assert_eq!(repositions(WM_MOUSEMOVE, WPARAM(0), taskbar), None);
     }
 }
