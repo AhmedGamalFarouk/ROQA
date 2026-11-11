@@ -13,6 +13,8 @@ use crate::{
     native_window::{self, NativeWindow, WindowClass},
     notch_uia,
     picker::Picker,
+    pins::Pins,
+    store::{self, Flush, Pending, Store},
     text_settings::TextSettings,
     topology::{self, Monitor},
     window_catalog::Catalog,
@@ -32,8 +34,9 @@ use windows::Win32::{
     UI::{
         Controls::WM_MOUSELEAVE,
         Input::KeyboardAndMouse::{
-            GetKeyState, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_DOWN,
-            VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+            GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+            VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
+            VK_TAB, VK_UP,
         },
         WindowsAndMessaging::*,
     },
@@ -679,6 +682,34 @@ impl Rebuild {
     }
 }
 
+/// `WM_MOUSEMOVE` wParam bit: the left button is still down.
+const MK_LBUTTON: usize = 0x0001;
+
+/// A press on a pinned dock slot: which pin, where the pointer went down, and whether it has moved far
+/// enough to be a reorder (`dock::drag_started`) rather than a click.
+struct Drag {
+    from: usize,
+    x: i32,
+    active: bool,
+}
+
+/// Applies one pin edit: only a real change (`edit` returns true) rewrites the store's pin section and marks
+/// it dirty, once. Returns whether the dock must be rebuilt.
+fn edit_pins(
+    pins: &mut Pins,
+    store: &mut Store,
+    pending: &mut Pending,
+    now: Instant,
+    edit: impl FnOnce(&mut Pins) -> bool,
+) -> bool {
+    let changed = edit(pins);
+    if changed {
+        pins.write_to(store);
+        pending.mark(now);
+    }
+    changed
+}
+
 struct Desktop {
     surfaces: Vec<Surface>,
     /// Last settled topology; each monitor in it carries every shown kind.
@@ -700,6 +731,13 @@ struct Desktop {
     dock_items: Vec<DockItem>,
     dock_names: Vec<String>,
     dock_generation: Option<u64>,
+    /// Pinned apps, their persisted form, and the unwritten-change times. Read once at startup; written on
+    /// a host-loop deadline (`store_wait`) after a change and once at quit, never by a timer or thread.
+    pins: Pins,
+    store: Store,
+    store_path: Option<std::path::PathBuf>,
+    pending: Pending,
+    drag: Option<Drag>,
     /// Media session state, drawn by the notches. Declared before `text` so its WinRT objects and
     /// event tokens are released before that field's `RoUninitialize`, and before `icons`, whose
     /// worker stops only once media's handle to its queue is gone.
@@ -728,6 +766,10 @@ impl Desktop {
             .ok_or_else(|| Error::new(E_FAIL, "No usable display monitor."))?;
         let text = TextSettings::create()?;
         let text_factor = text.factor()?;
+        let store_path = store::default_path();
+        let store = store_path
+            .as_deref()
+            .map_or_else(Store::default, |path| store::load(path).0);
         let mut desktop = Self {
             surfaces: Vec::new(),
             monitors,
@@ -747,6 +789,11 @@ impl Desktop {
             dock_items: Vec::new(),
             dock_names: dock::names(&[], &WindowModel::default()),
             dock_generation: None,
+            pins: Pins::from_store(&store),
+            store,
+            store_path,
+            pending: Pending::default(),
+            drag: None,
             media: Media::create(),
             audio: Audio::create(),
             text,
@@ -961,7 +1008,7 @@ impl Desktop {
         }
         if self.dock_generation != Some(model.generation) {
             self.dock_generation = Some(model.generation);
-            let items = dock::items(model);
+            let items = dock::items_with_pins(model, &self.pins);
             let changed = items != self.dock_items;
             self.dock_names = dock::names(&items, model);
             for dock in self
@@ -1073,11 +1120,95 @@ impl Desktop {
                     .and_then(|item| dock::action(item, dock::foreground_key()))
                 {
                     // A refused or stale target is left alone; the catalog repaints the dock on the next event.
-                    dock::perform(action);
+                    match action {
+                        dock::Action::Launch(target) => {
+                            dock::launch(&target);
+                        }
+                        action => {
+                            dock::perform(action);
+                        }
+                    }
                 }
                 Ok(())
             }
             None => Ok(()),
+        }
+    }
+    /// Right-click on a dock slot toggles its pin. The dock is rebuilt on the next pass.
+    fn toggle_pin(&mut self, slot: Option<usize>) {
+        let Some(item) = slot
+            .and_then(|slot| slot.checked_sub(1))
+            .and_then(|index| self.dock_items.get(index))
+        else {
+            return;
+        };
+        let (identity, pinned) = (item.identity.clone(), dock::pinned_as(item, &self.pins));
+        self.change_pins(|pins| match &pinned {
+            Some(pin) => pins.remove(pin),
+            None => pins.add(identity).is_ok(),
+        });
+    }
+    fn change_pins(&mut self, edit: impl FnOnce(&mut Pins) -> bool) {
+        let now = Instant::now();
+        if edit_pins(
+            &mut self.pins,
+            &mut self.store,
+            &mut self.pending,
+            now,
+            edit,
+        ) {
+            self.dock_generation = None;
+        }
+    }
+    /// Left button released on a dock. Returns true when it ended a reorder drag (so it is not a click):
+    /// the pin moves to the slot under the pointer, as one store change.
+    fn end_drag(&mut self, hwnd: HWND, lparam: LPARAM) -> bool {
+        let Some(drag) = self.drag.take() else {
+            return false;
+        };
+        // SAFETY: releases this thread's own pointer capture.
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        if !drag.active {
+            return false;
+        }
+        let (slots, pins) = (self.dock_slots(), self.pins.items().len());
+        let target = self.dock_at(hwnd).and_then(|dock| {
+            let (x, _) = point(lparam);
+            dock::drop_index(x, dock.bounds.width, dock.dpi, slots, pins)
+        });
+        if let Some(to) = target {
+            self.change_pins(|pins| pins.move_to(drag.from, to));
+        }
+        true
+    }
+    /// Milliseconds until the debounced store write is due; `INFINITE` with no unwritten change.
+    fn store_wait(&self) -> u32 {
+        let now = Instant::now();
+        match self.pending.decision(now) {
+            Flush::Idle => INFINITE,
+            Flush::Wait(due) => milliseconds_until(due, now),
+            Flush::Now => 0,
+        }
+    }
+    /// Writes the store if its deadline passed, or at quit if anything is unwritten. A failure stays
+    /// pending and retries after `store::RETRY`.
+    fn flush_store(&mut self, quit: bool) {
+        let now = Instant::now();
+        if !self.pending.should_write(now, quit) {
+            return;
+        }
+        match self
+            .store_path
+            .as_deref()
+            .map(|path| self.store.flush(path))
+        {
+            Some(Err(error)) => {
+                eprintln!("Store: write failed: {error}");
+                self.pending.retry(now);
+            }
+            _ => self.pending.written(),
         }
     }
     fn command(&mut self, command: Command) -> Result<bool> {
@@ -1263,8 +1394,35 @@ impl Desktop {
                 let kind = surface.kind();
                 self.close(kind);
             }
+            WM_LBUTTONDOWN if matches!(surface.role, Role::Dock { .. }) => {
+                // Only a pinned slot can be dragged; pins are always the first items.
+                let from = surface
+                    .dock_slot(message.lParam, slots)
+                    .and_then(|slot| slot.checked_sub(1))
+                    .filter(|&index| index < self.pins.items().len());
+                self.drag = from.map(|from| Drag {
+                    from,
+                    x: point(message.lParam).0,
+                    active: false,
+                });
+                if self.drag.is_some() {
+                    // SAFETY: captures the pointer for this thread's own live dock window.
+                    unsafe {
+                        SetCapture(surface.window.0);
+                    }
+                }
+            }
             WM_MOUSEMOVE => {
                 let entered = surface.track_pointer()?;
+                if let Some(drag) = &mut self.drag {
+                    if message.wParam.0 & MK_LBUTTON == 0 {
+                        // The release was lost (capture stolen): no drag, no click.
+                        self.drag = None;
+                    } else if !drag.active {
+                        drag.active =
+                            dock::drag_started(drag.x, point(message.lParam).0, surface.dpi);
+                    }
+                }
                 if let Role::Dock { hover, .. } = surface.role {
                     let slot = surface.dock_slot(message.lParam, slots);
                     if entered || slot != hover {
@@ -1536,6 +1694,7 @@ pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> 
     }
     let mut catalog = Catalog::create(diagnostics)?;
     let result = event_loop(&controls, &mut desktop, &mut catalog);
+    desktop.flush_store(true);
     result.and(catalog.shutdown())
 }
 
@@ -1543,6 +1702,7 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
     let events = controls.handles();
     loop {
         catalog.service()?;
+        desktop.flush_store(false);
         desktop.refresh_graphics()?;
         let pass = desktop.update(catalog.model());
         let (clock_wait, animating) = desktop.survive(pass, (INFINITE, false))?;
@@ -1551,6 +1711,7 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
             .min(clock_wait)
             .min(desktop.topology_wait())
             .min(desktop.fullscreen_wait())
+            .min(desktop.store_wait())
             .min(
                 desktop
                     .media
@@ -1669,11 +1830,20 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             if catalog.message(&message)? {
                 continue;
             }
-            if message.message == WM_LBUTTONUP
+            if message.message == WM_LBUTTONUP && desktop.dock_at(message.hwnd).is_some() {
+                if !desktop.end_drag(message.hwnd, message.lParam) {
+                    let slot = desktop
+                        .dock_at(message.hwnd)
+                        .and_then(|dock| dock.dock_slot(message.lParam, desktop.dock_slots()));
+                    desktop.activate_slot(slot, catalog)?;
+                }
+                continue;
+            }
+            if message.message == WM_RBUTTONUP
                 && let Some(dock) = desktop.dock_at(message.hwnd)
             {
                 let slot = dock.dock_slot(message.lParam, desktop.dock_slots());
-                desktop.activate_slot(slot, catalog)?;
+                desktop.toggle_pin(slot);
                 continue;
             }
             if message.message == dock_uia::INVOKE && desktop.dock_at(message.hwnd).is_some() {
@@ -1723,6 +1893,43 @@ fn remember_fullscreen(
 #[cfg(test)]
 mod clock_wait_tests {
     use super::*;
+    use crate::window_model::Identity;
+
+    #[test]
+    fn a_pin_edit_marks_the_store_dirty_once_and_only_when_it_changed() {
+        let (mut pins, mut store, mut pending) =
+            (Pins::default(), Store::default(), Pending::default());
+        let now = Instant::now();
+        let app = |id: &str| Identity::Application(id.into());
+        for id in ["a", "b", "c"] {
+            assert!(edit_pins(&mut pins, &mut store, &mut pending, now, |p| p
+                .add(app(id))
+                .is_ok()));
+        }
+        assert_eq!(store.pins, ["app:a", "app:b", "app:c"]);
+        // Nothing unwritten means no deadline; no-op edits change neither the store nor the deadline.
+        let mut pending = Pending::default();
+        assert_eq!(pending.decision(now), Flush::Idle);
+        let before = store.clone();
+        for (from, to) in [(1, 1), (0, 3), (7, 0)] {
+            assert!(!edit_pins(&mut pins, &mut store, &mut pending, now, |p| p
+                .move_to(from, to)));
+        }
+        assert!(!edit_pins(&mut pins, &mut store, &mut pending, now, |p| p
+            .add(app("a"))
+            .is_ok()));
+        assert!(!edit_pins(&mut pins, &mut store, &mut pending, now, |p| p
+            .remove(&app("missing"))));
+        assert_eq!(
+            (store.clone(), pending.decision(now)),
+            (before, Flush::Idle)
+        );
+        // One real reorder: one rewrite, one pending change due a coalesce delay later.
+        assert!(edit_pins(&mut pins, &mut store, &mut pending, now, |p| p
+            .move_to(0, 2)));
+        assert_eq!(store.pins, ["app:b", "app:c", "app:a"]);
+        assert_eq!(pending.decision(now), Flush::Wait(now + store::COALESCE));
+    }
     #[test]
     fn the_meter_runs_only_open_playing_and_metered_and_never_above_15_hz() {
         let now = Instant::now();

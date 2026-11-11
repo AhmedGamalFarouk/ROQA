@@ -2,7 +2,6 @@
 //!
 //! A pin is just an `Identity` (AUMID, or lowercased exe path as the fallback). Its display name and launch
 //! target are derived from it, so the store keeps one string per pin: `app:<aumid>` or `exe:<path>`.
-#![allow(dead_code)] // S4 wires the host; until then only dock's merge and the tests call this module.
 
 use crate::store::Store;
 use crate::window_model::Identity;
@@ -122,7 +121,8 @@ pub fn display_name(identity: &Identity) -> String {
 pub fn launch_target(identity: &Identity) -> Option<String> {
     match normalize(identity)? {
         Identity::Application(id) => Some(format!(r"shell:AppsFolder\{id}")),
-        Identity::Executable(path) => Some(path),
+        // A relative path would resolve against the search path or the working directory; only absolute ones launch.
+        Identity::Executable(path) => std::path::Path::new(&path).is_absolute().then_some(path),
         Identity::Unavailable(_) => None,
     }
 }
@@ -242,5 +242,13 @@ mod tests {
         assert_eq!(pins.items().len(), MAX_PINS);
         assert_eq!(&pins.items()[..2], [app("A"), exe(r"c:\b.exe")]);
         assert_eq!(Pins::from_store(&Store::default()), Pins::default());
+    }
+
+    #[test]
+    fn only_absolute_executable_paths_launch() {
+        for bad in ["edit.exe", r"tools\edit.exe", "cmd", r"\x.exe"] {
+            assert_eq!(launch_target(&exe(bad)), None, "{bad}");
+        }
+        assert!(launch_target(&exe(r"\\host\share\a.exe")).is_some());
     }
 }

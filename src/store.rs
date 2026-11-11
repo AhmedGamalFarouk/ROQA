@@ -3,7 +3,6 @@
 //! Format is a hand-rolled `key=value` text file (no new crate): `version=N`, repeated `pin=`/`shelf=` lines,
 //! and a closing `end` line that makes truncation detectable. Unknown keys are skipped, so a newer build's
 //! extra fields survive an older reader; a *newer version* is set aside instead, so a downgrade never rewrites it.
-#![allow(dead_code)] // S3's `pins` models the pin section; S4 and S6 wire the host, so only tests call this module yet.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -14,6 +13,10 @@ pub const VERSION: u32 = 1;
 pub const MAX_BYTES: u64 = 64 * 1024;
 /// A burst of changes becomes one write this long after the last change (UNVERIFIED value; tune in S9).
 pub const COALESCE: Duration = Duration::from_millis(1500);
+/// A never-ending burst still writes this long after its first unwritten change (UNVERIFIED value).
+pub const MAX_WAIT: Duration = Duration::from_secs(10);
+/// A failed write is retried this long after it, so a full or locked disk costs one wake per 30 s at most.
+pub const RETRY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Store {
@@ -56,6 +59,42 @@ pub fn flush_decision(dirty: bool, last_change: Instant, now: Instant) -> Flush 
         Flush::Now
     } else {
         Flush::Wait(due)
+    }
+}
+
+/// As `flush_decision`, but a burst cannot postpone the write past `MAX_WAIT` after its first change.
+pub fn flush_decision_capped(first_change: Instant, last_change: Instant, now: Instant) -> Flush {
+    match flush_decision(true, last_change, now) {
+        Flush::Wait(_) if now >= first_change + MAX_WAIT => Flush::Now,
+        Flush::Wait(due) => Flush::Wait(due.min(first_change + MAX_WAIT)),
+        other => other,
+    }
+}
+
+/// Unwritten changes: when the first and the latest happened. Clean is `None`, which has no deadline.
+#[derive(Debug, Default)]
+pub struct Pending(Option<(Instant, Instant)>);
+
+impl Pending {
+    pub fn mark(&mut self, now: Instant) {
+        self.0 = Some((self.0.map_or(now, |(first, _)| first), now));
+    }
+    pub fn decision(&self, now: Instant) -> Flush {
+        self.0.map_or(Flush::Idle, |(first, last)| {
+            flush_decision_capped(first, last, now)
+        })
+    }
+    /// Write now? Quit writes anything unwritten at once; otherwise only a due flush does.
+    pub fn should_write(&self, now: Instant, quit: bool) -> bool {
+        (quit && self.0.is_some()) || self.decision(now) == Flush::Now
+    }
+    pub fn written(&mut self) {
+        self.0 = None;
+    }
+    /// A failed write stays pending and is next due `RETRY` after `now`.
+    pub fn retry(&mut self, now: Instant) {
+        let at = now + RETRY - COALESCE;
+        self.0 = Some((at, at));
     }
 }
 
@@ -138,6 +177,12 @@ impl Store {
         }
         out.push_str("end\n");
         out
+    }
+
+    /// `save` plus the diagnostics write counter; the host's flush path, so unit-test saves are not counted.
+    pub fn flush(&self, path: &Path) -> io::Result<()> {
+        self.save(path)
+            .inspect(|()| crate::diagnostics::note_store_write())
     }
 
     /// Atomic temp-and-rename write, same pattern as the opt-in diagnostics. A stale temp file from a crashed
@@ -353,5 +398,54 @@ mod tests {
         let last = t0 + Duration::from_millis(400);
         assert_eq!(flush_decision(true, last, last + COALESCE), Flush::Now);
         assert_eq!(flush_decision(true, last, last + COALESCE * 3), Flush::Now);
+    }
+
+    #[test]
+    fn a_never_ending_burst_still_writes_by_the_max_wait() {
+        let t0 = Instant::now();
+        let mut pending = Pending::default();
+        assert_eq!(pending.decision(t0), Flush::Idle);
+        assert!(!pending.should_write(t0, true)); // clean: nothing to write at quit either
+        // A change every second for a minute: each restarts the coalesce wait, so only the cap fires.
+        let mut writes = Vec::new();
+        for second in 0..60u64 {
+            let now = t0 + Duration::from_secs(second);
+            pending.mark(now);
+            if pending.should_write(now, false) {
+                writes.push(second);
+                pending.written();
+            }
+        }
+        assert_eq!(writes, [10, 21, 32, 43, 54]); // first change after a write starts a new cap window
+        assert_eq!(
+            flush_decision_capped(t0, t0 + Duration::from_secs(9), t0 + Duration::from_secs(9)),
+            Flush::Wait(t0 + MAX_WAIT)
+        );
+        assert_eq!(
+            flush_decision_capped(t0, t0, t0),
+            Flush::Wait(t0 + COALESCE)
+        );
+    }
+
+    #[test]
+    fn pending_flushes_once_quit_writes_dirty_and_failure_retries_later() {
+        let t0 = Instant::now();
+        let mut pending = Pending::default();
+        pending.mark(t0);
+        pending.mark(t0 + Duration::from_millis(500));
+        assert_eq!(
+            pending.decision(t0 + Duration::from_millis(600)),
+            Flush::Wait(t0 + Duration::from_millis(2000))
+        );
+        assert!(!pending.should_write(t0 + Duration::from_millis(1999), false));
+        assert!(pending.should_write(t0 + Duration::from_millis(1999), true)); // quit ignores the delay
+        assert!(pending.should_write(t0 + Duration::from_millis(2000), false));
+        // A failed write leaves it pending and due RETRY later, not at the next coalesce tick.
+        let failed = t0 + Duration::from_secs(5);
+        pending.retry(failed);
+        assert_eq!(pending.decision(failed), Flush::Wait(failed + RETRY));
+        assert!(pending.should_write(failed + RETRY, false));
+        pending.written();
+        assert_eq!(pending.decision(failed + RETRY * 9), Flush::Idle);
     }
 }

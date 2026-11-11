@@ -3,11 +3,15 @@ use crate::window_model::{Identity, WindowKey, WindowModel};
 use windows::Win32::{
     Foundation::HWND,
     System::Threading::GetCurrentProcessId,
-    UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-        SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindowAsync,
+    UI::{
+        Shell::{SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, ShellExecuteExW},
+        WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+            SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindowAsync,
+        },
     },
 };
+use windows::core::{HSTRING, PCWSTR};
 
 /// Dock geometry in DIPs. Slot 0 is the "all windows" picker; app groups follow.
 pub const SLOT_DIPS: i32 = 56;
@@ -51,7 +55,6 @@ pub fn items(model: &WindowModel) -> Vec<DockItem> {
 /// Pins first, in pin order (running group or a launcher with no windows), then unpinned groups in `items` order.
 /// An `Executable` pin also claims a group whose AUMID identity has the same exe, so a pin survives that upgrade.
 /// With no pins this equals `items(model)`.
-#[allow(dead_code)] // S4 switches the host to this.
 pub fn items_with_pins(model: &WindowModel, pins: &Pins) -> Vec<DockItem> {
     let mut running: Vec<Option<DockItem>> = items(model).into_iter().map(Some).collect();
     let find = |running: &[Option<DockItem>], matches: &dyn Fn(&DockItem) -> bool| {
@@ -136,11 +139,38 @@ pub fn slot_at(x_px: i32, width_px: i32, dpi: u32, slots: usize) -> Option<usize
     (slot < visible_slots(width_px, dpi, slots)).then_some(slot)
 }
 
+/// Pointer travel (DIPs) before a press on a pinned slot becomes a reorder drag instead of a click.
+pub const DRAG_DIPS: i32 = 6;
+
+pub fn drag_started(origin_x: i32, x: i32, dpi: u32) -> bool {
+    (x - origin_x).abs() >= px(DRAG_DIPS, dpi)
+}
+
+/// Pin index a drag released at `x_px` drops on: the slot under the pointer (clamped to the visible pins, so
+/// releasing beyond either end drops on the first or last), or `None` with no visible pin. Item `i` is pin `i`.
+pub fn drop_index(x_px: i32, width_px: i32, dpi: u32, slots: usize, pins: usize) -> Option<usize> {
+    let last = visible_slots(width_px, dpi, slots)
+        .saturating_sub(1)
+        .min(pins)
+        .checked_sub(1)?;
+    let slot = (x_px - px(PAD_DIPS, dpi)).div_euclid(px(SLOT_DIPS, dpi).max(1));
+    Some((slot - 1).clamp(0, last as i32) as usize)
+}
+
+/// The pin that represents `item`, if any: its identity, or the executable pin that claimed it.
+pub fn pinned_as(item: &DockItem, pins: &Pins) -> Option<Identity> {
+    let exe = item.executable.clone().map(Identity::Executable);
+    [Some(item.identity.clone()), exe]
+        .into_iter()
+        .flatten()
+        .find(|identity| pins.position(identity).is_some())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
     Activate(WindowKey),
     Minimize(WindowKey),
-    /// Shell target of a pinned app with no window; `perform` does nothing with it until S4 wires the launch.
+    /// Shell target of a pinned app with no window; `launch` runs it (`perform` only handles window actions).
     Launch(String),
 }
 
@@ -203,10 +233,25 @@ pub fn restore_foreground(from: HWND, to: Option<WindowKey>) {
     }
 }
 
+/// Starts a not-running pin through the shell, on the user's click only. No UI on failure (a missing target
+/// would otherwise open a modal error box on the host thread); false means it did not start.
+pub fn launch(target: &str) -> bool {
+    let file = HSTRING::from(target);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_FLAG_NO_UI,
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: `info` and `file` outlive the call; no process handle is requested, so nothing is left to close.
+    unsafe { ShellExecuteExW(&mut info).is_ok() }
+}
+
 /// Returns false when the target is gone or Windows refused foreground; never forces focus.
 pub fn perform(action: Action) -> bool {
     let (Action::Activate(key) | Action::Minimize(key)) = action else {
-        return false; // Launch: the shell launch is S4's.
+        return false; // Launch goes through `launch`.
     };
     if !valid_target(key) {
         return false;
@@ -437,5 +482,78 @@ mod tests {
         assert_eq!(visible_slots(200, 144, 3), 2);
         assert_eq!(slot_at(190, 200, 144, 3), None);
         assert_eq!(width_dips(0), width_dips(1));
+    }
+
+    #[test]
+    fn drag_starts_only_past_the_threshold_at_any_scale() {
+        assert!(!drag_started(100, 105, 96) && drag_started(100, 106, 96));
+        assert!(!drag_started(100, 95, 96) && drag_started(100, 94, 96));
+        // 150%: 9 px.
+        assert!(!drag_started(100, 108, 144) && drag_started(100, 109, 144));
+        assert!(!drag_started(0, 0, 96));
+    }
+
+    #[test]
+    fn drop_index_uses_the_dock_slots_and_clamps_to_the_pins() {
+        // 96 dpi: pad 8, slot 56; slot 0 is the picker, so item i is slot i + 1 at x = 8 + 56 * (i + 1).
+        let at = |x, slots, pins| drop_index(x, px(width_dips(slots), 96), 96, slots, pins);
+        // 4 pins among 8 slots (picker, 4 pins, 3 running): slots 1..=4 are pins.
+        assert_eq!(at(8 + 56, 8, 4), Some(0));
+        assert_eq!(at(8 + 56 * 3 + 55, 8, 4), Some(2));
+        assert_eq!(at(8 + 56 * 4, 8, 4), Some(3));
+        // On the picker, left of the bar, or beyond the pins: first and last pin.
+        assert_eq!(at(8 + 10, 8, 4), Some(0));
+        assert_eq!(at(-300, 8, 4), Some(0));
+        assert_eq!(at(8 + 56 * 7, 8, 4), Some(3));
+        assert_eq!(at(10_000, 8, 4), Some(3));
+        // No pins: nothing to drop on.
+        assert_eq!(at(70, 8, 0), None);
+        // Clipped bar (width for 3 slots, so only 2 pins visible): the drop never lands on a hidden pin.
+        assert_eq!(drop_index(10_000, px(width_dips(3), 96), 96, 8, 4), Some(1));
+        // Agrees with `slot_at`: the slot a click would hit is the slot a drop lands on.
+        let width = px(width_dips(8), 96);
+        for x in 0..width {
+            if let Some(slot @ 1..=4) = slot_at(x, width, 96, 8) {
+                assert_eq!(drop_index(x, width, 96, 8, 4), Some(slot - 1), "x {x}");
+            }
+        }
+        // 150%: pad 12, slot 84.
+        assert_eq!(
+            drop_index(12 + 84 * 2, px(width_dips(5), 144), 144, 5, 3),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn pin_toggle_target_follows_the_claiming_pin() {
+        let running = |identity, exe: &str| DockItem {
+            identity,
+            executable: Some(exe.into()),
+            windows: vec![key(1)],
+            active: false,
+        };
+        let aumid = running(Identity::Application("Vendor.App".into()), r"c:\vendor.exe");
+        let mut pins = Pins::default();
+        assert_eq!(pinned_as(&aumid, &pins), None);
+        // An executable pin that claimed this group is the one to remove.
+        pins.add(Identity::Executable(r"c:\vendor.exe".into()))
+            .unwrap();
+        assert_eq!(
+            pinned_as(&aumid, &pins),
+            Some(Identity::Executable(r"c:\vendor.exe".into()))
+        );
+        // The exact identity wins when both exist.
+        pins.add(aumid.identity.clone()).unwrap();
+        assert_eq!(pinned_as(&aumid, &pins), Some(aumid.identity.clone()));
+        // A pin-only item and an unpinnable one.
+        let gone = DockItem {
+            identity: Identity::Application("Gone".into()),
+            executable: None,
+            windows: vec![],
+            active: false,
+        };
+        assert_eq!(pinned_as(&gone, &pins), None);
+        let unavailable = running(Identity::Unavailable(3), r"c:\other.exe");
+        assert_eq!(pinned_as(&unavailable, &pins), None);
     }
 }

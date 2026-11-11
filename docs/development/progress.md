@@ -795,3 +795,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Process:** `badac8a` standing worker rules; `scripts/land.ps1` now lands from a worktree branch (push `HEAD:main`, root fast-forward, CR-only root edits cleared, `.gitignore` never touched).
 - **Reviews:** REVIEW NOT RUN (paused by user). No approval exists for S1/S2; neither slice is accepted.
 - **Native evidence:** all NOT RUN. No GUI/native, footprint or measurement run was performed; store and harness behaviour is unit-tested only.
+
+## M5 S4 pins interaction: landed candidate (2026-11-11 Africa/Cairo)
+
+- **S4:** branch `feat/m5-s4-pins-ui` on `34dea95`, packet `docs/development/m5-s4-pins-ui.md`. Right-click toggles a pin, a pointer drag past 6 DIPs reorders pins (one store change), a click on a not-running pin launches via `ShellExecuteExW` (no UI on failure). The dock is built by `dock::items_with_pins`; not-running pin icons go through the existing icon worker at first paint.
+- **Store wiring:** loaded once at startup; dirty only on a real pin change; one host-loop deadline (1.5 s coalesce, 10 s max-wait, 30 s retry after a failed write) plus a flush at quit; no timer, thread or wait handle, and no wake when clean. `Store::flush` calls `diagnostics::note_store_write()`. New `windows` feature `Win32_System_Registry` (gates `SHELLEXECUTEINFOW`).
+- **Verify:** `scripts/verify.ps1` PASS, **135 tests** (128 + 7). Release 858,112 B vs 809,984 B at S9 (+48,128 B, mostly previously dead-stripped S2/S3 code), SHA-256 `2E283876FEFBDD8B12D220247AFF803DD483985051A380B8436E7C8002C0D3FD`.
+- **Reviews:** REVIEW NOT RUN (paused by user). Not accepted.
+- **Native evidence:** all NOT RUN (real launch, drag, right-click, persistence across a restart, packaged app, mixed DPI, RTL). Deferred: pin from the picker, keyboard and Narrator reorder (S8), missing-target indicator, drag marker.

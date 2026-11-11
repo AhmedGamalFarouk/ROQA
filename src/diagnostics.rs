@@ -30,7 +30,7 @@ const THREE_MONITOR_MAX: u64 = 120 * MIB;
 const STATIC_CPU_MS_PER_S: u64 = 1;
 const NOT_WIRED: u64 = u64::MAX;
 
-/// Store writes; `NOT_WIRED` until `store.rs` calls `note_store_write` (it is not wired in this slice).
+/// Store writes; `NOT_WIRED` (reported as unavailable) until the first `Store::flush` calls `note_store_write`.
 static STORE_WRITES: AtomicU64 = AtomicU64::new(NOT_WIRED);
 /// Calls that found media work, and every host call of `Media::refresh`.
 pub static MEDIA_WAKES: AtomicU64 = AtomicU64::new(0);
@@ -38,7 +38,6 @@ pub static MEDIA_REFRESHES: AtomicU64 = AtomicU64::new(0);
 /// Cached icons, published by the icon service.
 pub static ICON_CACHE: AtomicU64 = AtomicU64::new(0);
 
-#[allow(dead_code)] // called by `store.rs` once S3 (which owns that file) lands
 pub fn note_store_write() {
     let _ = STORE_WRITES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
         Some(if n == NOT_WIRED {
