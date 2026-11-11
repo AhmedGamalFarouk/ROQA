@@ -7,9 +7,9 @@ Read `PLAN.md`, `PRODUCT.md` and `docs/development/progress.md` before working.
 To maximize development velocity and prevent rate-limit exhaustion, ROQA follows a tiered execution and review model:
 
 - **Tiered Model Routing:**
-  - **Tier 1 (Architecture & Milestone Reviews):** Claude Opus 5.5 High / Gemini Pro — reserved for milestone gates, architecture decisions, and deep multi-model council evaluations.
+  - **Tier 1 (Architecture & Milestone Reviews):** Claude Opus 5.5 High / GPT-6.1 Sol High — reserved for milestone gates, architecture decisions, and deep multi-model council evaluations.
   - **Tier 2 (Feature Implementation):** Claude Sonnet 5.5 / GPT-6.1 Sol — fast, quota-resilient implementation of features, refactors, and unit tests.
-  - **Tier 3 (Mechanical Git & Verification):** Gemini Flash / GPT-6.1 Sol (low effort) / Orchestrator — git operations, fast-forwards, pushes, running `scripts/verify.ps1`, formatting, and progress logging. **Never use Tier 1 models for routine git or shell execution.**
+  - **Tier 3 (Mechanical Git & Verification):** GPT-6.1 Sol (low effort) / Orchestrator — git operations, fast-forwards, pushes, running `scripts/verify.ps1`, formatting, and progress logging. **Never use Tier 1 models for routine git or shell execution.**
 
 - **Milestone-Level Reviews vs. Intermediate Work:**
   - Work in cohesive, logical feature increments (e.g. whole backend or complete UI panels), avoiding over-fragmentation into micro-slices.
