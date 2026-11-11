@@ -16,6 +16,7 @@ mod native_window;
 mod notch_uia;
 mod picker;
 mod picker_font;
+mod store;
 mod text_settings;
 mod topology;
 mod window_catalog;
