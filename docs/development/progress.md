@@ -787,3 +787,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Reviews:** REVIEW NOT RUN, paused by user as recorded in both packets. No clean-code-guard or council approval exists for these candidates; no new reviewer was launched for this commit/push task. These slices and the M4 milestone are not accepted.
 - **Native evidence:** all NOT RUN. No GUI/native test, player, audio-setting, Explorer restart, sleep, device-loss or footprint run was performed. Meter call cost, actual paint/sample counts, real endpoint behavior and device-resource reuse remain unverified. Synchronous GSMTC getters, hung thumbnail stream on the shared worker and dead GSMTC-manager recreation remain deferred. Provisional visualizer design and accessibility follow-ups remain open as described in the packets.
 - **Landing verification:** root-checkout pinned `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1` PASS: fmt, clippy, **102 tests passed, 0 failed**, locked release build; logs in `artifacts/verification/`. Release binary 801792 B, SHA-256 `24C66127BC7519C2B6F919E2866035A345D3431A43B58908FA1C71B6852F672A`. Verification is author/landing-worker evidence, not independent approval.
+
+## M5 S1 harness, S2 store and land-script fix: landed candidates (2026-11-11 Africa/Cairo)
+
+- **S1:** `5805f24` (plan doc `5e87731` + harness), `docs/development/m5-harness.md`. verify.ps1 PASS, **102 tests**; binary SHA-256 `70269D8A661EADFD87E85A21E1764F7B32320A96418AED95BDACFF2D8AB46037`; manifest SHA `137F8AB2…61887`.
+- **S2:** `6874324` (rebased from `e65b7b7` onto S1), `docs/development/m5-s2-store.md`. verify.ps1 PASS, **112 tests**; binary SHA-256 `1819149B17B1CB9F7799AFD5F54B768E193BF372E92E53699212329ADE3C320C`; manifest SHA `68BA7A31…A81F2B`, entries unchanged by the rebase.
+- **Process:** `badac8a` standing worker rules; `scripts/land.ps1` now lands from a worktree branch (push `HEAD:main`, root fast-forward, CR-only root edits cleared, `.gitignore` never touched).
+- **Reviews:** REVIEW NOT RUN (paused by user). No approval exists for S1/S2; neither slice is accepted.
+- **Native evidence:** all NOT RUN. No GUI/native, footprint or measurement run was performed; store and harness behaviour is unit-tested only.
