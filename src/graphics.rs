@@ -1,5 +1,5 @@
 use crate::{
-    audio::Level,
+    audio::{BARS, Level},
     dock,
     icons::IconPixels,
     layout::{self, Bounds},
@@ -154,6 +154,8 @@ pub struct NotchScene<'a> {
     pub played: Option<Progress>,
     /// The panel's volume row; `None` without an audio endpoint draws it disabled.
     pub volume: Option<Level>,
+    /// The visualizer's bar heights in whole pixels (`layout::meter_heights`).
+    pub bars: [i32; BARS],
 }
 
 /// Dock material (docs/design/roqa-visual-spec.md): black bar, white-alpha hover fill, whole-pixel icon lift.
@@ -540,6 +542,8 @@ struct MediaPlan<'a> {
     /// Around the control with keyboard focus.
     ring: Option<Ring>,
     volume: Option<VolumeBar>,
+    /// The visualizer's bars and their opacity.
+    meter: Option<([D2D1_ROUNDED_RECT; BARS], f32)>,
 }
 
 /// A black circle carrying the play-state glyph at the art's bottom-right corner, faded by `alpha`.
@@ -556,6 +560,8 @@ struct VolumeBar {
     fill: D2D1_ROUNDED_RECT,
     fill_alpha: f32,
 }
+/// The visualizer's bars: secondary, decorative content, white 60 % like the artist.
+const METER_FILL: f32 = 0.60;
 /// The bar's drawn thickness in DIPs, centred in its hit box.
 const VOLUME_THICKNESS: f32 = 4.0;
 /// The bar's track: white 40 % is about 3.7 : 1 on black, the non-text contrast a target needs.
@@ -753,7 +759,31 @@ fn media_plan<'a>(
         chips,
         ring,
         volume: volume_bar(scene, body),
+        meter: meter_bars(scene, body),
     }
+}
+
+/// The visualizer right of the controls row, placed and revealed like it: fully rounded bars spread
+/// across the slot (`layout::meter`), bottom-aligned at the scene's heights.
+fn meter_bars(scene: &NotchScene, body: &D2D_RECT_F) -> Option<([D2D1_ROUNDED_RECT; BARS], f32)> {
+    let reveal = motion::reveal(scene.progress);
+    if reveal <= 0.0 {
+        return None;
+    }
+    let (slot, bar) = layout::meter(scene.dpi);
+    let bottom = body.top + (slot.y + slot.height) as f32;
+    let bars = std::array::from_fn(|index| {
+        let left =
+            body.left + (slot.x + index as i32 * (slot.width - bar) / (BARS as i32 - 1)) as f32;
+        let rect = D2D_RECT_F {
+            left,
+            top: bottom - scene.bars[index] as f32,
+            right: left + bar as f32,
+            bottom,
+        };
+        rounded(rect, bar as f32 / 2.0)
+    });
+    Some((bars, METER_FILL * reveal))
 }
 
 /// The panel's progress row (`layout::media_progress`), fading in with the controls: the elapsed
@@ -988,6 +1018,15 @@ fn media_text(context: &ID2D1DeviceContext, plan: &MediaPlan) -> Result<()> {
             context.FillRoundedRectangle(&bar.fill, &fill);
         }
     }
+    if let Some((bars, alpha)) = &plan.meter {
+        // SAFETY: as above.
+        unsafe {
+            let brush = context.CreateSolidColorBrush(&with_alpha(WHITE, *alpha), None)?;
+            for bar in bars {
+                context.FillRoundedRectangle(bar, &brush);
+            }
+        }
+    }
     if let Some(ring) = &plan.ring {
         // SAFETY: as above.
         unsafe {
@@ -1000,7 +1039,7 @@ fn media_text(context: &ID2D1DeviceContext, plan: &MediaPlan) -> Result<()> {
 
 /// Album art scaled into the cover square. A bitmap brush clips it to the rounded rect directly,
 /// with no layer or geometry mask.
-// shortcut: the art is uploaded on every notch paint (its arrival, track changes, clock minutes, open/close frames); cache the bitmap per canvas if profiling shows cost.
+// shortcut: the art is uploaded on every notch paint (its arrival, track changes, clock minutes, open/close frames, and up to 15 visualizer repaints a second while open and playing); cache the bitmap per canvas if profiling shows cost.
 fn fill_art(
     context: &ID2D1DeviceContext,
     cover: &D2D1_ROUNDED_RECT,
@@ -1438,6 +1477,7 @@ mod media_tests {
             focus,
             played,
             volume,
+            bars: [0; BARS],
         };
         let clock = clock_width(time, progress, dpi);
         media_plan(&scene, scene.track.unwrap(), &body(dpi, progress), clock)
@@ -1462,6 +1502,7 @@ mod media_tests {
                 focus: None,
                 played: None,
                 volume: None,
+                bars: [0; BARS],
             };
             let clock = clock_width("9:50 pm", progress, 96);
             let plan = media_plan(&scene, scene.track.unwrap(), &body(96, progress), clock);
@@ -1700,6 +1741,37 @@ mod media_tests {
                 assert!(item.top >= body.top && item.bottom <= body.bottom, "{dpi}");
             }
         }
+    }
+
+    #[test]
+    fn meter_bars_sit_right_of_the_controls_bottom_aligned_and_fade_in_with_them() {
+        let song = track("Song", "Artist", true);
+        let meter = |progress| {
+            let scene = NotchScene {
+                time: "9:50 pm",
+                date: "Tuesday",
+                track: song.shown(),
+                art: None,
+                progress,
+                dpi: 96,
+                focus: None,
+                played: None,
+                volume: None,
+                bars: [4, 20, 12, 8, 4],
+            };
+            meter_bars(&scene, &body(96, progress))
+        };
+        let body = body(96, 1.0);
+        let (bars, alpha) = meter(1.0).unwrap();
+        assert_eq!(alpha, METER_FILL);
+        let lefts = bars.map(|bar| bar.rect.left - body.left);
+        assert_eq!(lefts, [312.0, 319.0, 326.0, 333.0, 340.0]);
+        assert_eq!(bars[4].rect.right - body.left, 344.0);
+        assert!(bars.iter().all(|bar| bar.rect.bottom - body.top == 92.0));
+        assert_eq!(bars[1].rect.top - body.top, 72.0);
+        assert_eq!(bars[0].rect.bottom - bars[0].rect.top, 4.0);
+        assert_eq!(meter(0.6).unwrap().1, METER_FILL * motion::reveal(0.6));
+        assert!(meter(0.0).is_none());
     }
 
     #[test]

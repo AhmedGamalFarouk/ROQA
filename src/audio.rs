@@ -1,4 +1,5 @@
-//! The default render endpoint's master volume and mute, for the media panel's volume row.
+//! The default render endpoint's master volume and mute, for the media panel's volume row, and its
+//! peak meter, for the visualizer.
 //!
 //! Core Audio starts the first time a media notch is shown and stays bound until shutdown. Its
 //! callbacks may run on any Core Audio thread: they only set a dirty bit and post one scalar wake,
@@ -15,7 +16,7 @@ use windows::{
             AUDIO_VOLUME_NOTIFICATION_DATA, DEVICE_STATE, EDataFlow, ERole,
             Endpoints::{
                 IAudioEndpointVolume, IAudioEndpointVolumeCallback,
-                IAudioEndpointVolumeCallback_Impl,
+                IAudioEndpointVolumeCallback_Impl, IAudioMeterInformation,
             },
             IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
             MMDeviceEnumerator, eConsole, eRender,
@@ -29,6 +30,8 @@ use windows::{
     core::{GUID, PCWSTR, Result, implement},
 };
 
+/// The visualizer's bar count: one per meter sample, oldest first.
+pub const BARS: usize = 5;
 /// Index of the mute toggle, after the three media controls, in drawing, focus and UIA order.
 pub const MUTE: usize = 3;
 /// Thread message that only wakes the host loop; the pending work is in `Wake::dirty`.
@@ -47,6 +50,22 @@ const ECHO: GUID = GUID::from_u128(0x9d8f3897_b1df_4a66_add8_1c91eefc0f51);
 pub struct Level {
     pub percent: u8,
     pub muted: bool,
+}
+
+/// Shifts the oldest sample out and `peak`, clamped to 0..=1, in as the newest.
+fn push(peaks: &mut [f32; BARS], peak: f32) {
+    peaks.rotate_left(1);
+    peaks[BARS - 1] = if peak.is_nan() {
+        0.0
+    } else {
+        peak.clamp(0.0, 1.0)
+    };
+}
+
+/// Whether setting the level from the notch also unmutes: a level the user picks is meant to be
+/// heard (user decision, 2026-11-11).
+fn unmutes(shown: Level) -> bool {
+    shown.muted
 }
 
 fn percent(scalar: f32) -> u8 {
@@ -127,10 +146,13 @@ impl Drop for Devices {
     }
 }
 
-/// The bound endpoint's volume and its registered callback; dropping it unregisters, then releases.
+/// The bound endpoint's volume and its registered callback; dropping it unregisters, then releases
+/// both and the endpoint's meter.
 struct Endpoint {
     volume: IAudioEndpointVolume,
     events: IAudioEndpointVolumeCallback,
+    /// `None` when the endpoint has no meter, or after a failed read until the next rebind.
+    meter: Option<IAudioMeterInformation>,
 }
 impl Drop for Endpoint {
     fn drop(&mut self) {
@@ -149,7 +171,16 @@ fn bind(devices: &IMMDeviceEnumerator, wake: &Arc<Wake>) -> Result<Endpoint> {
         let device = devices.GetDefaultAudioEndpoint(eRender, eConsole)?;
         let volume: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None)?;
         volume.RegisterControlChangeNotify(&events)?;
-        Ok(Endpoint { volume, events })
+        // The volume row works without a meter; the visualizer then stays flat.
+        let meter = device
+            .Activate(CLSCTX_ALL, None)
+            .inspect_err(|error| eprintln!("Audio: no peak meter: {error}"))
+            .ok();
+        Ok(Endpoint {
+            volume,
+            events,
+            meter,
+        })
     }
 }
 
@@ -172,6 +203,8 @@ pub struct Audio {
     started: bool,
     /// `None` without a default render endpoint, or before the first bind.
     level: Option<Level>,
+    /// The last `BARS` peak samples, oldest first; zero while the visualizer is stopped.
+    peaks: [f32; BARS],
     wake: Arc<Wake>,
 }
 impl Audio {
@@ -182,6 +215,7 @@ impl Audio {
             devices: None,
             started: false,
             level: None,
+            peaks: [0.0; BARS],
             wake: Arc::new(Wake {
                 dirty: AtomicU32::new(0),
                 // SAFETY: reads this thread's ID; no pointers.
@@ -215,6 +249,36 @@ impl Audio {
     pub fn level(&self) -> Option<Level> {
         self.level
     }
+    /// Whether the bound endpoint has a meter for `sample` to read.
+    pub fn metered(&self) -> bool {
+        self.endpoint
+            .as_ref()
+            .is_some_and(|endpoint| endpoint.meter.is_some())
+    }
+    pub fn peaks(&self) -> [f32; BARS] {
+        self.peaks
+    }
+    /// Reads one endpoint-wide peak (all channels and apps, before volume) into the newest bar. A
+    /// failed read drops the meter until the next rebind, so a lost device is not polled.
+    pub fn sample(&mut self) {
+        let Some(endpoint) = &mut self.endpoint else {
+            return;
+        };
+        let Some(meter) = &endpoint.meter else {
+            return;
+        };
+        // SAFETY: host-thread read on the bound endpoint's meter.
+        let peak = unsafe { meter.GetPeakValue() }.unwrap_or_else(|error| {
+            eprintln!("Audio: peak: {error}");
+            endpoint.meter = None;
+            0.0
+        });
+        push(&mut self.peaks, peak);
+    }
+    /// Flattens the bars, so a restarted visualizer never shows old samples.
+    pub fn stop(&mut self) {
+        self.peaks = [0.0; BARS];
+    }
     /// Applies pending notifications; returns whether the shown level changed. Without any it
     /// costs one atomic swap.
     pub fn refresh(&mut self) -> bool {
@@ -231,6 +295,7 @@ impl Audio {
                     .inspect_err(|error| eprintln!("Audio: no render endpoint: {error}"))
                     .ok()
             });
+            self.stop();
             eprintln!("Audio: rebound, endpoint={}", self.endpoint.is_some());
         }
         self.level = self.endpoint.as_ref().and_then(|endpoint| {
@@ -240,12 +305,24 @@ impl Audio {
         });
         before != self.level
     }
-    /// Sets the master volume, 0 to 1, as ROQA's own change; the next `refresh` reads the result.
-    /// Like `toggle_mute`, it acts only while the row shows a level, never while it shows none.
+    /// Sets the master volume, 0 to 1, as ROQA's own change, unmuting a muted endpoint; the next
+    /// `refresh` reads the result. Like `toggle_mute`, it acts only while the row shows a level,
+    /// never while it shows none.
     pub fn set(&self, scalar: f32) {
-        if let (Some(endpoint), Some(_)) = (&self.endpoint, self.level) {
-            // SAFETY: host-thread call on the bound endpoint; `ECHO` outlives it.
-            let set = unsafe { endpoint.volume.SetMasterVolumeLevelScalar(scalar, &ECHO) };
+        if let (Some(endpoint), Some(level)) = (&self.endpoint, self.level) {
+            // SAFETY: host-thread calls on the bound endpoint; `ECHO` outlives them.
+            let set = unsafe {
+                endpoint
+                    .volume
+                    .SetMasterVolumeLevelScalar(scalar, &ECHO)
+                    .and_then(|()| {
+                        if unmutes(level) {
+                            endpoint.volume.SetMute(false, &ECHO)
+                        } else {
+                            Ok(())
+                        }
+                    })
+            };
             self.changed(set);
         }
     }
@@ -362,5 +439,34 @@ mod tests {
         audio.wake.raise(REBIND);
         assert!(audio.refresh()); // A lost endpoint hides the level.
         assert_eq!(audio.level(), None);
+    }
+
+    #[test]
+    fn setting_the_level_unmutes_only_a_muted_endpoint() {
+        let level = |muted| Level { percent: 40, muted };
+        assert!(unmutes(level(true)));
+        assert!(!unmutes(level(false)));
+    }
+
+    #[test]
+    fn peaks_shift_the_oldest_out_clamp_and_reset_on_rebind() {
+        let mut peaks = [0.0; BARS];
+        for peak in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6] {
+            push(&mut peaks, peak);
+        }
+        assert_eq!(peaks, [0.2, 0.3, 0.4, 0.5, 0.6]);
+        for peak in [-1.0, 2.0, f32::NAN] {
+            push(&mut peaks, peak);
+        }
+        assert_eq!(peaks, [0.5, 0.6, 0.0, 1.0, 0.0]);
+        // Without an endpoint there is no meter: sampling makes no call and shifts nothing.
+        let mut audio = Audio::create();
+        audio.peaks = peaks;
+        assert!(!audio.metered());
+        audio.sample();
+        assert_eq!(audio.peaks(), peaks);
+        audio.wake.raise(REBIND);
+        audio.refresh();
+        assert_eq!(audio.peaks(), [0.0; BARS]);
     }
 }

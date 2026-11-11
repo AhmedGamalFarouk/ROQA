@@ -133,6 +133,8 @@ struct Surface {
     motion: Tween,
     /// Notch: the progress row last drawn, if any.
     played: Option<Progress>,
+    /// Notch: the visualizer bar heights last drawn.
+    bars: [i32; audio::BARS],
 }
 impl Drop for Surface {
     fn drop(&mut self) {
@@ -218,6 +220,7 @@ impl Surface {
             live: false,
             motion: Tween::rest(0.0),
             played: None,
+            bars: [0; audio::BARS],
         })
     }
     /// A visible notch that is open or opening; only these read and draw playback progress.
@@ -339,6 +342,12 @@ impl Surface {
             .and_then(|track| {
                 track.progress(media::now_ticks(), layout::media_progress(self.dpi).width)
             });
+        // Paused bars lie flat at once; the meter stops on the next pass.
+        let peaks = match track {
+            Some(track) if track.playing => audio.peaks(),
+            _ => [0.0; audio::BARS],
+        };
+        self.bars = layout::meter_heights(peaks, self.dpi);
         self.publish_notch(media, audio);
         let Role::Notch {
             shadow,
@@ -366,6 +375,7 @@ impl Surface {
             focus,
             played: self.played,
             volume: audio.level(),
+            bars: self.bars,
         };
         shadow.paint(&scene, self.window.0)?;
         self.canvas.paint_notch(&scene)
@@ -600,6 +610,22 @@ const GRAPHICS_RETRY: Duration = Duration::from_millis(250);
 const GRAPHICS_ATTEMPTS: u32 = 8;
 /// A loss this long after the last rebuild starts a fresh budget; sooner ones keep backing off.
 const GRAPHICS_SETTLED: Duration = Duration::from_secs(60);
+/// Visualizer samples are at least this far apart: at most 15 a second, even after a late wake.
+const METER_PERIOD: Duration = Duration::from_millis(67);
+
+/// When the visualizer samples next: never unless a visible notch is open or opening (`open`), the
+/// track plays and the endpoint has a meter; otherwise `METER_PERIOD` after the last sample, or at
+/// once. The last sample outlives a stop, so stopping and restarting never samples faster.
+fn meter_due(
+    open: bool,
+    playing: bool,
+    metered: bool,
+    sampled: Option<Instant>,
+    now: Instant,
+) -> Option<Instant> {
+    (open && playing && metered).then(|| sampled.map_or(now, |at| at + METER_PERIOD))
+}
+
 fn rebuild_delay(attempts: u32) -> Duration {
     GRAPHICS_RETRY * (1 << attempts.min(5))
 }
@@ -693,6 +719,8 @@ struct Desktop {
     /// floor counts from that, not from its late wake, so wake latency never accumulates.
     progress_due: Option<Instant>,
     progress_tick: Instant,
+    /// When the visualizer last read the meter.
+    sampled: Option<Instant>,
 }
 impl Desktop {
     fn create(probe: &Probe) -> Result<Self> {
@@ -728,6 +756,7 @@ impl Desktop {
             clock_due: Instant::now(),
             progress_due: None,
             progress_tick: Instant::now(),
+            sampled: None,
         };
         desktop.show(SurfaceKind::Notch)?;
         if *probe == Probe::Initialization {
@@ -846,6 +875,32 @@ impl Desktop {
         }
         self.progress_due = next_due;
         Ok(next_due.map_or(INFINITE, |due| milliseconds_until(due, Instant::now())))
+    }
+    /// Reads the endpoint meter once per due sample (`meter_due`) and repaints each settled open
+    /// notch whose bar heights changed; returns how long until the next sample. Stopped, it makes
+    /// no meter call, flattens the bars and has no deadline, and with no open notch paints nothing.
+    #[inline(never)]
+    fn refresh_meter(&mut self) -> Result<u32> {
+        let now = Instant::now();
+        let playing = self.media.view().shown().is_some_and(|track| track.playing);
+        let open = self.surfaces.iter().any(Surface::expanded);
+        let due = meter_due(open, playing, self.audio.metered(), self.sampled, now);
+        match due {
+            None => self.audio.stop(),
+            Some(due) if due > now => return Ok(milliseconds_until(due, now)),
+            Some(_) => {
+                self.audio.sample();
+                self.sampled = Some(now);
+            }
+        }
+        let peaks = self.audio.peaks();
+        for notch in self.surfaces.iter_mut().filter(|s| s.expanded()) {
+            // A running animation paints every frame already.
+            if !notch.live && notch.bars != layout::meter_heights(peaks, notch.dpi) {
+                notch.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?;
+            }
+        }
+        Ok(due.map_or(INFINITE, |_| milliseconds_until(now + METER_PERIOD, now)))
     }
     /// Paints one frame of each running animation; returns true while any still runs.
     /// The final frame always lands exactly on the target before a surface goes idle.
@@ -1342,8 +1397,8 @@ impl Desktop {
         self.topology_due = Some(Instant::now());
         self.topology_retries = 0;
     }
-    /// One pass of state refreshes and frames; returns the clock and progress wait and whether
-    /// animation runs.
+    /// One pass of state refreshes and frames; returns the clock, progress and visualizer wait and
+    /// whether animation runs.
     fn update(&mut self, model: &WindowModel) -> Result<(u32, bool)> {
         self.refresh_topology()?;
         if self.text.take_changed() {
@@ -1378,7 +1433,10 @@ impl Desktop {
         }
         self.refresh_dock(model)?;
         self.refresh_fullscreen(model.generation)?;
-        let wait = self.refresh_clock()?.min(self.refresh_progress()?);
+        let wait = self
+            .refresh_clock()?
+            .min(self.refresh_progress()?)
+            .min(self.refresh_meter()?);
         if let Some(picker) = &mut self.picker {
             picker.synchronize(model)?;
             if picker.closed() {
@@ -1653,6 +1711,44 @@ fn remember_fullscreen(
 #[cfg(test)]
 mod clock_wait_tests {
     use super::*;
+    #[test]
+    fn the_meter_runs_only_open_playing_and_metered_and_never_above_15_hz() {
+        let now = Instant::now();
+        // Collapsed, hidden and full-screen-suppressed notches are not open (`Surface::expanded`).
+        for (open, playing, metered) in [
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            assert_eq!(meter_due(open, playing, metered, None, now), None);
+            assert_eq!(meter_due(open, playing, metered, Some(now), now), None);
+        }
+        assert_eq!(meter_due(true, true, true, None, now), Some(now));
+        // Wakes early, on time, late and after a stop and restart: samples stay a period apart.
+        let mut sampled = None;
+        let mut samples = Vec::new();
+        for (wake, open) in [
+            (0, true),
+            (10, true),
+            (67, true),
+            (300, true),
+            (310, false),
+            (320, true),
+            (366, true),
+            (367, true),
+            (1000, true),
+        ] {
+            let at = now + Duration::from_millis(wake);
+            if meter_due(open, true, true, sampled, at).is_some_and(|due| due <= at) {
+                sampled = Some(at);
+                samples.push(wake);
+            }
+        }
+        assert_eq!(samples, [0, 67, 300, 367, 1000]);
+        assert!(samples.windows(2).all(|pair| pair[1] - pair[0] >= 67));
+    }
+
     #[test]
     fn keyboard_focus_steps_over_disabled_controls_and_wraps() {
         let all = [true; 3];

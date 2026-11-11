@@ -1,4 +1,4 @@
-use crate::{dock, motion};
+use crate::{audio::BARS, dock, motion};
 
 /// Notch outline in DIPs: body size, bottom corner radius and the concave "ear" fillets that
 /// blend the top corners into the screen edge.
@@ -138,7 +138,7 @@ pub fn notch_hit(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32
 
 /// Previous, play/pause and next in the media panel's controls row (direction B), then the volume
 /// row's mute toggle (`audio::MUTE`), in DIPs from the body's left and top edges: x, y, width,
-/// height. The visualizer slot right of the controls row stays empty.
+/// height.
 const MEDIA_CONTROLS: [(f32, f32, f32, f32); 4] = [
     (100.0, 66.0, 28.0, 32.0),
     (148.0, 66.0, 32.0, 32.0),
@@ -174,6 +174,24 @@ pub fn volume_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32) -> 
     let bar = volume_bar(dpi);
     panel_offset(window_width, dpi, progress, bar, (x, y))
         .map(|offset| offset as f32 / (bar.width - 1).max(1) as f32)
+}
+
+/// The visualizer slot right of the controls row (slice 7, provisional), in DIPs from the body's
+/// left and top edges: `BARS` bars `METER_BAR` wide, spread across it and bottom-aligned, ending 16
+/// before the body's right edge and centred on the controls row.
+const METER: (f32, f32, f32, f32) = (312.0, 72.0, 32.0, 20.0);
+const METER_BAR: f32 = 4.0;
+
+/// The visualizer slot in pixels from the body's left and top edges, and each bar's width.
+pub fn meter(dpi: u32) -> (Bounds, i32) {
+    (scaled_bounds(METER, dpi), scaled(METER_BAR, dpi))
+}
+
+/// Each bar's height in whole pixels for its peak (0 to 1): from the bar's width, a dot at silence,
+/// to the slot's height. The bars repaint only when one of these changes.
+pub fn meter_heights(peaks: [f32; BARS], dpi: u32) -> [i32; BARS] {
+    let (slot, bar) = meter(dpi);
+    peaks.map(|peak| bar + (peak * (slot.height - bar) as f32).round() as i32)
 }
 
 /// The progress bar's target in the media panel (slice 4, provisional), in DIPs from the body's
@@ -584,5 +602,39 @@ mod tests {
             .iter()
             .any(|r| r.y == 40 && r.x <= 50)
         );
+    }
+
+    #[test]
+    fn meter_bars_quantize_to_whole_pixels_and_fit_beside_the_controls() {
+        // A dot at silence, the slot's height at full scale, whole pixels between.
+        assert_eq!(
+            meter_heights([0.0, 1.0, 0.5, 0.51, 0.53], 96),
+            [4, 20, 12, 12, 12]
+        );
+        assert_eq!(
+            meter_heights([0.0, 1.0, 0.5, 0.51, 0.53], 192),
+            [8, 40, 24, 24, 25]
+        );
+        // A steady or sub-pixel level quantizes the same, so it repaints nothing.
+        assert_eq!(
+            meter_heights([0.30; BARS], 96),
+            meter_heights([0.33; BARS], 96)
+        );
+        for dpi in [96, 144, 192, 240] {
+            let (slot, bar) = meter(dpi);
+            let body = notch_body(scaled(440.0, dpi), dpi, notch_shape(1.0, true));
+            assert!(slot.x + slot.width <= body.width && slot.y + slot.height <= body.height);
+            assert!(bar * BARS as i32 <= slot.width);
+            let overlaps = |other: Bounds| {
+                slot.x < other.x + other.width
+                    && other.x < slot.x + slot.width
+                    && slot.y < other.y + other.height
+                    && other.y < slot.y + slot.height
+            };
+            let mut targets = media_controls(dpi)
+                .into_iter()
+                .chain([media_progress(dpi), volume_bar(dpi)]);
+            assert!(!targets.any(overlaps), "{dpi}");
+        }
     }
 }
