@@ -1,4 +1,5 @@
 use crate::{
+    audio::{self, Audio},
     catalog_timing::milliseconds_until,
     clock,
     dock::{self, DockItem},
@@ -305,7 +306,7 @@ impl Surface {
     /// Shares what the notch shows with UI Automation: the current session's controls, the focused
     /// one, and whether the panel is open or opening, so clients see the target state before the
     /// motion ends.
-    fn publish_notch(&self, media: &Media) {
+    fn publish_notch(&self, media: &Media, audio: &Audio) {
         if let Role::Notch { uia, focus, .. } = &self.role
             && let Ok(mut state) = uia.lock()
         {
@@ -314,7 +315,11 @@ impl Surface {
             state.controls = media
                 .view()
                 .shown()
-                .map(notch_uia::controls)
+                .map(|track| {
+                    let mut controls = notch_uia::controls(track);
+                    controls.push(notch_uia::mute(audio.level()));
+                    controls
+                })
                 .unwrap_or_default();
             state.focus = focus.as_ref().map(|focus| focus.control);
             state.open = self.motion.target() >= 1.0;
@@ -325,7 +330,7 @@ impl Surface {
         }
     }
     /// Draws one frame, publishing it to UI Automation first.
-    fn paint_notch(&mut self, time: &str, date: &str, media: &Media) -> Result<()> {
+    fn paint_notch(&mut self, time: &str, date: &str, media: &Media, audio: &Audio) -> Result<()> {
         let track = media.view().shown();
         let progress = self.motion.value(Instant::now());
         // Only a revealed panel row reads the time; a collapsed notch draws no progress.
@@ -334,7 +339,7 @@ impl Surface {
             .and_then(|track| {
                 track.progress(media::now_ticks(), layout::media_progress(self.dpi).width)
             });
-        self.publish_notch(media);
+        self.publish_notch(media, audio);
         let Role::Notch {
             shadow,
             area,
@@ -360,6 +365,7 @@ impl Surface {
             dpi: self.dpi,
             focus,
             played: self.played,
+            volume: audio.level(),
         };
         shadow.paint(&scene, self.window.0)?;
         self.canvas.paint_notch(&scene)
@@ -564,7 +570,7 @@ fn take_foreground(notch: HWND) -> bool {
     unsafe { SetForegroundWindow(notch).as_bool() || GetForegroundWindow() == notch }
 }
 /// The next enabled control after `from`, wrapping, or the first (last) enabled one without it.
-fn step(enabled: [bool; 3], from: Option<usize>, forward: bool) -> Option<usize> {
+fn step<const N: usize>(enabled: [bool; N], from: Option<usize>, forward: bool) -> Option<usize> {
     let count = enabled.len();
     let start = from.unwrap_or(if forward { count - 1 } else { 0 });
     (1..=count)
@@ -673,6 +679,8 @@ struct Desktop {
     /// worker stops only once media's handle to its queue is gone.
     media: Media,
     icons: IconService,
+    /// The default render endpoint's volume, bound once a media notch is first shown.
+    audio: Audio,
     /// Windows text size (Accessibility > Text size) scales the whole notch, whose only content is text.
     text: TextSettings,
     text_factor: f64,
@@ -712,6 +720,7 @@ impl Desktop {
             dock_names: dock::names(&[], &WindowModel::default()),
             dock_generation: None,
             media: Media::create(),
+            audio: Audio::create(),
             text,
             text_factor,
             clock: String::new(),
@@ -763,7 +772,7 @@ impl Desktop {
         if kind == SurfaceKind::Notch {
             // Advances every existing notch first, so all monitors show the same minute.
             self.refresh_clock()?;
-            surface.paint_notch(&self.clock, &self.date, &self.media)?;
+            surface.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?;
             self.surfaces.push(surface);
         } else {
             surface.publish_accessibility(&self.dock_names, false);
@@ -804,7 +813,7 @@ impl Desktop {
             .iter_mut()
             .filter(|s| s.kind() == SurfaceKind::Notch && s.visible)
         {
-            notch.paint_notch(&self.clock, &self.date, &self.media)?;
+            notch.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?;
         }
         Ok(())
     }
@@ -826,7 +835,7 @@ impl Desktop {
             let width = layout::media_progress(notch.dpi).width;
             // A running animation paints every frame already.
             if !notch.live && notch.played != track.progress(ticks, width) {
-                notch.paint_notch(&self.clock, &self.date, &self.media)?;
+                notch.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?;
             }
             let floor =
                 (self.progress_tick + Duration::from_secs(1)).saturating_duration_since(now);
@@ -861,7 +870,7 @@ impl Desktop {
             if surface.live {
                 match surface.kind() {
                     SurfaceKind::Notch => {
-                        surface.paint_notch(&self.clock, &self.date, &self.media)?
+                        surface.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?
                     }
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
@@ -1046,7 +1055,7 @@ impl Desktop {
         match message.message {
             WM_LBUTTONUP => return self.click_control(notch, message.lParam),
             WM_KEYDOWN => return self.notch_key(notch, message),
-            dock_uia::INVOKE if current => self.media.command(message.wParam.0),
+            dock_uia::INVOKE if current => self.press(message.wParam.0),
             notch_uia::FOCUS if current => self.enter_focus(notch, message.wParam.0),
             dock_uia::INVOKE | notch_uia::FOCUS => {}
             native_window::DEACTIVATED => {
@@ -1057,8 +1066,8 @@ impl Desktop {
         }
         true
     }
-    /// A click on a drawn media control sends its command, and one on the progress bar seeks; the
-    /// notch stays nonactivating.
+    /// A click on a drawn media control sends its command, one on the progress bar seeks, and one
+    /// on the volume bar sets the volume; the notch stays nonactivating.
     fn click_control(&mut self, notch: usize, lparam: LPARAM) -> bool {
         let surface = &self.surfaces[notch];
         let (x, y) = point(lparam);
@@ -1068,18 +1077,36 @@ impl Desktop {
             return false;
         }
         if let Some(control) = layout::media_control_at(width, dpi, progress, x, y) {
-            self.media.command(control);
+            self.press(control);
         } else if let Some(fraction) = layout::media_seek_at(width, dpi, progress, x, y) {
             self.media.seek(fraction);
+        } else if let Some(volume) = layout::volume_at(width, dpi, progress, x, y) {
+            self.audio.set(volume);
         } else {
             return false;
         }
         true
     }
+    /// Presses a shown media control or the mute toggle.
+    fn press(&mut self, control: usize) {
+        if control != audio::MUTE {
+            self.media.command(control);
+        } else if self.media.view().shown().is_some() {
+            self.audio.toggle_mute();
+        }
+    }
+    /// The notch controls that take focus and presses: the player's three, then mute while a
+    /// default render endpoint is bound.
+    fn enabled(&self) -> [bool; 4] {
+        let track = self.media.view().shown();
+        let [previous, play_pause, next] = track.map_or([false; 3], |track| track.controls);
+        let mute = track.is_some() && self.audio.level().is_some();
+        [previous, play_pause, next, mute]
+    }
     /// A UIA client focused a media control, or the notch itself (`notch_uia::FIRST`): the notch
     /// takes the foreground if Windows allows it, remembers the window it came from, and opens.
     fn enter_focus(&mut self, notch: usize, requested: usize) {
-        let enabled = self.media.view().shown().map_or([false; 3], |t| t.controls);
+        let enabled = self.enabled();
         let surface = &mut self.surfaces[notch];
         let control = match requested {
             notch_uia::FIRST => step(enabled, None, true),
@@ -1104,7 +1131,7 @@ impl Desktop {
     /// Keys while a notch has keyboard focus: Tab, Shift+Tab and the arrows move among enabled
     /// controls, Enter and Space press the focused one, and Escape closes and returns the foreground.
     fn notch_key(&mut self, notch: usize, message: &MSG) -> bool {
-        let enabled = self.media.view().shown().map_or([false; 3], |t| t.controls);
+        let enabled = self.enabled();
         let surface = &mut self.surfaces[notch];
         let Some(control) = surface.focused().map(|focus| focus.control) else {
             return false;
@@ -1118,7 +1145,7 @@ impl Desktop {
             VK_RETURN | VK_SPACE => {
                 // Held keys repeat; one press is one command.
                 if message.lParam.0 & (1 << 30) == 0 {
-                    self.media.command(control);
+                    self.press(control);
                 }
                 return true;
             }
@@ -1136,13 +1163,9 @@ impl Desktop {
     }
     /// A player can disable the focused action or replace its entire session between input events.
     fn reconcile_focus(&mut self) {
-        let enabled = self
-            .media
-            .view()
-            .shown()
-            .map_or([false; 3], |track| track.controls);
+        let enabled = self.enabled();
         for notch in &mut self.surfaces {
-            notch.publish_notch(&self.media);
+            notch.publish_notch(&self.media, &self.audio);
             let Some(control) = notch.focused().map(|focus| focus.control) else {
                 continue;
             };
@@ -1244,7 +1267,7 @@ impl Desktop {
             if visible && !surface.visible {
                 match surface.kind() {
                     SurfaceKind::Notch => {
-                        surface.paint_notch(&self.clock, &self.date, &self.media)?
+                        surface.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?
                     }
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
@@ -1331,11 +1354,27 @@ impl Desktop {
         // One paint per visible notch when the drawn track changes or its pause grace expires.
         let generation = self.media.generation();
         let redraw = self.media.refresh(self.cover_pixels());
-        if redraw || generation != self.media.generation() {
+        let shown = self.media.view().shown().is_some();
+        if shown {
+            // Core Audio loads only once a media panel can show the volume row.
+            self.audio.start();
+        }
+        let volume = self.audio.refresh();
+        if redraw || volume || generation != self.media.generation() {
             self.reconcile_focus();
         }
         if redraw {
             self.paint_notches()?;
+        } else if volume && shown {
+            // Only an open or opening panel draws the volume row; a collapsed pill has nothing new.
+            let now = Instant::now();
+            for notch in self.surfaces.iter_mut().filter(|s| {
+                s.kind() == SurfaceKind::Notch
+                    && s.visible
+                    && motion::reveal(s.motion.value(now)) > 0.0
+            }) {
+                notch.paint_notch(&self.clock, &self.date, &self.media, &self.audio)?;
+            }
         }
         self.refresh_dock(model)?;
         self.refresh_fullscreen(model.generation)?;

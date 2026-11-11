@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod audio;
 mod catalog_timing;
 mod clock;
 mod dock;

@@ -16,6 +16,10 @@ windows = { version = "=0.62.2", features = [
     "Foundation",
     "Media_Control",
     "Storage_Streams",
+    # Core Audio: IMMDeviceEnumerator, IMMNotificationClient and AUDIO_VOLUME_NOTIFICATION_DATA (slice 6).
+    "Win32_Media_Audio",
+    # IAudioEndpointVolume and its callback (slice 6).
+    "Win32_Media_Audio_Endpoints",
     "UI_ViewManagement",
     "Win32_System_WinRT",
     "Win32_Storage_EnhancedStorage",

@@ -1,8 +1,10 @@
 //! UI Automation for the notch: a ToolBar root with one Button (Invoke) per media control (previous,
-//! play/pause, next) while a media session exists. Like `dock_uia`, the providers read a small shared
-//! snapshot and post actions to the host loop, which validates them again before acting.
+//! play/pause, next, then the volume row's mute toggle) while a media session exists. Like
+//! `dock_uia`, the providers read a small shared snapshot and post actions to the host loop, which
+//! validates them again before acting.
 #![allow(non_upper_case_globals)] // Matching on Windows SDK constant names.
 use crate::{
+    audio::Level,
     dock_uia::{
         self, Accessibility, none, not_available, variant_bool, variant_i32, variant_text,
         window_rect,
@@ -73,6 +75,18 @@ pub fn controls(track: &Track) -> Vec<(String, bool)> {
         (play_pause, track.controls[PLAY_PAUSE]),
         ("Next track".to_owned(), track.controls[NEXT]),
     ]
+}
+
+/// The mute toggle's name and enabled state: its action and the shown level, such as "Mute, volume
+/// 40%". The level is read-only: there is no RangeValue. Without an endpoint it stays, disabled.
+pub fn mute(level: Option<Level>) -> (String, bool) {
+    match level {
+        Some(Level { percent, muted }) => {
+            let action = if muted { "Unmute" } else { "Mute" };
+            (format!("{action}, volume {percent}%"), true)
+        }
+        None => ("Volume unavailable, no audio device".to_owned(), false),
+    }
 }
 
 /// Serves the notch's UIA root for one HWND lifetime; drop before destroying the window.
@@ -310,7 +324,12 @@ impl IRawElementProviderSimple_Impl for Item_Impl {
             let focused = state.focus == Some(self.index);
             (name.clone(), *enabled, focused, state.open)
         })?;
-        let id = ["RoqaMediaPrevious", "RoqaMediaPlayPause", "RoqaMediaNext"];
+        let id = [
+            "RoqaMediaPrevious",
+            "RoqaMediaPlayPause",
+            "RoqaMediaNext",
+            "RoqaVolumeMute",
+        ];
         Ok(match property {
             UIA_ControlTypePropertyId => variant_i32(UIA_ButtonControlTypeId.0),
             UIA_NamePropertyId => variant_text(&name),
@@ -581,6 +600,24 @@ mod tests {
         track.playing = false;
         track.artist.clear();
         assert_eq!(controls(&track)[PLAY_PAUSE].0, "Play, Song");
+        assert_eq!(
+            mute(Some(Level {
+                percent: 40,
+                muted: false
+            })),
+            ("Mute, volume 40%".to_owned(), true)
+        );
+        assert_eq!(
+            mute(Some(Level {
+                percent: 0,
+                muted: true
+            })),
+            ("Unmute, volume 0%".to_owned(), true)
+        );
+        assert_eq!(
+            mute(None),
+            ("Volume unavailable, no audio device".to_owned(), false)
+        );
         // Properties not read yet: the action alone, still exposed, and disabled if so reported.
         let pending = Track::default();
         assert_eq!(

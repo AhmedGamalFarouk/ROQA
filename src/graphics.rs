@@ -1,4 +1,5 @@
 use crate::{
+    audio::Level,
     dock,
     icons::IconPixels,
     layout::{self, Bounds},
@@ -151,6 +152,8 @@ pub struct NotchScene<'a> {
     pub focus: Option<usize>,
     /// The panel's progress row; none while collapsed or without a track duration.
     pub played: Option<Progress>,
+    /// The panel's volume row; `None` without an audio endpoint draws it disabled.
+    pub volume: Option<Level>,
 }
 
 /// Dock material (docs/design/roqa-visual-spec.md): black bar, white-alpha hover fill, whole-pixel icon lift.
@@ -536,6 +539,7 @@ struct MediaPlan<'a> {
     chips: Vec<Chip>,
     /// Around the control with keyboard focus.
     ring: Option<Ring>,
+    volume: Option<VolumeBar>,
 }
 
 /// A black circle carrying the play-state glyph at the art's bottom-right corner, faded by `alpha`.
@@ -544,6 +548,21 @@ struct Badge {
     glyph: D2D_RECT_F,
     alpha: f32,
 }
+/// The volume level bar: a thin track, and its fill to the shown percent, dimmed while muted or
+/// without an endpoint. Both fade in with the controls.
+struct VolumeBar {
+    track: D2D1_ROUNDED_RECT,
+    track_alpha: f32,
+    fill: D2D1_ROUNDED_RECT,
+    fill_alpha: f32,
+}
+/// The bar's drawn thickness in DIPs, centred in its hit box.
+const VOLUME_THICKNESS: f32 = 4.0;
+/// The bar's track: white 40 % is about 3.7 : 1 on black, the non-text contrast a target needs.
+const VOLUME_TRACK: f32 = 0.40;
+/// The fill while muted: white 60 % over the track is about 3.2 : 1 against it, and dimmer than the
+/// audible white fill.
+const MUTED_FILL: f32 = 0.60;
 
 /// One media control: a white glyph, or for play/pause a black glyph on a white circle. A control
 /// the player does not accept now is drawn at `DISABLED` opacity.
@@ -571,6 +590,9 @@ enum Glyph {
     Pause,
     Previous,
     Next,
+    /// The mute toggle: a speaker with sound waves, or without them while muted.
+    Speaker,
+    Muted,
 }
 /// Glyph parts on a 10-unit grid: a triangle's x, y corners, and a bar's left, top, right, bottom.
 type Triangle = [(f32, f32); 3];
@@ -587,6 +609,18 @@ impl Glyph {
             Glyph::Next => (
                 Some([(1.0, 1.0), (6.2, 5.0), (1.0, 9.0)]),
                 &[(7.0, 1.0, 8.6, 9.0)],
+            ),
+            Glyph::Speaker => (
+                Some([(0.5, 5.0), (6.5, 1.0), (6.5, 9.0)]),
+                &[
+                    (1.0, 3.5, 3.5, 6.5),
+                    (7.6, 3.5, 8.4, 6.5),
+                    (9.0, 2.0, 9.8, 8.0),
+                ],
+            ),
+            Glyph::Muted => (
+                Some([(0.5, 5.0), (6.5, 1.0), (6.5, 9.0)]),
+                &[(1.0, 3.5, 3.5, 6.5)],
             ),
         }
     }
@@ -612,8 +646,8 @@ fn media_clock(open: f32, scale: f32) -> Font {
 /// moves by `smooth(p)` from its pill position to its panel position, in DIPs from the body's left
 /// and top edges (the clock from its right edge). The title column ends before the clock's measured
 /// width (`clock`, physical pixels) and never inverts. The artist fades in below the title as the
-/// date does, and so do the controls (`media_chips`) and the progress row (`progress_row`). The
-/// volume row stays empty until slice 6. Empty text is skipped.
+/// date does, and so do the controls (`media_chips`), the progress row (`progress_row`) and the
+/// volume bar (`volume_bar`). Empty text is skipped.
 fn media_plan<'a>(
     scene: &NotchScene<'a>,
     track: &'a Track,
@@ -718,6 +752,7 @@ fn media_plan<'a>(
         bar,
         chips,
         ring,
+        volume: volume_bar(scene, body),
     }
 }
 
@@ -774,6 +809,43 @@ fn progress_row(
     Some(([rounded(track, radius), rounded(fill, radius)], reveal))
 }
 
+/// The level bar right of the mute toggle, placed and revealed like the controls; the fill ends at
+/// the shown whole percent.
+fn volume_bar(scene: &NotchScene, body: &D2D_RECT_F) -> Option<VolumeBar> {
+    let reveal = motion::reveal(scene.progress);
+    if reveal <= 0.0 {
+        return None;
+    }
+    let bar = layout::volume_bar(scene.dpi);
+    let thickness = (VOLUME_THICKNESS * scene.dpi as f32 / 96.0).round();
+    let left = body.left + bar.x as f32;
+    let top = body.top + bar.y as f32 + ((bar.height as f32 - thickness) / 2.0).round();
+    let percent = scene.volume.map_or(0, |level| level.percent);
+    let filled = (bar.width as f32 * f32::from(percent) / 100.0).round();
+    let rect = |width: f32| {
+        rounded(
+            D2D_RECT_F {
+                left,
+                top,
+                right: left + width,
+                bottom: top + thickness,
+            },
+            thickness / 2.0,
+        )
+    };
+    Some(VolumeBar {
+        track: rect(bar.width as f32),
+        track_alpha: reveal * VOLUME_TRACK,
+        fill: rect(filled),
+        fill_alpha: reveal
+            * match scene.volume {
+                Some(level) if !level.muted => 1.0,
+                Some(_) => MUTED_FILL,
+                None => DISABLED,
+            },
+    })
+}
+
 /// Previous, play/pause and next keep their panel place in the body, so the body clip reveals
 /// them as it opens; they fade in with the artist. None are planned while they are invisible.
 fn media_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip> {
@@ -787,9 +859,15 @@ fn media_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip
     } else {
         Glyph::Play
     };
+    let speaker = match scene.volume {
+        Some(level) if level.muted => Glyph::Muted,
+        _ => Glyph::Speaker,
+    };
+    let [previous, play_pause, next] = track.controls;
+    let enabled = [previous, play_pause, next, scene.volume.is_some()];
     layout::media_controls(scene.dpi)
         .into_iter()
-        .zip([Glyph::Previous, toggle, Glyph::Next])
+        .zip([Glyph::Previous, toggle, Glyph::Next, speaker])
         .enumerate()
         .map(|(index, (control, shape))| {
             let rect = D2D_RECT_F {
@@ -811,7 +889,7 @@ fn media_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip
                 ),
                 shape,
                 filled,
-                alpha: reveal * if track.controls[index] { 1.0 } else { DISABLED },
+                alpha: reveal * if enabled[index] { 1.0 } else { DISABLED },
             }
         })
         .collect()
@@ -899,6 +977,15 @@ fn media_text(context: &ID2D1DeviceContext, plan: &MediaPlan) -> Result<()> {
             fill_glyph(context, chip.glyph, chip.shape, rgba(0, 0, 0, 1.0))?;
         } else {
             fill_glyph(context, chip.glyph, chip.shape, color)?;
+        }
+    }
+    if let Some(bar) = &plan.volume {
+        // SAFETY: as above.
+        unsafe {
+            let track = context.CreateSolidColorBrush(&with_alpha(WHITE, bar.track_alpha), None)?;
+            context.FillRoundedRectangle(&bar.track, &track);
+            let fill = context.CreateSolidColorBrush(&with_alpha(WHITE, bar.fill_alpha), None)?;
+            context.FillRoundedRectangle(&bar.fill, &fill);
         }
     }
     if let Some(ring) = &plan.ring {
@@ -1320,6 +1407,27 @@ mod media_tests {
         focus: Option<usize>,
         played: Option<Progress>,
     ) -> MediaPlan<'a> {
+        planned(view, time, progress, dpi, focus, played, None)
+    }
+    fn volume<'a>(
+        view: &'a View,
+        time: &'a str,
+        progress: f32,
+        dpi: u32,
+        focus: Option<usize>,
+        volume: Option<Level>,
+    ) -> MediaPlan<'a> {
+        planned(view, time, progress, dpi, focus, None, volume)
+    }
+    fn planned<'a>(
+        view: &'a View,
+        time: &'a str,
+        progress: f32,
+        dpi: u32,
+        focus: Option<usize>,
+        played: Option<Progress>,
+        volume: Option<Level>,
+    ) -> MediaPlan<'a> {
         let scene = NotchScene {
             time,
             date: "Tuesday",
@@ -1329,6 +1437,7 @@ mod media_tests {
             dpi,
             focus,
             played,
+            volume,
         };
         let clock = clock_width(time, progress, dpi);
         media_plan(&scene, scene.track.unwrap(), &body(dpi, progress), clock)
@@ -1352,6 +1461,7 @@ mod media_tests {
                 dpi: 96,
                 focus: None,
                 played: None,
+                volume: None,
             };
             let clock = clock_width("9:50 pm", progress, 96);
             let plan = media_plan(&scene, scene.track.unwrap(), &body(96, progress), clock);
@@ -1496,6 +1606,14 @@ mod media_tests {
                     false,
                     1.0
                 ),
+                // Mute, disabled here: the scene has no audio endpoint.
+                (
+                    rect(140.0, 100.0, 164.0, 116.0),
+                    rect(145.0, 101.0, 159.0, 115.0),
+                    Glyph::Speaker,
+                    false,
+                    DISABLED
+                ),
             ]
         );
         assert!(panel.ring.is_none());
@@ -1582,6 +1700,42 @@ mod media_tests {
                 assert!(item.top >= body.top && item.bottom <= body.bottom, "{dpi}");
             }
         }
+    }
+
+    #[test]
+    fn volume_row_fills_to_the_shown_percent_and_dims_while_muted_or_unavailable() {
+        let song = track("Song", "Artist", true);
+        let level = |percent, muted| Some(Level { percent, muted });
+        let panel = volume(&song, "9:50 pm", 1.0, 96, None, level(40, false));
+        let bar = panel.volume.unwrap();
+        // Bar x 172..384 in the body at 40; 4 DIP thick, centred in 100..116.
+        assert_eq!(bar.track.rect, rect(172.0, 106.0, 384.0, 110.0));
+        assert_eq!(bar.fill.rect, rect(172.0, 106.0, 172.0 + 85.0, 110.0));
+        assert_eq!((bar.track_alpha, bar.fill_alpha), (VOLUME_TRACK, 1.0));
+        assert_eq!(
+            (panel.chips[3].shape, panel.chips[3].alpha),
+            (Glyph::Speaker, 1.0)
+        );
+        let muted = volume(&song, "9:50 pm", 1.0, 96, None, level(40, true));
+        assert_eq!(muted.chips[3].shape, Glyph::Muted);
+        assert_eq!(muted.chips[3].alpha, 1.0); // Still a live toggle.
+        assert_eq!(muted.volume.unwrap().fill_alpha, MUTED_FILL);
+        let unavailable = volume(&song, "9:50 pm", 1.0, 96, None, None);
+        let bar = unavailable.volume.unwrap();
+        assert_eq!((bar.fill.rect.right, bar.fill_alpha), (172.0, DISABLED));
+        // The ring fits the mute toggle inside the body; the row is not drawn while collapsed.
+        let ring = volume(&song, "9:50 pm", 1.0, 96, Some(3), level(40, false)).ring;
+        assert_eq!(ring.unwrap().shape.rect, rect(137.0, 97.0, 167.0, 119.0));
+        assert!(
+            volume(&song, "9:50 pm", 0.0, 96, None, level(40, false))
+                .volume
+                .is_none()
+        );
+        let full = volume(&song, "9:50 pm", 1.0, 192, None, level(100, false))
+            .volume
+            .unwrap();
+        assert_eq!(full.fill.rect.right, full.track.rect.right);
+        assert!(full.track.rect.bottom <= body(192, 1.0).bottom);
     }
 
     #[test]

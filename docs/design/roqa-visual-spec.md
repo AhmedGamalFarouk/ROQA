@@ -89,9 +89,20 @@ The font is Segoe UI Variable, from the system; no font is bundled.
   - Drawn only while the player reports a length (`EndTime` after `StartTime`, at most 1000 hours); without one there is no row and no seek. Times are whole seconds, floored; a track over an hour reads, for example, `62:05`.
   - The shown position is `Position + (now − LastUpdatedTime) × rate`, clamped to the timeline. It holds still while paused.
   - **Seek.** A click or tap inside the bar's target, when the player enables `IsPlaybackPositionEnabled`, asks for that fraction of the length; the left edge is the start. There is no hover, drag or keyboard seek (user decision, 2026-11-10). When the player accepts it, the timeline is read again; if that read still predates the request, the row shows the target until the player reports a newer timeline.
+- **Volume row (slice 6, PROVISIONAL).** The default render endpoint's master volume (user decision, 2026-11-10: overall level, not per app), in DIPs from the body's left and top (`layout::media_controls`, `layout::volume_bar`):
+
+  | Element | Box | Look |
+  |---|---|---|
+  | Mute toggle | 24 × 16 at (100, 100), the fourth control | 14 DIP white speaker glyph: box (1–3.5, 3.5–6.5), cone (0.5, 5)–(6.5, 1)–(6.5, 9), and two wave bars (7.6–8.4, 3.5–6.5) and (9–9.8, 2–8). Muted: the speaker without the waves |
+  | Level bar | hit box 212 × 16 at (132, 100), ending 16 before the body's right edge | A 4 DIP track centred in it (white 40 %, about 3.7 : 1 on black, fully rounded; brighter than the progress track's white 20 % for target contrast, which design review may align), filled in white from its left end to the shown whole percent |
+
+  - It is revealed and placed like the controls row: fixed panel place, body clip, `motion::reveal`. The pill draws no volume.
+  - A click or tap on the bar sets the level: its first pixel is 0 and its last 100 %. A click on the toggle flips mute. Both are ROQA's own changes, tagged with ROQA's event context, so their echo wakes nothing; ROQA re-reads the endpoint once instead.
+  - The level is shown as the whole percent Windows uses; the fill and the accessible name are drawn from it alone. While muted, the fill drops to white 60 % (about 3.2 : 1 against the track) and the toggle stays fully opaque, because it is still a live control.
+  - With no default render endpoint (none present, or the last one unplugged), the toggle and fill are drawn at 30 % with an empty fill, the toggle is disabled, and nothing polls: the row returns on the next device-added, device-state or default-changed notification.
+  - The bar is not mirrored for an RTL UI language (deferred with the rest of the layout mirroring). There is no drag, hover or press state.
 - **Reserved panel rows.** Nothing else is drawn below 50 yet, and there are no placeholders:
   - the visualizer slot right of the controls, slice 7;
-  - volume, about 101–115, slice 6.
 
 **Type.** Segoe UI Variable Text in every role. White on black is 21 : 1; white 60 % is about 7.4 : 1.
 
@@ -110,7 +121,7 @@ Weights switch at the midpoint of the morph. While paused, the glyph and the tit
   - The layout itself is not mirrored: the cover stays on the left and the clock on the right.
   - Mirroring for an RTL UI language is deferred.
 
-**Repaints.** A visible notch repaints only when the drawn track changes: session presence, title, artist, play state or the controls' enabled states (`media::redraw`). Moving keyboard focus paints one frame for the ring. A collapsed notch draws no timeline, so timeline and rate updates draw nothing there, and there is no media timer, deadline or frame loop for it. Album art adds one paint when it arrives. Collapsed static playback otherwise keeps only the clock's per-minute paint. Text layouts are not cached: static paints happen at most once a minute collapsed and about once a second open, and animation frames change the font sizes, so a cache would miss.
+**Repaints.** A visible notch repaints only when the drawn track changes: session presence, title, artist, play state or the controls' enabled states (`media::redraw`). A volume or mute change repaints only visible notches whose panel is open or opening, and only when the whole percent or mute state changes. Moving keyboard focus paints one frame for the ring. A collapsed notch draws no timeline, so timeline and rate updates draw nothing there, and there is no media timer, deadline or frame loop for it. Album art adds one paint when it arrives. Collapsed static playback otherwise keeps only the clock's per-minute paint. Text layouts are not cached: static paints happen at most once a minute collapsed and about once a second open, and animation frames change the font sizes, so a cache would miss.
 
 - **Open panel (slice 4).** An open, visible notch repaints when its progress row's shown seconds or filled pixels change. While the track plays forward, one host deadline falls at the next whole second or bar pixel, whichever is first. At rate 1 or below a whole second is never deferred, so the time neither lags nor skips; a pixel-only change waits until a second after the previous tick's scheduled time (not its late wake, so latency never accumulates) and is drawn on its own only if the next second is still a second later. Above rate 1 every change waits for that floor. Ticks are therefore at least a second apart after the first one. A seek or other read repaints at once. Paused, rate 0, no length (or one over 1000 hours), collapsed, hidden or full-screen-suppressed: no deadline.
 - **Timeline reads.** There is no timeline event subscription. The timeline is read with the playback info, when a notch opens, and while one is open after a track change or a finished command such as a seek.
@@ -160,7 +171,7 @@ Weights switch at the midpoint of the morph. While paused, the glyph and the tit
 ## Accessibility
 
 - **Dock.** UIA rectangles and hit-testing are unchanged; the picker remains the keyboard and Narrator route.
-- **Notch media controls (slice 3).** A ToolBar root ("ROQA Notch") with three Buttons while a session exists: "Previous track", "Pause, Title – Artist" or "Play, …", and "Next track". Invoke works whether or not the panel is open; a disabled control reports `IsEnabled` false and refuses Invoke and focus. Bounds are the open panel's while it is open or opening, and offscreen otherwise.
+- **Notch media controls (slice 3).** A ToolBar root ("ROQA Notch") with three Buttons while a session exists: "Previous track", "Pause, Title – Artist" or "Play, …", and "Next track". Slice 6 (PROVISIONAL) adds a fourth Button, the mute toggle: "Mute, volume 40%", or "Unmute, volume 40%" while muted, and "Volume unavailable, no audio device", disabled, without an endpoint. The level is read-only text in that name; there is no RangeValue and no arrow-key adjustment. Invoke works whether or not the panel is open; a disabled control reports `IsEnabled` false and refuses Invoke and focus. Bounds are the open panel's while it is open or opening, and offscreen otherwise.
   - **Keyboard (user decision, 2026-11-10).** Entry is only through UIA focus, such as Narrator moving to a control: the notch takes the foreground if Windows allows it and opens. Tab and Shift+Tab, and the arrow keys, move among enabled controls, wrapping; Enter and Space press the focused one; Escape closes the panel and gives the foreground back to the window that had it. No global hotkey, IPC command or picker entry.
   - Pointer use stays nonactivating: a click on a control never takes focus.
   - **Position (slice 4).** While the progress row is drawn, the play/pause Button's `ItemStatus` is its text, such as "1:23 of 4:56"; otherwise it is empty. It is read-only: no RangeValue and no arrow-key seek (user decision). No property-changed event is raised as it advances.

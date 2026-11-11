@@ -136,23 +136,44 @@ pub fn notch_hit(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32
     x as f32 >= left && (x as f32) < right
 }
 
-/// Previous, play/pause and next in the media panel's controls row (direction B), in DIPs from the
-/// body's left and top edges: x, y, width, height. The visualizer slot to their right stays empty.
-const MEDIA_CONTROLS: [(f32, f32, f32, f32); 3] = [
+/// Previous, play/pause and next in the media panel's controls row (direction B), then the volume
+/// row's mute toggle (`audio::MUTE`), in DIPs from the body's left and top edges: x, y, width,
+/// height. The visualizer slot right of the controls row stays empty.
+const MEDIA_CONTROLS: [(f32, f32, f32, f32); 4] = [
     (100.0, 66.0, 28.0, 32.0),
     (148.0, 66.0, 32.0, 32.0),
     (200.0, 66.0, 28.0, 32.0),
+    (100.0, 100.0, 24.0, 16.0),
 ];
+/// The volume level bar's hit box, right of the mute toggle and ending 16 before the body's right.
+const VOLUME_BAR: (f32, f32, f32, f32) = (132.0, 100.0, 212.0, 16.0);
 
-/// The media controls in pixels from the body's left and top edges. They keep their panel position
-/// while the body morphs: the body clip reveals them, and they fade in with `motion::reveal`.
-pub fn media_controls(dpi: u32) -> [Bounds; 3] {
-    MEDIA_CONTROLS.map(|(x, y, width, height)| Bounds {
+fn scaled_bounds((x, y, width, height): (f32, f32, f32, f32), dpi: u32) -> Bounds {
+    Bounds {
         x: scaled(x, dpi),
         y: scaled(y, dpi),
         width: scaled(width, dpi),
         height: scaled(height, dpi),
-    })
+    }
+}
+
+/// The media controls in pixels from the body's left and top edges. They keep their panel position
+/// while the body morphs: the body clip reveals them, and they fade in with `motion::reveal`.
+pub fn media_controls(dpi: u32) -> [Bounds; 4] {
+    MEDIA_CONTROLS.map(|control| scaled_bounds(control, dpi))
+}
+
+/// The volume bar's hit box in pixels from the body's left and top edges, placed like the controls.
+pub fn volume_bar(dpi: u32) -> Bounds {
+    scaled_bounds(VOLUME_BAR, dpi)
+}
+
+/// The volume a click at a window point sets: 0 at the bar's first pixel to 1 at its last; none
+/// outside the bar or while the row is not drawn.
+pub fn volume_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32) -> Option<f32> {
+    let bar = volume_bar(dpi);
+    panel_offset(window_width, dpi, progress, bar, (x, y))
+        .map(|offset| offset as f32 / (bar.width - 1).max(1) as f32)
 }
 
 /// The progress bar's target in the media panel (slice 4, provisional), in DIPs from the body's
@@ -162,13 +183,7 @@ const MEDIA_PROGRESS: (f32, f32, f32, f32) = (140.0, 50.0, 164.0, 14.0);
 /// The progress bar's target in pixels from the body's left and top edges; like the controls, it
 /// keeps its panel place while the body morphs.
 pub fn media_progress(dpi: u32) -> Bounds {
-    let (x, y, width, height) = MEDIA_PROGRESS;
-    Bounds {
-        x: scaled(x, dpi),
-        y: scaled(y, dpi),
-        width: scaled(width, dpi),
-        height: scaled(height, dpi),
-    }
+    scaled_bounds(MEDIA_PROGRESS, dpi)
 }
 
 /// A window point's x offset inside `target` (pixels from the body's left and top) at `progress`;
@@ -451,6 +466,51 @@ mod tests {
         let left = body.left + 140;
         assert_eq!(seek(0.36, left, body.height - 1), Some(0.0));
         assert_eq!(seek(0.36, left, body.height), None);
+    }
+
+    #[test]
+    fn volume_bar_maps_its_first_and_last_pixel_to_silent_and_full() {
+        // Body x 40..400: the bar spans 172..384 and 100..116 at 100 %, below the mute toggle's row.
+        let at = |progress, x, y| volume_at(440, 96, progress, x, y);
+        assert_eq!(at(1.0, 172, 100), Some(0.0));
+        assert_eq!(at(1.0, 383, 115), Some(1.0));
+        assert_eq!(at(1.0, 172 + 211 / 2, 108), Some(105.0 / 211.0));
+        for (x, y) in [(171, 108), (384, 108), (200, 99), (200, 116)] {
+            assert_eq!(at(1.0, x, y), None, "{x}, {y}");
+        }
+        assert_eq!(media_control_at(440, 96, 1.0, 140, 100), Some(3));
+        assert_eq!(media_control_at(440, 96, 1.0, 172, 108), None);
+        // Collapsed or barely open, the row is not drawn.
+        for progress in [0.0, 0.07, 0.35] {
+            assert_eq!(at(progress, 200, 108), None);
+        }
+        for dpi in [144, 192, 240] {
+            let window = scaled(440.0, dpi);
+            let body = notch_body(window, dpi, notch_shape(1.0, true));
+            let bar = volume_bar(dpi);
+            let (left, right) = (body.left + bar.x, body.left + bar.x + bar.width - 1);
+            assert_eq!(volume_at(window, dpi, 1.0, left, bar.y), Some(0.0));
+            assert_eq!(volume_at(window, dpi, 1.0, right, bar.y), Some(1.0));
+            assert!(right < body.left + body.width && bar.y + bar.height <= body.height);
+        }
+        // Controls, the progress bar and the volume bar never share a point, so hit order is moot.
+        for dpi in [96, 144, 192] {
+            let window = scaled(440.0, dpi);
+            let body = notch_body(window, dpi, notch_shape(1.0, true));
+            for y in 0..body.height {
+                for x in body.left..body.left + body.width {
+                    let hits = [
+                        media_control_at(window, dpi, 1.0, x, y).is_some(),
+                        media_seek_at(window, dpi, 1.0, x, y).is_some(),
+                        volume_at(window, dpi, 1.0, x, y).is_some(),
+                    ];
+                    assert!(
+                        hits.iter().filter(|&&hit| hit).count() <= 1,
+                        "{dpi} {x} {y}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
