@@ -24,6 +24,7 @@ mod shelf;
 mod shelf_os;
 mod store;
 mod text_settings;
+mod theme;
 mod timer;
 mod topology;
 mod window_catalog;

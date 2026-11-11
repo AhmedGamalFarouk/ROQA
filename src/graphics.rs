@@ -4,7 +4,9 @@ use crate::{
     icons::IconPixels,
     layout::{self, Bounds},
     media::{PLAY_PAUSE, Progress, Track},
-    motion, timer,
+    motion,
+    theme::{Palette, Rgba},
+    timer,
 };
 use std::{borrow::Cow, cell::RefCell, mem::ManuallyDrop};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
@@ -16,17 +18,20 @@ use windows::Win32::{
             Common::{
                 D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
                 D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-                D2D1_PIXEL_FORMAT,
+                D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
             },
             D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT,
             D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_BRUSH_PROPERTIES1, D2D1_BITMAP_OPTIONS_NONE,
-            D2D1_BITMAP_PROPERTIES1, D2D1_BRUSH_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE,
-            D2D1_EXTEND_MODE_CLAMP, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-            D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_VECTOR4,
-            D2D1_ROUNDED_RECT, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
+            D2D1_BITMAP_PROPERTIES1, D2D1_BRUSH_PROPERTIES, D2D1_BUFFER_PRECISION_8BPC_UNORM,
+            D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT, D2D1_COLOR_SPACE_SRGB,
+            D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
+            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_INTERPOLATION_MODE_LINEAR,
+            D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PROPERTY_TYPE_FLOAT,
+            D2D1_PROPERTY_TYPE_VECTOR4, D2D1_ROUNDED_RECT,
+            D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
             D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
-            D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateDevice, ID2D1Bitmap1, ID2D1DeviceContext,
-            ID2D1PathGeometry,
+            D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateDevice, ID2D1Bitmap1, ID2D1Brush,
+            ID2D1DeviceContext, ID2D1LinearGradientBrush, ID2D1PathGeometry,
         },
         Direct3D::D3D_DRIVER_TYPE_HARDWARE,
         Direct3D11::{
@@ -169,11 +174,9 @@ pub struct ShelfSlot<'a> {
     pub missing: bool,
 }
 
-/// Dock material (docs/design/roqa-visual-spec.md): black bar, white-alpha hover fill, whole-pixel icon lift.
+/// Dock material (docs/design/roqa-visual-spec.md, colours from the theme): bar, ink-alpha hover fill, whole-pixel icon lift.
 const DOCK_RADIUS_DIPS: i32 = 20;
-const DOCK_HOVER_FILL: f32 = 20.0;
 const ICON_LIFT_DIPS: f32 = 3.0;
-const WHITE: (u8, u8, u8) = (255, 255, 255);
 const TEXT_FONT: PCWSTR = w!("Segoe UI Variable Text");
 const DISPLAY_FONT: PCWSTR = w!("Segoe UI Variable Display");
 /// The time's digits lead; "pm" and similar designators sit smaller beside them.
@@ -189,9 +192,16 @@ pub struct Canvas {
     /// The album art's device bitmap and its entry number. Reused while the entry is unchanged and
     /// released with the canvas, which a device loss or rebuild replaces.
     art: RefCell<Option<(u64, ID2D1Bitmap1)>>,
+    /// The theme's colours, fixed for this canvas: a theme change rebuilds the surfaces.
+    palette: Palette,
 }
 impl Canvas {
-    pub fn create(graphics: &Graphics, hwnd: HWND, bounds: Bounds) -> Result<Self> {
+    pub fn create(
+        graphics: &Graphics,
+        hwnd: HWND,
+        bounds: Bounds,
+        palette: Palette,
+    ) -> Result<Self> {
         // SAFETY: owned HWND outlives canvas; dimensions are positive validated layout.
         unsafe {
             let target = graphics.composition.CreateTargetForHwnd(hwnd, true)?;
@@ -207,6 +217,7 @@ impl Canvas {
                 width: bounds.width as u32,
                 height: bounds.height as u32,
                 art: RefCell::default(),
+                palette,
             };
             // Transparent until the host paints real content, so no placeholder rectangle flashes.
             canvas.draw(|_, _| Ok(()))?;
@@ -230,6 +241,7 @@ impl Canvas {
         let scale = scene.dpi as f32 / 96.0;
         let shape = layout::notch_shape(scene.progress, scene.track.is_some());
         let pixels = layout::notch_body(self.width as i32, scene.dpi, shape);
+        let p = self.palette;
         self.draw(|context, rect| {
             let body = D2D_RECT_F {
                 left: rect.left + pixels.left as f32,
@@ -238,8 +250,8 @@ impl Canvas {
                 bottom: rect.top + pixels.height as f32,
             };
             let open = motion::smooth(scene.progress);
-            if open > 0.0 {
-                notch_shadow(context, &body, shape.radius * scale, scale, open)?;
+            if open > 0.0 && p.shadow > 0.0 {
+                notch_shadow(context, &body, shape.radius * scale, scale, open * p.shadow)?;
             }
             Ok(())
         })
@@ -251,6 +263,7 @@ impl Canvas {
         let shape = layout::notch_shape(scene.progress, scene.track.is_some());
         // The same whole-pixel body that layout::notch_region and notch_hit use.
         let pixels = layout::notch_body(self.width as i32, scene.dpi, shape);
+        let p = self.palette;
         self.draw(|context, rect| {
             let left = rect.left + pixels.left as f32;
             let body = D2D_RECT_F {
@@ -267,16 +280,20 @@ impl Canvas {
             )?;
             // SAFETY: context is live between surface BeginDraw/EndDraw; the clip is popped below.
             unsafe {
-                let black = context.CreateSolidColorBrush(&rgba(0, 0, 0, 1.0), None)?;
-                context.FillGeometry(&outline, &black, None);
+                let fill = context.CreateSolidColorBrush(&color(p.body), None)?;
+                context.FillGeometry(&outline, &fill, None);
+                if let Some((top, bottom)) = p.rim {
+                    let rim = rim_brush(context, p.ink, (top, bottom), (body.top, body.bottom))?;
+                    context.DrawGeometry(&outline, &rim, 1.0, None);
+                }
                 context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
                 context.PushAxisAlignedClip(&body, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             }
             let art = cached(&mut self.art.borrow_mut(), scene.art, |pixels| {
                 upload(context, pixels)
             });
-            let drawn =
-                art.and_then(|art| notch_text(context, scene, &body, scale, art.as_ref(), status));
+            let drawn = art
+                .and_then(|art| notch_text(context, scene, &body, scale, art.as_ref(), status, &p));
             // SAFETY: balances the PushAxisAlignedClip above on the same live context.
             unsafe { context.PopAxisAlignedClip() };
             drawn
@@ -287,6 +304,7 @@ impl Canvas {
     pub fn paint_meter(&self, dpi: u32, bars: [i32; BARS]) -> Result<()> {
         let update = meter_update(self.width as i32, dpi);
         let left = layout::notch_body(self.width as i32, dpi, layout::notch_shape(1.0, true)).left;
+        let p = self.palette;
         self.draw_within(Some(update), |context, rect| {
             let body = D2D_RECT_F {
                 left: rect.left + left as f32,
@@ -295,8 +313,8 @@ impl Canvas {
             };
             // SAFETY: context is live between surface BeginDraw/EndDraw; brushes are scoped to this draw.
             unsafe {
-                // The cleared slot sits inside the black panel body: refill it, then the bars.
-                let black = context.CreateSolidColorBrush(&rgba(0, 0, 0, 1.0), None)?;
+                // The cleared slot sits inside the panel body, a single flat fill: refill it, then the bars.
+                let black = context.CreateSolidColorBrush(&color(p.body), None)?;
                 context.FillRectangle(
                     &D2D_RECT_F {
                         left: rect.left + update.left as f32,
@@ -307,7 +325,7 @@ impl Canvas {
                     &black,
                 );
                 if let Some((bars, alpha)) = meter_rects(1.0, dpi, bars, &body) {
-                    let brush = context.CreateSolidColorBrush(&with_alpha(WHITE, alpha), None)?;
+                    let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, alpha), None)?;
                     for bar in &bars {
                         context.FillRoundedRectangle(bar, &brush);
                     }
@@ -317,9 +335,9 @@ impl Canvas {
         })
     }
     pub fn paint_dock(&self, scene: &DockScene) -> Result<()> {
+        let p = self.palette;
         self.draw(|context, rect| {
             let px = |dips: i32| dock::px(dips, scene.dpi) as f32;
-            let fill = (DOCK_HOVER_FILL * scene.inside).round() as u8;
             let radius = px(DOCK_RADIUS_DIPS);
             // A one-physical-pixel inner hairline separates the black bar from dark wallpapers.
             let edge = D2D_RECT_F {
@@ -330,10 +348,14 @@ impl Canvas {
             };
             // SAFETY: context is live between surface BeginDraw/EndDraw.
             unsafe {
-                let bar = context
-                    .CreateSolidColorBrush(&rgba(fill, fill, fill + fill / 10, 1.0), None)?;
+                let bar = context.CreateSolidColorBrush(&color(p.dock_fill(scene.inside)), None)?;
                 context.FillRoundedRectangle(&rounded(rect, radius), &bar);
-                let hairline = context.CreateSolidColorBrush(&with_alpha(WHITE, 0.10), None)?;
+                let hairline: ID2D1Brush = match p.rim {
+                    Some(rim) => rim_brush(context, p.ink, rim, (rect.top, rect.bottom))?.into(),
+                    None => context
+                        .CreateSolidColorBrush(&with_alpha(p.ink, 0.10), None)?
+                        .into(),
+                };
                 context.DrawRoundedRectangle(&rounded(edge, radius - 0.5), &hairline, 1.0, None);
             }
             let visible = dock::visible_slots(self.width as i32, scene.dpi, scene.slots.len());
@@ -345,7 +367,7 @@ impl Canvas {
                     right: left + px(dock::SLOT_DIPS),
                     bottom: rect.bottom,
                 };
-                draw_slot(context, &cell, slot, scene.dpi, &px)?;
+                draw_slot(context, &cell, slot, scene.dpi, &px, &p)?;
             }
             Ok(())
         })
@@ -466,7 +488,8 @@ fn notch_outline(
     }
 }
 
-/// Soft shadow under the opening notch, fading in with it (the flush pill casts none).
+/// Soft shadow under the opening notch, fading in with it (the flush pill casts none). `strength` is the
+/// open progress times the theme's shadow (Classic 0.9).
 /// Source: the body inset 6 DIP at the sides and ending 7 DIP above its bottom, blurred (sigma 20 DIP);
 /// fitted to the live Nusa shadow profile (below and beside the body) in docs/design/nusa-reference.md.
 fn notch_shadow(
@@ -486,7 +509,7 @@ fn notch_shadow(
         return Ok(());
     }
     let sigma = 20.0 * scale;
-    let color: Vec<u8> = [0.0f32, 0.0, 0.0, 0.9 * strength]
+    let color: Vec<u8> = [0.0f32, 0.0, 0.0, strength]
         .iter()
         .flat_map(|channel| channel.to_le_bytes())
         .collect();
@@ -534,13 +557,14 @@ fn notch_text(
     scale: f32,
     art: Option<&ID2D1Bitmap1>,
     status: Option<&str>,
+    p: &Palette,
 ) -> Result<()> {
-    timer_text(context, scene, body, scale)?;
-    shelf_row(context, scene, body, scale)?;
+    timer_text(context, scene, body, scale, p)?;
+    shelf_row(context, scene, body, scale, p)?;
     if let Some(track) = scene.track {
         let font = media_clock(motion::smooth(scene.progress), scale);
         let clock = text_width(scene.time, &font)?;
-        return media_text(context, &media_plan(scene, track, body, clock), art);
+        return media_text(context, &media_plan(scene, track, body, clock), art, p);
     }
     let open = motion::smooth(scene.progress);
     let row = |middle: f32, half: f32| D2D_RECT_F {
@@ -563,7 +587,7 @@ fn notch_text(
         scene.time,
         &clock,
         row(15.0 + 14.0 * open, 24.0),
-        with_alpha(WHITE, 1.0),
+        with_alpha(p.ink, 1.0),
     )?;
     let date = motion::reveal(scene.progress);
     if date <= 0.0 {
@@ -581,7 +605,7 @@ fn notch_text(
         scene.date,
         &font,
         row(58.0 - 6.0 * (1.0 - date), 10.0),
-        with_alpha(WHITE, 0.60 * date),
+        with_alpha(p.ink, 0.60 * date),
     )?;
     // PROVISIONAL: why there is no media notch, under the date, 11 DIP at the date's opacity.
     match status {
@@ -593,7 +617,7 @@ fn notch_text(
                 ..font
             },
             row(72.0, 6.0),
-            with_alpha(WHITE, 0.60 * date),
+            with_alpha(p.ink, 0.60 * date),
         ),
         None => Ok(()),
     }
@@ -607,6 +631,7 @@ fn timer_text(
     scene: &NotchScene,
     body: &D2D_RECT_F,
     scale: f32,
+    p: &Palette,
 ) -> Result<()> {
     let Some(view) = scene.timer else {
         return Ok(());
@@ -628,7 +653,7 @@ fn timer_text(
             right: left + slot.width as f32,
             bottom: top + slot.height as f32,
         };
-        draw_text(context, text, &font, rect, with_alpha(WHITE, 0.85 * alpha))
+        draw_text(context, text, &font, rect, with_alpha(p.ink, 0.85 * alpha))
     };
     if reveal > 0.0 {
         let slot = layout::timer_panel(media, scene.dpi);
@@ -659,6 +684,7 @@ fn shelf_row(
     scene: &NotchScene,
     body: &D2D_RECT_F,
     scale: f32,
+    p: &Palette,
 ) -> Result<()> {
     let reveal = motion::reveal(scene.progress);
     if reveal <= 0.0 {
@@ -685,7 +711,7 @@ fn shelf_row(
                 // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw.
                 unsafe {
                     let brush = context
-                        .CreateSolidColorBrush(&with_alpha(WHITE, COVER_FILL * alpha), None)?;
+                        .CreateSolidColorBrush(&with_alpha(p.ink, COVER_FILL * alpha), None)?;
                     context.FillRoundedRectangle(&shape, &brush);
                 }
             }
@@ -1159,6 +1185,7 @@ fn media_text(
     context: &ID2D1DeviceContext,
     plan: &MediaPlan,
     bitmap: Option<&ID2D1Bitmap1>,
+    p: &Palette,
 ) -> Result<()> {
     let state = if plan.playing {
         Glyph::Play
@@ -1170,28 +1197,28 @@ fn media_text(
     } else {
         // SAFETY: context is live between surface BeginDraw/EndDraw; brushes are scoped to this draw.
         unsafe {
-            let slot = context.CreateSolidColorBrush(&with_alpha(WHITE, COVER_FILL), None)?;
+            let slot = context.CreateSolidColorBrush(&with_alpha(p.ink, COVER_FILL), None)?;
             context.FillRoundedRectangle(&plan.cover, &slot);
         }
-        fill_glyph(context, plan.glyph, state, with_alpha(WHITE, plan.dim))?;
+        fill_glyph(context, plan.glyph, state, with_alpha(p.ink, plan.dim))?;
     }
     if let Some(badge) = &plan.badge {
         // SAFETY: as above.
         unsafe {
-            let circle = context.CreateSolidColorBrush(&rgba(0, 0, 0, badge.alpha), None)?;
+            let circle = context.CreateSolidColorBrush(&with_alpha(p.on_ink, badge.alpha), None)?;
             context.FillRoundedRectangle(&badge.circle, &circle);
         }
-        let color = with_alpha(WHITE, plan.dim * badge.alpha);
+        let color = with_alpha(p.ink, plan.dim * badge.alpha);
         fill_glyph(context, badge.glyph, state, color)?;
     }
     if let Some(([track, fill], alpha)) = &plan.bar {
         // SAFETY: as above.
         unsafe {
             let brush =
-                context.CreateSolidColorBrush(&with_alpha(WHITE, COVER_FILL * alpha), None)?;
+                context.CreateSolidColorBrush(&with_alpha(p.ink, COVER_FILL * alpha), None)?;
             context.FillRoundedRectangle(track, &brush);
             if fill.rect.right > fill.rect.left {
-                let brush = context.CreateSolidColorBrush(&with_alpha(WHITE, *alpha), None)?;
+                let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, *alpha), None)?;
                 context.FillRoundedRectangle(fill, &brush);
             }
         }
@@ -1202,11 +1229,11 @@ fn media_text(
             &line.text,
             &line.font,
             line.rect,
-            with_alpha(WHITE, line.alpha),
+            with_alpha(p.ink, line.alpha),
         )?;
     }
     for chip in &plan.chips {
-        let color = with_alpha(WHITE, chip.alpha);
+        let color = with_alpha(p.ink, chip.alpha);
         if chip.filled {
             let radius = (chip.rect.bottom - chip.rect.top) / 2.0;
             // SAFETY: as above.
@@ -1214,8 +1241,8 @@ fn media_text(
                 let circle = context.CreateSolidColorBrush(&color, None)?;
                 context.FillRoundedRectangle(&rounded(chip.rect, radius), &circle);
             }
-            // Black on the circle; over the black body it vanishes as the circle fades.
-            fill_glyph(context, chip.glyph, chip.shape, rgba(0, 0, 0, 1.0))?;
+            // Body-coloured on the circle; over the body it vanishes as the circle fades.
+            fill_glyph(context, chip.glyph, chip.shape, with_alpha(p.on_ink, 1.0))?;
         } else {
             fill_glyph(context, chip.glyph, chip.shape, color)?;
         }
@@ -1223,16 +1250,16 @@ fn media_text(
     if let Some(bar) = &plan.volume {
         // SAFETY: as above.
         unsafe {
-            let track = context.CreateSolidColorBrush(&with_alpha(WHITE, bar.track_alpha), None)?;
+            let track = context.CreateSolidColorBrush(&with_alpha(p.ink, bar.track_alpha), None)?;
             context.FillRoundedRectangle(&bar.track, &track);
-            let fill = context.CreateSolidColorBrush(&with_alpha(WHITE, bar.fill_alpha), None)?;
+            let fill = context.CreateSolidColorBrush(&with_alpha(p.ink, bar.fill_alpha), None)?;
             context.FillRoundedRectangle(&bar.fill, &fill);
         }
     }
     if let Some((bars, alpha)) = &plan.meter {
         // SAFETY: as above.
         unsafe {
-            let brush = context.CreateSolidColorBrush(&with_alpha(WHITE, *alpha), None)?;
+            let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, *alpha), None)?;
             for bar in bars {
                 context.FillRoundedRectangle(bar, &brush);
             }
@@ -1241,7 +1268,7 @@ fn media_text(
     if let Some(ring) = &plan.ring {
         // SAFETY: as above.
         unsafe {
-            let brush = context.CreateSolidColorBrush(&with_alpha(WHITE, ring.alpha), None)?;
+            let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, ring.alpha), None)?;
             context.DrawRoundedRectangle(&ring.shape, &brush, ring.stroke, None);
         }
     }
@@ -1525,6 +1552,7 @@ fn draw_slot(
     slot: &DockSlot,
     dpi: u32,
     px: &dyn Fn(i32) -> f32,
+    p: &Palette,
 ) -> Result<()> {
     let size = px(dock::ICON_DIPS);
     // Whole-pixel lift keeps shell icon bitmaps unresampled (crisp) on every frame.
@@ -1549,10 +1577,10 @@ fn draw_slot(
                 bottom: center_y + half,
             };
             let brush =
-                context.CreateSolidColorBrush(&with_alpha(WHITE, 0.12 * slot.hover), None)?;
+                context.CreateSolidColorBrush(&with_alpha(p.ink, 0.12 * slot.hover), None)?;
             context.FillRoundedRectangle(&rounded(highlight, px(12)), &brush);
         }
-        let glyph = context.CreateSolidColorBrush(&rgba(220, 225, 232, 1.0), None)?;
+        let glyph = context.CreateSolidColorBrush(&with_alpha(p.glyph, 1.0), None)?;
         if slot.picker {
             // Our own glyph: a 2x2 grid meaning "all windows".
             let (tile, gap) = (px(12), px(4));
@@ -1579,7 +1607,7 @@ fn draw_slot(
             );
         } else {
             // A real group whose icon is unavailable or still loading: neutral tile, never a fake app icon.
-            let brush = context.CreateSolidColorBrush(&rgba(58, 58, 64, 1.0), None)?;
+            let brush = context.CreateSolidColorBrush(&color(p.tile), None)?;
             context.FillRoundedRectangle(&rounded(frame, px(10)), &brush);
         }
         if slot.active {
@@ -1591,11 +1619,48 @@ fn draw_slot(
                 right: center_x + half,
                 bottom,
             };
-            let brush = context.CreateSolidColorBrush(&with_alpha(WHITE, 0.92), None)?;
+            let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, 0.92), None)?;
             context.FillRoundedRectangle(&rounded(pill, px(3) / 2.0), &brush);
         }
     }
     Ok(())
+}
+
+fn color(Rgba(red, green, blue, alpha): Rgba) -> D2D1_COLOR_F {
+    rgba(red, green, blue, alpha)
+}
+
+/// A 1 px glass rim: `ink` at the top alpha along `span.0` fading to the bottom alpha at `span.1` (device y).
+fn rim_brush(
+    context: &ID2D1DeviceContext,
+    ink: (u8, u8, u8),
+    (top, bottom): (f32, f32),
+    span: (f32, f32),
+) -> Result<ID2D1LinearGradientBrush> {
+    let stop = |position, alpha| D2D1_GRADIENT_STOP {
+        position,
+        color: with_alpha(ink, alpha),
+    };
+    // SAFETY: context is live between surface BeginDraw/EndDraw; the stops and properties are local values
+    // the calls copy, and the returned brush is scoped to the caller's draw.
+    unsafe {
+        let stops = context.CreateGradientStopCollection(
+            &[stop(0.0, top), stop(1.0, bottom)],
+            D2D1_COLOR_SPACE_SRGB,
+            D2D1_COLOR_SPACE_SRGB,
+            D2D1_BUFFER_PRECISION_8BPC_UNORM,
+            D2D1_EXTEND_MODE_CLAMP,
+            D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
+        )?;
+        context.CreateLinearGradientBrush(
+            &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                startPoint: Vector2 { X: 0.0, Y: span.0 },
+                endPoint: Vector2 { X: 0.0, Y: span.1 },
+            },
+            None,
+            &stops,
+        )
+    }
 }
 
 fn with_alpha((red, green, blue): (u8, u8, u8), alpha: f32) -> D2D1_COLOR_F {

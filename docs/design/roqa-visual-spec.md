@@ -4,7 +4,7 @@ Author: `/root`, 2026-11-09. Reference study: `nusa-reference.md`. All sizes are
 
 ## Surfaces and theme
 
-- **Always dark.** Both surfaces use a black body with white content, like Nusa and hardware notches, and follow neither light nor dark mode: a black notch is part of the screen edge, not app chrome.
+- **Always dark by default (Classic theme; other themes in `roqa-themes.md`).** Both surfaces use a black body with white content, like Nusa and hardware notches, and follow neither light nor dark mode: a black notch is part of the screen edge, not app chrome.
 - **High contrast.** System high-contrast colour mapping isn't implemented yet; see the limits.
 
 ## Notch (`src/layout.rs`, `src/graphics.rs`, `src/host.rs`)

@@ -1,7 +1,7 @@
 //! Settings (M5 S7): a pure model with defaults and clamping. The store keeps it as `key=value` lines;
 //! the host applies a change live through `surface_diff`. No launch-at-login: PLAN forbids startup registration.
 
-use crate::{layout::SurfaceKind, shelf, timer};
+use crate::{layout::SurfaceKind, shelf, theme::Theme, timer};
 
 const KINDS: [SurfaceKind; 2] = [SurfaceKind::Notch, SurfaceKind::Dock];
 /// Monitors remembered as off, and the longest device name or diagnostics path kept.
@@ -21,6 +21,8 @@ pub struct Settings {
     pub shelf_cap: usize,
     /// Opt-in report file the catalog writes; `None` is off.
     pub diagnostics: Option<String>,
+    /// Colours of both surfaces (`theme.rs`).
+    pub theme: Theme,
 }
 
 impl Default for Settings {
@@ -32,6 +34,7 @@ impl Default for Settings {
             timer_sound: true,
             shelf_cap: shelf::MAX,
             diagnostics: None,
+            theme: Theme::Classic,
         }
     }
 }
@@ -93,6 +96,7 @@ impl Settings {
             "notch" => flag(value).map(|v| self.notch = v).is_some(),
             "sound" => flag(value).map(|v| self.timer_sound = v).is_some(),
             "shelfcap" => value.parse().map(|v| self.shelf_cap = v).is_ok(),
+            "theme" => Theme::from_key(value).map(|v| self.theme = v).is_some(),
             "diag" if !value.is_empty() => {
                 self.diagnostics = Some(value.to_owned());
                 true
@@ -109,11 +113,12 @@ impl Settings {
     pub fn write_lines(&self, out: &mut String) {
         let one_line = |v: &&String| !v.contains(['\n', '\r']);
         out.push_str(&format!(
-            "dock={}\nnotch={}\nsound={}\nshelfcap={}\n",
+            "dock={}\nnotch={}\nsound={}\nshelfcap={}\ntheme={}\n",
             u8::from(self.dock),
             u8::from(self.notch),
             u8::from(self.timer_sound),
-            self.shelf_cap
+            self.shelf_cap,
+            self.theme.key()
         ));
         for device in self.off_monitors.iter().filter(one_line) {
             out.push_str(&format!("off={device}\n"));
@@ -192,11 +197,13 @@ mod tests {
             timer_sound: false,
             shelf_cap: 999,
             diagnostics: Some("  \"C:\\logs\\roqa.json\"  ".into()),
+            theme: Theme::Glass,
         }
         .clamped();
         assert!(!wild.dock && wild.notch, "one surface kind always stays on");
         assert_eq!(wild.off_monitors, ["a", "b"]);
         assert_eq!(wild.shelf_cap, shelf::MAX);
+        assert_eq!(wild.theme, Theme::Glass);
         assert_eq!(wild.diagnostics.as_deref(), Some(r"C:\logs\roqa.json"));
         let low = Settings {
             shelf_cap: 0,
@@ -294,10 +301,11 @@ mod tests {
                 vec![id(SurfaceKind::Notch, "D1"), id(SurfaceKind::Notch, "D2")]
             )
         );
-        // Sound and shelf changes touch no surface.
+        // Sound, shelf and theme changes create or destroy no surface (a theme rebuilds them in the host).
         let quiet = Settings {
             timer_sound: false,
             shelf_cap: 3,
+            theme: Theme::Light,
             ..base.clone()
         };
         assert_eq!(surface_diff(&base, &quiet, &devices), (vec![], vec![]));
@@ -314,6 +322,7 @@ mod tests {
             timer_sound: false,
             shelf_cap: 4,
             diagnostics: Some("C:\\r.json".into()),
+            theme: Theme::Glass,
             ..Settings::default()
         };
         let reset = Settings::default();
@@ -321,6 +330,11 @@ mod tests {
         assert_eq!(reset.clone().clamped(), reset);
         let (create, destroy) = surface_diff(&custom, &reset, &devices);
         assert_eq!(destroy, vec![]);
+        assert_eq!(
+            reset.theme,
+            Theme::Classic,
+            "reset brings the black theme back"
+        );
         // Dock on both monitors and the notch on the re-enabled one come back.
         assert_eq!(create.len(), 3);
     }
@@ -333,6 +347,7 @@ mod tests {
             timer_sound: false,
             shelf_cap: 5,
             diagnostics: Some("C:\\a=b\\r.json".into()),
+            theme: Theme::Midnight,
             ..Settings::default()
         };
         let mut text = String::new();
@@ -347,6 +362,8 @@ mod tests {
         for (key, value) in [
             ("dock", "yes"),
             ("shelfcap", "x"),
+            ("theme", "dark"),
+            ("theme", ""),
             ("diag", ""),
             ("off", ""),
             ("pin", "a"),

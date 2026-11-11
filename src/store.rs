@@ -368,6 +368,7 @@ mod tests {
                 shelf_cap: crate::shelf::MAX,
                 off_monitors: vec!["D2".into()],
                 diagnostics: Some(r"C:\d.json".into()),
+                theme: Default::default(),
             }
         );
         // No settings lines in a v2 file means the defaults too.

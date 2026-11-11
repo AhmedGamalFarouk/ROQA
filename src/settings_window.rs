@@ -12,6 +12,7 @@ use crate::{
     picker_font::PickerFont,
     settings::{MAX_OFF, MAX_PATH, Settings, parse_timer},
     shelf,
+    theme::Theme,
     window_model::WindowKey,
 };
 use windows::{
@@ -31,6 +32,7 @@ const DOCK: usize = 100;
 const NOTCH: usize = 101;
 const SOUND: usize = 102;
 const SHELF: usize = 103;
+const THEME: usize = 110;
 const DIAGNOSTICS: usize = 104;
 const TIMER: usize = 105;
 const START: usize = 106;
@@ -47,6 +49,8 @@ pub struct SettingsWindow {
     dock: HWND,
     notch: HWND,
     sound: HWND,
+    /// Drop-down list of `Theme::ALL`, in that order.
+    theme: HWND,
     /// One checkbox per connected monitor (at most `MAX_OFF`), named by its GDI device.
     monitors: Vec<(HWND, String)>,
     shelf: HWND,
@@ -98,6 +102,7 @@ impl SettingsWindow {
             dock: HWND::default(),
             notch: HWND::default(),
             sound: HWND::default(),
+            theme: HWND::default(),
             monitors: Vec::new(),
             shelf: HWND::default(),
             diagnostics: HWND::default(),
@@ -155,7 +160,28 @@ impl SettingsWindow {
             check,
             flat,
         )?;
-        let shelf_label = label(&format!("S&helf size (1 to {})", shelf::MAX))?;
+        let theme_label = label("T&heme")?;
+        self.theme = control(
+            window,
+            w!("ComboBox"),
+            "",
+            THEME,
+            CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | tab,
+            flat,
+        )?;
+        for theme in Theme::ALL {
+            let name = wide(theme.label());
+            // SAFETY: the combo box copies the terminated string synchronously.
+            unsafe {
+                SendMessageW(
+                    self.theme,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(name.as_ptr() as isize)),
+                );
+            }
+        }
+        let shelf_label = label(&format!("Shel&f size (1 to {})", shelf::MAX))?;
         self.shelf = control(
             window,
             w!("Edit"),
@@ -180,6 +206,7 @@ impl SettingsWindow {
         let close = control(window, w!("Button"), "&Close", CLOSE, tab, flat)?;
         self.status = control(window, w!("Static"), "", STATUS, 0, WS_EX_NOPARENTNOTIFY)?;
         self.others = vec![
+            theme_label,
             shelf_label,
             diagnostics_label,
             timer_label,
@@ -201,7 +228,7 @@ impl SettingsWindow {
     }
 
     fn children(&self) -> Vec<HWND> {
-        let mut all = vec![self.dock, self.notch, self.sound, self.shelf];
+        let mut all = vec![self.dock, self.notch, self.sound, self.theme, self.shelf];
         all.extend(self.monitors.iter().map(|(handle, _)| *handle));
         all.extend([self.diagnostics, self.timer, self.status]);
         all.extend(&self.others);
@@ -213,6 +240,14 @@ impl SettingsWindow {
         set_checked(self.dock, settings.dock);
         set_checked(self.notch, settings.notch);
         set_checked(self.sound, settings.timer_sound);
+        let index = Theme::ALL
+            .iter()
+            .position(|t| *t == settings.theme)
+            .unwrap_or(0);
+        // SAFETY: scalar selection index on our own combo box.
+        unsafe {
+            SendMessageW(self.theme, CB_SETCURSEL, Some(WPARAM(index)), None);
+        }
         for (handle, device) in &self.monitors {
             set_checked(*handle, !settings.off_monitors.contains(device));
         }
@@ -230,6 +265,12 @@ impl SettingsWindow {
         next.dock = checked(self.dock);
         next.notch = checked(self.notch);
         next.timer_sound = checked(self.sound);
+        // SAFETY: scalar query of our own combo box; -1 (nothing chosen) keeps the current theme.
+        let chosen = unsafe { SendMessageW(self.theme, CB_GETCURSEL, None, None) }.0;
+        next.theme = usize::try_from(chosen)
+            .ok()
+            .and_then(|index| Theme::ALL.get(index).copied())
+            .unwrap_or(next.theme);
         // A monitor that is not connected now keeps its stored state.
         next.off_monitors.retain(|d| !devices.contains(d));
         next.off_monitors.extend(
@@ -283,6 +324,7 @@ impl SettingsWindow {
                 let monitor = (MONITOR..MONITOR + self.monitors.len()).contains(&id);
                 match id {
                     DOCK | NOTCH | SOUND if notification == BN_CLICKED => self.commit()?,
+                    THEME if notification == CBN_SELCHANGE => self.commit()?,
                     _ if monitor && notification == BN_CLICKED => self.commit()?,
                     SHELF | DIAGNOSTICS if notification == EN_KILLFOCUS => self.commit()?,
                     OK => self.commit()?,
@@ -350,7 +392,8 @@ impl SettingsWindow {
         let px = |value: f64| (value * scale).round() as i32;
         // Row heights in DIPs, top to bottom: one list gives both the window height and every control's top.
         let mut heights = vec![24.0; 3 + self.monitors.len()]; // dock, notch, monitors, sound
-        heights.extend([28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0]);
+        // theme, shelf, diagnostics label and edit, timer label and row, status, buttons
+        heights.extend([28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0]);
         let tops: Vec<i32> = heights
             .iter()
             .scan(16.0, |y, height| {
@@ -400,6 +443,7 @@ impl SettingsWindow {
                 places.push((*handle, margin, tops[2 + index], inner, px(24.0)));
             }
             let [
+                theme_label,
                 shelf_label,
                 diagnostics_label,
                 timer_label,
@@ -412,36 +456,51 @@ impl SettingsWindow {
             };
             places.extend([
                 (
-                    shelf_label,
+                    theme_label,
                     margin,
                     tops[after + 1] + px(5.0),
+                    inner - half(180.0),
+                    px(20.0),
+                ),
+                // The height is the dropped-down list's; the closed box is one row.
+                (
+                    self.theme,
+                    margin + inner - half(170.0),
+                    tops[after + 1],
+                    half(170.0),
+                    px(160.0),
+                ),
+                (
+                    shelf_label,
+                    margin,
+                    tops[after + 2] + px(5.0),
                     inner - half(80.0),
                     px(20.0),
                 ),
                 (
                     self.shelf,
                     margin + inner - half(70.0),
-                    tops[after + 1],
+                    tops[after + 2],
                     half(70.0),
                     px(28.0),
                 ),
-                (diagnostics_label, margin, tops[after + 2], inner, px(20.0)),
-                (self.diagnostics, margin, tops[after + 3], inner, px(28.0)),
-                (timer_label, margin, tops[after + 4], inner, px(20.0)),
-                (self.timer, margin, tops[after + 5], half(120.0), px(28.0)),
+                (diagnostics_label, margin, tops[after + 3], inner, px(20.0)),
+                (self.diagnostics, margin, tops[after + 4], inner, px(28.0)),
+                (timer_label, margin, tops[after + 5], inner, px(20.0)),
+                (self.timer, margin, tops[after + 6], half(120.0), px(28.0)),
                 (
                     start,
                     margin + half(128.0),
-                    tops[after + 5],
+                    tops[after + 6],
                     half(150.0),
                     px(28.0),
                 ),
-                (self.status, margin, tops[after + 6], inner, px(42.0)),
-                (reset, margin, tops[after + 7], half(180.0), px(28.0)),
+                (self.status, margin, tops[after + 7], inner, px(42.0)),
+                (reset, margin, tops[after + 8], half(180.0), px(28.0)),
                 (
                     close,
                     client.right - margin - half(100.0),
-                    tops[after + 7],
+                    tops[after + 8],
                     half(100.0),
                     px(28.0),
                 ),

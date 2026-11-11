@@ -835,3 +835,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Verify:** `scripts/verify.ps1` PASS, **170 tests** (161 + 9). Release 990,208 B (+60,416 B), SHA-256 `98369E6C2978D002D934522589F1E251E5B91E9719DB01D950A305E43A3A2549`.
 - **Reviews:** REVIEW NOT RUN (paused by user). Not accepted.
 - **Native evidence:** all NOT RUN (opening, live apply, per-monitor, a real timer start, reset, keyboard, text scale, IME, Narrator). Deferred: monitor list refresh while open, entries 4-12, modal Ctrl+O.
+
+## M5 themes: landed candidate (2026-11-11 Africa/Cairo)
+
+- **Themes:** branch `feat/themes` on `2d4d97f`, packet `docs/development/m5-themes.md`, design `docs/design/roqa-themes.md` (written first). Classic (default, today's look), Light, Midnight and Liquid glass (0.82-alpha body, gradient rim, no shadow); chosen in a settings drop-down, stored as `theme=`, applied by rebuilding the surfaces once. `src/theme.rs` is pure; `graphics.rs` reads a per-canvas palette.
+- **Verify:** `scripts/verify.ps1` PASS, **175 tests** (170 + 5, incl. contrast per theme). Release 999,424 B (+9,216 B), SHA-256 `3CE2BD8E4230E4FD3C025265236E0A7786A08002AE519673FD0BE46DB7FB583A`.
+- **Reviews:** REVIEW NOT RUN (paused by user). Not accepted.
+- **Native evidence:** all NOT RUN (no theme has been seen on a display). Deferred: real backdrop blur for glass, Follow Windows, per-monitor themes, high contrast.

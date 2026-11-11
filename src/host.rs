@@ -20,6 +20,7 @@ use crate::{
     shelf_os::{self, DropEvent, Drops},
     store::{self, Flush, Pending, Store},
     text_settings::TextSettings,
+    theme::Palette,
     timer::{self, Timers},
     topology::{self, Monitor},
     window_catalog::Catalog,
@@ -85,9 +86,9 @@ struct NotchShadow {
     window: NativeWindow,
 }
 impl NotchShadow {
-    fn create(graphics: &Graphics, bounds: Bounds) -> Result<Self> {
+    fn create(graphics: &Graphics, bounds: Bounds, palette: Palette) -> Result<Self> {
         let window = NativeWindow::create_shadow(bounds)?;
-        let canvas = Canvas::create(graphics, window.0, bounds)?;
+        let canvas = Canvas::create(graphics, window.0, bounds, palette)?;
         Ok(Self {
             canvas,
             window,
@@ -198,10 +199,11 @@ impl Surface {
         dpi: u32,
         slots: usize,
         drops: &Drops,
+        palette: Palette,
     ) -> Result<Self> {
         let bounds = placement(monitor.work, dpi, kind, slots);
         let shadow = if kind == SurfaceKind::Notch {
-            Some(NotchShadow::create(graphics, bounds)?)
+            Some(NotchShadow::create(graphics, bounds, palette)?)
         } else {
             None
         };
@@ -236,7 +238,7 @@ impl Surface {
                 }
             }
         };
-        let canvas = Canvas::create(graphics, window.0, bounds)?;
+        let canvas = Canvas::create(graphics, window.0, bounds, palette)?;
         // Created hidden; the owner shows it after the first paint.
         Ok(Self {
             role,
@@ -1027,6 +1029,7 @@ impl Desktop {
             dpi,
             self.dock_slots(),
             &self.drops,
+            self.settings.theme.palette(),
         )?;
         if kind == SurfaceKind::Notch {
             // Advances every existing notch first, so all monitors show the same minute.
@@ -1293,6 +1296,7 @@ impl Desktop {
             return Ok(());
         }
         let old = std::mem::replace(&mut self.settings, next);
+        let restyle = old.theme != self.settings.theme;
         let (create, destroy) = settings::surface_diff(&old, &self.settings, &devices);
         for kind in [SurfaceKind::Notch, SurfaceKind::Dock] {
             match (old.kind_on(kind), self.settings.kind_on(kind)) {
@@ -1303,6 +1307,14 @@ impl Desktop {
         }
         self.surfaces
             .retain(|s| !destroy.contains(&(s.kind(), s.monitor.clone())));
+        if restyle {
+            // Colours are fixed when a surface is created, so a new theme rebuilds the survivors (as a text-scale
+            // change does); the diff's creations below then find nothing left to skip and place themselves.
+            self.surfaces.clear();
+            for kind in self.shown.clone() {
+                self.show(kind)?;
+            }
+        }
         for (kind, device) in create {
             if let Some(monitor) = self.monitors.iter().find(|m| m.device == device).cloned() {
                 self.place(&monitor, kind)?;
