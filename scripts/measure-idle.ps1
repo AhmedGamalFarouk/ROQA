@@ -3,6 +3,8 @@
 # -Competitor <name> measures a competitor build: it needs -Executable and -ExpectedSha256 (the pinned SHA-256) or it fails before launching.
 # -Scenario: idle (default), start-warm, start-cold (counters from launch), churn and media (a person drives the stimulus; input abort is off, -Note is required).
 # -SampleSeconds lengthens the sample (for example 900 for the 15-minute static gate); default 30 keeps the M1 sample length.
+# While sampling the harness holds SetThreadExecutionState(ES_CONTINUOUS|ES_DISPLAY_REQUIRED|ES_SYSTEM_REQUIRED), cleared in finally, so a sample may outlast the display-off timeout (power settings are never changed); if the call fails the old timeout refusal applies.
+# The idle scenario passes --diagnostics to ROQA and records the counters' start and end values and delta (paints, wakes). A user-input abort writes <scenario>-<build>-r<N>.aborted.json (Status ABORTED, elapsed seconds) instead of nothing.
 # -DryRun validates arguments and prints the plan without launching, building or reading counters.
 param(
     [switch]$SkipBuild, [switch]$DryRun, [string]$EvidenceDirectory = 'artifacts/m1', [string]$Executable = '',
@@ -25,11 +27,14 @@ $executable = if ($Executable) { (Resolve-Path -LiteralPath $Executable).Path } 
 $binarySha = if (Test-Path -LiteralPath $executable) { (Get-FileHash -Algorithm SHA256 -LiteralPath $executable).Hash } else { $null }
 if ($ExpectedSha256 -and $binarySha -ne $ExpectedSha256) { throw "Pinned SHA-256 mismatch for $executable (got $binarySha); nothing was launched." }
 $outputPath = Join-Path $evidence "$Scenario-$label-r$Repetition.json"
+$abortedPath = [System.IO.Path]::ChangeExtension($outputPath, 'aborted.json')
+# Only ROQA's idle scenario reads its diagnostics report; a competitor has none.
+$diagnosticsPath = if ($Scenario -eq 'idle' -and !$Competitor) { [System.IO.Path]::ChangeExtension($outputPath, 'diagnostics.json') } else { '' }
 # A second instance of the same executable would be counted as a descendant or make a single-instance build exit.
 $running = @(Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($executable)) -ErrorAction SilentlyContinue)
 if ($running.Count) { if ($DryRun) { Write-Warning "$($running.Count) process(es) with this name are already running." } else { throw "$($running.Count) process(es) with this name are already running; stop them first." } }
 if ($DryRun) {
-    [ordered]@{ DryRun = $true; Scenario = $Scenario; Build = $label; Executable = $executable; BinarySha256 = $binarySha; SampleSeconds = $SampleSeconds; InputGuard = $inputGuard; Output = $outputPath } | ConvertTo-Json
+    [ordered]@{ DryRun = $true; Scenario = $Scenario; Build = $label; Executable = $executable; BinarySha256 = $binarySha; SampleSeconds = $SampleSeconds; InputGuard = $inputGuard; KeepAwake = $true; Diagnostics = $diagnosticsPath; Output = $outputPath; AbortedOutput = $abortedPath } | ConvertTo-Json
     return
 }
 New-Item -ItemType Directory -Force -Path $evidence | Out-Null
@@ -60,6 +65,9 @@ public static uint LastInputTick() {
     return info.Time;
 }
 public static uint IdleMilliseconds() { return unchecked((uint)System.Environment.TickCount - LastInputTick()); }
+[DllImport("kernel32.dll")] static extern uint SetThreadExecutionState(uint flags);
+// ES_CONTINUOUS (0x80000000) with ES_SYSTEM_REQUIRED (1) and ES_DISPLAY_REQUIRED (2) holds until cleared with ES_CONTINUOUS alone; both are per calling thread.
+public static bool KeepAwake(bool hold) { return SetThreadExecutionState(hold ? 0x80000003u : 0x80000000u) != 0; }
 public static bool OnBattery() {
     PowerStatus status;
     if (!GetSystemPowerStatus(out status)) throw new System.ComponentModel.Win32Exception();
@@ -88,9 +96,11 @@ $machine.IdleTimeouts = [ordered]@{
     DisplayOffSeconds = [Convert]::ToUInt32($videoIdle[$videoIdle.Count - $(if ($onBattery) { 1 } else { 2 })].Value, 16)
     ScreenSaverSeconds = $screenSaverSeconds
 }
+# Held for the whole sample and cleared in the final finally; while it is held the display-off and screen-saver timeouts cannot fall inside the run.
+$held = [RoqaIdle.Native]::KeepAwake($true)
 $idleLimitSeconds = ($machine.IdleTimeouts.DisplayOffSeconds, $screenSaverSeconds | Where-Object { $_ -gt 0 } | Measure-Object -Minimum).Minimum
 # shortcut: 30 s covers two WMI reads (about 5 s each when measured); the post-run check below catches a slower machine.
-if ($idleLimitSeconds -and [RoqaIdle.Native]::IdleMilliseconds() / 1000 + 5 + $SampleSeconds + 30 -ge $idleLimitSeconds) {
+if (!$held -and $idleLimitSeconds -and [RoqaIdle.Native]::IdleMilliseconds() / 1000 + 5 + $SampleSeconds + 30 -ge $idleLimitSeconds) {
     throw "STOP: an idle timeout of $idleLimitSeconds s (display off or screen saver) would fall inside the run; shorten -SampleSeconds or start sooner after input."
 }
 # The measured scope is the launched process plus its descendants (WebView2, helpers), found by one Win32_Process read.
@@ -154,6 +164,17 @@ function Measure-SwitchDelta([hashtable]$Start, [hashtable]$End) {
     }
     return @{ Switches = $switches; Exited = @($Start.Keys | Where-Object { !$End.ContainsKey($_) }).Count; Born = @($End.Keys | Where-Object { !$Start.ContainsKey($_) }).Count }
 }
+# The counters of ROQA's last --diagnostics report (written after each catalog scan, so up to one reconcile period old; the age is recorded).
+function Read-Diagnostics {
+    if (!$diagnosticsPath -or !(Test-Path -LiteralPath $diagnosticsPath)) { return $null }
+    try { return @{ Counters = (Get-Content -Raw -LiteralPath $diagnosticsPath | ConvertFrom-Json).counters; AgeSeconds = ((Get-Date) - (Get-Item -LiteralPath $diagnosticsPath).LastWriteTime).TotalSeconds } }
+    catch { return $null }
+}
+function Measure-DiagnosticsDelta($Start, $End) {
+    $delta = [ordered]@{}
+    if ($Start -and $End) { foreach ($name in 'media_wakes', 'media_refreshes', 'paints', 'store_writes') { if ($null -ne $Start.Counters.$name -and $null -ne $End.Counters.$name) { $delta[$name] = $End.Counters.$name - $Start.Counters.$name } } }
+    return $delta
+}
 $inputBeforeLaunch = [RoqaIdle.Native]::LastInputTick()
 function Assert-NoInput([string]$When) { if ($inputGuard -and [RoqaIdle.Native]::LastInputTick() -ne $inputBeforeLaunch) { throw "STOP: user input arrived during $When; nothing was recorded." } }
 $idleSecondsAtLaunch = [RoqaIdle.Native]::IdleMilliseconds() / 1000
@@ -161,7 +182,11 @@ $sampler = [System.Diagnostics.Process]::GetCurrentProcess()
 $launchClock = [System.Diagnostics.Stopwatch]::StartNew()
 $launchTimestamp = [System.Diagnostics.Stopwatch]::GetTimestamp()
 # Hidden is ROQA's own launch mode; a competitor starts with its default window state, whose effect is unverified.
-$measuredHost = if ($Competitor) { Start-Process -FilePath $executable -PassThru } else { Start-Process -FilePath $executable -PassThru -WindowStyle Hidden }
+$launchArguments = @{ FilePath = $executable; PassThru = $true; WindowStyle = 'Hidden' }
+if ($diagnosticsPath) { Remove-Item -LiteralPath $diagnosticsPath -ErrorAction SilentlyContinue; $launchArguments.ArgumentList = @('--diagnostics', ('"' + $diagnosticsPath + '"')) }
+$measuredHost = if ($Competitor) { Start-Process -FilePath $executable -PassThru } else { Start-Process @launchArguments }
+$sampleClock = $null
+$diagnosticsStart = $null
 try {
     $empty = @{ Procs = @{}; Unreadable = 0 }
     if ($isStart) {
@@ -176,6 +201,7 @@ try {
         $switchesStart = Read-ContextSwitches @($treeStart.Procs.Keys)
         $sampleClock = [System.Diagnostics.Stopwatch]::StartNew()
     }
+    $diagnosticsStart = Read-Diagnostics
     $startSamplerCycles = [RoqaIdle.Native]::Cycles($sampler.Handle)
     $settleSeconds = $launchClock.Elapsed.TotalSeconds
     # Polls the sampler (not the build) once a second so user input stops a long run early.
@@ -187,8 +213,9 @@ try {
     $endSamplerCycles = [RoqaIdle.Native]::Cycles($sampler.Handle)
     $sampleClock.Stop()
     $switchesEnd = Read-ContextSwitches @($treeEnd.Procs.Keys)
+    $diagnosticsEnd = Read-Diagnostics
     Assert-NoInput 'the final reads'
-    if ($idleLimitSeconds -and $idleSecondsAtLaunch + $launchClock.Elapsed.TotalSeconds -ge $idleLimitSeconds) { throw "STOP: the $idleLimitSeconds s idle timeout passed during the run; nothing was recorded." }
+    if (!$held -and $idleLimitSeconds -and $idleSecondsAtLaunch + $launchClock.Elapsed.TotalSeconds -ge $idleLimitSeconds) { throw "STOP: the $idleLimitSeconds s idle timeout passed during the run; nothing was recorded." }
     $seconds = $sampleClock.Elapsed.TotalSeconds
     $cycles = Measure-TreeDelta $treeStart $treeEnd 'Cycles'
     $cpuMilliseconds = Measure-TreeDelta $treeStart $treeEnd 'CpuMs'
@@ -200,6 +227,7 @@ try {
     $processCount = [Math]::Max($treeStart.Procs.Count, $treeEnd.Procs.Count)
     $observation = [ordered]@{
         Label = 'Observation only; CpuVerdict is INCONCLUSIVE below the counter floor and, for idle, compares CPU with the proposed 1 ms/s gate; no product-budget or comparison verdict'
+        Status = 'COMPLETE'
         Utc = [DateTime]::UtcNow.ToString('o')
         Scenario = $Scenario
         Build = $label
@@ -207,7 +235,7 @@ try {
         Note = $Note
         Competitor = if ($Competitor) { [ordered]@{ Name = $Competitor; Executable = $executable; PinnedSha256 = $ExpectedSha256.ToUpperInvariant() } } else { $null }
         BinarySha256 = $binarySha
-        Method = "Scope is the launched process plus descendants (one Win32_Process read); $(if ($isStart) { 'counters run from process creation, so every *Start value is 0 by construction' } else { 'five-second settle plus one WMI read (SettleSeconds, about 10 s; M1 used 5 s)' }); $SampleSeconds-second wait; System.Diagnostics.Process counters summed over the tree; QueryProcessCycleTime; GetGuiResources; per-thread WMI context switches read just outside the CPU window; sampler cycles recorded; refuses to run into the display-off or screen-saver timeout; $(if ($inputGuard) { 'stops on any user input (GetLastInputInfo) from launch to the final read' } else { 'user input is expected (churn or media stimulus) and does not stop the run' }); no working-set trimming"
+        Method = "Scope is the launched process plus descendants (one Win32_Process read); $(if ($isStart) { 'counters run from process creation, so every *Start value is 0 by construction' } else { 'five-second settle plus one WMI read (SettleSeconds, about 10 s; M1 used 5 s)' }); $SampleSeconds-second wait; System.Diagnostics.Process counters summed over the tree; QueryProcessCycleTime; GetGuiResources; per-thread WMI context switches read just outside the CPU window; sampler cycles recorded; holds SetThreadExecutionState (display and system required) so no display-off or screen-saver timeout falls inside the run, and refuses to run into one if that call fails; $(if ($inputGuard) { 'stops on any user input (GetLastInputInfo) from launch to the final read' } else { 'user input is expected (churn or media stimulus) and does not stop the run' }); no working-set trimming"
         Machine = $machine
         Complete = $complete
         ProcessesStart = $treeStart.Procs.Count
@@ -241,11 +269,21 @@ try {
         ThreadsEnd = $switchesEnd.Counts.Count
         ThreadsExited = $wake.Exited
         ThreadsBorn = $wake.Born
-        Limits = 'CpuMilliseconds moves in scheduler ticks (15.625 ms by default) per process, so it is coarse at idle. CpuCycles has no tick quantization; ApproxCpuMillisecondsPerSecondFromCycles assumes cycles tick at NominalClockMegahertz (WMI MaxClockSpeed), which is unverified; the QueryThreadCycleTime docs advise against converting cycles to time, so it is approximate; compare builds by CpuCyclesPerSecond. WakeProxyContextSwitches is a wake proxy, not a wake count: it is matched per thread ID, threads that exit between reads lose their in-window switches (so it can understate; see ThreadsExited, and a reused thread ID can hide an exit and understate further), and its window is WakeProxySeconds give or take half the sum of WakeProxyReadSeconds because the snapshot instant inside each WMI read is unknown. SettleSeconds is longer than the M1 five seconds. Group-policy screen-saver and lock timeouts and the system sleep timeout are not read; a screen saver without ScreenSaveTimeOut is treated as never. Two endpoint queries per counter; SamplerCyclesPerSecond covers only the wait loop, not the WMI reads; DWM/GPU/power/shared allocations not attributed; other desktop applications remain running. Complete is false when a descendant exited or could not be read between the reads; its CPU is then lost and the verdict is INCONCLUSIVE.'
+        KeepAwakeHeld = $held
+        Diagnostics = if ($diagnosticsPath) { [ordered]@{ Start = if ($diagnosticsStart) { $diagnosticsStart.Counters } else { $null }; End = if ($diagnosticsEnd) { $diagnosticsEnd.Counters } else { $null }; StartReportAgeSeconds = if ($diagnosticsStart) { $diagnosticsStart.AgeSeconds } else { $null }; EndReportAgeSeconds = if ($diagnosticsEnd) { $diagnosticsEnd.AgeSeconds } else { $null }; Delta = Measure-DiagnosticsDelta $diagnosticsStart $diagnosticsEnd } } else { $null }
+        Limits = 'CpuMilliseconds moves in scheduler ticks (15.625 ms by default) per process, so it is coarse at idle. CpuCycles has no tick quantization; ApproxCpuMillisecondsPerSecondFromCycles assumes cycles tick at NominalClockMegahertz (WMI MaxClockSpeed), which is unverified; the QueryThreadCycleTime docs advise against converting cycles to time, so it is approximate; compare builds by CpuCyclesPerSecond. WakeProxyContextSwitches is a wake proxy, not a wake count: it is matched per thread ID, threads that exit between reads lose their in-window switches (so it can understate; see ThreadsExited, and a reused thread ID can hide an exit and understate further), and its window is WakeProxySeconds give or take half the sum of WakeProxyReadSeconds because the snapshot instant inside each WMI read is unknown. SettleSeconds is longer than the M1 five seconds. Group-policy screen-saver and lock timeouts and the system sleep timeout are not read; a screen saver without ScreenSaveTimeOut is treated as never. Two endpoint queries per counter; SamplerCyclesPerSecond covers only the wait loop, not the WMI reads; DWM/GPU/power/shared allocations not attributed; other desktop applications remain running. Diagnostics counters are those of the last ROQA report, up to one catalog reconcile period older than the read (see the report ages); null means no report was readable, never zero. A held execution state does not stop group-policy lock or sleep timeouts. Complete is false when a descendant exited or could not be read between the reads; its CPU is then lost and the verdict is INCONCLUSIVE.'
     }
     $observation | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $outputPath
 }
+catch {
+    # Keep the partial evidence of an abort (user input, idle timeout, early exit) and still fail the run.
+    $failure = $_
+    [ordered]@{ Status = 'ABORTED'; Reason = $failure.Exception.Message; Utc = [DateTime]::UtcNow.ToString('o'); Scenario = $Scenario; Build = $label; Repetition = $Repetition; BinarySha256 = $binarySha; ElapsedSeconds = $launchClock.Elapsed.TotalSeconds; SampleElapsedSeconds = if ($sampleClock) { $sampleClock.Elapsed.TotalSeconds } else { $null }; SampleSeconds = $SampleSeconds; KeepAwakeHeld = $held; DiagnosticsStart = if ($diagnosticsStart) { $diagnosticsStart.Counters } else { $null } } | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 $abortedPath
+    Write-Warning "Aborted after $([int]$launchClock.Elapsed.TotalSeconds) s; partial record in $abortedPath."
+    throw
+}
 finally {
+    [void][RoqaIdle.Native]::KeepAwake($false)
     if (!$measuredHost.HasExited) {
         if ($Competitor) {
             # A competitor has no known --quit: ask its main window to close, then end only the owned process tree.

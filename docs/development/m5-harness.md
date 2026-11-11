@@ -23,6 +23,9 @@ scripts/compare-report.ps1 -RoqaRuns artifacts/m5-baseline/idle-roqa-r*.json -Co
 ```
 
 Output file: `<EvidenceDirectory>/<scenario>-<build>-r<N>.json` (build is `roqa` or the competitor name). The old fixed `idle.json` name is gone.
+Sleep and display: while sampling the harness holds `SetThreadExecutionState(ES_CONTINUOUS|ES_DISPLAY_REQUIRED|ES_SYSTEM_REQUIRED)` and clears it in `finally`, so `-SampleSeconds` may exceed the display-off or screen-saver timeout (it never changes power settings; the old refusal applies only if the call fails). Group-policy lock and sleep timeouts are not covered.
+Idle diagnostics: the `idle` scenario for ROQA passes `--diagnostics <build>.diagnostics.json` and records the counters at the start and end plus `Delta` (`paints`, `media_wakes`, `media_refreshes`, `store_writes`) in `Diagnostics`; the report is as old as the last catalog scan (ages recorded), and `null` means unreadable, never zero. `paints` counts committed canvas draws (notch, shadow, meter slot, dock).
+Abort: user input (or any early stop) writes `<scenario>-<build>-r<N>.aborted.json` (`Status` `ABORTED`, reason, elapsed seconds) and still fails the run.
 
 ## Scenarios
 

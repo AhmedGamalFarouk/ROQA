@@ -29,3 +29,8 @@ foreach ($command in @(@{ Name = 'checks'; Script = 'check.ps1'; Arguments = '' 
         Write-Host "$($command.Name): PASS (exit 0); stdout/stderr captured."
     } finally { $child.Dispose() }
 }
+# Size ratchet: the release binary may not exceed the tracked baseline (scripts/size-baseline.txt) by more than 2%.
+$baseline = [int](Get-Content -LiteralPath (Join-Path $PSScriptRoot 'size-baseline.txt') -TotalCount 1)
+$size = (Get-Item -LiteralPath (Join-Path $projectRoot 'target/release/roqa.exe')).Length
+if ($size -gt $baseline * 1.02) { throw "Release binary is $size B, over the $baseline B baseline plus 2%. If the growth is intended, write $size to scripts/size-baseline.txt in the same commit." }
+Write-Host "size: PASS ($size B, baseline $baseline B + 2%)."

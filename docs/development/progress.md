@@ -903,3 +903,12 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Suites:** verify PASS (185 tests); catalog-smoke PASS 67 checks; packaged-hung PASS 16 checks; picker-smoke INTERFERENCE x2; smoke.ps1 NOT RUN (media session active).
 - **Measured:** start-warm 20.8 MiB private, 488 handles, 40 GDI, 25 USER, 20 threads (30 s, includes startup). Idle 15 min aborted by user input twice.
 - **NOT RUN:** idle, cold start, churn, media, S9 idle diagnostics (no paint counter), Nectar/Nusa comparison; every gate INCONCLUSIVE or NOT RUN. Reviews paused.
+
+## Refresh storm 1: media refresh counter, harness, size ratchet (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `perf/refresh-storm`; [packet](refresh-storm-1.md). No native/GUI run.
+- **Root cause:** `Media::refresh` counted every host call (`media.rs:764`; called per pass at `host.rs:2222`), so 21,955 was host passes (meter 67 ms, frames, messages), not media work. Now counts only a wake or grace expiry; test: 1000 idle passes give 0 refreshes.
+- **Harness:** `measure-idle.ps1` holds keep-awake while sampling, passes `--diagnostics` and records start/end/delta, writes `*.aborted.json` on abort; new `paints` counter in the report.
+- **Ratchet:** `verify.ps1` fails above `scripts/size-baseline.txt` (803840) + 2%. Now 804,864 B, SHA `9098A4F446E85559B6E0175A6609B4F8D735E574A5F73191A5F40A4D586EDD0D`.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 186 tests, locked release); script parse/compile/`-DryRun` PASS.
+- **NOT RUN:** ROQA launch, idle sample, refresh/min re-measure; reviews paused.

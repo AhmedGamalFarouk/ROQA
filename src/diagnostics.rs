@@ -32,9 +32,11 @@ const NOT_WIRED: u64 = u64::MAX;
 
 /// Store writes; `NOT_WIRED` (reported as unavailable) until the first `Store::flush` calls `note_store_write`.
 static STORE_WRITES: AtomicU64 = AtomicU64::new(NOT_WIRED);
-/// Calls that found media work, and every host call of `Media::refresh`.
+/// Media wakes handled, and `Media::refresh` calls that did work (a wake or a grace expiry).
 pub static MEDIA_WAKES: AtomicU64 = AtomicU64::new(0);
 pub static MEDIA_REFRESHES: AtomicU64 = AtomicU64::new(0);
+/// Committed canvas draws: every notch, notch-shadow, meter-slot and dock paint (a notch paint with a shadow counts 2).
+pub static PAINTS: AtomicU64 = AtomicU64::new(0);
 /// Cached icons, published by the icon service.
 pub static ICON_CACHE: AtomicU64 = AtomicU64::new(0);
 
@@ -83,6 +85,7 @@ pub struct Counters {
     pub store_writes: Option<u64>,
     pub media_wakes: u64,
     pub media_refreshes: u64,
+    pub paints: u64,
     pub icon_cache: u64,
     pub icon_cache_cap: u64,
     pub handles: Option<u64>,
@@ -118,6 +121,7 @@ impl Counters {
             store_writes: (store != NOT_WIRED).then_some(store),
             media_wakes: MEDIA_WAKES.load(Ordering::Relaxed),
             media_refreshes: MEDIA_REFRESHES.load(Ordering::Relaxed),
+            paints: PAINTS.load(Ordering::Relaxed),
             icon_cache: ICON_CACHE.load(Ordering::Relaxed),
             icon_cache_cap: crate::icons::CACHE_LIMIT as u64,
             handles,
@@ -191,7 +195,7 @@ pub fn report(catalog: &CatalogView, c: &Counters, stopped: bool) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"generation\":{},\"complete\":{},\"groups\":{},\"full_scans\":{},\"delta_batches\":{},\"inspected\":{},\"scans\":{},\"discarded\":{},\"invalidations\":{},\"reconciliations\":{},\"hooks_live\":{},\"stopped\":{},\"windows\":[{}],\"counters\":{{\"store_writes\":{},\"media_wakes\":{},\"media_refreshes\":{},\"icon_cache\":{},\"handles\":{},\"gdi\":{},\"user\":{},\"private_bytes\":{},\"monitors\":{}}},\"budgets\":[{}]}}\n",
+        "{{\"generation\":{},\"complete\":{},\"groups\":{},\"full_scans\":{},\"delta_batches\":{},\"inspected\":{},\"scans\":{},\"discarded\":{},\"invalidations\":{},\"reconciliations\":{},\"hooks_live\":{},\"stopped\":{},\"windows\":[{}],\"counters\":{{\"store_writes\":{},\"media_wakes\":{},\"media_refreshes\":{},\"paints\":{},\"icon_cache\":{},\"handles\":{},\"gdi\":{},\"user\":{},\"private_bytes\":{},\"monitors\":{}}},\"budgets\":[{}]}}\n",
         model.generation,
         model.incomplete.is_none(),
         model.groups().len(),
@@ -208,6 +212,7 @@ pub fn report(catalog: &CatalogView, c: &Counters, stopped: bool) -> String {
         number(c.store_writes),
         c.media_wakes,
         c.media_refreshes,
+        c.paints,
         c.icon_cache,
         number(c.handles),
         number(c.gdi),
@@ -277,6 +282,7 @@ mod tests {
             store_writes: Some(2),
             media_wakes: 5,
             media_refreshes: 9,
+            paints: 4,
             icon_cache: 3,
             icon_cache_cap: 256,
             handles: Some(120),
@@ -335,6 +341,7 @@ mod tests {
             "store_writes",
             "media_wakes",
             "media_refreshes",
+            "paints",
             "icon_cache",
             "handles",
             "gdi",
@@ -365,7 +372,7 @@ mod tests {
     fn counters_format_as_integers_or_null() {
         let model = model();
         let output = report(&view(&model), &counters(), false);
-        assert!(output.contains("\"counters\":{\"store_writes\":2,\"media_wakes\":5,\"media_refreshes\":9,\"icon_cache\":3,\"handles\":120,\"gdi\":30,\"user\":null,\"private_bytes\":73400320,\"monitors\":1}"));
+        assert!(output.contains("\"counters\":{\"store_writes\":2,\"media_wakes\":5,\"media_refreshes\":9,\"paints\":4,\"icon_cache\":3,\"handles\":120,\"gdi\":30,\"user\":null,\"private_bytes\":73400320,\"monitors\":1}"));
         let unwired = Counters {
             store_writes: None,
             ..counters()

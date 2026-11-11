@@ -607,6 +607,8 @@ pub struct Media {
     wake: Arc<Wake>,
     /// Media wakes handled, for diagnostics.
     wakes: u32,
+    /// Refreshes that did work (a wake or a grace expiry), not host calls.
+    refreshes: u32,
 }
 impl Media {
     /// Idle until `start`; the calling thread is the host thread that `refresh` runs on.
@@ -634,6 +636,7 @@ impl Media {
                 caller: AtomicU32::new(0),
             }),
             wakes: 0,
+            refreshes: 0,
         }
     }
     /// Requests the session manager; the caller must be the WinRT-initialized host STA. Never
@@ -762,7 +765,6 @@ impl Media {
     /// atomic swap, plus a clock check only while a grace deadline exists; the caller's `cover`
     /// is a scan of a few surfaces.
     pub fn refresh(&mut self, cover: u32) -> bool {
-        crate::diagnostics::MEDIA_REFRESHES.fetch_add(1, Ordering::Relaxed);
         let expired = self
             .deadline()
             .is_some_and(|_| self.state.expire(Instant::now()));
@@ -771,11 +773,15 @@ impl Media {
             self.wake.dirty.fetch_or(PROPERTIES, Ordering::Relaxed);
         }
         let mut dirty = self.wake.dirty.swap(0, Ordering::Acquire);
-        if dirty != 0 || expired {
-            self.uia_revision = self.uia_revision.wrapping_add(1);
+        // The host calls this every pass (meter, frames, any message): only a wake or an expiry is a refresh.
+        if dirty == 0 && !expired {
+            return false;
         }
+        self.refreshes = self.refreshes.wrapping_add(1);
+        crate::diagnostics::MEDIA_REFRESHES.fetch_add(1, Ordering::Relaxed);
+        self.uia_revision = self.uia_revision.wrapping_add(1);
         if dirty == 0 {
-            return expired;
+            return true;
         }
         let started = Instant::now();
         self.wakes = self.wakes.wrapping_add(1);
@@ -1816,6 +1822,25 @@ mod tests {
         media.refresh(72);
         assert!(!media.art_skipped);
         assert!(!media.pending());
+    }
+
+    #[test]
+    fn host_passes_without_a_media_event_are_not_refreshes() {
+        let mut media = Media::create();
+        for _ in 0..1000 {
+            assert!(!media.refresh(72));
+        }
+        assert_eq!(
+            (media.refreshes, media.wakes, media.uia_revision()),
+            (0, 0, 0)
+        );
+        // A wake is one refresh, and the next idle passes add none.
+        media.reconnect();
+        media.refresh(72);
+        for _ in 0..1000 {
+            media.refresh(72);
+        }
+        assert_eq!((media.refreshes, media.wakes), (1, 1));
     }
 
     fn stream() -> IRandomAccessStream {

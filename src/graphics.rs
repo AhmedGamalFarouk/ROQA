@@ -416,8 +416,11 @@ impl Canvas {
             let ended = self.surface.EndDraw();
             drawing?;
             ended?;
-            self.graphics.composition.Commit()
+            self.graphics.composition.Commit()?;
         }
+        // Every notch, shadow, meter-slot and dock paint ends here, so this is the one paint count.
+        crate::diagnostics::PAINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 }
 impl Drop for Canvas {
