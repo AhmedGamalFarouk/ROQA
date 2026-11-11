@@ -172,6 +172,8 @@ pub struct NotchScene<'a> {
 pub struct ShelfSlot<'a> {
     pub icon: Option<&'a IconPixels>,
     pub missing: bool,
+    pub more: bool,
+    pub add: bool,
 }
 
 /// Dock material (docs/design/roqa-visual-spec.md, colours from the theme): bar, ink-alpha hover fill, whole-pixel icon lift.
@@ -325,7 +327,8 @@ impl Canvas {
                     &black,
                 );
                 if let Some((bars, alpha)) = meter_rects(1.0, dpi, bars, &body) {
-                    let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, alpha), None)?;
+                    let brush = context
+                        .CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(alpha)), None)?;
                     for bar in &bars {
                         context.FillRoundedRectangle(bar, &brush);
                     }
@@ -353,7 +356,7 @@ impl Canvas {
                 let hairline: ID2D1Brush = match p.rim {
                     Some(rim) => rim_brush(context, p.ink, rim, (rect.top, rect.bottom))?.into(),
                     None => context
-                        .CreateSolidColorBrush(&with_alpha(p.ink, 0.10), None)?
+                        .CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(0.10)), None)?
                         .into(),
                 };
                 context.DrawRoundedRectangle(&rounded(edge, radius - 0.5), &hairline, 1.0, None);
@@ -587,7 +590,7 @@ fn notch_text(
         scene.time,
         &clock,
         row(15.0 + 14.0 * open, 24.0),
-        with_alpha(p.ink, 1.0),
+        with_alpha(p.ink, p.ink_alpha(1.0)),
     )?;
     let date = motion::reveal(scene.progress);
     if date <= 0.0 {
@@ -605,7 +608,7 @@ fn notch_text(
         scene.date,
         &font,
         row(58.0 - 6.0 * (1.0 - date), 10.0),
-        with_alpha(p.ink, 0.60 * date),
+        with_alpha(p.ink, p.ink_alpha(0.60 * date)),
     )?;
     // PROVISIONAL: why there is no media notch, under the date, 11 DIP at the date's opacity.
     match status {
@@ -617,7 +620,7 @@ fn notch_text(
                 ..font
             },
             row(72.0, 6.0),
-            with_alpha(p.ink, 0.60 * date),
+            with_alpha(p.ink, p.ink_alpha(0.60 * date)),
         ),
         None => Ok(()),
     }
@@ -653,7 +656,13 @@ fn timer_text(
             right: left + slot.width as f32,
             bottom: top + slot.height as f32,
         };
-        draw_text(context, text, &font, rect, with_alpha(p.ink, 0.85 * alpha))
+        draw_text(
+            context,
+            text,
+            &font,
+            rect,
+            with_alpha(p.ink, p.ink_alpha(0.85 * alpha)),
+        )
     };
     if reveal > 0.0 {
         let slot = layout::timer_panel(media, scene.dpi);
@@ -702,6 +711,69 @@ fn shelf_row(
         );
         let alpha = reveal * if slot.missing { DISABLED } else { 1.0 };
         let shape = rounded(square, 3.0 * scale);
+        if scene.focus == Some(crate::notch_uia::SHELF_BASE + index) {
+            // SAFETY: live draw context and local brush.
+            unsafe {
+                let brush =
+                    context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(reveal)), None)?;
+                context.DrawRoundedRectangle(
+                    &rounded(
+                        pixel_square(
+                            square.left - 3.0 * scale,
+                            square.top - 3.0 * scale,
+                            side + 6.0 * scale,
+                        ),
+                        4.0 * scale,
+                    ),
+                    &brush,
+                    scale,
+                    None,
+                );
+            }
+        }
+        if slot.add {
+            // SAFETY: scoped brush and live context, a plus marks the empty shelf's add action.
+            unsafe {
+                let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, reveal), None)?;
+                context.FillRectangle(
+                    &D2D_RECT_F {
+                        left: square.left + 7.0 * scale,
+                        top: square.top + 2.0 * scale,
+                        right: square.left + 9.0 * scale,
+                        bottom: square.top + 14.0 * scale,
+                    },
+                    &brush,
+                );
+                context.FillRectangle(
+                    &D2D_RECT_F {
+                        left: square.left + 2.0 * scale,
+                        top: square.top + 7.0 * scale,
+                        right: square.left + 14.0 * scale,
+                        bottom: square.top + 9.0 * scale,
+                    },
+                    &brush,
+                );
+            }
+            continue;
+        }
+        if slot.more {
+            // SAFETY: scoped brush and live draw context; three dots distinguish paging from a file.
+            unsafe {
+                let brush =
+                    context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(reveal)), None)?;
+                for dot in 0..3 {
+                    context.FillRectangle(
+                        &pixel_square(
+                            square.left + (2.0 + 5.0 * dot as f32) * scale,
+                            square.top + 7.0 * scale,
+                            2.0 * scale,
+                        ),
+                        &brush,
+                    );
+                }
+            }
+            continue;
+        }
         match slot.icon {
             Some(icon) => {
                 let bitmap = upload(context, icon)?;
@@ -710,8 +782,10 @@ fn shelf_row(
             None => {
                 // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw.
                 unsafe {
-                    let brush = context
-                        .CreateSolidColorBrush(&with_alpha(p.ink, COVER_FILL * alpha), None)?;
+                    let brush = context.CreateSolidColorBrush(
+                        &tint(p.ink_dim(slot.missing, COVER_FILL * alpha)),
+                        None,
+                    )?;
                     context.FillRoundedRectangle(&shape, &brush);
                 }
             }
@@ -770,6 +844,8 @@ struct VolumeBar {
     track_alpha: f32,
     fill: D2D1_ROUNDED_RECT,
     fill_alpha: f32,
+    /// Muted or without an endpoint: high contrast draws the fill in the system grey-text colour.
+    dim: bool,
 }
 /// The visualizer's bars: secondary, decorative content, white 60 % like the artist.
 const METER_FILL: f32 = 0.60;
@@ -789,6 +865,8 @@ struct Chip {
     shape: Glyph,
     filled: bool,
     alpha: f32,
+    /// The player does not accept it now: high contrast draws it in the system grey-text colour.
+    disabled: bool,
 }
 struct Ring {
     shape: D2D1_ROUNDED_RECT,
@@ -1106,6 +1184,7 @@ fn volume_bar(scene: &NotchScene, body: &D2D_RECT_F) -> Option<VolumeBar> {
                 Some(_) => MUTED_FILL,
                 None => DISABLED,
             },
+        dim: scene.volume.is_none_or(|level| level.muted),
     })
 }
 
@@ -1153,6 +1232,7 @@ fn media_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip
                 shape,
                 filled,
                 alpha: reveal * if enabled[index] { 1.0 } else { DISABLED },
+                disabled: !enabled[index],
             }
         })
         .collect()
@@ -1197,10 +1277,15 @@ fn media_text(
     } else {
         // SAFETY: context is live between surface BeginDraw/EndDraw; brushes are scoped to this draw.
         unsafe {
-            let slot = context.CreateSolidColorBrush(&with_alpha(p.ink, COVER_FILL), None)?;
+            let slot = context.CreateSolidColorBrush(&tint(p.track(COVER_FILL)), None)?;
             context.FillRoundedRectangle(&plan.cover, &slot);
         }
-        fill_glyph(context, plan.glyph, state, with_alpha(p.ink, plan.dim))?;
+        fill_glyph(
+            context,
+            plan.glyph,
+            state,
+            with_alpha(p.ink, p.ink_alpha(plan.dim)),
+        )?;
     }
     if let Some(badge) = &plan.badge {
         // SAFETY: as above.
@@ -1208,17 +1293,16 @@ fn media_text(
             let circle = context.CreateSolidColorBrush(&with_alpha(p.on_ink, badge.alpha), None)?;
             context.FillRoundedRectangle(&badge.circle, &circle);
         }
-        let color = with_alpha(p.ink, plan.dim * badge.alpha);
+        let color = with_alpha(p.ink, p.ink_alpha(plan.dim * badge.alpha));
         fill_glyph(context, badge.glyph, state, color)?;
     }
     if let Some(([track, fill], alpha)) = &plan.bar {
         // SAFETY: as above.
         unsafe {
-            let brush =
-                context.CreateSolidColorBrush(&with_alpha(p.ink, COVER_FILL * alpha), None)?;
-            context.FillRoundedRectangle(track, &brush);
+            draw_track(context, p, track, COVER_FILL * alpha)?;
             if fill.rect.right > fill.rect.left {
-                let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, *alpha), None)?;
+                let brush =
+                    context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(*alpha)), None)?;
                 context.FillRoundedRectangle(fill, &brush);
             }
         }
@@ -1229,11 +1313,11 @@ fn media_text(
             &line.text,
             &line.font,
             line.rect,
-            with_alpha(p.ink, line.alpha),
+            with_alpha(p.ink, p.ink_alpha(line.alpha)),
         )?;
     }
     for chip in &plan.chips {
-        let color = with_alpha(p.ink, chip.alpha);
+        let color = tint(p.ink_dim(chip.disabled, chip.alpha));
         if chip.filled {
             let radius = (chip.rect.bottom - chip.rect.top) / 2.0;
             // SAFETY: as above.
@@ -1250,16 +1334,17 @@ fn media_text(
     if let Some(bar) = &plan.volume {
         // SAFETY: as above.
         unsafe {
-            let track = context.CreateSolidColorBrush(&with_alpha(p.ink, bar.track_alpha), None)?;
-            context.FillRoundedRectangle(&bar.track, &track);
-            let fill = context.CreateSolidColorBrush(&with_alpha(p.ink, bar.fill_alpha), None)?;
+            draw_track(context, p, &bar.track, bar.track_alpha)?;
+            let fill =
+                context.CreateSolidColorBrush(&tint(p.ink_dim(bar.dim, bar.fill_alpha)), None)?;
             context.FillRoundedRectangle(&bar.fill, &fill);
         }
     }
     if let Some((bars, alpha)) = &plan.meter {
         // SAFETY: as above.
         unsafe {
-            let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, *alpha), None)?;
+            let brush =
+                context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(*alpha)), None)?;
             for bar in bars {
                 context.FillRoundedRectangle(bar, &brush);
             }
@@ -1268,7 +1353,8 @@ fn media_text(
     if let Some(ring) = &plan.ring {
         // SAFETY: as above.
         unsafe {
-            let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, ring.alpha), None)?;
+            let brush =
+                context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(ring.alpha)), None)?;
             context.DrawRoundedRectangle(&ring.shape, &brush, ring.stroke, None);
         }
     }
@@ -1576,8 +1662,7 @@ fn draw_slot(
                 right: center_x + half,
                 bottom: center_y + half,
             };
-            let brush =
-                context.CreateSolidColorBrush(&with_alpha(p.ink, 0.12 * slot.hover), None)?;
+            let brush = context.CreateSolidColorBrush(&tint(p.track(0.12 * slot.hover)), None)?;
             context.FillRoundedRectangle(&rounded(highlight, px(12)), &brush);
         }
         let glyph = context.CreateSolidColorBrush(&with_alpha(p.glyph, 1.0), None)?;
@@ -1619,7 +1704,8 @@ fn draw_slot(
                 right: center_x + half,
                 bottom,
             };
-            let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, 0.92), None)?;
+            let brush =
+                context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(0.92)), None)?;
             context.FillRoundedRectangle(&rounded(pill, px(3) / 2.0), &brush);
         }
     }
@@ -1663,6 +1749,30 @@ fn rim_brush(
     }
 }
 
+/// A bar's track: a faint fill, the system track colour in high contrast, or a 1 px ink outline when
+/// that colour would equal the dimmed fill's.
+fn draw_track(
+    context: &ID2D1DeviceContext,
+    p: &Palette,
+    track: &D2D1_ROUNDED_RECT,
+    alpha: f32,
+) -> Result<()> {
+    // SAFETY: live draw context between BeginDraw/EndDraw; the brush is scoped to this call.
+    unsafe {
+        if p.track_outline() {
+            let brush =
+                context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(alpha)), None)?;
+            context.DrawRoundedRectangle(track, &brush, 1.0, None);
+        } else {
+            let brush = context.CreateSolidColorBrush(&tint(p.track(alpha)), None)?;
+            context.FillRoundedRectangle(track, &brush);
+        }
+    }
+    Ok(())
+}
+fn tint(((red, green, blue), alpha): ((u8, u8, u8), f32)) -> D2D1_COLOR_F {
+    rgba(red, green, blue, alpha)
+}
 fn with_alpha((red, green, blue): (u8, u8, u8), alpha: f32) -> D2D1_COLOR_F {
     rgba(red, green, blue, alpha)
 }

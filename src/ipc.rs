@@ -1,8 +1,8 @@
 use std::{mem::size_of, ptr};
 use windows::Win32::{
     Foundation::{
-        CloseHandle, E_INVALIDARG, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, GetLastError,
-        HANDLE, HLOCAL, LocalFree,
+        CloseHandle, E_ACCESSDENIED, E_INVALIDARG, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER,
+        GetLastError, HANDLE, HLOCAL, LocalFree,
     },
     Security::{
         Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_QUERY, TOKEN_USER,
@@ -14,7 +14,7 @@ use windows::Win32::{
     },
     UI::WindowsAndMessaging::{AllowSetForegroundWindow, FindWindowW, GetWindowThreadProcessId},
 };
-use windows::core::{Error, PCWSTR, PWSTR, Result};
+use windows::core::{Error, HRESULT, PCWSTR, PWSTR, Result};
 
 pub struct OwnedHandle(pub HANDLE);
 impl Drop for OwnedHandle {
@@ -103,11 +103,19 @@ impl Controls {
     pub fn create() -> Result<Self> {
         let name = object_name("instance")?;
         // SAFETY: default token DACL restricts access; Local namespace scopes the session.
-        let instance = unsafe { OwnedHandle(CreateMutexW(None, false, PCWSTR(name.as_ptr()))?) };
+        let created = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) };
+        // An instance at another integrity level denies access to its mutex: still "already running".
+        if created.as_ref().is_err_and(|e| e.code() == E_ACCESSDENIED) {
+            return Err(Error::new(
+                HRESULT(crate::error_log::ALREADY_RUNNING),
+                "ROQA is already running in this user session.",
+            ));
+        }
+        let instance = OwnedHandle(created?);
         // SAFETY: checked immediately after CreateMutexW, before any unrelated Win32 call.
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             return Err(Error::new(
-                E_INVALIDARG,
+                HRESULT(crate::error_log::ALREADY_RUNNING),
                 "ROQA is already running in this user session.",
             ));
         }

@@ -53,7 +53,9 @@ use windows::core::{Error, Result, s, w};
 #[derive(PartialEq, Eq)]
 pub enum Probe {
     None,
+    #[cfg(debug_assertions)]
     Initialization,
+    #[cfg(debug_assertions)]
     Callback,
     /// Debug builds only: one synthetic device-removed failure right after startup.
     #[cfg(debug_assertions)]
@@ -163,8 +165,12 @@ struct Surface {
 impl Drop for Surface {
     fn drop(&mut self) {
         self.release_focus();
-        if let Role::Notch { uia, .. } = &self.role {
+        if let Role::Notch {
+            accessible, uia, ..
+        } = &mut self.role
+        {
             shelf_os::revoke(self.window.0);
+            accessible.disconnect();
             notch_uia::invalidate(uia);
         }
     }
@@ -373,27 +379,41 @@ impl Surface {
             && let Ok(mut state) = uia.lock()
         {
             state.dpi = self.dpi;
-            state.timer = timer.map_or_else(String::new, |view| view.name.clone());
+            let timer_name = timer.map_or("", |view| view.name.as_str());
+            if state.timer != timer_name {
+                state.timer.clear();
+                state.timer.push_str(timer_name);
+            }
             state.version = uia_version(media, &shelf.shelf);
-            state.shelf = (0..shelf.shelf.visible().len())
-                .filter_map(|index| shelf.shelf.label(index))
-                .collect();
-            state.controls = media
-                .view()
-                .shown()
-                .map(|track| {
-                    let mut controls = notch_uia::controls(track);
-                    controls.push(notch_uia::mute(audio.level()));
-                    controls
-                })
-                .unwrap_or_default();
-            state.status = media.view().status();
+            if state.published_shelf != Some(shelf.shelf.revision()) {
+                state.published_shelf = Some(shelf.shelf.revision());
+                state.shelf = (0..shelf.shelf.slot_count())
+                    .filter_map(|index| shelf.shelf.slot_label(index))
+                    .collect();
+            }
+            let media_stamp = (media.uia_revision(), audio.level());
+            if state.published_media != Some(media_stamp) {
+                state.published_media = Some(media_stamp);
+                state.controls = media
+                    .view()
+                    .shown()
+                    .map(|track| {
+                        let mut controls = notch_uia::controls(track);
+                        controls.push(notch_uia::mute(audio.level()));
+                        controls
+                    })
+                    .unwrap_or_default();
+                state.status = media.view().status();
+            }
             state.focus = focus.as_ref().map(|focus| focus.control);
             state.open = self.motion.target() >= 1.0;
-            state.position = self
-                .played
-                .map(|played| played.times().join(" of "))
-                .unwrap_or_default();
+            if state.published_position != self.played {
+                state.published_position = self.played;
+                state.position = self
+                    .played
+                    .map(|played| played.times().join(" of "))
+                    .unwrap_or_default();
+            }
         }
     }
     /// Draws one frame, publishing it to UI Automation first.
@@ -438,7 +458,7 @@ impl Surface {
             self.window.set_notch_region(&rows)?;
             *area = rows;
         }
-        let slots: Vec<ShelfSlot> = shelf
+        let mut slots: Vec<ShelfSlot> = shelf
             .shelf
             .visible()
             .iter()
@@ -446,8 +466,18 @@ impl Surface {
             .map(|(index, entry)| ShelfSlot {
                 icon: shelf.icons.get(index).and_then(|icon| icon.as_deref()),
                 missing: entry.check == Check::Missing,
+                more: false,
+                add: false,
             })
             .collect();
+        if shelf.shelf.overflow() || shelf.shelf.is_empty() {
+            slots.push(ShelfSlot {
+                icon: None,
+                missing: false,
+                more: shelf.shelf.overflow(),
+                add: shelf.shelf.is_empty(),
+            });
+        }
         let scene = NotchScene {
             time,
             date,
@@ -691,7 +721,7 @@ enum Refocus {
     Move(usize),
     Release,
 }
-fn refocus(enabled: [bool; 4], control: usize, replaced: bool) -> Refocus {
+fn refocus<const N: usize>(enabled: [bool; N], control: usize, replaced: bool) -> Refocus {
     if enabled.get(control) == Some(&true) {
         return if replaced {
             Refocus::Announce
@@ -865,7 +895,10 @@ struct Desktop {
     rebuild: Rebuild,
     picker: Option<Picker>,
     /// Open only while the user has it up; created on demand, destroyed on close, so it costs nothing closed.
+    palette: Palette,
+    palette_dirty: bool,
     settings_window: Option<SettingsWindow>,
+    file_picker: shelf_os::FilePicker,
     /// What the user chose: loaded once, persisted through `store` on change, applied live by `apply_settings`.
     settings: Settings,
     dock_items: Vec<DockItem>,
@@ -911,7 +944,7 @@ struct Desktop {
     timer_shown: String,
 }
 impl Desktop {
-    fn create(probe: &Probe) -> Result<Self> {
+    fn create(_probe: &Probe) -> Result<Self> {
         let monitors = topology::settle(native_window::monitors()?)
             .ok_or_else(|| Error::new(E_FAIL, "No usable display monitor."))?;
         let text = TextSettings::create()?;
@@ -945,7 +978,10 @@ impl Desktop {
             graphics: Graphics::create()?,
             rebuild: Rebuild::new(Instant::now()),
             picker: None,
+            palette: crate::theme::system_palette(settings.theme),
+            palette_dirty: false,
             settings_window: None,
+            file_picker: Default::default(),
             settings,
             icons: IconService::create()?,
             dock_items: Vec::new(),
@@ -979,7 +1015,8 @@ impl Desktop {
         if desktop.settings.notch {
             desktop.show(SurfaceKind::Notch)?;
         }
-        if *probe == Probe::Initialization {
+        #[cfg(debug_assertions)]
+        if *_probe == Probe::Initialization {
             return Err(Error::new(
                 E_FAIL,
                 "Injected failure after first composed window.",
@@ -1029,7 +1066,7 @@ impl Desktop {
             dpi,
             self.dock_slots(),
             &self.drops,
-            self.settings.theme.palette(),
+            self.palette,
         )?;
         if kind == SurfaceKind::Notch {
             // Advances every existing notch first, so all monitors show the same minute.
@@ -1267,7 +1304,21 @@ impl Desktop {
             &devices,
             self.text_factor,
         )?);
+        self.sync_settings_pins(0);
         Ok(())
+    }
+    fn sync_settings_pins(&self, selected: usize) {
+        if let Some(window) = &self.settings_window {
+            window.set_pins(
+                &self
+                    .pins
+                    .items()
+                    .iter()
+                    .map(crate::pins::display_name)
+                    .collect::<Vec<_>>(),
+                selected,
+            );
+        }
     }
     /// Takes what the settings window produced in its last message: a change to apply live and a timer to
     /// start. The window is told how the timer went.
@@ -1275,7 +1326,23 @@ impl Desktop {
         let Some(window) = &mut self.settings_window else {
             return Ok(());
         };
-        let (change, start) = (window.take_change(), window.take_start());
+        let (change, start, movement) = (
+            window.take_change(),
+            window.take_start(),
+            window.take_move(),
+        );
+        if let Some((from, later)) = movement {
+            let to = if later {
+                from.saturating_add(1)
+            } else {
+                from.saturating_sub(1)
+            };
+            // Select the destination first: `change_pins` refreshes the combo and keeps that row.
+            if let Some(window) = &self.settings_window {
+                window.select_pin(to);
+            }
+            self.change_pins(|pins| pins.move_to(from, to));
+        }
         if let Some(next) = change {
             self.apply_settings(next, catalog)?;
         }
@@ -1308,6 +1375,7 @@ impl Desktop {
         self.surfaces
             .retain(|s| !destroy.contains(&(s.kind(), s.monitor.clone())));
         if restyle {
+            self.palette = crate::theme::system_palette(self.settings.theme);
             // Colours are fixed when a surface is created, so a new theme rebuilds the survivors (as a text-scale
             // change does); the diff's creations below then find nothing left to skip and place themselves.
             self.surfaces.clear();
@@ -1525,6 +1593,12 @@ impl Desktop {
             edit,
         ) {
             self.dock_generation = None;
+            // Every pin change (dock click, drag, settings move) refreshes the list so a later Move is not stale.
+            let selected = self
+                .settings_window
+                .as_ref()
+                .map_or(0, SettingsWindow::pin_selection);
+            self.sync_settings_pins(selected);
         }
     }
     /// Left button released on a dock. Returns true when it ended a reorder drag (so it is not a click):
@@ -1598,6 +1672,12 @@ impl Desktop {
             self.request_notches(Repaint::Full, |s| s.expanded() && !s.live);
         }
     }
+    /// Opens the picker; a finished one whose completion wake was lost is collected instead of stranding it.
+    fn start_file_picker(&mut self) {
+        if let Some(paths) = self.file_picker.start() {
+            self.change_shelf(|shelf| shelf.add_all(&paths) > 0);
+        }
+    }
     fn change_shelf(&mut self, edit: impl FnOnce(&mut Shelf) -> bool) {
         let now = Instant::now();
         if edit_shelf(
@@ -1608,6 +1688,7 @@ impl Desktop {
             edit,
         ) {
             self.request_notches(Repaint::Full, |_| true);
+            self.reconcile_focus(|control| control >= notch_uia::SHELF_BASE);
         }
     }
     /// The visible shelf entry under a window point of notch `notch`, if its slot is drawn and filled.
@@ -1617,12 +1698,23 @@ impl Desktop {
         let progress = surface.motion.value(Instant::now());
         let media = self.media.view().shown().is_some();
         layout::shelf_at(surface.bounds.width, surface.dpi, progress, media, x, y)
-            .filter(|&index| index < self.shelf.shelf.visible().len())
+            .filter(|&index| index < self.shelf.shelf.slot_count())
     }
     /// A user activation of shelf entry `index`: open it, or with `reveal` select it in Explorer. The only
     /// existence check in the shelf's life happens here, never for a UNC path (`shelf_os::open` runs that
     /// call off the host thread); a target that is gone is marked, not opened, and not removed.
     fn open_shelf(&mut self, index: usize, reveal: bool) {
+        if index >= self.shelf.shelf.slot_count() {
+            return;
+        }
+        if self.shelf.shelf.is_empty() && index == 0 {
+            self.start_file_picker();
+            return;
+        }
+        let Some(index) = self.shelf.shelf.absolute(index) else {
+            self.change_shelf(Shelf::next_page);
+            return;
+        };
         let Some(entry) = self.shelf.shelf.entries().get(index) else {
             return;
         };
@@ -1646,7 +1738,9 @@ impl Desktop {
         let Some(index) = notch.and_then(|notch| self.shelf_slot_at(notch, lparam)) else {
             return false;
         };
-        self.change_shelf(|shelf| shelf.remove(index));
+        if let Some(index) = self.shelf.shelf.absolute(index) {
+            self.change_shelf(|shelf| shelf.remove(index));
+        }
         true
     }
     /// Milliseconds until the debounced store write is due; `INFINITE` with no unwritten change.
@@ -1757,11 +1851,15 @@ impl Desktop {
     }
     /// The notch controls that take focus and presses: the player's three, then mute while a
     /// default render endpoint is bound.
-    fn enabled(&self) -> [bool; 4] {
+    fn enabled(&self) -> [bool; 7] {
         let track = self.media.view().shown();
         let [previous, play_pause, next] = track.map_or([false; 3], |track| track.controls);
         let mute = track.is_some() && self.audio.level().is_some();
-        [previous, play_pause, next, mute]
+        let mut enabled = [previous, play_pause, next, mute, false, false, false];
+        for slot in 0..self.shelf.shelf.slot_count() {
+            enabled[notch_uia::SHELF_BASE + slot] = true;
+        }
+        enabled
     }
     /// A UIA client focused a media control, or the notch itself (`notch_uia::FIRST`): the notch
     /// takes the foreground if Windows allows it, remembers the window it came from, and opens.
@@ -1805,11 +1903,9 @@ impl Desktop {
         };
         let key = VIRTUAL_KEY(message.wParam.0 as u16);
         if key == VK_O && ctrl {
-            // The keyboard route to add files: the standard dialog, modal on this thread until closed.
+            // One on-demand STA owns the dialog; the host continues servicing its deadlines.
             if message.lParam.0 & (1 << 30) == 0 {
-                let owner = surface.window.0;
-                let picked = shelf_os::pick_files(owner);
-                self.change_shelf(|shelf| shelf.add_all(&picked) > 0);
+                self.start_file_picker();
             }
             return true;
         }
@@ -1820,7 +1916,19 @@ impl Desktop {
             VK_RETURN | VK_SPACE => {
                 // Held keys repeat; one press is one command.
                 if message.lParam.0 & (1 << 30) == 0 {
-                    self.press(control);
+                    if ctrl && control >= notch_uia::SHELF_BASE {
+                        self.open_shelf(control - notch_uia::SHELF_BASE, true);
+                    } else {
+                        self.press(control);
+                    }
+                }
+                return true;
+            }
+            windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE
+                if control >= notch_uia::SHELF_BASE =>
+            {
+                if let Some(index) = self.shelf.shelf.absolute(control - notch_uia::SHELF_BASE) {
+                    self.change_shelf(|shelf| shelf.remove(index));
                 }
                 return true;
             }
@@ -1837,7 +1945,8 @@ impl Desktop {
         true
     }
     /// A player can disable the focused action or replace its entire session between input events.
-    fn reconcile_focus(&mut self, replaced: bool) {
+    /// `replaced(control)`: whether the focused `control` was replaced (re-announced) by the change.
+    fn reconcile_focus(&mut self, replaced: impl Fn(usize) -> bool) {
         let enabled = self.enabled();
         let timer = self.timers.view(Instant::now());
         for notch in &mut self.surfaces {
@@ -1845,7 +1954,7 @@ impl Desktop {
             let Some(control) = notch.focused().map(|focus| focus.control) else {
                 continue;
             };
-            match refocus(enabled, control, replaced) {
+            match refocus(enabled, control, replaced(control)) {
                 Refocus::Keep => {}
                 // The retained element belonged to the old session: tell clients about the new one.
                 Refocus::Announce => notch.announce_focus(),
@@ -1858,7 +1967,19 @@ impl Desktop {
         }
     }
     fn message(&mut self, message: &MSG) -> Result<()> {
+        if message.message == shelf_os::PICKED && message.hwnd.is_invalid() {
+            if let Some(paths) = self.file_picker.take() {
+                self.change_shelf(|shelf| shelf.add_all(&paths) > 0);
+            }
+            return Ok(());
+        }
         if message.message == native_window::REPOSITION {
+            if matches!(
+                message.lParam.0 as u32,
+                WM_SETTINGCHANGE | WM_SYSCOLORCHANGE
+            ) {
+                self.palette_dirty = true;
+            }
             // Every surface forwards display/DPI/settings/time changes, resume and taskbar recreation;
             // one coalesced read serves them all.
             self.request_topology();
@@ -2042,6 +2163,17 @@ impl Desktop {
                 }
             }
         }
+        // After placement, and contained: a settings failure closes that window and never ends the host.
+        let devices: Vec<String> = self.monitors.iter().map(|m| m.device.clone()).collect();
+        let broken = self.settings_window.as_mut().is_some_and(|window| {
+            window
+                .refresh_monitors(&devices)
+                .map_err(|error| eprintln!("Settings monitors: {error}"))
+                .is_err()
+        });
+        if broken {
+            self.settings_window.take();
+        }
         failure.map_or(Ok(()), |error| self.retry_topology(error))
     }
     /// Schedules a bounded re-read. Once retries run out with no surface left, `error` ends the host
@@ -2067,6 +2199,16 @@ impl Desktop {
     /// whether animation runs.
     fn update(&mut self, model: &WindowModel) -> Result<(u32, bool)> {
         self.refresh_topology()?;
+        if std::mem::take(&mut self.palette_dirty) {
+            let palette = crate::theme::system_palette(self.settings.theme);
+            if palette != self.palette {
+                self.palette = palette;
+                self.surfaces.clear();
+                for kind in self.shown.clone() {
+                    self.show(kind)?;
+                }
+            }
+        }
         if self.text.take_changed() {
             self.rescale_text()?;
         }
@@ -2086,7 +2228,7 @@ impl Desktop {
         let volume = self.audio.refresh();
         let replaced = generation != self.media.generation();
         if redraw || volume || replaced {
-            self.reconcile_focus(replaced);
+            self.reconcile_focus(|_| replaced);
         }
         if redraw {
             self.request_notches(Repaint::Full, |_| true);
@@ -2188,15 +2330,21 @@ impl Desktop {
 }
 
 pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> {
+    // Admission first: a second launch must not open (truncate) the running instance's log.
+    let controls = Controls::create();
+    if controls.as_ref().err().map(|e| e.code().0) != Some(crate::error_log::ALREADY_RUNNING) {
+        crate::error_log::initialize();
+    }
+    let controls = controls?;
     let _apartment = Apartment::enter()?;
     let _class = WindowClass::register()?;
-    let controls = Controls::create()?;
     let mut desktop = Desktop::create(&probe)?;
     #[cfg(debug_assertions)]
     if probe == Probe::DeviceLoss {
         let removed = windows::Win32::Graphics::Dxgi::DXGI_ERROR_DEVICE_REMOVED;
         desktop.survive(Err(Error::from(removed)), ())?;
     }
+    #[cfg(debug_assertions)]
     if probe == Probe::Callback {
         // SAFETY: synchronous probe targets a live window on this thread; parameters contain no pointers.
         unsafe {
@@ -2216,6 +2364,7 @@ pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> 
             .map(std::path::PathBuf::from)
     });
     let mut catalog = Catalog::create(report)?;
+    crate::error_log::started();
     let result = event_loop(&controls, &mut desktop, &mut catalog);
     desktop.flush_store(true);
     result.and(catalog.shutdown())
@@ -2571,6 +2720,16 @@ mod clock_wait_tests {
         assert_eq!(refocus(no_next, 2, false), Refocus::Move(3));
         assert_eq!(refocus(no_next, 2, true), Refocus::Move(3));
         assert_eq!(refocus([false; 4], 1, true), Refocus::Release);
+    }
+
+    #[test]
+    fn shelf_focus_enters_without_media_and_recovers_when_the_last_page_shrinks() {
+        let shelf_only = [false, false, false, false, true, true, true];
+        assert_eq!(step(shelf_only, None, true), Some(4));
+        assert_eq!(step(shelf_only, Some(6), true), Some(4));
+        assert_eq!(step(shelf_only, Some(4), false), Some(6));
+        let add_only = [false, false, false, false, true, false, false];
+        assert_eq!(refocus(add_only, 6, true), Refocus::Move(4));
     }
 
     #[test]

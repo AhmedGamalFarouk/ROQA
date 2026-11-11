@@ -48,6 +48,7 @@ pub struct Shelf {
     revision: u32,
     /// Entries kept, `1..=MAX` (the settings' shelf size).
     cap: usize,
+    page: usize,
 }
 
 impl Default for Shelf {
@@ -56,6 +57,7 @@ impl Default for Shelf {
             entries: Vec::new(),
             revision: 0,
             cap: MAX,
+            page: 0,
         }
     }
 }
@@ -155,7 +157,47 @@ impl Shelf {
     }
     /// The entries drawn and exposed to UI Automation.
     pub fn visible(&self) -> &[Entry] {
-        &self.entries[..self.entries.len().min(VISIBLE)]
+        let start = self.page_start();
+        &self.entries
+            [start..(start + if self.overflow() { 2 } else { VISIBLE }).min(self.entries.len())]
+    }
+    pub fn overflow(&self) -> bool {
+        self.entries.len() > VISIBLE
+    }
+    fn page_start(&self) -> usize {
+        if self.overflow() {
+            (self.page % self.entries.len().div_ceil(2)) * 2
+        } else {
+            0
+        }
+    }
+    pub fn absolute(&self, slot: usize) -> Option<usize> {
+        (slot < self.visible().len()).then(|| self.page_start() + slot)
+    }
+    pub fn slot_count(&self) -> usize {
+        (self.visible().len() + usize::from(self.overflow())).max(1)
+    }
+    pub fn slot_label(&self, slot: usize) -> Option<String> {
+        if self.is_empty() && slot == 0 {
+            return Some("Add shelf files (Ctrl+O)".to_owned());
+        }
+        if self.overflow() && slot == self.visible().len() {
+            Some(format!(
+                "More shelf files, page {} of {}",
+                self.page_start() / 2 + 1,
+                self.entries.len().div_ceil(2)
+            ))
+        } else {
+            self.absolute(slot).and_then(|index| self.label(index))
+        }
+    }
+    pub fn next_page(&mut self) -> bool {
+        if !self.overflow() {
+            return false;
+        }
+        self.page = (self.page_start() / 2 + 1) % self.entries.len().div_ceil(2);
+        self.revision = self.revision.wrapping_add(1);
+        true
     }
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -249,6 +291,30 @@ mod tests {
 
     fn paths(shelf: &Shelf) -> Vec<&str> {
         shelf.entries().iter().map(|e| e.path.as_str()).collect()
+    }
+
+    #[test]
+    fn overflow_pages_visit_every_reference_and_wrap() {
+        let mut shelf = Shelf::default();
+        shelf.add_all(&(0..12).map(|n| format!(r"C:\f{n}")).collect::<Vec<_>>());
+        let mut visited = Vec::new();
+        for _ in 0..6 {
+            for slot in 0..shelf.visible().len() {
+                visited.push(shelf.absolute(slot).unwrap());
+            }
+            assert!(
+                shelf
+                    .slot_label(shelf.visible().len())
+                    .unwrap()
+                    .starts_with("More shelf files")
+            );
+            assert!(shelf.next_page());
+        }
+        assert_eq!(visited, (0..12).collect::<Vec<_>>());
+        assert_eq!(shelf.absolute(0), Some(0));
+        shelf.set_cap(1);
+        assert_eq!(shelf.absolute(0), Some(0));
+        assert!(!shelf.next_page());
     }
 
     #[test]
@@ -370,7 +436,7 @@ mod tests {
             .collect();
         assert_eq!(shelf.add_all(&many), MAX);
         assert_eq!(paths(&shelf)[0], r"C:\d0.txt");
-        assert_eq!(shelf.visible().len(), VISIBLE);
+        assert_eq!(shelf.slot_count(), VISIBLE);
     }
 
     #[test]

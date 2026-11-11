@@ -842,3 +842,41 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Verify:** `scripts/verify.ps1` PASS, **175 tests** (170 + 5, incl. contrast per theme). Release 999,424 B (+9,216 B), SHA-256 `3CE2BD8E4230E4FD3C025265236E0A7786A08002AE519673FD0BE46DB7FB583A`.
 - **Reviews:** REVIEW NOT RUN (paused by user). Not accepted.
 - **Native evidence:** all NOT RUN (no theme has been seen on a display). Deferred: real backdrop blur for glass, Follow Windows, per-monitor themes, high contrast.
+
+## M5 smoke expansion probe: uncommitted harness candidate (2026-11-11 Africa/Cairo)
+
+- **Scope:** root main `238c2c8`; [packet](m5-smoke-envelope-fix.md), candidate manifest `m5-smoke-envelope-fix.sha256`. Implementation sub-agent; no commit/push or independent review.
+- **Fix:** expansion probe outside the complete overshoot silhouette envelope; intermediate-growth and actual-click assertions retained; before/after bounds membership logged. Expansion shadow overlap NOT ESTABLISHED; production regression unproven.
+- **Checks:** PowerShell 5.1 parse/pure-helper checks and 16,814 geometry samples PASS; required verify.ps1 PASS (fmt, clippy, 175 tests, locked release); 999424 B, binary SHA `A329BF01972840FC1EBAE04792E00B0E6CEFF1F0093991BCC22831433D70622C`.
+- **Open:** smoke rerun NOT RUN (no native/GUI authorization); separate UIA cleanup `0x80070057` unresolved and unsuppressed. Milestone not accepted. User `.gitignore` preserved; no staging or system/settings changes.
+
+## M5 native batch Sol 2: stopped on interference (2026-11-11 Africa/Cairo)
+
+- **Packet:** [exact results and cleanup](m5-native-sol-2.md), packet manifest `m5-native-sol-2.sha256`; root `238c2c8`, no commit/push.
+- **Preflight:** Default/Default, stable nonzero foreground, no competing process; 999424 B SHA `A329BF01972840FC1EBAE04792E00B0E6CEFF1F0093991BCC22831433D70622C`.
+- **Picker:** INCONCLUSIVE after 2 checks; fixture foreground denied before ROQA launch. Catalog/packaged-hung NOT RUN per stop-on-interference instruction; cleanup confirms no fixture/picker/ROQA remains.
+- **Prior:** topology 25 PASS and smoke 331 PASS on the same SHA; not repeated. Runtime UIA cleanup `0x80070057` remains unresolved (2/222 occurrences).
+- **Open:** remaining suites and manual accessibility/lifecycle matrix; performance/long measurements NOT RUN. No milestone acceptance; existing edits and user's `.gitignore` preserved.
+
+## M5 production-readiness assessment: read-only (2026-11-11 Africa/Cairo)
+
+- **Scope:** root `238c2c8` + uncommitted smoke fix; [packet](m5-readiness-assessment.md). Opus 5.5 medium, gstack `/health` + `/review` rubrics by hand. No code change, native run, commit or push.
+- **Blockers:** B1 UIA teardown order (`host.rs:163` invalidates before `UiaDisconnectProvider`; 222 `E_INVALIDARG`); B2 high contrast ignored; B3 shelf/pin keyboard gaps, shelf entries 4-12 unreachable; B4 errors invisible in the windows-subsystem build; B5 no release path; B6 no accepted milestone since M3, M5 perf gates NOT RUN.
+- **Next:** B1, B4, P2/P3, B3, B2, then reviews and the measurement run. Estimated no new thread/timer/idle wake (not measured).
+- **Cleanup:** nothing deleted. `roqa-m2b2\target` (1.6 GB, stale copy whose `.tools` is a junction to the live toolchain) proposed; the delegate command was refused by sandbox policy. WIP and user `.gitignore` untouched.
+
+## M5 readiness implementation: uncommitted candidate (2026-11-11 Africa/Cairo)
+
+- **Scope:** sole implementation worker on root `238c2c8` + preserved WIP; [packet](m5-readiness-implementation.md), [manifest](m5-readiness-implementation.sha256) SHA `BACB03F1F5A309A3A84521DD1C22A5C8DC0CD63C68347162ED8015177CFF4FC2`.
+- **Changes:** B1 disconnect order; B4 bounded private error fallback; debug-only probes; one network launch; keyboard/UIA shelf paging + native pin reorder; on-demand STA picker; live settings monitors; system high contrast; revision-based UIA labels.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 180 tests, locked release); debug build and static probe/PowerShell checks PASS; 1059840 B SHA `968551D6E7EF115C973022413FCC2F51488745AD28B8E2AE5DAC188688A465F7`.
+- **Open:** fresh Opus 5.5 High review via Chief, independent council/CCG and all candidate native/manual/performance gates NOT RUN; no self-approval, commit or push.
+- **Release/backlog:** [checklist](release-readiness.md); license/signing/distribution/update choices OPEN; text-layout cache deferred pending trace. Preserved smoke/reports/evidence/user .gitignore; refused deletion remains pending, not retried.
+
+## M5 readiness fixes: committed (2026-11-11 Africa/Cairo)
+
+- **Scope:** UIA teardown order, private error log, system high contrast, settings monitors, shelf/pin keyboard+UIA, smoke envelope; [packet](m5-readiness-implementation.md), [manifest](m5-readiness-implementation.sha256) SHA `9C10C94573FF18AFB7191A24990A727533BC0498D0FBA49744EC1EBB8791D551`.
+- **Reviews (Opus 5.5 High):** r1 REVISE [review](m5-readiness-review.md); r2 REVISE narrow [recheck](m5-readiness-recheck.md); r3 ACCEPT WITH NITS [recheck-2](m5-readiness-recheck-2.md).
+- **Checks:** verify.ps1 PASS (fmt/clippy, 184 tests, locked release); 1081856 B SHA `1E704AB5503A8BF7B6D446F155555214090DA7FF219D2E15742C839BE68A665E`.
+- **Deferred:** RC2-N1 and RC2-N2 nits, no code change.
+- **NOT RUN:** all native/GUI/manual/performance gates; no milestone acceptance (M5 perf gates still open).

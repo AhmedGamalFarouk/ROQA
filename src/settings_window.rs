@@ -28,6 +28,9 @@ use windows::{
     core::{Error, PCWSTR, Result, w},
 };
 
+const PIN: usize = 140;
+const EARLIER: usize = 141;
+const LATER: usize = 142;
 const DOCK: usize = 100;
 const NOTCH: usize = 101;
 const SOUND: usize = 102;
@@ -46,6 +49,11 @@ const FIRST_TIMER: &str = "5";
 
 pub struct SettingsWindow {
     window: HWND,
+    pin_label: HWND,
+    pins: HWND,
+    earlier: HWND,
+    later: HWND,
+    move_pin: Option<(usize, bool)>,
     dock: HWND,
     notch: HWND,
     sound: HWND,
@@ -69,6 +77,10 @@ pub struct SettingsWindow {
     closed: bool,
 }
 
+/// A combo row kept inside `len` items; `CB_ERR` (no selection) becomes the first row.
+fn clamp_selection(row: isize, len: usize) -> usize {
+    (row.max(0) as usize).min(len.saturating_sub(1))
+}
 fn checked(control: HWND) -> bool {
     // SAFETY: scalar query of our own checkbox.
     unsafe { SendMessageW(control, BM_GETCHECK, None, None) }.0 == 1
@@ -99,6 +111,11 @@ impl SettingsWindow {
         let window = empty_dialog(480, 300)?;
         let mut this = Self {
             window,
+            pin_label: HWND::default(),
+            pins: HWND::default(),
+            earlier: HWND::default(),
+            later: HWND::default(),
+            move_pin: None,
             dock: HWND::default(),
             notch: HWND::default(),
             sound: HWND::default(),
@@ -131,7 +148,104 @@ impl SettingsWindow {
         Ok(this)
     }
 
-    /// Creates the controls in tab order.
+    pub fn set_pins(&self, names: &[String], selected: usize) {
+        // SAFETY: synchronous string copies to our own native combo box.
+        unsafe {
+            SendMessageW(self.pins, CB_RESETCONTENT, None, None);
+            for name in names {
+                let name = wide(name);
+                SendMessageW(
+                    self.pins,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(name.as_ptr() as isize)),
+                );
+            }
+            SendMessageW(
+                self.pins,
+                CB_SETCURSEL,
+                Some(WPARAM(clamp_selection(selected as isize, names.len()))),
+                None,
+            );
+        }
+    }
+    /// The pin combo's current row (0 when none), so a refresh keeps the user's place.
+    pub fn pin_selection(&self) -> usize {
+        // SAFETY: synchronous query of our own combo box.
+        let row = unsafe { SendMessageW(self.pins, CB_GETCURSEL, None, None) }.0;
+        clamp_selection(row, usize::MAX)
+    }
+    /// Selects pin row `row` (kept inside the list), so the next refresh keeps it.
+    pub fn select_pin(&self, row: usize) {
+        // SAFETY: synchronous queries and selection on our own combo box.
+        unsafe {
+            let count = SendMessageW(self.pins, CB_GETCOUNT, None, None).0;
+            let row = clamp_selection(row as isize, count.max(0) as usize);
+            SendMessageW(self.pins, CB_SETCURSEL, Some(WPARAM(row)), None);
+        }
+    }
+    pub fn take_move(&mut self) -> Option<(usize, bool)> {
+        self.move_pin.take()
+    }
+    pub fn refresh_monitors(&mut self, devices: &[String]) -> Result<()> {
+        if self
+            .monitors
+            .iter()
+            .map(|(_, device)| device)
+            .eq(devices.iter().take(MAX_OFF))
+        {
+            return Ok(());
+        }
+        // Keep keyboard focus in a live control when the focused monitor disappears.
+        // SAFETY: own controls and current thread focus; no foreground activation.
+        unsafe {
+            if self.monitors.iter().any(|(handle, _)| {
+                *handle == windows::Win32::UI::Input::KeyboardAndMouse::GetFocus()
+            }) {
+                SetFocus(Some(self.dock))?;
+            }
+        }
+        // Retain edit contents and settings; replace only monitor checkboxes.
+        for (handle, _) in self.monitors.drain(..) {
+            // SAFETY: owned monitor checkbox, no retained references.
+            unsafe {
+                DestroyWindow(handle)?;
+            }
+        }
+        // Tab order follows the screen: each new checkbox goes right after the previous one.
+        let mut previous = self.notch;
+        for (index, device) in devices.iter().take(MAX_OFF).enumerate() {
+            let handle = control(
+                self.window,
+                w!("Button"),
+                &format!(
+                    "Show on monitor {} ({})",
+                    index + 1,
+                    device.trim_start_matches(r"\\.\")
+                ),
+                MONITOR + index,
+                BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
+                WINDOW_EX_STYLE(0),
+            )?;
+            // SAFETY: both are our own live children; this only reorders them, no move, size or activation.
+            unsafe {
+                SetWindowPos(
+                    handle,
+                    Some(previous),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )?;
+            }
+            previous = handle;
+            set_checked(handle, !self.current.off_monitors.contains(device));
+            self.monitors.push((handle, device.clone()));
+        }
+        self.relayout()
+    }
+    /// Creates the controls in tab order, which matches the top-to-bottom layout in `position`.
     fn build(&mut self, devices: &[String]) -> Result<()> {
         let window = self.window;
         let tab = WS_TABSTOP.0;
@@ -202,6 +316,31 @@ impl SettingsWindow {
             WS_EX_CLIENTEDGE,
         )?;
         let start = control(window, w!("Button"), "St&art timer", START, tab, flat)?;
+        self.pin_label = control(
+            window,
+            w!("Static"),
+            "Pinned apps",
+            LABEL,
+            0,
+            WS_EX_NOPARENTNOTIFY,
+        )?;
+        self.pins = control(
+            window,
+            w!("ComboBox"),
+            "Pinned apps",
+            PIN,
+            CBS_DROPDOWNLIST as u32 | tab | WS_VSCROLL.0,
+            flat,
+        )?;
+        self.earlier = control(
+            window,
+            w!("Button"),
+            "Move pin &earlier",
+            EARLIER,
+            tab,
+            flat,
+        )?;
+        self.later = control(window, w!("Button"), "Move pin &later", LATER, tab, flat)?;
         let reset = control(window, w!("Button"), "&Reset to defaults", RESET, tab, flat)?;
         let close = control(window, w!("Button"), "&Close", CLOSE, tab, flat)?;
         self.status = control(window, w!("Static"), "", STATUS, 0, WS_EX_NOPARENTNOTIFY)?;
@@ -229,6 +368,7 @@ impl SettingsWindow {
 
     fn children(&self) -> Vec<HWND> {
         let mut all = vec![self.dock, self.notch, self.sound, self.theme, self.shelf];
+        all.extend([self.pin_label, self.pins, self.earlier, self.later]);
         all.extend(self.monitors.iter().map(|(handle, _)| *handle));
         all.extend([self.diagnostics, self.timer, self.status]);
         all.extend(&self.others);
@@ -324,6 +464,13 @@ impl SettingsWindow {
                 let monitor = (MONITOR..MONITOR + self.monitors.len()).contains(&id);
                 match id {
                     DOCK | NOTCH | SOUND if notification == BN_CLICKED => self.commit()?,
+                    EARLIER | LATER if notification == BN_CLICKED => {
+                        // SAFETY: scalar selection query of our own native combo.
+                        let index = unsafe { SendMessageW(self.pins, CB_GETCURSEL, None, None) }.0;
+                        if index >= 0 {
+                            self.move_pin = Some((index as usize, id == LATER));
+                        }
+                    }
                     THEME if notification == CBN_SELCHANGE => self.commit()?,
                     _ if monitor && notification == BN_CLICKED => self.commit()?,
                     SHELF | DIAGNOSTICS if notification == EN_KILLFOCUS => self.commit()?,
@@ -392,8 +539,8 @@ impl SettingsWindow {
         let px = |value: f64| (value * scale).round() as i32;
         // Row heights in DIPs, top to bottom: one list gives both the window height and every control's top.
         let mut heights = vec![24.0; 3 + self.monitors.len()]; // dock, notch, monitors, sound
-        // theme, shelf, diagnostics label and edit, timer label and row, status, buttons
-        heights.extend([28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0]);
+        // theme, shelf, diagnostics label and edit, timer label and row, status, pins, buttons
+        heights.extend([28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0, 28.0]);
         let tops: Vec<i32> = heights
             .iter()
             .scan(16.0, |y, height| {
@@ -456,6 +603,34 @@ impl SettingsWindow {
             };
             places.extend([
                 (
+                    self.pin_label,
+                    margin,
+                    tops[last - 1] + px(5.0),
+                    px(80.0),
+                    px(20.0),
+                ),
+                (
+                    self.pins,
+                    margin + px(80.0),
+                    tops[last - 1],
+                    (inner - px(320.0)).max(1),
+                    px(180.0),
+                ),
+                (
+                    self.earlier,
+                    margin + (inner - px(240.0)).max(1),
+                    tops[last - 1],
+                    px(120.0),
+                    px(28.0),
+                ),
+                (
+                    self.later,
+                    margin + (inner - px(120.0)).max(1),
+                    tops[last - 1],
+                    px(120.0),
+                    px(28.0),
+                ),
+                (
                     theme_label,
                     margin,
                     tops[after + 1] + px(5.0),
@@ -496,11 +671,11 @@ impl SettingsWindow {
                     px(28.0),
                 ),
                 (self.status, margin, tops[after + 7], inner, px(42.0)),
-                (reset, margin, tops[after + 8], half(180.0), px(28.0)),
+                (reset, margin, tops[after + 9], half(180.0), px(28.0)),
                 (
                     close,
                     client.right - margin - half(100.0),
-                    tops[after + 8],
+                    tops[after + 9],
                     half(100.0),
                     px(28.0),
                 ),
@@ -521,5 +696,19 @@ impl Drop for SettingsWindow {
                 eprintln!("Settings window cleanup: {error}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_selection;
+
+    #[test]
+    fn pin_row_stays_inside_a_refreshed_list() {
+        assert_eq!(clamp_selection(2, 5), 2);
+        // A pin was removed while the last row was selected: the row follows the shorter list.
+        assert_eq!(clamp_selection(4, 3), 2);
+        // CB_ERR (-1) and an empty list both give row 0.
+        assert_eq!((clamp_selection(-1, 3), clamp_selection(3, 0)), (0, 0));
     }
 }

@@ -578,6 +578,7 @@ fn hand_off(
 /// Host-thread owner of the GSMTC manager, the current session and their event tokens.
 /// Must be dropped on the host thread before its `RoInitialize` and COM apartment guards.
 pub struct Media {
+    uia_revision: u64,
     // Teardown is field order after `drop` cancels pending reads: the session's tokens are removed
     // and it is released before the manager's.
     session: Option<Subscribed<Session>>,
@@ -611,6 +612,7 @@ impl Media {
     /// Idle until `start`; the calling thread is the host thread that `refresh` runs on.
     pub fn create() -> Self {
         Self {
+            uia_revision: 0,
             session: None,
             manager: None,
             request: None,
@@ -675,6 +677,10 @@ impl Media {
             }
             _ => None,
         }
+    }
+    /// Bumped on every wake that may change what UI Automation reports, so the host republishes labels.
+    pub fn uia_revision(&self) -> u64 {
+        self.uia_revision
     }
     /// The session generation; UI Automation elements from an older one are stale.
     pub fn generation(&self) -> u64 {
@@ -765,6 +771,9 @@ impl Media {
             self.wake.dirty.fetch_or(PROPERTIES, Ordering::Relaxed);
         }
         let mut dirty = self.wake.dirty.swap(0, Ordering::Acquire);
+        if dirty != 0 || expired {
+            self.uia_revision = self.uia_revision.wrapping_add(1);
+        }
         if dirty == 0 {
             return expired;
         }
@@ -780,7 +789,7 @@ impl Media {
             self.request = None;
             match outcome {
                 Ok(manager) => {
-                    eprintln!("Media: RequestAsync succeeded");
+                    std::eprintln!("Media: RequestAsync succeeded");
                     match subscribe_manager(manager, &self.wake) {
                         Ok(manager) => {
                             self.manager = Some(manager);
@@ -992,7 +1001,7 @@ impl Media {
         let (generation, wakes) = (self.state.generation, self.wakes);
         let name = match &self.state.view {
             View::Track(track) => {
-                return eprintln!(
+                return std::eprintln!(
                     "Media: {} session={generation} title_utf16={} artist_utf16={} controls={}{}{} rate_milli={} position_s={} end_s={} wakes={wakes} callback_on_host={on_host}",
                     if track.playing { "playing" } else { "paused" },
                     track.title.encode_utf16().count(),
@@ -1009,7 +1018,9 @@ impl Media {
             View::Permission => "permission",
             View::Error => "error",
         };
-        eprintln!("Media: {name} session={generation} wakes={wakes} callback_on_host={on_host}");
+        std::eprintln!(
+            "Media: {name} session={generation} wakes={wakes} callback_on_host={on_host}"
+        );
     }
 }
 impl Drop for Media {
@@ -1018,7 +1029,7 @@ impl Drop for Media {
         if let Some(request) = self.request.take() {
             request.cancel();
         }
-        eprintln!("Media: stopped wakes={}", self.wakes);
+        std::eprintln!("Media: stopped wakes={}", self.wakes);
     }
 }
 
@@ -1026,7 +1037,7 @@ impl Drop for Media {
 fn slow(work: &str, started: Instant) {
     let elapsed = started.elapsed();
     if elapsed > Duration::from_millis(8) {
-        eprintln!("Media: slow {work} {elapsed:?}");
+        std::eprintln!("Media: slow {work} {elapsed:?}");
     }
 }
 

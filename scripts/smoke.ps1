@@ -2,7 +2,12 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-if (!$SkipBuild) { & "$PSScriptRoot/cargo.ps1" build --locked --release }
+if (!$SkipBuild) {
+    & "$PSScriptRoot/cargo.ps1" build --locked --release
+    if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
+    & "$PSScriptRoot/cargo.ps1" build --locked
+    if ($LASTEXITCODE -ne 0) { throw 'Debug probe build failed' }
+}
 Add-Type -Path "$projectRoot/tests/PickerProbe.cs"
 Add-Type -AssemblyName System.Drawing
 Add-Type -Path "$projectRoot/tests/NativeProbe.cs" -ReferencedAssemblies System.Drawing
@@ -17,6 +22,24 @@ $observations = [ordered]@{ Label = 'M1 observation only; not a product-budget o
 function Assert-Check([bool]$Condition, [string]$Name) {
     if (!$Condition) { throw "FAIL: $Name" }
     $observations.Checks += $Name
+}
+# Plain-notch envelope from layout::notch_shape/notch_rows and motion::OPEN.
+# The spring peak is 1 + exp(-pi * .65 / sqrt(1 - .65^2)) < 1.1.
+# Intent starts at .07, so opening from the swell has a smaller peak still.
+function Get-ExpansionClickProbe([int]$WindowWidth, [int]$Dpi) {
+    $maxWidth = [int][Math]::Floor(((150 + (320 - 150) * 1.1) * $Dpi + 48) / 96)
+    $maxEars = [int][Math]::Floor((16 * $Dpi + 48) / 96)
+    $envelopeLeft = [int][Math]::Floor(($WindowWidth - $maxWidth) / 2) - $maxEars
+    $gap = [Math]::Max(2, [int][Math]::Floor((2 * $Dpi + 48) / 96))
+    return [ordered]@{ EnvelopeLeft = $envelopeLeft; WindowX = $envelopeLeft - $gap; MaxProgress = 1.1 }
+}
+# RegionBox is a bounding rectangle, not the shaped HRGN. False proves exclusion;
+# true alone cannot establish membership at a rounded corner or shadow coverage.
+function Test-RegionBoundsContainsPoint([string]$Region, [int]$X, [int]$Y) {
+    $bounds = @($Region.Split(',') | ForEach-Object { [int]$_ })
+    if ($bounds.Count -ne 4) { throw 'Expected notch region bounds.' }
+    return ($X -ge $bounds[0] -and $X -lt ($bounds[0] + $bounds[2]) -and
+        $Y -ge $bounds[1] -and $Y -lt ($bounds[1] + $bounds[3]))
 }
 function Surface-Window([string]$Title) {
     $window = [NativeProbe]::PrimarySurface($Title)
@@ -226,11 +249,14 @@ try {
             [void][NativeProbe]::GetWindowRect($anchor, [ref]$anchorRect)
             try {
                 Assert-Check ([NativeProbe]::SetWindowPos($anchor, [IntPtr]::Zero, $rect.Left - 20, $rect.Top - 40, $rect.Width + 40, $rect.Height + 80, 0x0014)) 'Place underlying fixture behind the notch'
+                # Compute the fixed envelope before observing motion; keep the timed click path short.
+                $expansionEnvelope = Get-ExpansionClickProbe $rect.Width $dpi
+                Assert-Check ($expansionEnvelope.WindowX -ge 0 -and $expansionEnvelope.WindowX -lt $expansionEnvelope.EnvelopeLeft) 'Expansion probe lies inside the HWND and outside the full silhouette envelope'
                 # Each click must be received by this PowerShell process's fixture, not ROQA.
                 foreach ($case in @(
                     @{ Name = 'rest rounded corner'; Wait = 0; X = $bodyLeft + (& $px 1); Y = & $px 29 },
                     @{ Name = 'hover intent side margin'; Wait = 120; X = & $px 50; Y = & $px 40 },
-                    @{ Name = 'expanding side shadow'; Wait = 1; Expansion = $true },
+                    @{ Name = 'expanding exterior margin'; Wait = 1; Expansion = $true },
                     @{ Name = 'open side shadow'; Wait = 1100; X = & $px 50; Y = & $px 40 },
                     @{ Name = 'open rounded corner'; Wait = 1100; X = $expandedLeft + (& $px 1); Y = & $px 79 },
                     @{ Name = 'closing side shadow'; Wait = 1100; Close = $true; X = & $px 50; Y = & $px 40 },
@@ -247,6 +273,7 @@ try {
                         Start-Sleep -Milliseconds 60
                     }
                     $point = New-Object NativeProbe+Point
+                    $expansionProbe = $null
                     $phaseClock = [Diagnostics.Stopwatch]::StartNew()
                     $waitToExpansionMs = 0
                     if ($case.ContainsKey('Expansion')) {
@@ -262,19 +289,23 @@ try {
                         Assert-Check ($boundsBefore[3] -ge (& $px 48) -and $boundsBefore[3] -le (& $px 64)) 'Observe intermediate panel expansion after hover intent'
                         $waitToExpansionMs = $phaseClock.ElapsedMilliseconds
                         $phaseClock.Restart()
-                        # Just outside the contemporaneous silhouette bounds, halfway down
-                        # the growing panel: inside the shadow, outside all body-region rows.
-                        $point.X = $rect.Left + $boundsBefore[0] - (& $px 2)
+                        # Stay outside the entire expansion/overshoot envelope, including ears
+                        # and pixel rounding, regardless of growth between observation and input.
+                        # Shadow overlap here is unproven; this tests exterior click delivery.
+                        $expansionProbe = $expansionEnvelope
+                        $point.X = $rect.Left + $expansionProbe.WindowX
                         $point.Y = $rect.Top + [int][Math]::Floor($boundsBefore[3] / 2)
                     } else {
                         $regionBefore = [NativeProbe]::RegionBox($surface.Window)
                         $point.X = $rect.Left + $case.X; $point.Y = $rect.Top + $case.Y
                     }
+                    $inBoundsBefore = Test-RegionBoundsContainsPoint $regionBefore ($point.X - $rect.Left) ($point.Y - $rect.Top)
                     Assert-Check ([NativeProbe]::WindowFromPoint($point) -eq $anchor) "$($case.Name) resolves to the underlying fixture"
                     $beforeClicks = [NativeProbe]::AnchorClicks()
                     [PickerProbe]::Click($point.X, $point.Y)
                     $regionAfter = [NativeProbe]::RegionBox($surface.Window)
                     $clickElapsedMs = $phaseClock.ElapsedMilliseconds
+                    $inBoundsAfter = Test-RegionBoundsContainsPoint $regionAfter ($point.X - $rect.Left) ($point.Y - $rect.Top)
                     if ($case.ContainsKey('Expansion')) {
                         $boundsAfter = @($regionAfter.Split(',') | ForEach-Object { [int]$_ })
                         Assert-Check ($boundsAfter.Count -eq 4 -and $boundsAfter[3] -ge $boundsBefore[3] -and $boundsAfter[3] -lt (& $px 76)) 'Expansion click is bracketed by growing intermediate geometry before settling'
@@ -283,7 +314,12 @@ try {
                     $receivedClicks = [NativeProbe]::AnchorClicks() - $beforeClicks
                     $observations.ClickProbes += [ordered]@{ Phase = $case.Name; RegionBefore = $regionBefore;
                         RegionAfter = $regionAfter; WindowX = $point.X - $rect.Left; WindowY = $point.Y - $rect.Top;
+                        BoundsContainPointBefore = $inBoundsBefore; BoundsContainPointAfter = $inBoundsAfter;
+                        ExpansionEnvelope = $expansionProbe; ExpansionShadowOverlap = 'NOT ESTABLISHED';
                         WaitToExpansionMs = $waitToExpansionMs; ObservationToInjectionMs = $clickElapsedMs; ReceivedClicks = $receivedClicks }
+                    if ($case.ContainsKey('Expansion')) {
+                        Assert-Check (!$inBoundsBefore -and !$inBoundsAfter) 'Expansion probe stays outside both observed region bounds'
+                    }
                     Assert-Check ($receivedClicks -eq 1) "$($case.Name) delivers a real click to the underlying process"
                 }
             } finally {
@@ -370,8 +406,11 @@ try {
     Assert-Check ($script:hostProcess.WaitForExit(5000)) 'Native close of last surface exits host'
     Assert-Check ($script:hostProcess.ExitCode -eq 0) 'Last-surface shutdown returns zero'
     $script:hostProcess.Dispose(); $script:hostProcess = $null
+    $probeExecutable = Join-Path $projectRoot 'target/debug/roqa.exe'
+    if (!(Test-Path -LiteralPath $probeExecutable)) { throw 'Debug probe binary missing; build with scripts/cargo.ps1 build --locked before -SkipBuild' }
+    $observations.DebugProbeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $probeExecutable).Hash
     foreach ($probe in @('--probe-failure', '--probe-panic')) {
-        $failedHost = Start-Process -FilePath $executable -ArgumentList $probe -PassThru -WindowStyle Hidden
+        $failedHost = Start-Process -FilePath $probeExecutable -ArgumentList $probe -PassThru -WindowStyle Hidden
         if (!$failedHost.WaitForExit(5000)) { $failedHost.Kill(); throw "Failure probe hung: $probe" }
         Assert-Check ($failedHost.ExitCode -eq 1) "Failure takes expected orderly exit code 1: $probe"
         $failedHost.Dispose()

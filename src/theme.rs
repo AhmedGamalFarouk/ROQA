@@ -11,6 +11,8 @@ pub type Rgb = (u8, u8, u8);
 pub struct Palette {
     /// The notch body and the dock bar at rest, one flat fill.
     pub body: Rgba,
+    /// High contrast only: the system (bar track, grey text) colours; `None` in every theme.
+    pub high_contrast: Option<(Rgb, Rgb)>,
     /// The dock bar with the pointer inside.
     pub dock_hover: Rgba,
     /// Text, glyphs, bars and rings; each element applies its own alpha.
@@ -67,6 +69,7 @@ impl Theme {
     pub fn palette(self) -> Palette {
         match self {
             Self::Classic => Palette {
+                high_contrast: None,
                 body: Rgba(0, 0, 0, 1.0),
                 dock_hover: Rgba(20, 20, 22, 1.0),
                 ink: (255, 255, 255),
@@ -77,6 +80,7 @@ impl Theme {
                 rim: None,
             },
             Self::Light => Palette {
+                high_contrast: None,
                 body: Rgba(244, 245, 247, 1.0),
                 dock_hover: Rgba(232, 234, 238, 1.0),
                 ink: (20, 22, 26),
@@ -87,6 +91,7 @@ impl Theme {
                 rim: None,
             },
             Self::Midnight => Palette {
+                high_contrast: None,
                 body: Rgba(11, 16, 32, 1.0),
                 dock_hover: Rgba(22, 30, 56, 1.0),
                 ink: (232, 238, 255),
@@ -97,6 +102,7 @@ impl Theme {
                 rim: None,
             },
             Self::Glass => Palette {
+                high_contrast: None,
                 body: Rgba(22, 28, 40, 0.82),
                 dock_hover: Rgba(22, 28, 40, 0.90),
                 ink: (255, 255, 255),
@@ -110,7 +116,95 @@ impl Theme {
     }
 }
 
+/// Read only at construction or a system notification; never polls or changes Windows settings.
+pub fn system_palette(theme: Theme) -> Palette {
+    use windows::Win32::{
+        Graphics::Gdi::{
+            COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor,
+        },
+        UI::{
+            Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
+            WindowsAndMessaging::{
+                SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+            },
+        },
+    };
+    let mut contrast = HIGHCONTRASTW {
+        cbSize: std::mem::size_of::<HIGHCONTRASTW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: correctly sized, writable HIGHCONTRASTW. This SPI action only queries system state.
+    unsafe {
+        let queried = SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            contrast.cbSize,
+            Some((&mut contrast as *mut HIGHCONTRASTW).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+        if let Err(error) = &queried {
+            eprintln!("ROQA: high-contrast query failed: {error}");
+        }
+        // A failed query falls back to the selected theme rather than ending the host.
+        if queried.is_ok() && contrast.dwFlags & HCF_HIGHCONTRASTON == HCF_HIGHCONTRASTON {
+            let rgb = |color: windows::Win32::Graphics::Gdi::SYS_COLOR_INDEX| {
+                let value = GetSysColor(color);
+                (value as u8, (value >> 8) as u8, (value >> 16) as u8)
+            };
+            return Palette::contrast(
+                rgb(COLOR_WINDOW),
+                rgb(COLOR_WINDOWTEXT),
+                rgb(COLOR_BTNFACE),
+                rgb(COLOR_GRAYTEXT),
+            );
+        }
+    }
+    theme.palette()
+}
+
 impl Palette {
+    fn contrast(body: Rgb, ink: Rgb, tile: Rgb, gray: Rgb) -> Self {
+        // The button face usually equals the window colour in a high-contrast theme: then use grey text.
+        let track = if tile == body { gray } else { tile };
+        let opaque = |(r, g, b)| Rgba(r, g, b, 1.0);
+        Self {
+            body: opaque(body),
+            dock_hover: opaque(body),
+            ink,
+            on_ink: body,
+            glyph: ink,
+            tile: opaque(tile),
+            shadow: 0.0,
+            rim: None,
+            high_contrast: Some((track, gray)),
+        }
+    }
+    /// Settled secondary text and glyphs use the selected system foreground at full contrast.
+    pub fn ink_alpha(&self, alpha: f32) -> f32 {
+        if self.high_contrast.is_some() && alpha > 0.0 {
+            1.0
+        } else {
+            alpha
+        }
+    }
+    /// A bar track: the system track colour in high contrast (never the fill's ink), else faint ink.
+    pub fn track(&self, alpha: f32) -> (Rgb, f32) {
+        match self.high_contrast {
+            Some((track, _)) => (track, self.ink_alpha(alpha)),
+            None => (self.ink, alpha),
+        }
+    }
+    /// High contrast with no distinct track colour: bars draw a 1 px ink outline, not a grey fill.
+    pub fn track_outline(&self) -> bool {
+        matches!(self.high_contrast, Some((track, gray)) if track == gray)
+    }
+    /// Ink, or when `dim` (disabled, muted, missing) the system grey-text colour in high contrast.
+    pub fn ink_dim(&self, dim: bool, alpha: f32) -> (Rgb, f32) {
+        match self.high_contrast {
+            Some((_, gray)) if dim => (gray, self.ink_alpha(alpha)),
+            _ => (self.ink, self.ink_alpha(alpha)),
+        }
+    }
+
     /// The dock bar fill for a hover progress of `inside` (0 at rest, 1 with the pointer in).
     pub fn dock_fill(&self, inside: f32) -> Rgba {
         let (a, b) = (self.body, self.dock_hover);
@@ -158,6 +252,37 @@ mod tests {
         (x.max(y) + 0.05) / (x.min(y) + 0.05)
     }
 
+    #[test]
+    fn high_contrast_is_opaque_and_uses_only_supplied_system_colours() {
+        let palette = Palette::contrast((1, 2, 3), (250, 251, 252), (4, 5, 6), (7, 8, 9));
+        assert_eq!(palette.body, Rgba(1, 2, 3, 1.0));
+        assert_eq!(palette.ink, (250, 251, 252));
+        assert_eq!(palette.on_ink, (1, 2, 3));
+        assert_eq!(palette.ink_alpha(0.6), 1.0);
+        assert_eq!(palette.ink_alpha(0.0), 0.0);
+        assert_eq!((palette.shadow, palette.rim), (0.0, None));
+    }
+    #[test]
+    fn high_contrast_keeps_track_and_disabled_distinct_from_ink() {
+        let p = Palette::contrast((1, 2, 3), (250, 251, 252), (4, 5, 6), (7, 8, 9));
+        assert_eq!(p.track(0.4), ((4, 5, 6), 1.0));
+        assert_ne!(p.track(0.4).0, p.ink);
+        assert_eq!(p.ink_dim(true, 0.3), ((7, 8, 9), 1.0));
+        assert_eq!(p.ink_dim(false, 0.3), (p.ink, 1.0));
+        // A face colour equal to the window would hide the track: grey text is used instead.
+        let same = Palette::contrast((1, 2, 3), (250, 251, 252), (1, 2, 3), (7, 8, 9));
+        assert_eq!(same.track(0.4).0, (7, 8, 9));
+        // ...and the track is then an outline, so it is not the dim (grey) fill; tiles never use ink.
+        assert!(same.track_outline() && !p.track_outline());
+        assert_ne!(same.track(0.4).0, same.ink);
+        assert_ne!(p.track(0.12).0, p.glyph);
+        // Other themes keep the alpha look.
+        let classic = Theme::Classic.palette();
+        assert_eq!(
+            (classic.track(0.4), classic.ink_dim(true, 0.3)),
+            ((classic.ink, 0.4), (classic.ink, 0.3))
+        );
+    }
     #[test]
     fn classic_is_the_legacy_look() {
         let p = Theme::Classic.palette();

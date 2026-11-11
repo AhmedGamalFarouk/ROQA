@@ -355,7 +355,7 @@ pub fn get_object(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT>
 /// Owns a surface's UIA root for one HWND lifetime; drop before destroying the window.
 pub struct Accessibility {
     hwnd: HWND,
-    root: IRawElementProviderSimple,
+    root: Option<IRawElementProviderSimple>,
 }
 impl Accessibility {
     pub fn dock(hwnd: HWND, state: &Shared) -> Result<Self> {
@@ -378,26 +378,35 @@ impl Accessibility {
                 .map(|mut roots| roots.push((hwnd.0 as isize, root.clone())))
                 .map_err(|_| Error::new(E_FAIL, "Accessibility registry busy."))
         })?;
-        Ok(Self { hwnd, root })
+        Ok(Self {
+            hwnd,
+            root: Some(root),
+        })
     }
     pub fn root(&self) -> &IRawElementProviderSimple {
-        &self.root
+        self.root.as_ref().expect("live accessibility root")
+    }
+    /// Retire registry access before COM disconnect, while the host identity is still valid.
+    pub fn disconnect(&mut self) {
+        if self.root.is_none() {
+            return;
+        }
+        let hwnd = self.hwnd.0 as isize;
+        ROOTS.with(|roots| {
+            roots.borrow_mut().retain(|(window, _)| *window != hwnd);
+        });
+        let root = self.root.take().expect("registered accessibility root");
+        // SAFETY: documented teardown while the HWND is still alive: release UIA's references, then disconnect.
+        unsafe {
+            UiaReturnRawElementProvider(self.hwnd, WPARAM(0), LPARAM(0), None);
+            if let Err(error) = UiaDisconnectProvider(&root) {
+                eprintln!("Accessibility cleanup: {error}");
+            }
+        }
     }
 }
 impl Drop for Accessibility {
     fn drop(&mut self) {
-        let hwnd = self.hwnd.0 as isize;
-        ROOTS.with(|roots| {
-            if let Ok(mut roots) = roots.try_borrow_mut() {
-                roots.retain(|(window, _)| *window != hwnd);
-            }
-        });
-        // SAFETY: documented teardown while the HWND is still alive: release UIA's references, then disconnect.
-        unsafe {
-            UiaReturnRawElementProvider(self.hwnd, WPARAM(0), LPARAM(0), None);
-            if let Err(error) = UiaDisconnectProvider(&self.root) {
-                eprintln!("Accessibility cleanup: {error}");
-            }
-        }
+        self.disconnect();
     }
 }

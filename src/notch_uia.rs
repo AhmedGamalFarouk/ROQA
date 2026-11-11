@@ -37,6 +37,9 @@ pub const SHELF_BASE: usize = 4;
 #[derive(Default)]
 pub struct State {
     pub hwnd: isize,
+    pub published_media: Option<(u64, Option<Level>)>,
+    pub published_shelf: Option<u32>,
+    pub published_position: Option<crate::media::Progress>,
     pub dpi: u32,
     /// The media session generation the controls belong to; older elements are unavailable.
     pub version: u32,
@@ -386,15 +389,13 @@ impl IRawElementProviderSimple_Impl for Item_Impl {
             "RoqaShelf1",
             "RoqaShelf2",
         ];
-        // Shelf entries open files; keyboard focus stays on the media controls.
-        let shelf = self.index >= SHELF_BASE;
         Ok(match property {
             UIA_ControlTypePropertyId => variant_i32(UIA_ButtonControlTypeId.0),
             UIA_NamePropertyId => variant_text(&name),
             UIA_AutomationIdPropertyId => variant_text(id.get(self.index).unwrap_or(&"")),
             // Disabled controls stay in the tree, exposed as disabled.
             UIA_IsEnabledPropertyId => variant_bool(enabled),
-            UIA_IsKeyboardFocusablePropertyId => variant_bool(enabled && !shelf),
+            UIA_IsKeyboardFocusablePropertyId => variant_bool(enabled),
             UIA_HasKeyboardFocusPropertyId => variant_bool(focused),
             UIA_IsOffscreenPropertyId => variant_bool(!open),
             // Read-only: the position is shown and spoken, not adjusted with keys (user decision).
@@ -462,9 +463,6 @@ impl IRawElementProviderFragment_Impl for Item_Impl {
         Ok(std::ptr::null_mut())
     }
     fn SetFocus(&self) -> Result<()> {
-        if self.index >= SHELF_BASE {
-            return Err(not_enabled());
-        }
         self.act(FOCUS)
     }
     fn FragmentRoot(&self) -> Result<IRawElementProviderFragmentRoot> {
@@ -673,6 +671,51 @@ mod tests {
         assert_eq!(status(PLAY_PAUSE), "1:23 of 4:56");
         assert_eq!(status(PREVIOUS), "");
         assert_eq!(status(NEXT), "");
+    }
+
+    #[test]
+    fn shelf_items_expose_focus_and_retire_when_the_page_changes() {
+        let state = Shared::default();
+        {
+            let mut snapshot = state.lock().unwrap();
+            snapshot.hwnd = 1;
+            snapshot.version = 3;
+            snapshot.shelf = vec!["Shelf: file".into(), "More shelf files, page 1 of 6".into()];
+            snapshot.focus = Some(SHELF_BASE);
+        }
+        let root: IRawElementProviderFragmentRoot = Root {
+            state: Arc::clone(&state),
+        }
+        .into();
+        let item: IRawElementProviderSimple = Item {
+            state: Arc::clone(&state),
+            root,
+            index: SHELF_BASE,
+            version: 3,
+        }
+        .into();
+        // SAFETY: local property reads only; no HWND or foreground API is called.
+        unsafe {
+            assert_eq!(
+                item.GetPropertyValue(UIA_IsKeyboardFocusablePropertyId)
+                    .unwrap()
+                    .to_string(),
+                variant_bool(true).to_string()
+            );
+            assert_eq!(
+                item.GetPropertyValue(UIA_HasKeyboardFocusPropertyId)
+                    .unwrap()
+                    .to_string(),
+                variant_bool(true).to_string()
+            );
+            state.lock().unwrap().version = 4;
+            assert_eq!(
+                item.GetPropertyValue(UIA_NamePropertyId)
+                    .unwrap_err()
+                    .code(),
+                not_available().code()
+            );
+        }
     }
 
     #[test]

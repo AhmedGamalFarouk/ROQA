@@ -1,11 +1,19 @@
 #![windows_subsystem = "windows"]
 
+// Keep existing diagnostic stderr output; the fallback records only fixed context, never arguments.
+macro_rules! eprintln {
+    ($message:literal $(, $argument:expr)* $(,)?) => {{
+        std::eprintln!($message $(, $argument)*);
+        crate::error_log::record($message);
+    }};
+}
 mod audio;
 mod catalog_timing;
 mod clock;
 mod diagnostics;
 mod dock;
 mod dock_uia;
+mod error_log;
 mod graphics;
 mod host;
 mod icons;
@@ -37,6 +45,7 @@ use windows::core::{Error, Result};
 fn main() {
     if let Err(error) = run() {
         eprintln!("ROQA: {error}");
+        error_log::startup_failure(error.code().0);
         std::process::exit(1);
     }
 }
@@ -45,7 +54,9 @@ fn run() -> Result<()> {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
     match arguments.as_slice() {
         [] => host::run(host::Probe::None, None),
+        #[cfg(debug_assertions)]
         [command] if command == "--probe-failure" => host::run(host::Probe::Initialization, None),
+        #[cfg(debug_assertions)]
         [command] if command == "--probe-panic" => host::run(host::Probe::Callback, None),
         #[cfg(debug_assertions)]
         [command] if command == "--probe-device-loss" => host::run(host::Probe::DeviceLoss, None),

@@ -29,6 +29,7 @@ use windows::core::{BOOL, Error, Result, w};
 
 pub const REPOSITION: u32 = WM_APP + 1;
 pub const CLOSE_SURFACE: u32 = WM_APP + 2;
+#[cfg(debug_assertions)]
 pub const PANIC_PROBE: u32 = WM_APP + 3;
 /// Posted when a surface loses the foreground; only a keyboard-focused notch ever has it.
 pub const DEACTIVATED: u32 = WM_APP + 6;
@@ -401,7 +402,12 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
         if let Some(reconnect) =
             repositions(message, wparam, TASKBAR_CREATED.load(Ordering::Relaxed))
         {
-            let _ = PostMessageW(Some(hwnd), REPOSITION, WPARAM(reconnect.into()), LPARAM(0));
+            let _ = PostMessageW(
+                Some(hwnd),
+                REPOSITION,
+                WPARAM(reconnect.into()),
+                LPARAM(message as isize),
+            );
             // WM_POWERBROADCAST is handled by returning TRUE; the others by returning 0.
             return LRESULT(isize::from(message == WM_POWERBROADCAST));
         }
@@ -424,6 +430,7 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
                 }
                 DefWindowProcW(hwnd, message, wparam, lparam)
             }
+            #[cfg(debug_assertions)]
             PANIC_PROBE => panic!("Intentional callback-boundary probe"),
             _ => DefWindowProcW(hwnd, message, wparam, lparam),
         }
@@ -438,7 +445,9 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
 /// media and audio may have missed events and reconnect.
 fn repositions(message: u32, wparam: WPARAM, taskbar_created: u32) -> Option<bool> {
     match message {
-        WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_TIMECHANGE => Some(false),
+        WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_TIMECHANGE => {
+            Some(false)
+        }
         // Sent on every resume, with or without a user present; suspend changes nothing visible.
         WM_POWERBROADCAST => (wparam.0 == PBT_APMRESUMEAUTOMATIC as usize).then_some(true),
         _ => (taskbar_created != 0 && message == taskbar_created).then_some(true),
@@ -455,6 +464,7 @@ mod tests {
             WM_DPICHANGED,
             WM_DISPLAYCHANGE,
             WM_SETTINGCHANGE,
+            WM_SYSCOLORCHANGE,
             WM_TIMECHANGE,
         ] {
             assert_eq!(repositions(message, WPARAM(0), taskbar), Some(false));

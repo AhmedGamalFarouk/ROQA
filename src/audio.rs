@@ -340,7 +340,7 @@ impl Audio {
                     .ok()
             });
             self.stop();
-            eprintln!("Audio: rebound, endpoint={}", self.endpoint.is_some());
+            std::eprintln!("Audio: rebound, endpoint={}", self.endpoint.is_some());
         }
         self.level = self.endpoint.as_ref().and_then(|endpoint| {
             read(&endpoint.volume)
