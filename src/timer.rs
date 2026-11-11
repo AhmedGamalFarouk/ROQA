@@ -91,8 +91,6 @@ impl Timers {
     }
 
     /// Starts a countdown; false when it is out of range or `MAX` are already running.
-    // shortcut: no entry point yet (`--timer` is deferred), so only tests call this; drop the allow with it.
-    #[allow(dead_code)]
     pub fn start(&mut self, seconds: u64, wall: u64, now: Instant) -> bool {
         if !(1..=MAX_SECONDS).contains(&seconds) || self.list.len() >= MAX {
             return false;

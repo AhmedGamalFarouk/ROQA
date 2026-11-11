@@ -1,4 +1,4 @@
-param([ValidateSet('start','quit','show-notch','hide-notch','show-dock','hide-dock','show-picker')][string]$Action = 'start')
+param([ValidateSet('start','quit','show-notch','hide-notch','show-dock','hide-dock','show-picker','show-settings')][string]$Action = 'start')
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot

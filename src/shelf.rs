@@ -4,7 +4,8 @@
 
 use crate::store::Store;
 
-/// Entries kept (UNVERIFIED default from m5-preparation.md section 4). A new one evicts the oldest.
+/// Hard ceiling and default of the entries kept (UNVERIFIED default from m5-preparation.md section 4). A new
+/// one evicts the oldest beyond the shelf's cap.
 pub const MAX: usize = 12;
 /// Entries drawn and exposed to UI Automation: the newest ones fit the panel's free pocket (PROVISIONAL).
 pub const VISIBLE: usize = 3;
@@ -40,17 +41,37 @@ pub struct Entry {
     pub check: Check,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shelf {
     entries: Vec<Entry>,
     /// Bumped on every visible change, so UI Automation retires elements of an older list.
     revision: u32,
+    /// Entries kept, `1..=MAX` (the settings' shelf size).
+    cap: usize,
+}
+
+impl Default for Shelf {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            revision: 0,
+            cap: MAX,
+        }
+    }
 }
 
 const RESERVED: [&str; 22] = [
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
+
+/// `GetDriveType` value of a mapped network drive (`DRIVE_REMOTE`).
+pub const DRIVE_REMOTE: u32 = 4;
+
+/// Activation must keep off the host thread for a UNC path and for a drive letter that maps to a share.
+pub fn is_network(check: Check, drive_type: u32) -> bool {
+    check == Check::NotChecked || drive_type == DRIVE_REMOTE
+}
 
 /// Case-insensitive key two spellings of one path share (no file system access, so no canonicalisation).
 fn key(path: &str) -> String {
@@ -156,7 +177,7 @@ impl Shelf {
             .take(MAX_DROP)
             .filter_map(|p| validate(p.as_ref()).ok())
         {
-            if fresh.len() < MAX
+            if fresh.len() < self.cap
                 && !self.has(&entry.path)
                 && !fresh.iter().any(|f| key(&f.path) == key(&entry.path))
             {
@@ -166,11 +187,22 @@ impl Shelf {
         let added = fresh.len();
         if added > 0 {
             fresh.append(&mut self.entries);
-            fresh.truncate(MAX);
+            fresh.truncate(self.cap);
             self.entries = fresh;
             self.revision = self.revision.wrapping_add(1);
         }
         added
+    }
+
+    /// Sets the cap within `1..=MAX`; true when entries beyond it were dropped (the oldest go first).
+    pub fn set_cap(&mut self, cap: usize) -> bool {
+        self.cap = cap.clamp(1, MAX);
+        let cut = self.entries.len() > self.cap;
+        if cut {
+            self.entries.truncate(self.cap);
+            self.revision = self.revision.wrapping_add(1);
+        }
+        cut
     }
 
     /// Removes an entry; false for an index past the end.
@@ -397,5 +429,31 @@ mod tests {
         let loaded = Shelf::from_store(&hostile);
         assert_eq!(loaded.entries().len(), MAX);
         assert_eq!(loaded.entries()[0].path, r"C:\ok.txt");
+    }
+
+    #[test]
+    fn a_lower_cap_drops_the_oldest_and_a_mapped_drive_counts_as_network() {
+        let mut shelf = Shelf::default();
+        shelf.add_all(&[r"C:\a", r"C:\b", r"C:\c", r"C:\d"]);
+        let revision = shelf.revision();
+        assert!(!shelf.set_cap(99), "clamped to the ceiling: nothing cut");
+        assert!(shelf.set_cap(2));
+        assert_eq!(paths(&shelf), [r"C:\a", r"C:\b"]);
+        assert_ne!(shelf.revision(), revision);
+        assert_eq!(shelf.add_all(&[r"C:\e"]), 1);
+        assert_eq!(
+            paths(&shelf),
+            [r"C:\e", r"C:\a"],
+            "new entries obey the cap"
+        );
+        assert!(shelf.set_cap(0), "0 clamps to 1");
+        assert_eq!(shelf.entries().len(), 1);
+        // UNC (not checked) or DRIVE_REMOTE stays off the host thread; fixed, removable and unknown do not.
+        assert!(is_network(Check::NotChecked, 3));
+        assert!(is_network(Check::Unknown, DRIVE_REMOTE));
+        assert!(is_network(Check::Missing, DRIVE_REMOTE));
+        for drive_type in [0, 1, 2, 3, 5, 6] {
+            assert!(!is_network(Check::Unknown, drive_type), "{drive_type}");
+        }
     }
 }

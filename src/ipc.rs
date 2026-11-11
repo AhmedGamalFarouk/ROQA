@@ -34,15 +34,17 @@ pub enum Command {
     ShowDock,
     HideDock,
     ShowPicker,
+    ShowSettings,
 }
 impl Command {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Quit,
         Self::ShowNotch,
         Self::HideNotch,
         Self::ShowDock,
         Self::HideDock,
         Self::ShowPicker,
+        Self::ShowSettings,
     ];
     fn name(self) -> &'static str {
         match self {
@@ -52,11 +54,12 @@ impl Command {
             Self::ShowDock => "show-dock",
             Self::HideDock => "hide-dock",
             Self::ShowPicker => "show-picker",
+            Self::ShowSettings => "show-settings",
         }
     }
     pub fn parse(argument: &str) -> Result<Self> {
         Self::ALL.into_iter().find(|command| argument == format!("--{}", command.name()))
-            .ok_or_else(|| Error::new(E_INVALIDARG, "Unknown command. Use --quit, --show-notch, --hide-notch, --show-dock --hide-dock or --show-picker."))
+            .ok_or_else(|| Error::new(E_INVALIDARG, "Unknown command. Use --quit, --show-notch, --hide-notch, --show-dock, --hide-dock, --show-picker or --show-settings."))
     }
     pub fn signal(self) -> Result<()> {
         let name = object_name(self.name())?;
@@ -67,7 +70,7 @@ impl Command {
                 false,
                 PCWSTR(name.as_ptr()),
             )?);
-            if matches!(self, Self::ShowPicker) {
+            if matches!(self, Self::ShowPicker | Self::ShowSettings) {
                 grant_foreground_to_resident();
             }
             SetEvent(event.0)
@@ -75,7 +78,7 @@ impl Command {
     }
 }
 
-/// An explicit picker request comes from whatever app the user is in, so this client usually holds the
+/// An explicit picker or settings request comes from whatever app the user is in, so this client usually holds the
 /// foreground right; pass it to the resident ROQA process only. Without the right Windows refuses,
 /// and the picker reports the refusal instead of forcing focus.
 fn grant_foreground_to_resident() {

@@ -1,14 +1,16 @@
 //! Persistence store (M5 S2): one small versioned file, read once at startup and written only on change.
 //!
 //! Format is a hand-rolled `key=value` text file (no new crate): `version=N`, repeated `pin=`/`shelf=` lines,
-//! and a closing `end` line that makes truncation detectable. Unknown keys are skipped, so a newer build's
-//! extra fields survive an older reader; a *newer version* is set aside instead, so a downgrade never rewrites it.
+//! the settings lines (`settings.rs`, version 2), and a closing `end` line that makes truncation detectable.
+//! Unknown keys are skipped, so a newer build's extra fields survive an older reader; a *newer version* is set
+//! aside instead, so a downgrade never rewrites it.
 
+use crate::settings::Settings;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// Bigger files are not read at all; saves refuse to exceed it.
 pub const MAX_BYTES: u64 = 64 * 1024;
 /// A burst of changes becomes one write this long after the last change (UNVERIFIED value; tune in S9).
@@ -26,6 +28,8 @@ pub struct Store {
     pub shelf: Vec<String>,
     /// Running countdown timers as absolute wall-clock expiries (Unix seconds), soonest first.
     pub timers: Vec<u64>,
+    /// User settings; version 1 files had none, so they load as the defaults.
+    pub settings: Settings,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -150,6 +154,7 @@ fn parse(text: &str) -> Option<Store> {
             Some(("pin", value)) if !value.is_empty() => store.pins.push(value.into()),
             Some(("shelf", value)) if !value.is_empty() => store.shelf.push(value.into()),
             Some(("timer", value)) => store.timers.extend(value.parse::<u64>()),
+            Some((key, value)) if store.settings.set(key, value) => {}
             _ => {} // Unknown keys and junk lines are ignored.
         }
     }
@@ -160,8 +165,14 @@ fn parse(text: &str) -> Option<Store> {
     Some(store)
 }
 
-/// Migration stub: VERSION is 1, so nothing runs yet. A bump adds `if from < N { ... }` steps here.
-fn migrate(_from: u32, _store: &mut Store) {}
+/// Brings an older file's contents to the current schema; a bump adds an `if from < N { ... }` step.
+fn migrate(from: u32, store: &mut Store) {
+    if from < 2 {
+        // v1 had no settings section: whatever a stray line said, a v1 file means the defaults.
+        store.settings = Settings::default();
+    }
+    store.settings = std::mem::take(&mut store.settings).clamped();
+}
 
 impl Store {
     fn serialize(&self) -> String {
@@ -181,6 +192,7 @@ impl Store {
         for expiry in &self.timers {
             out.push_str(&format!("timer={expiry}\n"));
         }
+        self.settings.write_lines(&mut out);
         out.push_str("end\n");
         out
     }
@@ -245,6 +257,14 @@ mod tests {
             ],
             shelf: vec![r"C:\Users\me\doc.txt".into()],
             timers: vec![1_800_000_000, 1_800_000_060],
+            settings: Settings {
+                dock: false,
+                off_monitors: vec![r"\\.\DISPLAY2".into()],
+                timer_sound: false,
+                shelf_cap: 6,
+                diagnostics: Some(r"C:\logs\run=1.json".into()),
+                ..Settings::default()
+            },
         }
     }
 
@@ -279,6 +299,7 @@ mod tests {
                 pins: vec!["a".into()],
                 shelf: vec!["b".into()],
                 timers: vec![77], // unparsable timer values are skipped
+                settings: Settings::default(),
             })
         );
         assert_eq!(
@@ -306,7 +327,67 @@ mod tests {
         assert!(kept.contains("pin=keep"));
         let mut store = sample();
         migrate(1, &mut store);
-        assert_eq!(store, sample());
+        // Only the settings differ: version 1 had none, so they reset to the defaults.
+        assert_eq!(
+            store,
+            Store {
+                settings: Settings::default(),
+                ..sample()
+            }
+        );
+        migrate(2, &mut store);
+        assert_eq!(
+            store,
+            Store {
+                settings: Settings::default(),
+                ..sample()
+            }
+        );
+        let mut v2 = sample();
+        migrate(2, &mut v2);
+        assert_eq!(v2, sample(), "a current-version file keeps its settings");
+    }
+
+    #[test]
+    fn a_version_1_file_migrates_to_default_settings_and_a_v2_one_is_clamped() {
+        let v1 = parse("version=1\npin=a\ndock=0\nshelfcap=2\nend\n").unwrap();
+        assert_eq!(
+            (v1.pins, v1.settings),
+            (vec!["a".to_string()], Settings::default())
+        );
+        let v2 = parse(
+            "version=2\ndock=0\nnotch=0\nshelfcap=999\nsound=0\noff=D2\ndiag= \"C:\\d.json\" \nend\n",
+        )
+        .unwrap();
+        assert_eq!(
+            v2.settings,
+            Settings {
+                dock: false,
+                notch: true, // at least one kind stays on
+                timer_sound: false,
+                shelf_cap: crate::shelf::MAX,
+                off_monitors: vec!["D2".into()],
+                diagnostics: Some(r"C:\d.json".into()),
+            }
+        );
+        // No settings lines in a v2 file means the defaults too.
+        assert_eq!(
+            parse("version=2\nend\n").unwrap().settings,
+            Settings::default()
+        );
+        let dir = Dir::new("v1");
+        std::fs::write(dir.file(), "version=1\nshelf=C:\\a\nend\n").unwrap();
+        let (loaded, state) = load(&dir.file());
+        assert_eq!(
+            (state, loaded.settings.clone()),
+            (Load::Loaded, Settings::default())
+        );
+        loaded.save(&dir.file()).unwrap();
+        assert!(
+            std::fs::read_to_string(dir.file())
+                .unwrap()
+                .starts_with("version=2\n")
+        );
     }
 
     #[test]

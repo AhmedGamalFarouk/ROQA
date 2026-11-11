@@ -14,7 +14,9 @@ use crate::{
     notch_uia,
     picker::Picker,
     pins::Pins,
-    shelf::{Check, Shelf},
+    settings::{self, Settings},
+    settings_window::SettingsWindow,
+    shelf::{self, Check, Shelf},
     shelf_os::{self, DropEvent, Drops},
     store::{self, Flush, Pending, Store},
     text_settings::TextSettings,
@@ -860,6 +862,10 @@ struct Desktop {
     graphics: Graphics,
     rebuild: Rebuild,
     picker: Option<Picker>,
+    /// Open only while the user has it up; created on demand, destroyed on close, so it costs nothing closed.
+    settings_window: Option<SettingsWindow>,
+    /// What the user chose: loaded once, persisted through `store` on change, applied live by `apply_settings`.
+    settings: Settings,
     dock_items: Vec<DockItem>,
     dock_names: Vec<String>,
     dock_generation: Option<u64>,
@@ -899,8 +905,6 @@ struct Desktop {
     sampled: Option<Instant>,
     /// Countdown timers: restored once from the store and driven only by `refresh_timers`' deadline.
     timers: Timers,
-    /// Play the system sound when a timer completes; the settings surface (S7) will own this.
-    timer_sound: bool,
     /// The soonest timer's last requested panel text, so an expanded notch repaints only when it changes.
     timer_shown: String,
 }
@@ -915,6 +919,12 @@ impl Desktop {
             .as_deref()
             .map_or_else(Store::default, |path| store::load(path).0);
         let now = Instant::now();
+        let devices: Vec<String> = monitors.iter().map(|m| m.device.clone()).collect();
+        let settings = store.settings.clone().keep_one_monitor(&devices);
+        let mut shelf = Shelf::from_store(&store);
+        if shelf.set_cap(settings.shelf_cap) {
+            shelf.write_to(&mut store); // the cut list leaves the file with its next write
+        }
         let timers = Timers::restore(&store.timers, timer::wall_now(), now);
         // The section now mirrors what is running; stale entries leave the file with its next write.
         timers.write_to(&mut store, &mut Pending::default(), now);
@@ -933,13 +943,15 @@ impl Desktop {
             graphics: Graphics::create()?,
             rebuild: Rebuild::new(Instant::now()),
             picker: None,
+            settings_window: None,
+            settings,
             icons: IconService::create()?,
             dock_items: Vec::new(),
             dock_names: dock::names(&[], &WindowModel::default()),
             dock_generation: None,
             pins: Pins::from_store(&store),
             shelf: ShelfView {
-                shelf: Shelf::from_store(&store),
+                shelf,
                 icons: Vec::new(),
                 stale: true,
             },
@@ -960,17 +972,20 @@ impl Desktop {
             progress_tick: Instant::now(),
             sampled: None,
             timers,
-            timer_sound: true,
             timer_shown: String::new(),
         };
-        desktop.show(SurfaceKind::Notch)?;
+        if desktop.settings.notch {
+            desktop.show(SurfaceKind::Notch)?;
+        }
         if *probe == Probe::Initialization {
             return Err(Error::new(
                 E_FAIL,
                 "Injected failure after first composed window.",
             ));
         }
-        desktop.show(SurfaceKind::Dock)?;
+        if desktop.settings.dock {
+            desktop.show(SurfaceKind::Dock)?;
+        }
         // After the first paints, so loading the media component never delays them. WinRT is
         // already initialized on this thread by `TextSettings`.
         desktop.media.start(desktop.icons.jobs());
@@ -990,6 +1005,9 @@ impl Desktop {
     }
     /// Creates and paints `kind` on `monitor` unless it already has one.
     fn place(&mut self, monitor: &Monitor, kind: SurfaceKind) -> Result<()> {
+        if self.settings.off_monitors.contains(&monitor.device) {
+            return Ok(()); // the user switched ROQA off on this monitor
+        }
         if self
             .surfaces
             .iter()
@@ -1179,7 +1197,7 @@ impl Desktop {
                 surface.live = true;
             }
         }
-        if self.timer_sound {
+        if self.settings.timer_sound {
             // SAFETY: plays the user's own default sound asynchronously; no pointers.
             unsafe {
                 let _ = MessageBeep(MB_ICONASTERISK);
@@ -1236,6 +1254,93 @@ impl Desktop {
         self.surfaces
             .iter()
             .find(|s| s.kind() == SurfaceKind::Dock && s.window.0 == hwnd)
+    }
+    /// Opens the settings window (or replaces an open one) on the connected monitors.
+    fn open_settings(&mut self) -> Result<()> {
+        self.settings_window.take();
+        let devices: Vec<String> = self.monitors.iter().map(|m| m.device.clone()).collect();
+        self.settings_window = Some(SettingsWindow::create(
+            &self.settings,
+            &devices,
+            self.text_factor,
+        )?);
+        Ok(())
+    }
+    /// Takes what the settings window produced in its last message: a change to apply live and a timer to
+    /// start. The window is told how the timer went.
+    fn settings_changed(&mut self, catalog: &mut Catalog) -> Result<()> {
+        let Some(window) = &mut self.settings_window else {
+            return Ok(());
+        };
+        let (change, start) = (window.take_change(), window.take_start());
+        if let Some(next) = change {
+            self.apply_settings(next, catalog)?;
+        }
+        if let Some(seconds) = start {
+            let status = self.start_timer(seconds);
+            if let Some(window) = &self.settings_window {
+                let _ = window.say(&status);
+            }
+        }
+        Ok(())
+    }
+    /// Applies new settings live: creates and destroys exactly the surfaces `settings::surface_diff` names,
+    /// trims the shelf to its cap, repoints the diagnostics report and marks the store dirty once.
+    fn apply_settings(&mut self, next: Settings, catalog: &mut Catalog) -> Result<()> {
+        let devices: Vec<String> = self.monitors.iter().map(|m| m.device.clone()).collect();
+        let next = next.clamped().keep_one_monitor(&devices);
+        if next == self.settings {
+            return Ok(());
+        }
+        let old = std::mem::replace(&mut self.settings, next);
+        let (create, destroy) = settings::surface_diff(&old, &self.settings, &devices);
+        for kind in [SurfaceKind::Notch, SurfaceKind::Dock] {
+            match (old.kind_on(kind), self.settings.kind_on(kind)) {
+                (false, true) if !self.shown.contains(&kind) => self.shown.push(kind),
+                (true, false) => self.shown.retain(|shown| *shown != kind),
+                _ => {}
+            }
+        }
+        self.surfaces
+            .retain(|s| !destroy.contains(&(s.kind(), s.monitor.clone())));
+        for (kind, device) in create {
+            if let Some(monitor) = self.monitors.iter().find(|m| m.device == device).cloned() {
+                self.place(&monitor, kind)?;
+            }
+        }
+        // A runtime `--hide-*` plus this change must not leave nothing shown: that would end the host.
+        if self.shown.is_empty() {
+            for kind in [SurfaceKind::Notch, SurfaceKind::Dock] {
+                if self.settings.kind_on(kind) {
+                    self.show(kind)?;
+                }
+            }
+        }
+        let cap = self.settings.shelf_cap;
+        self.change_shelf(|shelf| shelf.set_cap(cap));
+        // Only an edited path repoints the report, so a `--diagnostics <path>` run keeps its own.
+        if old.diagnostics != self.settings.diagnostics {
+            catalog.set_diagnostics(
+                self.settings
+                    .diagnostics
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+            );
+        }
+        self.store.settings = self.settings.clone();
+        self.pending.mark(Instant::now());
+        Ok(())
+    }
+    /// Starts a countdown the user asked for in the settings window; the text is the window's status line.
+    fn start_timer(&mut self, seconds: u64) -> String {
+        let now = Instant::now();
+        if !self.timers.start(seconds, timer::wall_now(), now) {
+            return format!("{} timers are already running.", timer::MAX);
+        }
+        self.timers
+            .write_to(&mut self.store, &mut self.pending, now);
+        self.request_notches(Repaint::Full, |_| true);
+        "Timer started.".to_owned()
     }
     fn open_picker(&mut self, catalog: &Catalog) -> Result<()> {
         self.picker.take();
@@ -1509,7 +1614,9 @@ impl Desktop {
         let Some(entry) = self.shelf.shelf.entries().get(index) else {
             return;
         };
-        let (path, network) = (entry.path.clone(), entry.check == Check::NotChecked);
+        let path = entry.path.clone();
+        // A UNC path or a mapped drive could stall the host on a dead share, so neither is stat'ed here.
+        let network = shelf::is_network(entry.check, shelf_os::drive_type(&path));
         let found = network || std::path::Path::new(&path).exists();
         if self.shelf.shelf.set_missing(index, !found) {
             self.request_notches(Repaint::Full, |_| true);
@@ -1561,7 +1668,7 @@ impl Desktop {
     fn command(&mut self, command: Command) -> Result<bool> {
         match command {
             Command::Quit => return Ok(false),
-            Command::ShowPicker => {}
+            Command::ShowPicker | Command::ShowSettings => {}
             Command::ShowNotch => self.show(SurfaceKind::Notch)?,
             Command::ShowDock => self.show(SurfaceKind::Dock)?,
             Command::HideNotch => self.close(SurfaceKind::Notch),
@@ -1991,6 +2098,13 @@ impl Desktop {
                 self.picker.take();
             }
         }
+        if self
+            .settings_window
+            .as_ref()
+            .is_some_and(SettingsWindow::closed)
+        {
+            self.settings_window.take();
+        }
         Ok((wait, self.animate()?))
     }
     /// A device loss schedules a rebuild and yields `fallback`; any other failure still ends the host.
@@ -2050,6 +2164,9 @@ impl Desktop {
             return Ok(());
         }
         self.text_factor = factor;
+        if let Some(window) = &mut self.settings_window {
+            window.set_factor(factor)?;
+        }
         self.surfaces.retain(|s| s.kind() != SurfaceKind::Notch);
         if self.shown.contains(&SurfaceKind::Notch) {
             self.show(SurfaceKind::Notch)?;
@@ -2079,7 +2196,14 @@ pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> 
             );
         }
     }
-    let mut catalog = Catalog::create(diagnostics)?;
+    let report = diagnostics.or_else(|| {
+        desktop
+            .settings
+            .diagnostics
+            .as_ref()
+            .map(std::path::PathBuf::from)
+    });
+    let mut catalog = Catalog::create(report)?;
     let result = event_loop(&controls, &mut desktop, &mut catalog);
     desktop.flush_store(true);
     result.and(catalog.shutdown())
@@ -2130,12 +2254,14 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
         }
         let index = wake.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
         if index < events.len() {
-            if matches!(Command::ALL[index], Command::ShowPicker) {
-                desktop.open_picker(catalog)?;
-            } else {
-                let shown = desktop.command(Command::ALL[index]);
-                if !desktop.survive(shown, true)? {
-                    return Ok(());
+            match Command::ALL[index] {
+                Command::ShowPicker => desktop.open_picker(catalog)?,
+                Command::ShowSettings => desktop.open_settings()?,
+                command => {
+                    let shown = desktop.command(command);
+                    if !desktop.survive(shown, true)? {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -2244,6 +2370,22 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 continue;
             }
             if desktop.notch_input(&message) {
+                continue;
+            }
+            let settings = match &mut desktop.settings_window {
+                Some(window) => window.message(&message)?,
+                None => false,
+            };
+            if settings {
+                let applied = desktop.settings_changed(catalog);
+                desktop.survive(applied, ())?;
+                continue;
+            }
+            if desktop
+                .settings_window
+                .as_ref()
+                .is_some_and(|window| window.keyboard(&message))
+            {
                 continue;
             }
             if let Some(picker) = &mut desktop.picker {

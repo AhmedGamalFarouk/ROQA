@@ -18,6 +18,8 @@ mod notch_uia;
 mod picker;
 mod picker_font;
 mod pins;
+mod settings;
+mod settings_window;
 mod shelf;
 mod shelf_os;
 mod store;

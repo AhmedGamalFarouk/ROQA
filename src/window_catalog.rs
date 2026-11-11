@@ -318,6 +318,10 @@ impl Catalog {
         }
         Ok(())
     }
+    /// Settings changed the opt-in report file (`None` stops writing it).
+    pub fn set_diagnostics(&mut self, path: Option<PathBuf>) {
+        self.diagnostics = path;
+    }
     pub fn shutdown(&mut self) -> Result<()> {
         TARGET.store(0, Ordering::Relaxed);
         let mut failure = None;

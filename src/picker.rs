@@ -20,13 +20,14 @@ use windows::{
     core::{Error, PCWSTR, Result, w},
 };
 
-const ACTION: u32 = WM_APP + 40;
-const RELAYOUT: u32 = WM_APP + 41;
+pub(crate) const ACTION: u32 = WM_APP + 40;
+pub(crate) const RELAYOUT: u32 = WM_APP + 41;
 const FILTER: usize = 100;
 const LIST: usize = 101;
 const STATUS: usize = 102;
 const OPEN: usize = 1;
-const CLOSE: usize = 2;
+pub(crate) const CLOSE: usize = 2;
+pub(crate) const DIALOG_STYLE: u32 = WS_POPUP.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_BORDER.0;
 
 #[repr(C, align(4))]
 struct EmptyDialog {
@@ -62,35 +63,7 @@ pub struct Picker {
 }
 impl Picker {
     pub fn create(model: &WindowModel) -> Result<Self> {
-        // SAFETY: initialize standard themed classes before creating this process's first interactive controls.
-        unsafe {
-            InitCommonControlsEx(&INITCOMMONCONTROLSEX {
-                dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-                dwICC: ICC_STANDARD_CLASSES,
-            })
-            .ok()?;
-        }
-        let template = EmptyDialog {
-            header: DLGTEMPLATE {
-                style: (WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_BORDER).0,
-                cx: 440,
-                cy: 280,
-                ..Default::default()
-            },
-            menu: 0,
-            class: 0,
-            title: 0,
-        };
-        // SAFETY: properly aligned, zero-child standard template remains live throughout synchronous creation.
-        let window = unsafe {
-            CreateDialogIndirectParamW(
-                Some(HINSTANCE(GetModuleHandleW(None)?.0)),
-                &template.header,
-                None,
-                Some(dialog_proc),
-                LPARAM(0),
-            )?
-        };
+        let window = empty_dialog(440, 280)?;
         let mut picker = Self {
             window,
             filter: HWND::default(),
@@ -126,15 +99,24 @@ impl Picker {
         Ok(picker)
     }
     fn create_controls(&mut self) -> Result<()> {
-        self.label = self.control(w!("Static"), "&Filter windows", 99, 0, WS_EX_NOPARENTNOTIFY)?;
-        self.filter = self.control(
+        self.label = control(
+            self.window,
+            w!("Static"),
+            "&Filter windows",
+            99,
+            0,
+            WS_EX_NOPARENTNOTIFY,
+        )?;
+        self.filter = control(
+            self.window,
             w!("Edit"),
             "",
             FILTER,
             ES_AUTOHSCROLL as u32 | WS_BORDER.0 | WS_TABSTOP.0,
             WS_EX_CLIENTEDGE,
         )?;
-        self.list = self.control(
+        self.list = control(
+            self.window,
             w!("ListBox"),
             "",
             LIST,
@@ -145,15 +127,24 @@ impl Picker {
                 | WS_TABSTOP.0,
             WS_EX_CLIENTEDGE,
         )?;
-        self.status = self.control(w!("Static"), "", STATUS, 0, WS_EX_NOPARENTNOTIFY)?;
-        self.open = self.control(
+        self.status = control(
+            self.window,
+            w!("Static"),
+            "",
+            STATUS,
+            0,
+            WS_EX_NOPARENTNOTIFY,
+        )?;
+        self.open = control(
+            self.window,
             w!("Button"),
             "&Open window",
             OPEN,
             BS_DEFPUSHBUTTON as u32 | WS_TABSTOP.0,
             WINDOW_EX_STYLE(0),
         )?;
-        self.close = self.control(
+        self.close = control(
+            self.window,
             w!("Button"),
             "&Close",
             CLOSE,
@@ -176,33 +167,6 @@ impl Picker {
             );
         }
         Ok(())
-    }
-    fn control(
-        &self,
-        class: PCWSTR,
-        title: &str,
-        id: usize,
-        style: u32,
-        extended: WINDOW_EX_STYLE,
-    ) -> Result<HWND> {
-        let title = wide(title);
-        // SAFETY: parent lives throughout synchronous creation; class/title strings are terminated and not retained.
-        unsafe {
-            CreateWindowExW(
-                extended,
-                class,
-                PCWSTR(title.as_ptr()),
-                WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | style),
-                0,
-                0,
-                1,
-                1,
-                Some(self.window),
-                Some(HMENU(id as *mut _)),
-                Some(HINSTANCE(GetModuleHandleW(None)?.0)),
-                None,
-            )
-        }
     }
     pub fn synchronize(&mut self, model: &WindowModel) -> Result<()> {
         // SAFETY: scalar foreground comparison with our own live dialog.
@@ -440,6 +404,67 @@ impl Picker {
         Ok(())
     }
 }
+/// A visible child control of `parent` (standard classes only); the settings window shares it.
+pub(crate) fn control(
+    parent: HWND,
+    class: PCWSTR,
+    title: &str,
+    id: usize,
+    style: u32,
+    extended: WINDOW_EX_STYLE,
+) -> Result<HWND> {
+    let title = wide(title);
+    // SAFETY: parent lives throughout synchronous creation; class/title strings are terminated and not retained.
+    unsafe {
+        CreateWindowExW(
+            extended,
+            class,
+            PCWSTR(title.as_ptr()),
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | style),
+            0,
+            0,
+            1,
+            1,
+            Some(parent),
+            Some(HMENU(id as *mut _)),
+            Some(HINSTANCE(GetModuleHandleW(None)?.0)),
+            None,
+        )
+    }
+}
+/// An empty standard dialog (caption and close box) whose commands `dialog_proc` posts to the host loop.
+/// The settings window reuses it.
+pub(crate) fn empty_dialog(cx: i16, cy: i16) -> Result<HWND> {
+    // SAFETY: initialize standard themed classes before creating this process's first interactive controls.
+    unsafe {
+        InitCommonControlsEx(&INITCOMMONCONTROLSEX {
+            dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_STANDARD_CLASSES,
+        })
+        .ok()?;
+    }
+    let template = EmptyDialog {
+        header: DLGTEMPLATE {
+            style: DIALOG_STYLE,
+            cx,
+            cy,
+            ..Default::default()
+        },
+        menu: 0,
+        class: 0,
+        title: 0,
+    };
+    // SAFETY: properly aligned, zero-child standard template remains live throughout synchronous creation.
+    unsafe {
+        CreateDialogIndirectParamW(
+            Some(HINSTANCE(GetModuleHandleW(None)?.0)),
+            &template.header,
+            None,
+            Some(dialog_proc),
+            LPARAM(0),
+        )
+    }
+}
 impl Drop for Picker {
     fn drop(&mut self) {
         self.text.take();
@@ -451,7 +476,7 @@ impl Drop for Picker {
         }
     }
 }
-fn wide(text: &str) -> Vec<u16> {
+pub(crate) fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 fn window_text(window: HWND) -> String {

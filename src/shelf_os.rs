@@ -10,6 +10,7 @@ use std::{cell::Cell, cell::RefCell, rc::Rc};
 use windows::{
     Win32::{
         Foundation::{HWND, POINTL},
+        Storage::FileSystem::GetDriveTypeW,
         System::{
             Com::{
                 CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
@@ -27,7 +28,7 @@ use windows::{
             FOS_FORCEFILESYSTEM, FileOpenDialog, HDROP, IFileOpenDialog, SIGDN_FILESYSPATH,
         },
     },
-    core::{Ref, Result, implement},
+    core::{PCWSTR, Ref, Result, implement},
 };
 
 /// What the drop target tells the host; read once per host pass, so a drop adds no wake of its own.
@@ -236,4 +237,16 @@ pub fn open(path: &str, reveal: bool, network: bool) {
                 unsafe { CoUninitialize() };
             }
         });
+}
+
+/// `GetDriveType` of the path's drive letter, 0 (unknown) for anything else. It asks the mount manager, not
+/// the network, so a mapped drive is classified (`shelf::DRIVE_REMOTE`) without touching its share.
+pub fn drive_type(path: &str) -> u32 {
+    let bytes = path.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+        return 0;
+    }
+    let root = [u16::from(bytes[0]), u16::from(b':'), u16::from(b'\\'), 0];
+    // SAFETY: `root` is a NUL-terminated `X:\` that outlives the call.
+    unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) }
 }

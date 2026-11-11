@@ -827,3 +827,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Verify:** `scripts/verify.ps1` PASS, **161 tests** (151 + 10). Release 929,792 B (+45,056 B), SHA-256 `F4E948B6028CD68095ED769202511FE5BB41214EECF71463AD87E8DBBEAEB5FC`.
 - **Reviews:** REVIEW NOT RUN (paused by user). Not accepted.
 - **Native evidence:** all NOT RUN (a real drop, activation, UNC and missing targets, Narrator, DPI). Deferred: entries past the third, mapped-drive detection, modal file dialog, keyboard focus on entries (S8).
+
+## M5 S7 settings: landed candidate (2026-11-11 Africa/Cairo)
+
+- **S7:** branch `feat/m5-s7-settings` on `a967371`, packet `docs/development/m5-s7-settings.md`. `src/settings.rs` (pure: surfaces, per-monitor off list, timer sound, shelf cap 1-12, diagnostics path) persisted as store v2 (v1 migrates to defaults); `src/settings_window.rs` modeless standard-control window via `--show-settings`, applied live by a surface diff; reset to defaults. No launch-at-login.
+- **Timers:** the window starts a countdown (`m`, `m:ss`, `h:mm:ss`) through `Timers::start`; no `--timer` channel. **S6 fix:** a `DRIVE_REMOTE` mapped drive is treated like UNC at activation.
+- **Verify:** `scripts/verify.ps1` PASS, **170 tests** (161 + 9). Release 990,208 B (+60,416 B), SHA-256 `98369E6C2978D002D934522589F1E251E5B91E9719DB01D950A305E43A3A2549`.
+- **Reviews:** REVIEW NOT RUN (paused by user). Not accepted.
+- **Native evidence:** all NOT RUN (opening, live apply, per-monitor, a real timer start, reset, keyboard, text scale, IME, Narrator). Deferred: monitor list refresh while open, entries 4-12, modal Ctrl+O.
