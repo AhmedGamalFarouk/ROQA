@@ -59,6 +59,8 @@ windows = { version = "=0.62.2", features = [
 [profile.release]
 lto = "fat"
 codegen-units = 1
+# A panic ends the process: the hook in error_log logs its location and exits 70 (-287 KB).
+panic = "abort"
 strip = "debuginfo"
 
 [lints.rust]

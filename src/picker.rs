@@ -5,7 +5,6 @@ use crate::{
     text_settings::TextSettings,
     window_model::{WindowKey, WindowModel},
 };
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use windows::{
     Win32::{
         Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, RECT, WPARAM},
@@ -491,31 +490,18 @@ unsafe extern "system" fn dialog_proc(
     wparam: WPARAM,
     _: LPARAM,
 ) -> isize {
-    let result = catch_unwind(AssertUnwindSafe(|| -> Result<bool> {
-        let forwarded = match message {
-            WM_COMMAND => Some((ACTION, wparam)),
-            WM_CLOSE => Some((ACTION, WPARAM(CLOSE))),
-            WM_DPICHANGED | WM_SETTINGCHANGE => Some((RELAYOUT, WPARAM(0))),
-            _ => None,
-        };
-        if let Some((kind, argument)) = forwarded {
-            // SAFETY: no Rust pointers/callback state. All mutation happens later in the outer loop, never reentrantly.
-            unsafe {
-                PostMessageW(Some(hwnd), kind, argument, LPARAM(0))?;
-            }
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }));
-    match result {
-        Ok(Ok(handled)) => isize::from(handled),
-        _ => {
-            // SAFETY: orderly failure on the owning UI thread; never unwind across this FFI callback.
-            unsafe {
-                PostQuitMessage(71);
-            }
-            1
+    let (kind, argument) = match message {
+        WM_COMMAND => (ACTION, wparam),
+        WM_CLOSE => (ACTION, WPARAM(CLOSE)),
+        WM_DPICHANGED | WM_SETTINGCHANGE => (RELAYOUT, WPARAM(0)),
+        _ => return 0,
+    };
+    // SAFETY: no Rust pointers/callback state. All mutation happens later in the outer loop, never reentrantly.
+    if unsafe { PostMessageW(Some(hwnd), kind, argument, LPARAM(0)) }.is_err() {
+        // SAFETY: orderly failure on the owning UI thread.
+        unsafe {
+            PostQuitMessage(71);
         }
     }
+    1
 }

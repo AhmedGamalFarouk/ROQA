@@ -43,6 +43,7 @@ use windows::Win32::Foundation::E_INVALIDARG;
 use windows::core::{Error, Result};
 
 fn main() {
+    error_log::install_panic_hook();
     if let Err(error) = run() {
         eprintln!("ROQA: {error}");
         error_log::startup_failure(error.code().0);

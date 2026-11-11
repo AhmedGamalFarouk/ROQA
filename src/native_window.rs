@@ -6,7 +6,6 @@ use crate::{
 };
 use std::{
     mem::size_of,
-    panic::{AssertUnwindSafe, catch_unwind},
     sync::atomic::{AtomicU32, Ordering},
 };
 use windows::Win32::{
@@ -386,14 +385,8 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    let outcome = catch_unwind(AssertUnwindSafe(|| dispatch(hwnd, message, wparam, lparam)));
-    outcome.unwrap_or_else(|_| {
-        // SAFETY: queues a nonzero exit on this UI thread; Rust unwinding never crosses the callback.
-        unsafe {
-            PostQuitMessage(70);
-        }
-        LRESULT(0)
-    })
+    // A panic here never unwinds: release is `panic = "abort"` and the hook exits 70 first.
+    dispatch(hwnd, message, wparam, lparam)
 }
 
 fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {

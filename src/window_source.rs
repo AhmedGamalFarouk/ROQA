@@ -5,7 +5,6 @@ use crate::{
 use std::{
     collections::BTreeMap,
     mem::size_of,
-    panic::{AssertUnwindSafe, catch_unwind},
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -40,21 +39,12 @@ struct Enumeration<'a> {
 unsafe extern "system" fn enumerate(hwnd: HWND, parameter: LPARAM) -> BOOL {
     // SAFETY: EnumWindows synchronously borrows this Enumeration until returning on the worker thread.
     let state = unsafe { &mut *(parameter.0 as *mut Enumeration<'_>) };
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        if state.cancel.load(Ordering::Relaxed) || state.handles.len() == MAX_HANDLES {
-            state.incomplete = true;
-            return false;
-        }
-        state.handles.push(hwnd.0 as usize);
-        true
-    }));
-    match outcome {
-        Ok(keep_going) => BOOL::from(keep_going),
-        Err(_) => {
-            state.incomplete = true;
-            BOOL(0)
-        }
+    if state.cancel.load(Ordering::Relaxed) || state.handles.len() == MAX_HANDLES {
+        state.incomplete = true;
+        return BOOL(0);
     }
+    state.handles.push(hwnd.0 as usize);
+    BOOL(1)
 }
 
 fn full_scan(generation: u64, cancel: &AtomicBool) -> Snapshot {
@@ -64,7 +54,7 @@ fn full_scan(generation: u64, cancel: &AtomicBool) -> Snapshot {
         cancel,
         incomplete: false,
     };
-    // SAFETY: callback does not retain the stack pointer; catches panics before the FFI boundary.
+    // SAFETY: callback does not retain the stack pointer and cannot panic.
     let enumeration =
         unsafe { EnumWindows(Some(enumerate), LPARAM(&mut state as *mut _ as isize)) };
     let mut snapshot = Snapshot {

@@ -426,25 +426,21 @@ impl FilePicker {
         match std::thread::Builder::new()
             .name("roqa-file-picker".into())
             .spawn(move || {
-                let paths = std::panic::catch_unwind(|| {
-                    let _sta = match Sta::enter() {
-                        Ok(sta) => sta,
-                        Err(error) => {
-                            eprintln!("Shelf picker COM initialization: {error}");
-                            return Vec::new();
+                // `pick_files` reports every failure as an empty result; it has no panic path.
+                let paths = match Sta::enter() {
+                    Ok(_sta) => {
+                        if let Ok(mut state) = state.lock() {
+                            // SAFETY: scalar identity for cancellation validation on this owned worker.
+                            state.thread =
+                                unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
                         }
-                    };
-                    if let Ok(mut state) = state.lock() {
-                        // SAFETY: scalar identity for cancellation validation on this owned worker.
-                        state.thread =
-                            unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+                        pick_files(&state)
                     }
-                    pick_files(&state)
-                })
-                .unwrap_or_else(|_| {
-                    eprintln!("Shelf file picker worker panicked");
-                    Vec::new()
-                });
+                    Err(error) => {
+                        eprintln!("Shelf picker COM initialization: {error}");
+                        Vec::new()
+                    }
+                };
                 // Retire the HWND before a completion can release this worker's ownership.
                 if let Ok(mut state) = state.lock() {
                     state.hwnd = 0;

@@ -410,9 +410,10 @@ try {
     if (!(Test-Path -LiteralPath $probeExecutable)) { throw 'Debug probe binary missing; build with scripts/cargo.ps1 build --locked before -SkipBuild' }
     $observations.DebugProbeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $probeExecutable).Hash
     foreach ($probe in @('--probe-failure', '--probe-panic')) {
+        $expectedExit = if ($probe -eq '--probe-panic') { 70 } else { 1 }  # the panic hook exits 70
         $failedHost = Start-Process -FilePath $probeExecutable -ArgumentList $probe -PassThru -WindowStyle Hidden
         if (!$failedHost.WaitForExit(5000)) { $failedHost.Kill(); throw "Failure probe hung: $probe" }
-        Assert-Check ($failedHost.ExitCode -eq 1) "Failure takes expected orderly exit code 1: $probe"
+        Assert-Check ($failedHost.ExitCode -eq $expectedExit) "Failure takes expected exit code ${expectedExit}: $probe"
         $failedHost.Dispose()
         Assert-Check ([NativeProbe]::Surfaces('ROQA Notch').Count -eq 0 -and [NativeProbe]::Surfaces('ROQA Dock').Count -eq 0) "No orphan surface after exited failure probe (OS cleanup also applies): $probe"
     }

@@ -39,6 +39,9 @@ fn write_line(context: &str) {
     let Some(Ok(mut log)) = LOG.get().map(Mutex::lock) else {
         return;
     };
+    append(&mut log, context);
+}
+fn append(log: &mut Option<(File, usize)>, context: &str) {
     let Some((file, bytes)) = log.as_mut() else {
         return;
     };
@@ -46,6 +49,36 @@ fn write_line(context: &str) {
         let _ = writeln!(file, "{context}");
         *bytes += context.len() + 1;
     }
+}
+/// Exit code of a panic: the hook ends the process with it, so a crash is distinguishable from the
+/// startup failure code 1.
+const PANIC_EXIT: u32 = 70;
+/// Location and thread name only: the payload can carry window titles or paths, which the log never holds.
+fn panic_line(file: &str, line: u32, thread: &str) -> String {
+    format!("ROQA panic at {file}:{line} on {thread}")
+}
+/// First call in `main`. The release profile aborts on panic, so this is the only place a panic is
+/// seen: it logs the line (`try_lock`, so a panic inside the log cannot deadlock) and ends the process
+/// at once, rather than leaving a panicking worker's DLL-detach work to the abort path.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        let line = panic_line(
+            info.location().map_or("?", |location| location.file()),
+            info.location().map_or(0, |location| location.line()),
+            thread.name().unwrap_or("?"),
+        );
+        if let Some(Ok(mut log)) = LOG.get().map(Mutex::try_lock) {
+            append(&mut log, &line);
+        }
+        // SAFETY: terminates this process with a fixed code; nothing runs afterwards.
+        unsafe {
+            let _ = windows::Win32::System::Threading::TerminateProcess(
+                windows::Win32::System::Threading::GetCurrentProcess(),
+                PANIC_EXIT,
+            );
+        }
+    }));
 }
 fn code_line(code: i32) -> String {
     format!("ROQA startup failure 0x{:08X}", code as u32)
@@ -106,6 +139,14 @@ mod tests {
             false,
             &args(&["roqa", "--diagnostics", "x"])
         ));
+    }
+
+    #[test]
+    fn panic_line_has_location_and_thread_only() {
+        assert_eq!(
+            panic_line("src/icons.rs", 42, "roqa-icons"),
+            "ROQA panic at src/icons.rs:42 on roqa-icons"
+        );
     }
 
     #[test]

@@ -888,3 +888,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Measured, not adopted:** `panic=abort` 795,136 B (4 `catch_unwind` sites are relied on); `opt-level` s 865,792 / z 816,128 B; `strip=symbols` no effect.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 184 tests, locked release); SHA `5E2744A6A9C5ED5A706B2B0669B843686AA65202CF78ABF44BAF7649E537028B`.
 - **Deferred:** panic hook + abort (-287 KB), `opt-level=s` for cold modules, outline cold paths of `Desktop::update`/`drain_messages`.
+
+## Panic abort 1: `panic = "abort"` (2026-11-12 Africa/Cairo)
+
+- **Scope:** release profile `panic = "abort"`; [packet](panic-abort-1.md). Branch `perf/panic-abort`; no native/GUI run.
+- **Hook:** `error_log::install_panic_hook`, first line of `main`: logs `file:line` and thread only (never the payload) with `try_lock`, then `TerminateProcess(..., 70)`. Four `catch_unwind` sites removed; worker-path `unwrap`/indexing audited in the packet.
+- **Size:** 1,048,576 to 803,840 B (-23.3%); SHA `D7592F2D06AE878377EB78F49B064AAA99E507D36578A1A24E47855D75029AC2`.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 185 tests, locked release). `smoke.ps1` now expects exit 70 for `--probe-panic`.
+- **NOT RUN:** real crash, error.log line, exit 70, debug smoke, all native/gates; reviews paused (REVIEW NOT RUN).
