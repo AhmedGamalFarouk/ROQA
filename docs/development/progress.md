@@ -880,3 +880,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Checks:** verify.ps1 PASS (fmt/clippy, 184 tests, locked release); 1081856 B SHA `1E704AB5503A8BF7B6D446F155555214090DA7FF219D2E15742C839BE68A665E`.
 - **Deferred:** RC2-N1 and RC2-N2 nits, no code change.
 - **NOT RUN:** all native/GUI/manual/performance gates; no milestone acceptance (M5 perf gates still open).
+
+## Footprint 1: fat LTO, unused features (2026-11-12 Africa/Cairo)
+
+- **Scope:** release binary size; [packet](footprint-1.md). Branch `perf/footprint-1`; no native/GUI/runtime run (NOT RUN).
+- **Adopted:** `lto = "fat"` (1,082,368 to 1,048,576 B, -3.1%); 9 redundant `windows` features removed (no size change).
+- **Measured, not adopted:** `panic=abort` 795,136 B (4 `catch_unwind` sites are relied on); `opt-level` s 865,792 / z 816,128 B; `strip=symbols` no effect.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 184 tests, locked release); SHA `5E2744A6A9C5ED5A706B2B0669B843686AA65202CF78ABF44BAF7649E537028B`.
+- **Deferred:** panic hook + abort (-287 KB), `opt-level=s` for cold modules, outline cold paths of `Desktop::update`/`drain_messages`.
