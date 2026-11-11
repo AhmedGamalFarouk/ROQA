@@ -25,6 +25,8 @@ windows = { version = "=0.62.2", features = [
     "Win32_Storage_EnhancedStorage",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Ole",
+    # MODIFIERKEYS_FLAGS in IDropTarget (the shelf drop target, slice S6).
+    "Win32_System_SystemServices",
     "Win32_System_Variant",
     "Win32_UI_Shell",
     # SHELLEXECUTEINFOW / ShellExecuteExW (no-UI launch of a not-running pin, slice S4) are gated on it.

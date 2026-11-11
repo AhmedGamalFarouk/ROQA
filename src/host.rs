@@ -4,7 +4,7 @@ use crate::{
     clock,
     dock::{self, DockItem},
     dock_uia::{self, Accessibility},
-    graphics::{COVER_DIPS, Canvas, DockScene, DockSlot, Graphics, NotchScene},
+    graphics::{COVER_DIPS, Canvas, DockScene, DockSlot, Graphics, NotchScene, ShelfSlot},
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
     layout::{self, Bounds, SurfaceKind, placement},
@@ -14,12 +14,14 @@ use crate::{
     notch_uia,
     picker::Picker,
     pins::Pins,
+    shelf::{Check, Shelf},
+    shelf_os::{self, DropEvent, Drops},
     store::{self, Flush, Pending, Store},
     text_settings::TextSettings,
     timer::{self, Timers},
     topology::{self, Monitor},
     window_catalog::Catalog,
-    window_model::{WindowKey, WindowModel},
+    window_model::{Identity, WindowKey, WindowModel},
 };
 use std::{
     cell::Cell,
@@ -29,16 +31,16 @@ use std::{
 };
 use windows::Win32::{
     Foundation::{E_FAIL, HANDLE, HWND, LPARAM, WAIT_EVENT, WAIT_FAILED, WAIT_OBJECT_0, WPARAM},
-    System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
     System::Diagnostics::Debug::MessageBeep,
     System::LibraryLoader::{GetModuleHandleW, GetProcAddress},
+    System::Ole::{OleInitialize, OleUninitialize},
     System::Threading::INFINITE,
     UI::{
         Controls::WM_MOUSELEAVE,
         Input::KeyboardAndMouse::{
             GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-            VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
-            VK_TAB, VK_UP,
+            VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_O, VK_RETURN, VK_RIGHT,
+            VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
         },
         WindowsAndMessaging::*,
     },
@@ -58,9 +60,10 @@ pub enum Probe {
 struct Apartment;
 impl Apartment {
     fn enter() -> Result<Self> {
-        // SAFETY: main thread owns all COM objects and drops them before Apartment.
+        // SAFETY: main thread owns all COM objects and drops them before Apartment. OLE (an STA, as
+        // COM was) is what `RegisterDragDrop` for the shelf needs.
         unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            OleInitialize(None)?;
         }
         Ok(Self)
     }
@@ -69,7 +72,7 @@ impl Drop for Apartment {
     fn drop(&mut self) {
         // SAFETY: balances successful initialization on this same thread.
         unsafe {
-            CoUninitialize();
+            OleUninitialize();
         }
     }
 }
@@ -158,6 +161,7 @@ impl Drop for Surface {
     fn drop(&mut self) {
         self.release_focus();
         if let Role::Notch { uia, .. } = &self.role {
+            shelf_os::revoke(self.window.0);
             notch_uia::invalidate(uia);
         }
     }
@@ -191,6 +195,7 @@ impl Surface {
         monitor: &Monitor,
         dpi: u32,
         slots: usize,
+        drops: &Drops,
     ) -> Result<Self> {
         let bounds = placement(monitor.work, dpi, kind, slots);
         let shadow = if kind == SurfaceKind::Notch {
@@ -199,6 +204,11 @@ impl Surface {
             None
         };
         let window = NativeWindow::create(bounds, kind)?;
+        if kind == SurfaceKind::Notch
+            && let Err(error) = shelf_os::register(window.0, drops)
+        {
+            eprintln!("Shelf: file drops unavailable: {error}");
+        }
         let role = match shadow {
             None => {
                 let uia = dock_uia::Shared::default();
@@ -348,13 +358,22 @@ impl Surface {
     /// Shares what the notch shows with UI Automation: the current session's controls, the focused
     /// one, and whether the panel is open or opening, so clients see the target state before the
     /// motion ends.
-    fn publish_notch(&self, media: &Media, audio: &Audio, timer: Option<&timer::View>) {
+    fn publish_notch(
+        &self,
+        media: &Media,
+        audio: &Audio,
+        timer: Option<&timer::View>,
+        shelf: &ShelfView,
+    ) {
         if let Role::Notch { uia, focus, .. } = &self.role
             && let Ok(mut state) = uia.lock()
         {
             state.dpi = self.dpi;
             state.timer = timer.map_or_else(String::new, |view| view.name.clone());
-            state.version = media.generation() as u32;
+            state.version = uia_version(media, &shelf.shelf);
+            state.shelf = (0..shelf.shelf.visible().len())
+                .filter_map(|index| shelf.shelf.label(index))
+                .collect();
             state.controls = media
                 .view()
                 .shown()
@@ -381,6 +400,7 @@ impl Surface {
         media: &Media,
         audio: &Audio,
         timers: &Timers,
+        shelf: &ShelfView,
     ) -> Result<()> {
         let track = media.view().shown();
         let progress = self.motion.value(Instant::now());
@@ -397,7 +417,7 @@ impl Surface {
             _ => [0.0; audio::BARS],
         };
         self.bars = layout::meter_heights(peaks, self.dpi);
-        self.publish_notch(media, audio, timer.as_ref());
+        self.publish_notch(media, audio, timer.as_ref(), shelf);
         let Role::Notch {
             shadow,
             area,
@@ -414,6 +434,16 @@ impl Surface {
             self.window.set_notch_region(&rows)?;
             *area = rows;
         }
+        let slots: Vec<ShelfSlot> = shelf
+            .shelf
+            .visible()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| ShelfSlot {
+                icon: shelf.icons.get(index).and_then(|icon| icon.as_deref()),
+                missing: entry.check == Check::Missing,
+            })
+            .collect();
         let scene = NotchScene {
             time,
             date,
@@ -426,6 +456,7 @@ impl Surface {
             volume: audio.level(),
             bars: self.bars,
             timer: timer.as_ref(),
+            shelf: &slots,
         };
         shadow.paint(&scene, self.window.0)?;
         self.canvas.paint_notch(&scene, media.view().status())
@@ -780,6 +811,37 @@ fn edit_pins(
     changed
 }
 
+/// The shelf and what drawing it needs beyond the list: the system icons delivered so far for its visible
+/// entries, and whether they must be asked for again (the list changed, or the panel was never open).
+struct ShelfView {
+    shelf: Shelf,
+    icons: Vec<Option<Arc<IconPixels>>>,
+    stale: bool,
+}
+
+/// What UI Automation elements are valid for: the media session and the shelf's list.
+fn uia_version(media: &Media, shelf: &Shelf) -> u32 {
+    (media.generation() as u32).wrapping_add(shelf.revision())
+}
+
+/// As `edit_pins`, for the shelf: only a real change marks the store dirty (once) and re-asks for icons.
+fn edit_shelf(
+    view: &mut ShelfView,
+    store: &mut Store,
+    pending: &mut Pending,
+    now: Instant,
+    edit: impl FnOnce(&mut Shelf) -> bool,
+) -> bool {
+    let changed = edit(&mut view.shelf);
+    if changed {
+        view.stale = true;
+        if view.shelf.write_to(store) {
+            pending.mark(now);
+        }
+    }
+    changed
+}
+
 struct Desktop {
     surfaces: Vec<Surface>,
     /// Last settled topology; each monitor in it carries every shown kind.
@@ -804,6 +866,12 @@ struct Desktop {
     /// Pinned apps, their persisted form, and the unwritten-change times. Read once at startup; written on
     /// a host-loop deadline (`store_wait`) after a change and once at quit, never by a timer or thread.
     pins: Pins,
+    /// File references, drawn in the expanded notch; drops arrive through `drops` and are applied by
+    /// `refresh_shelf`, so the drop target touches no host state.
+    shelf: ShelfView,
+    drops: Drops,
+    /// An icon finished this pass (`refresh_dock` collected it).
+    icons_arrived: bool,
     store: Store,
     store_path: Option<std::path::PathBuf>,
     pending: Pending,
@@ -870,6 +938,13 @@ impl Desktop {
             dock_names: dock::names(&[], &WindowModel::default()),
             dock_generation: None,
             pins: Pins::from_store(&store),
+            shelf: ShelfView {
+                shelf: Shelf::from_store(&store),
+                icons: Vec::new(),
+                stale: true,
+            },
+            drops: Drops::default(),
+            icons_arrived: false,
             store,
             store_path,
             pending: Pending::default(),
@@ -927,7 +1002,14 @@ impl Desktop {
             SurfaceKind::Notch => (f64::from(monitor.dpi) * self.text_factor).round() as u32,
             SurfaceKind::Dock => monitor.dpi,
         };
-        let mut surface = Surface::create(&self.graphics, kind, monitor, dpi, self.dock_slots())?;
+        let mut surface = Surface::create(
+            &self.graphics,
+            kind,
+            monitor,
+            dpi,
+            self.dock_slots(),
+            &self.drops,
+        )?;
         if kind == SurfaceKind::Notch {
             // Advances every existing notch first, so all monitors show the same minute.
             self.refresh_clock()?;
@@ -937,6 +1019,7 @@ impl Desktop {
                 &self.media,
                 &self.audio,
                 &self.timers,
+                &self.shelf,
             )?;
             self.surfaces.push(surface);
         } else {
@@ -993,6 +1076,7 @@ impl Desktop {
                     &self.media,
                     &self.audio,
                     &self.timers,
+                    &self.shelf,
                 )?,
             }
         }
@@ -1130,6 +1214,7 @@ impl Desktop {
                         &self.media,
                         &self.audio,
                         &self.timers,
+                        &self.shelf,
                     )?,
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
@@ -1160,6 +1245,7 @@ impl Desktop {
     /// Rebuilds dock items only when the catalog generation or an icon changed.
     fn refresh_dock(&mut self, model: &WindowModel) -> Result<()> {
         let icons_arrived = self.icons.collect();
+        self.icons_arrived = icons_arrived;
         if self.dock_generation == Some(model.generation) && !icons_arrived {
             return Ok(());
         }
@@ -1180,8 +1266,11 @@ impl Desktop {
                 return Ok(());
             }
             if changed {
-                self.icons
-                    .retain(|identity| items.iter().any(|item| &item.identity == identity));
+                let shelf = self.shelf.shelf.entries();
+                self.icons.retain(|identity| {
+                    items.iter().any(|item| &item.identity == identity)
+                        || matches!(identity, Identity::Executable(path) if shelf.iter().any(|e| &e.path == path))
+                });
             }
             let resized = items.len() != self.dock_items.len();
             self.dock_items = items;
@@ -1228,19 +1317,23 @@ impl Desktop {
             .max()
             .unwrap_or(0)
     }
-    /// One icon set for every dock, extracted for the densest dock; lower-DPI docks scale it down.
-    // shortcut: mixed-DPI docks resample icons; keep one cache size per DPI if that looks soft on hardware.
-    fn dock_icons(&mut self) -> Vec<Option<Arc<IconPixels>>> {
+    /// The one icon size the worker's cache holds: the densest dock's. The shelf shares it (a different size
+    /// would empty the cache on every switch) and draws it smaller; none without a dock.
+    fn icon_size(&self) -> Option<u32> {
         let densest = self
             .surfaces
             .iter()
             .filter(|s| s.kind() == SurfaceKind::Dock)
             .map(|s| s.dpi)
             .max();
-        let Some(dpi) = densest else {
+        densest.map(|dpi| dock::px(dock::ICON_DIPS, dpi) as u32)
+    }
+    /// One icon set for every dock, extracted for the densest dock; lower-DPI docks scale it down.
+    // shortcut: mixed-DPI docks resample icons; keep one cache size per DPI if that looks soft on hardware.
+    fn dock_icons(&mut self) -> Vec<Option<Arc<IconPixels>>> {
+        let Some(size) = self.icon_size() else {
             return Vec::new();
         };
-        let size = dock::px(dock::ICON_DIPS, dpi) as u32;
         self.dock_items
             .iter()
             .map(|item| {
@@ -1340,6 +1433,103 @@ impl Desktop {
         }
         true
     }
+    /// Applies what the drop target queued, then asks the worker for the visible entries' icons, but only
+    /// while a panel is open and only when the list changed or an icon arrived: an empty shelf, a collapsed
+    /// notch and an idle pass do nothing here.
+    #[inline(never)]
+    fn refresh_shelf(&mut self) {
+        let events = std::mem::take(&mut *self.drops.borrow_mut());
+        for event in events {
+            match event {
+                DropEvent::Hover(hwnd, over) => {
+                    if let Some(notch) = self.surfaces.iter_mut().find(|s| s.window.0 == hwnd) {
+                        notch.set_notch_hover(over);
+                    }
+                }
+                DropEvent::Files(paths) => self.change_shelf(|shelf| shelf.add_all(&paths) > 0),
+            }
+        }
+        let wanted = self.shelf.stale || self.icons_arrived;
+        if self.shelf.shelf.is_empty() || !wanted || !self.surfaces.iter().any(Surface::expanded) {
+            return;
+        }
+        let Some(size) = self.icon_size() else {
+            return;
+        };
+        let icons: Vec<_> = self
+            .shelf
+            .shelf
+            .visible()
+            .iter()
+            .map(|entry| {
+                let identity = Identity::Executable(entry.path.clone());
+                self.icons.icon(&identity, vec![entry.path.clone()], size)
+            })
+            .collect();
+        self.shelf.stale = false;
+        let same =
+            |(new, old): (&Option<Arc<IconPixels>>, &Option<Arc<IconPixels>>)| match (new, old) {
+                (Some(new), Some(old)) => Arc::ptr_eq(new, old),
+                (None, None) => true,
+                _ => false,
+            };
+        let changed =
+            icons.len() != self.shelf.icons.len() || !icons.iter().zip(&self.shelf.icons).all(same);
+        self.shelf.icons = icons;
+        if changed {
+            // A running animation paints every frame already.
+            self.request_notches(Repaint::Full, |s| s.expanded() && !s.live);
+        }
+    }
+    fn change_shelf(&mut self, edit: impl FnOnce(&mut Shelf) -> bool) {
+        let now = Instant::now();
+        if edit_shelf(
+            &mut self.shelf,
+            &mut self.store,
+            &mut self.pending,
+            now,
+            edit,
+        ) {
+            self.request_notches(Repaint::Full, |_| true);
+        }
+    }
+    /// The visible shelf entry under a window point of notch `notch`, if its slot is drawn and filled.
+    fn shelf_slot_at(&self, notch: usize, lparam: LPARAM) -> Option<usize> {
+        let surface = &self.surfaces[notch];
+        let (x, y) = point(lparam);
+        let progress = surface.motion.value(Instant::now());
+        let media = self.media.view().shown().is_some();
+        layout::shelf_at(surface.bounds.width, surface.dpi, progress, media, x, y)
+            .filter(|&index| index < self.shelf.shelf.visible().len())
+    }
+    /// A user activation of shelf entry `index`: open it, or with `reveal` select it in Explorer. The only
+    /// existence check in the shelf's life happens here, never for a UNC path (`shelf_os::open` runs that
+    /// call off the host thread); a target that is gone is marked, not opened, and not removed.
+    fn open_shelf(&mut self, index: usize, reveal: bool) {
+        let Some(entry) = self.shelf.shelf.entries().get(index) else {
+            return;
+        };
+        let (path, network) = (entry.path.clone(), entry.check == Check::NotChecked);
+        let found = network || std::path::Path::new(&path).exists();
+        if self.shelf.shelf.set_missing(index, !found) {
+            self.request_notches(Repaint::Full, |_| true);
+        }
+        if found {
+            shelf_os::open(&path, reveal, network);
+        }
+    }
+    /// Right-click on a drawn shelf entry removes it. Returns whether it was consumed.
+    fn remove_shelf_at(&mut self, hwnd: HWND, lparam: LPARAM) -> bool {
+        let notch = self
+            .surfaces
+            .iter()
+            .position(|s| s.kind() == SurfaceKind::Notch && s.window.0 == hwnd);
+        let Some(index) = notch.and_then(|notch| self.shelf_slot_at(notch, lparam)) else {
+            return false;
+        };
+        self.change_shelf(|shelf| shelf.remove(index));
+        true
+    }
     /// Milliseconds until the debounced store write is due; `INFINITE` with no unwritten change.
     fn store_wait(&self) -> u32 {
         let now = Instant::now();
@@ -1394,7 +1584,7 @@ impl Desktop {
             return false;
         };
         // UIA posts the session generation its element was created for; older ones are ignored.
-        let current = message.lParam.0 as u32 == self.media.generation() as u32;
+        let current = message.lParam.0 as u32 == uia_version(&self.media, &self.shelf.shelf);
         match message.message {
             WM_LBUTTONUP => return self.click_control(notch, message.lParam),
             WM_KEYDOWN => return self.notch_key(notch, message),
@@ -1416,6 +1606,12 @@ impl Desktop {
         let (x, y) = point(lparam);
         let progress = surface.motion.value(Instant::now());
         let (width, dpi) = (surface.bounds.width, surface.dpi);
+        if let Some(index) = self.shelf_slot_at(notch, lparam) {
+            // SAFETY: reads this thread's keyboard state as of the message being handled.
+            let reveal = unsafe { GetKeyState(VK_CONTROL.0.into()) } < 0;
+            self.open_shelf(index, reveal);
+            return true;
+        }
         if self.media.view().shown().is_none() {
             return false;
         }
@@ -1432,7 +1628,9 @@ impl Desktop {
     }
     /// Presses a shown media control or the mute toggle.
     fn press(&mut self, control: usize) {
-        if control != audio::MUTE {
+        if control >= notch_uia::SHELF_BASE {
+            self.open_shelf(control - notch_uia::SHELF_BASE, false);
+        } else if control != audio::MUTE {
             self.media.command(control);
         } else if self.media.view().shown().is_some() {
             self.audio.toggle_mute();
@@ -1480,8 +1678,23 @@ impl Desktop {
             return false;
         };
         // SAFETY: reads this thread's keyboard state as of the message being handled.
-        let shift = unsafe { GetKeyState(VK_SHIFT.0.into()) } < 0;
-        let next = match VIRTUAL_KEY(message.wParam.0 as u16) {
+        let (shift, ctrl) = unsafe {
+            (
+                GetKeyState(VK_SHIFT.0.into()) < 0,
+                GetKeyState(VK_CONTROL.0.into()) < 0,
+            )
+        };
+        let key = VIRTUAL_KEY(message.wParam.0 as u16);
+        if key == VK_O && ctrl {
+            // The keyboard route to add files: the standard dialog, modal on this thread until closed.
+            if message.lParam.0 & (1 << 30) == 0 {
+                let owner = surface.window.0;
+                let picked = shelf_os::pick_files(owner);
+                self.change_shelf(|shelf| shelf.add_all(&picked) > 0);
+            }
+            return true;
+        }
+        let next = match key {
             VK_TAB => step(enabled, Some(control), !shift),
             VK_RIGHT | VK_DOWN => step(enabled, Some(control), true),
             VK_LEFT | VK_UP => step(enabled, Some(control), false),
@@ -1509,7 +1722,7 @@ impl Desktop {
         let enabled = self.enabled();
         let timer = self.timers.view(Instant::now());
         for notch in &mut self.surfaces {
-            notch.publish_notch(&self.media, &self.audio, timer.as_ref());
+            notch.publish_notch(&self.media, &self.audio, timer.as_ref(), &self.shelf);
             let Some(control) = notch.focused().map(|focus| focus.control) else {
                 continue;
             };
@@ -1656,6 +1869,7 @@ impl Desktop {
                         &self.media,
                         &self.audio,
                         &self.timers,
+                        &self.shelf,
                     )?,
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
@@ -1763,6 +1977,7 @@ impl Desktop {
             self.request_notches(Repaint::Full, |s| motion::reveal(s.motion.value(now)) > 0.0);
         }
         self.refresh_dock(model)?;
+        self.refresh_shelf();
         self.refresh_fullscreen(model.generation)?;
         let wait = self
             .refresh_clock()?
@@ -2018,6 +2233,11 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 desktop.toggle_pin(slot);
                 continue;
             }
+            if message.message == WM_RBUTTONUP
+                && desktop.remove_shelf_at(message.hwnd, message.lParam)
+            {
+                continue;
+            }
             if message.message == dock_uia::INVOKE && desktop.dock_at(message.hwnd).is_some() {
                 let (slot, version) = (message.wParam.0, message.lParam.0 as u32);
                 desktop.invoke_dock(message.hwnd, slot, version, catalog)?;
@@ -2102,6 +2322,33 @@ mod clock_wait_tests {
         assert_eq!(store.pins, ["app:b", "app:c", "app:a"]);
         assert_eq!(pending.decision(now), Flush::Wait(now + store::COALESCE));
     }
+    #[test]
+    fn a_shelf_edit_marks_the_store_dirty_once_and_only_when_it_changed() {
+        let mut view = ShelfView {
+            shelf: Shelf::default(),
+            icons: Vec::new(),
+            stale: false,
+        };
+        let (mut store, mut pending, now) = (Store::default(), Pending::default(), Instant::now());
+        let mut add = |view: &mut ShelfView, list: &[&str]| {
+            edit_shelf(view, &mut store, &mut pending, now, |s| s.add_all(list) > 0)
+        };
+        // Nothing valid in a drop: no change, no dirty mark, no icon request.
+        assert!(!add(&mut view, &["relative.txt", r"\\.\PhysicalDrive0"]));
+        assert!(!view.stale);
+        assert!(add(&mut view, &[r"C:\a.txt", r"C:\b.txt"]));
+        assert!(view.stale);
+        // The same files again are duplicates: nothing to write.
+        assert!(!add(&mut view, &[r"C:\A.TXT"]));
+        assert_eq!(store.shelf, [r"C:\a.txt", r"C:\b.txt"]);
+        assert_eq!(pending.decision(now), Flush::Wait(now + store::COALESCE));
+        // A removal is one more change; marking a target missing is not persisted, so not an edit here.
+        let mut pending = Pending::default();
+        assert!(edit_shelf(&mut view, &mut store, &mut pending, now, |s| s.remove(0)));
+        assert_eq!(store.shelf, [r"C:\b.txt"]);
+        assert_eq!(pending.decision(now), Flush::Wait(now + store::COALESCE));
+    }
+
     #[test]
     fn the_meter_runs_only_open_playing_and_metered_and_never_above_15_hz() {
         let now = Instant::now();

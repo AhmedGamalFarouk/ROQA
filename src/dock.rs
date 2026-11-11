@@ -236,15 +236,24 @@ pub fn restore_foreground(from: HWND, to: Option<WindowKey>) {
 /// Starts a not-running pin through the shell, on the user's click only. No UI on failure (a missing target
 /// would otherwise open a modal error box on the host thread); false means it did not start.
 pub fn launch(target: &str) -> bool {
+    launch_with(target, None)
+}
+
+/// `launch` with command-line `parameters`, for the file shelf's reveal.
+pub fn launch_with(target: &str, parameters: Option<&str>) -> bool {
     let file = HSTRING::from(target);
+    let parameters = parameters.map(HSTRING::from);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_FLAG_NO_UI,
         lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: parameters
+            .as_ref()
+            .map_or(PCWSTR::null(), |text| PCWSTR(text.as_ptr())),
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()
     };
-    // SAFETY: `info` and `file` outlive the call; no process handle is requested, so nothing is left to close.
+    // SAFETY: `info`, `file` and `parameters` outlive the call; no process handle is requested, so nothing is left to close.
     unsafe { ShellExecuteExW(&mut info).is_ok() }
 }
 

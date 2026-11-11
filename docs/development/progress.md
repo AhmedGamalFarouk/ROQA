@@ -819,3 +819,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Verify:** `scripts/verify.ps1` PASS, **151 tests** (142 + 9). Release 884,736 B (+19,456 B), SHA-256 `AE535ABEC902897BCEA5CFDA5FFD1712B1FD7BF5030012BCAD395EC2881D61EA`.
 - **Reviews:** REVIEW NOT RUN (paused by user). Not accepted.
 - **Native evidence:** all NOT RUN (a real countdown, the sound, clock change, sleep across expiry, restart, minute-boundary wakes). Deferred: `--timer <seconds>` (needs a payload channel, so nothing starts a timer in the app yet), cancel, pause, the settings toggle.
+
+## M5 S6 file shelf: landed candidate (2026-11-11 Africa/Cairo)
+
+- **S6:** branch `feat/m5-s6-shelf` on `9ebf962`, packet `docs/development/m5-s6-shelf.md`. `src/shelf.rs` (pure, 12 references, path validation, UNC "not checked", dedupe, store round trip) and `src/shelf_os.rs` (notch `IDropTarget`, file dialog, shell open). Drop or Ctrl+O adds, click opens, Ctrl+click reveals, right click removes; existence is checked only at activation. `OleInitialize` now replaces `CoInitializeEx`.
+- **Panel:** 3 slots in the free pocket of each panel (PROVISIONAL, visual spec addendum); UIA Buttons "Shelf: name" with Invoke. Icons through the existing worker, only while a panel is open; no wake, thread (but one short one per UNC click) or poll when collapsed or empty.
+- **Verify:** `scripts/verify.ps1` PASS, **161 tests** (151 + 10). Release 929,792 B (+45,056 B), SHA-256 `F4E948B6028CD68095ED769202511FE5BB41214EECF71463AD87E8DBBEAEB5FC`.
+- **Reviews:** REVIEW NOT RUN (paused by user). Not accepted.
+- **Native evidence:** all NOT RUN (a real drop, activation, UNC and missing targets, Narrator, DPI). Deferred: entries past the third, mapped-drive detection, modal file dialog, keyboard focus on entries (S8).

@@ -212,6 +212,44 @@ pub fn timer_pill(dpi: u32) -> Bounds {
     scaled_bounds(TIMER_PILL, dpi)
 }
 
+/// The file shelf's `shelf::VISIBLE` square slots (slice S6, PROVISIONAL, no design review), each
+/// `SHELF_SLOT` DIPs with the slot origin of the panel kind's first one, in DIPs from the body's left and
+/// top edges, then one slot further right per entry. Plain panel: right of the centred clock (it ends about
+/// x 228), on the clock's row. Media panel: the free pocket right of the controls row (it ends x 228) and left
+/// of the visualizer (from x 312), on the controls' centre line. Each slot draws a 16 DIP system icon.
+const SHELF_ORIGIN: [(f32, f32); 2] = [(236.0, 17.0), (232.0, 70.0)];
+const SHELF_SLOT: f32 = 24.0;
+
+/// A shelf slot in pixels from the body's left and top edges, for the plain or media panel.
+pub fn shelf_slot(media: bool, index: usize, dpi: u32) -> Bounds {
+    let (x, y) = SHELF_ORIGIN[usize::from(media)];
+    scaled_bounds(
+        (x + SHELF_SLOT * index as f32, y, SHELF_SLOT, SHELF_SLOT),
+        dpi,
+    )
+}
+
+/// The shelf slot under a window point at `progress`; none while the panel rows are not drawn. The caller
+/// ignores slots past the entries it has.
+pub fn shelf_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    x: i32,
+    y: i32,
+) -> Option<usize> {
+    if motion::reveal(progress) <= 0.0 {
+        return None;
+    }
+    let body = notch_body(window_width, dpi, notch_shape(progress, media));
+    (0..crate::shelf::VISIBLE).find(|&index| {
+        let slot = shelf_slot(media, index, dpi);
+        let (x, y) = (x - body.left - slot.x, y - slot.y);
+        (0..slot.width).contains(&x) && (0..slot.height.min(body.height - slot.y)).contains(&y)
+    })
+}
+
 /// The progress bar's target in the media panel (slice 4, provisional), in DIPs from the body's
 /// left and top edges: the drawn 4 DIP bar is centred in it, between the elapsed and total times.
 const MEDIA_PROGRESS: (f32, f32, f32, f32) = (140.0, 50.0, 164.0, 14.0);
@@ -692,6 +730,88 @@ mod tests {
             let pill = timer_pill(dpi);
             assert!(fits(pill, NOTCH), "{dpi}");
             assert!(pill.x >= scaled(105.0, dpi), "{dpi}");
+        }
+    }
+
+    #[test]
+    fn shelf_slots_stay_inside_their_body_overlap_no_other_element_and_hit_one_target() {
+        let hit = |a: Bounds, b: Bounds| {
+            a.x < b.x + b.width
+                && b.x < a.x + a.width
+                && a.y < b.y + b.height
+                && b.y < a.y + a.height
+        };
+        for dpi in [96, 144, 192, 240] {
+            let width = scaled(440.0, dpi);
+            for media in [false, true] {
+                let shape = if media {
+                    MEDIA_EXPANDED
+                } else {
+                    NOTCH_EXPANDED
+                };
+                let body = notch_body(width, dpi, shape);
+                let slots: Vec<Bounds> = (0..crate::shelf::VISIBLE)
+                    .map(|index| shelf_slot(media, index, dpi))
+                    .collect();
+                for slot in &slots {
+                    assert!(slot.x >= 0 && slot.y >= 0, "{dpi} {media}");
+                    // Whole slot and a 12 DIP right margin inside the body.
+                    assert!(
+                        slot.x + slot.width <= body.width - scaled(12.0, dpi),
+                        "{dpi} {media}"
+                    );
+                    assert!(slot.y + slot.height <= body.height, "{dpi} {media}");
+                }
+                let mut others = vec![timer_panel(media, dpi)];
+                if media {
+                    // Cover, title and artist rows, the top-right clock, then the controls, progress,
+                    // volume and visualizer.
+                    others.extend([
+                        scaled_bounds((16.0, 14.0, 72.0, 72.0), dpi),
+                        scaled_bounds((100.0, 9.0, 244.0, 40.0), dpi),
+                        media_progress(dpi),
+                        volume_bar(dpi),
+                        meter(dpi).0,
+                    ]);
+                    others.extend(media_controls(dpi));
+                } else {
+                    // The centred clock (about x 92-228, y 5-53) and the date row (y 48-68).
+                    others.extend([
+                        scaled_bounds((90.0, 5.0, 140.0, 48.0), dpi),
+                        scaled_bounds((90.0, 48.0, 140.0, 20.0), dpi),
+                    ]);
+                }
+                for slot in &slots {
+                    assert!(
+                        !others.iter().any(|&other| hit(*slot, other)),
+                        "{dpi} {media}"
+                    );
+                }
+                // A point in a slot's middle hits that slot only: no media control, seek or volume
+                // target shares it, and no pixel of one slot belongs to another.
+                for (index, slot) in slots.iter().enumerate() {
+                    let (x, y) = (
+                        body.left + slot.x + slot.width / 2,
+                        slot.y + slot.height / 2,
+                    );
+                    assert_eq!(shelf_at(width, dpi, 1.0, media, x, y), Some(index));
+                    assert_eq!(media_control_at(width, dpi, 1.0, x, y), None);
+                    assert_eq!(media_seek_at(width, dpi, 1.0, x, y), None);
+                    assert_eq!(volume_at(width, dpi, 1.0, x, y), None);
+                    // Just outside either edge, and above or below.
+                    assert_ne!(
+                        shelf_at(width, dpi, 1.0, media, body.left + slot.x - 1, y),
+                        Some(index)
+                    );
+                    assert_eq!(shelf_at(width, dpi, 1.0, media, x, slot.y - 1), None);
+                    assert_eq!(
+                        shelf_at(width, dpi, 1.0, media, x, slot.y + slot.height),
+                        None
+                    );
+                    // Not drawn while the panel is closed.
+                    assert_eq!(shelf_at(width, dpi, 0.0, media, x, y), None);
+                }
+            }
         }
     }
 }

@@ -158,6 +158,15 @@ pub struct NotchScene<'a> {
     pub bars: [i32; BARS],
     /// The soonest countdown timer (S5, PROVISIONAL); `None` draws nothing.
     pub timer: Option<&'a timer::View>,
+    /// The file shelf's visible entries (S6, PROVISIONAL); empty draws nothing.
+    pub shelf: &'a [ShelfSlot<'a>],
+}
+
+/// One shelf entry: its system icon once the worker delivered it (a plain square until then), and whether
+/// the last activation found the target gone.
+pub struct ShelfSlot<'a> {
+    pub icon: Option<&'a IconPixels>,
+    pub missing: bool,
 }
 
 /// Dock material (docs/design/roqa-visual-spec.md): black bar, white-alpha hover fill, whole-pixel icon lift.
@@ -527,6 +536,7 @@ fn notch_text(
     status: Option<&str>,
 ) -> Result<()> {
     timer_text(context, scene, body, scale)?;
+    shelf_row(context, scene, body, scale)?;
     if let Some(track) = scene.track {
         let font = media_clock(motion::smooth(scene.progress), scale);
         let clock = text_width(scene.time, &font)?;
@@ -632,6 +642,54 @@ fn timer_text(
             DWRITE_TEXT_ALIGNMENT_TRAILING,
             1.0 - reveal,
         )?;
+    }
+    Ok(())
+}
+
+/// Side of a shelf icon inside its slot, in DIPs.
+const SHELF_ICON: f32 = 16.0;
+
+/// PROVISIONAL (S6): the shelf's entries in their `layout::shelf_slot` cells, faded in with the panel. A
+/// missing target is dimmed like a disabled control. The tiny icon bitmaps are uploaded per paint, which only
+/// an open panel does.
+// shortcut: up to `shelf::VISIBLE` bitmap uploads per full paint of an open panel; cache them per canvas
+// like the art if a trace shows it.
+fn shelf_row(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    scale: f32,
+) -> Result<()> {
+    let reveal = motion::reveal(scene.progress);
+    if reveal <= 0.0 {
+        return Ok(());
+    }
+    let media = scene.track.is_some();
+    for (index, slot) in scene.shelf.iter().enumerate() {
+        let cell = layout::shelf_slot(media, index, scene.dpi);
+        let side = (SHELF_ICON * scale).round();
+        let inset = ((cell.width as f32 - side) / 2.0).round();
+        let square = pixel_square(
+            body.left + (cell.x as f32 + inset),
+            body.top + (cell.y as f32 + inset),
+            side,
+        );
+        let alpha = reveal * if slot.missing { DISABLED } else { 1.0 };
+        let shape = rounded(square, 3.0 * scale);
+        match slot.icon {
+            Some(icon) => {
+                let bitmap = upload(context, icon)?;
+                fill_art(context, &shape, icon.width, &bitmap, alpha)?;
+            }
+            None => {
+                // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw.
+                unsafe {
+                    let brush = context
+                        .CreateSolidColorBrush(&with_alpha(WHITE, COVER_FILL * alpha), None)?;
+                    context.FillRoundedRectangle(&shape, &brush);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1684,6 +1742,7 @@ mod media_tests {
             volume,
             bars: [0; BARS],
             timer: None,
+            shelf: &[],
         };
         let clock = clock_width(time, progress, dpi);
         media_plan(&scene, scene.track.unwrap(), &body(dpi, progress), clock)
@@ -1710,6 +1769,7 @@ mod media_tests {
                 volume: None,
                 bars: [0; BARS],
                 timer: None,
+                shelf: &[],
             };
             let clock = clock_width("9:50 pm", progress, 96);
             let plan = media_plan(&scene, scene.track.unwrap(), &body(96, progress), clock);
@@ -1966,6 +2026,7 @@ mod media_tests {
                 volume: None,
                 bars: [4, 20, 12, 8, 4],
                 timer: None,
+                shelf: &[],
             };
             meter_bars(&scene, &body(96, progress))
         };
@@ -2014,6 +2075,7 @@ mod media_tests {
                     volume: None,
                     bars: heights,
                     timer: None,
+                    shelf: &[],
                 };
                 let (bars, _) = meter_bars(&scene, &body(dpi, 1.0)).unwrap();
                 for bar in bars {

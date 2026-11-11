@@ -1,5 +1,6 @@
 //! UI Automation for the notch: a ToolBar root with one Button (Invoke) per media control (previous,
-//! play/pause, next, then the volume row's mute toggle) while a media session exists. Like
+//! play/pause, next, then the volume row's mute toggle) while a media session exists, then one Button (Invoke
+//! opens the file) per visible shelf entry. Like
 //! `dock_uia`, the providers read a small shared snapshot and post actions to the host loop, which
 //! validates them again before acting.
 #![allow(non_upper_case_globals)] // Matching on Windows SDK constant names.
@@ -29,6 +30,9 @@ use windows::{
 /// first enabled one; lParam = the version the element belonged to.
 pub const FOCUS: u32 = WM_APP + 5;
 pub const FIRST: usize = usize::MAX;
+/// Element ids of the shelf entries start here, after the media controls (including the mute toggle), so an
+/// id means the same thing with or without a media session.
+pub const SHELF_BASE: usize = 4;
 
 #[derive(Default)]
 pub struct State {
@@ -47,6 +51,8 @@ pub struct State {
     pub status: Option<&'static str>,
     /// The running timers and a just-finished one, as `timer::View::name`; empty without any.
     pub timer: String,
+    /// The visible shelf entries' names (`Shelf::label`); element id `SHELF_BASE + n` is entry n.
+    pub shelf: Vec<String>,
 }
 pub type Shared = Arc<Mutex<State>>;
 
@@ -55,6 +61,7 @@ pub fn invalidate(state: &Shared) {
     if let Ok(mut state) = state.lock() {
         state.hwnd = 0;
         state.controls.clear();
+        state.shelf.clear();
         state.timer.clear();
         state.focus = None;
         state.open = false;
@@ -69,6 +76,21 @@ fn root_name(status: Option<&str>, timer: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The element ids that exist, in tree order: the media controls, then the shelf entries.
+fn ids(state: &State) -> Vec<usize> {
+    (0..state.controls.len())
+        .chain(SHELF_BASE..SHELF_BASE + state.shelf.len())
+        .collect()
+}
+
+/// The name and enabled state of element `id`. Shelf entries are always enabled.
+fn entry(state: &State, id: usize) -> Option<(String, bool)> {
+    match id.checked_sub(SHELF_BASE) {
+        None => state.controls.get(id).cloned(),
+        Some(n) => state.shelf.get(n).map(|name| (name.clone(), true)),
+    }
 }
 
 /// Accessible names and enabled states, in drawing order. Play/pause names its action and the
@@ -182,8 +204,10 @@ struct Root {
 
 impl Root_Impl {
     fn item(&self, index: usize) -> Result<IRawElementProviderFragment> {
-        let (count, version) = read(&self.state, |state| (state.controls.len(), state.version))?;
-        if index >= count {
+        let (found, version) = read(&self.state, |state| {
+            (entry(state, index).is_some(), state.version)
+        })?;
+        if !found {
             return none();
         }
         Ok(Item {
@@ -221,10 +245,10 @@ impl IRawElementProviderSimple_Impl for Root_Impl {
 
 impl IRawElementProviderFragment_Impl for Root_Impl {
     fn Navigate(&self, direction: NavigateDirection) -> Result<IRawElementProviderFragment> {
-        let count = read(&self.state, |state| state.controls.len())?;
+        let ids = read(&self.state, ids)?;
         match direction {
-            NavigateDirection_FirstChild => self.item(0),
-            NavigateDirection_LastChild if count > 0 => self.item(count - 1),
+            NavigateDirection_FirstChild => ids.first().map_or_else(none, |&id| self.item(id)),
+            NavigateDirection_LastChild => ids.last().map_or_else(none, |&id| self.item(id)),
             // Parent and siblings of a hosted root come from the HWND host provider.
             _ => none(),
         }
@@ -258,12 +282,21 @@ impl IRawElementProviderFragment_Impl for Root_Impl {
 
 impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
     fn ElementProviderFromPoint(&self, x: f64, y: f64) -> Result<IRawElementProviderFragment> {
-        let (hwnd, dpi, open) = read(&self.state, |s| (s.hwnd, s.dpi, s.open))?;
+        let (hwnd, dpi, open, media) = read(&self.state, |s| {
+            (s.hwnd, s.dpi, s.open, !s.controls.is_empty())
+        })?;
         let rect = window_rect(hwnd)?;
         let (x, y) = (x as i32 - rect.left, y as i32 - rect.top);
+        let width = rect.right - rect.left;
         // Bounds are those of the open panel, as `Item::BoundingRectangle` reports them.
-        match layout::media_control_at(rect.right - rect.left, dpi, 1.0, x, y) {
-            Some(control) if open => self.item(control),
+        let control = media
+            .then(|| layout::media_control_at(width, dpi, 1.0, x, y))
+            .flatten()
+            .or_else(|| {
+                layout::shelf_at(width, dpi, 1.0, media, x, y).map(|slot| SHELF_BASE + slot)
+            });
+        match control {
+            Some(id) if open => self.item(id),
             _ => Ok(self.to_interface()),
         }
     }
@@ -292,18 +325,23 @@ impl Item_Impl {
     /// session has ended.
     fn current<T>(&self, view: impl FnOnce(&State, &(String, bool)) -> T) -> Result<T> {
         read(&self.state, |state| {
-            state
-                .controls
-                .get(self.index)
+            entry(state, self.index)
                 .filter(|_| state.version == self.version)
-                .map(|control| view(state, control))
+                .map(|control| view(state, &control))
         })?
         .ok_or_else(not_available)
     }
-    fn sibling(&self, index: usize) -> Result<IRawElementProviderFragment> {
-        if index >= self.current(|state, _| state.controls.len())? {
+    /// The next (or previous) existing element after this one.
+    fn sibling(&self, forward: bool) -> Result<IRawElementProviderFragment> {
+        let mut ids = self.current(|state, _| ids(state))?.into_iter();
+        let found = if forward {
+            ids.find(|&id| id > self.index)
+        } else {
+            ids.rev().find(|&id| id < self.index)
+        };
+        let Some(index) = found else {
             return none();
-        }
+        };
         Ok(Item {
             state: Arc::clone(&self.state),
             root: self.root.clone(),
@@ -344,13 +382,19 @@ impl IRawElementProviderSimple_Impl for Item_Impl {
             "RoqaMediaPlayPause",
             "RoqaMediaNext",
             "RoqaVolumeMute",
+            "RoqaShelf0",
+            "RoqaShelf1",
+            "RoqaShelf2",
         ];
+        // Shelf entries open files; keyboard focus stays on the media controls.
+        let shelf = self.index >= SHELF_BASE;
         Ok(match property {
             UIA_ControlTypePropertyId => variant_i32(UIA_ButtonControlTypeId.0),
             UIA_NamePropertyId => variant_text(&name),
             UIA_AutomationIdPropertyId => variant_text(id.get(self.index).unwrap_or(&"")),
             // Disabled controls stay in the tree, exposed as disabled.
-            UIA_IsEnabledPropertyId | UIA_IsKeyboardFocusablePropertyId => variant_bool(enabled),
+            UIA_IsEnabledPropertyId => variant_bool(enabled),
+            UIA_IsKeyboardFocusablePropertyId => variant_bool(enabled && !shelf),
             UIA_HasKeyboardFocusPropertyId => variant_bool(focused),
             UIA_IsOffscreenPropertyId => variant_bool(!open),
             // Read-only: the position is shown and spoken, not adjusted with keys (user decision).
@@ -375,8 +419,8 @@ impl IRawElementProviderFragment_Impl for Item_Impl {
         self.current(|_, _| ())?;
         match direction {
             NavigateDirection_Parent => self.root.cast(),
-            NavigateDirection_NextSibling => self.sibling(self.index + 1),
-            NavigateDirection_PreviousSibling if self.index > 0 => self.sibling(self.index - 1),
+            NavigateDirection_NextSibling => self.sibling(true),
+            NavigateDirection_PreviousSibling => self.sibling(false),
             _ => none(),
         }
     }
@@ -385,16 +429,27 @@ impl IRawElementProviderFragment_Impl for Item_Impl {
         dock_uia::runtime_id(self.version, self.index)
     }
     fn BoundingRectangle(&self) -> Result<UiaRect> {
-        let (hwnd, dpi, open) = self.current(|state, _| (state.hwnd, state.dpi, state.open))?;
+        let (hwnd, dpi, open, media) = self.current(|state, _| {
+            (
+                state.hwnd,
+                state.dpi,
+                state.open,
+                !state.controls.is_empty(),
+            )
+        })?;
         // A collapsed panel draws no controls: they are offscreen, and Invoke still works.
-        let Some(control) = layout::media_controls(dpi).get(self.index).copied() else {
+        let control = match self.index.checked_sub(SHELF_BASE) {
+            None => layout::media_controls(dpi).get(self.index).copied(),
+            Some(slot) => Some(layout::shelf_slot(media, slot, dpi)),
+        };
+        let Some(control) = control else {
             return Err(not_available());
         };
         if !open {
             return Ok(UiaRect::default());
         }
         let rect = window_rect(hwnd)?;
-        let shape = layout::notch_shape(1.0, true);
+        let shape = layout::notch_shape(1.0, media || self.index < SHELF_BASE);
         let body = layout::notch_body(rect.right - rect.left, dpi, shape);
         Ok(UiaRect {
             left: f64::from(rect.left + body.left + control.x),
@@ -407,6 +462,9 @@ impl IRawElementProviderFragment_Impl for Item_Impl {
         Ok(std::ptr::null_mut())
     }
     fn SetFocus(&self) -> Result<()> {
+        if self.index >= SHELF_BASE {
+            return Err(not_enabled());
+        }
         self.act(FOCUS)
     }
     fn FragmentRoot(&self) -> Result<IRawElementProviderFragmentRoot> {
