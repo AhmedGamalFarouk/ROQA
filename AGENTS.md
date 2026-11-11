@@ -28,3 +28,28 @@ To maximize development velocity and prevent rate-limit exhaustion, ROQA follows
 - No copied Nectar/Nusa code or assets. Do not invent product data or performance results.
 - Use project-local tooling when possible, leave global PATH alone, pin dependency/toolchain versions and keep generated binaries/caches out of version control.
 - Native UI should preserve keyboard, accessibility, text scaling, RTL/IME and reduced-motion needs as scoped by the milestone.
+
+## Standing worker rules
+
+Briefs point here instead of repeating these.
+
+- No native/GUI run without a fresh, explicit desktop-free user confirmation via the Chief, plus a foreground-window check. Scripts inject input and move the cursor; prior permission never carries over. Stop only the owned test process, preferably with `--quit`. Settings, display, audio, sleep, Explorer restart, forced TDR and remote-session switches each need separate authorization.
+- Never stage or commit the user's own `.gitignore` modification. Never use `git add -A` or `git add .`; stage exact paths.
+- Pinned project-local tooling only; never modify global PATH.
+- No system changes: global hooks, elevation, startup registration, shell/taskbar mutation.
+- Encodings: Rust LF, `progress.md` CRLF, scripts keep their existing encoding (`.gitattributes` enforces this).
+- Commit messages end with the co-author trailer the harness specifies; use `git commit -F <file>`; never force-push or skip hooks.
+- Don't invent results; keep NOT RUN and deferred items labelled.
+- Never build during a measurement.
+- Land with `scripts/land.ps1` (stale check, verify, binary SHA, exact-path staging, fast-forward push); use `-DryRun` first.
+
+## Report and ledger size
+
+- A worker's final report is 15 lines or fewer: what changed, test count, binary size and SHA, manifest SHA, deferred items. Paths and hashes, no prose recap.
+- `progress.md` entries are 10 lines or fewer and link to the packet for detail.
+- Workers read only the last ~60 lines of `progress.md`, never the whole file.
+- Manifests list only the files changed by the candidate plus its packet, not the whole tree.
+
+## Parallel work
+
+One slice at a time, or parallel slices only when their files are disjoint. If they overlap, land one first, then start the next from the new `main`. This avoids the double rebase-and-re-review paid for on slices 4-6.
