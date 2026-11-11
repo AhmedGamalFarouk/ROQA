@@ -391,6 +391,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clock_fallback_removes_children_and_rejects_retained_focus_and_invoke() {
+        use crate::media::View;
+        let recently_paused = View::Track(Track {
+            title: "Song".into(),
+            paused_until: Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+            controls: [true; 3],
+            ..Track::default()
+        });
+        for hidden in [
+            View::Track(Track {
+                title: "Song".into(),
+                controls: [true; 3],
+                paused_until: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+                ..Track::default()
+            }),
+            View::Track(Track {
+                title: "Song".into(),
+                controls: [true; 3],
+                ..Track::default()
+            }),
+            View::Track(Track {
+                playing: true,
+                controls: [true; 3],
+                ..Track::default()
+            }),
+        ] {
+            let state = Shared::default();
+            {
+                let mut state = state.lock().unwrap();
+                state.hwnd = 1; // Sentinel: only error paths below; no HWND or foreground APIs.
+                state.controls = recently_paused.shown().map(controls).unwrap_or_default();
+            }
+            let root: IRawElementProviderSimple = Root {
+                state: Arc::clone(&state),
+            }
+            .into();
+            let fragment: IRawElementProviderFragment = root.cast().unwrap();
+            // SAFETY: local providers; Navigate/GetPropertyValue read only the shared snapshot.
+            unsafe {
+                let child = fragment.Navigate(NavigateDirection_FirstChild).unwrap();
+                let simple: IRawElementProviderSimple = child.cast().unwrap();
+                assert!(simple.GetPropertyValue(UIA_NamePropertyId).is_ok());
+                state.lock().unwrap().controls = hidden.shown().map(controls).unwrap_or_default();
+                assert!(fragment.Navigate(NavigateDirection_FirstChild).is_err());
+                assert_eq!(
+                    simple
+                        .GetPropertyValue(UIA_IsKeyboardFocusablePropertyId)
+                        .unwrap_err()
+                        .code(),
+                    not_available().code()
+                );
+                assert_eq!(child.SetFocus().unwrap_err().code(), not_available().code());
+                assert_eq!(
+                    simple
+                        .cast::<IInvokeProvider>()
+                        .unwrap()
+                        .Invoke()
+                        .unwrap_err()
+                        .code(),
+                    not_available().code()
+                );
+                assert_eq!(
+                    fragment.SetFocus().unwrap_err().code(),
+                    not_enabled().code()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn root_owns_activation_and_destroyed_windows_invalidate_retained_children() {
         let state = Shared::default();
         {

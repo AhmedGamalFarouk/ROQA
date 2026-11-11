@@ -2,6 +2,7 @@ use crate::{
     dock,
     layout::{Bounds, SurfaceKind},
     topology::{self, Monitor},
+    window_model::WindowKey,
 };
 use std::{
     mem::size_of,
@@ -10,10 +11,12 @@ use std::{
 };
 use windows::Win32::{
     Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
     Graphics::Gdi::{
-        CombineRgn, CreateRectRgn, DeleteObject, EnumDisplayMonitors, GetMonitorInfoW, HDC,
-        HMONITOR, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW,
-        MonitorFromPoint, MonitorFromWindow, RGN_OR, SetRectRgn, SetWindowRgn, ValidateRect,
+        DeleteObject, EnumDisplayMonitors, ExtCreateRegion, GetMonitorInfoW, HDC, HMONITOR,
+        MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW,
+        MonitorFromPoint, MonitorFromWindow, RDH_RECTANGLES, RGNDATA, RGNDATAHEADER, SetWindowRgn,
+        ValidateRect,
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::{
@@ -141,39 +144,50 @@ impl NativeWindow {
             let _ = ShowWindow(self.0, SW_HIDE);
         }
     }
-    /// Transfers a silhouette region to Windows; the scratch row and any failed result stay owned here.
+    /// Transfers a silhouette region to Windows in one GDI call, rather than unioning every row.
     pub fn set_notch_region(&self, rows: &[Bounds]) -> Result<()> {
-        // SAFETY: owned HWND; all rows are bounded window-relative pixels. Only a successful
-        // SetWindowRgn transfers ownership. Both temporary GDI regions are cleaned on every error.
+        let bytes = size_of::<RGNDATAHEADER>() + rows.len() * size_of::<RECT>();
+        let mut data = vec![0u32; bytes.max(size_of::<RGNDATA>()).div_ceil(size_of::<u32>())];
+        let header = RGNDATAHEADER {
+            dwSize: size_of::<RGNDATAHEADER>() as u32,
+            iType: RDH_RECTANGLES,
+            nCount: rows.len() as u32,
+            nRgnSize: (rows.len() * size_of::<RECT>()) as u32,
+            rcBound: RECT {
+                left: rows.iter().map(|r| r.x).min().unwrap_or(0),
+                top: rows.first().map_or(0, |r| r.y),
+                right: rows.iter().map(|r| r.x + r.width).max().unwrap_or(0),
+                bottom: rows.last().map_or(0, |r| r.y + r.height),
+            },
+        };
+        // SAFETY: u32 storage has the alignment of these Win32 structs and room for the header
+        // and all sorted, nonoverlapping RECTs. SetWindowRgn alone transfers region ownership.
         unsafe {
-            let region = CreateRectRgn(0, 0, 0, 0);
+            data.as_mut_ptr().cast::<RGNDATAHEADER>().write(header);
+            let rectangles = data
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(size_of::<RGNDATAHEADER>())
+                .cast::<RECT>();
+            for (index, row) in rows.iter().enumerate() {
+                rectangles.add(index).write(RECT {
+                    left: row.x,
+                    top: row.y,
+                    right: row.x + row.width,
+                    bottom: row.y + row.height,
+                });
+            }
+            let region = ExtCreateRegion(None, bytes as u32, data.as_ptr().cast());
             if region.0.is_null() {
                 return Err(Error::from_thread());
             }
-            let row = CreateRectRgn(0, 0, 0, 0);
-            if row.0.is_null() {
+            if SetWindowRgn(self.0, Some(region), false) == 0 {
                 let failure = Error::from_thread();
                 let _ = DeleteObject(region.into());
                 return Err(failure);
             }
-            let applied = (|| {
-                for span in rows {
-                    SetRectRgn(row, span.x, span.y, span.x + span.width, span.y + 1).ok()?;
-                    if CombineRgn(Some(region), Some(region), Some(row), RGN_OR).0 == 0 {
-                        return Err(Error::from_thread());
-                    }
-                }
-                if SetWindowRgn(self.0, Some(region), false) == 0 {
-                    return Err(Error::from_thread());
-                }
-                Ok(())
-            })();
-            let _ = DeleteObject(row.into());
-            if applied.is_err() {
-                let _ = DeleteObject(region.into());
-            }
-            applied
         }
+        Ok(())
     }
 }
 impl Drop for NativeWindow {
@@ -261,14 +275,44 @@ fn device_name(info: &MONITORINFOEXW) -> String {
     String::from_utf16_lossy(&name[..length])
 }
 
-/// Device name of the monitor whose whole area the foreground window covers: the only window that
-/// can make a monitor full screen. Plain user32 geometry, so callers can run it before the shell
-/// query and poll only while it returns a candidate. Any failed query reads as "no candidate",
-/// which keeps the surfaces visible rather than hiding them on a guess.
-pub fn fullscreen_candidate() -> Option<String> {
-    // Visible foreign top-level window only; ROQA's own windows never suppress ROQA.
-    let key = dock::foreground_key().filter(|key| dock::valid_target(*key))?;
+/// A foreground candidate is admitted by the shell; retained candidates only need geometry checks.
+pub fn fullscreen_candidate() -> Option<(WindowKey, String)> {
+    let key = dock::foreground_key()?;
+    fullscreen_monitor(key).map(|device| (key, device))
+}
+
+/// Monitor of a foreign foreground window; ROQA focus must preserve remembered suppression.
+pub fn foreground_monitor(key: WindowKey) -> Option<String> {
+    if !dock::valid_target(key) {
+        return None;
+    }
+    // SAFETY: scalar query on a revalidated transient foreign HWND.
+    let monitor = unsafe { MonitorFromWindow(HWND(key.handle as *mut _), MONITOR_DEFAULTTONULL) };
+    monitor_info(monitor).ok().map(|info| device_name(&info))
+}
+
+/// A stale, hidden, cloaked or minimized window cannot keep a monitor suppressed. Revalidate its PID too,
+/// so an HWND reused by another process cannot inherit suppression.
+pub fn fullscreen_monitor(key: WindowKey) -> Option<String> {
+    if !dock::valid_target(key) {
+        return None;
+    }
     let window = HWND(key.handle as *mut _);
+    // SAFETY: scalar query on a revalidated transient foreign HWND.
+    let mut cloaked = 0u32;
+    // SAFETY: DWM writes one DWORD to this owned buffer; unknown visibility cannot suppress ROQA.
+    let visible = unsafe {
+        DwmGetWindowAttribute(
+            window,
+            DWMWA_CLOAKED,
+            &raw mut cloaked as *mut _,
+            size_of::<u32>() as u32,
+        )
+    };
+    // SAFETY: scalar query on the revalidated transient foreign HWND.
+    if visible.is_err() || cloaked != 0 || unsafe { IsIconic(window) }.as_bool() {
+        return None;
+    }
     // The desktop spans every monitor; under Presentation Settings (also QUNS_BUSY) it would read
     // as full screen.
     // shortcut: a maximized window can still read as full screen under Presentation Settings

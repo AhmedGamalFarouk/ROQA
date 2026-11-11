@@ -21,7 +21,7 @@ pub const NOTCH_EXPANDED: NotchShape = NotchShape {
     radius: 24.0,
     ears: 16.0,
 };
-/// While a media session exists the pill widens for the cover slot and title, and the panel grows
+/// While media is playing with a title or artist the pill widens for the cover slot and title, and the panel grows
 /// for the cover, title, progress, controls and volume rows (direction B, provisional;
 /// docs/design/roqa-visual-spec.md).
 pub const MEDIA_NOTCH: NotchShape = NotchShape {

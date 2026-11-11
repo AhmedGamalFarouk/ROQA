@@ -18,6 +18,7 @@ use crate::{
     window_model::{WindowKey, WindowModel},
 };
 use std::{
+    cell::Cell,
     mem::size_of,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
@@ -68,6 +69,7 @@ impl Drop for Apartment {
 }
 
 struct NotchShadow {
+    painted: Cell<Option<(f32, bool)>>,
     canvas: Canvas,
     window: NativeWindow,
 }
@@ -75,9 +77,21 @@ impl NotchShadow {
     fn create(graphics: &Graphics, bounds: Bounds) -> Result<Self> {
         let window = NativeWindow::create_shadow(bounds)?;
         let canvas = Canvas::create(graphics, window.0, bounds)?;
-        Ok(Self { canvas, window })
+        Ok(Self {
+            canvas,
+            window,
+            painted: Cell::new(None),
+        })
     }
     fn paint(&self, scene: &NotchScene, notch: HWND) -> Result<()> {
+        let frame = if motion::smooth(scene.progress) == 0.0 {
+            (0.0, false)
+        } else {
+            (scene.progress, scene.track.is_some())
+        };
+        if self.painted.get() == Some(frame) {
+            return Ok(());
+        }
         // Follow the body even when a test moves its HWND; keep the shadow immediately behind it.
         // SAFETY: both HWNDs are owned on this UI thread; no activation or focus change.
         unsafe {
@@ -93,7 +107,9 @@ impl NotchShadow {
                 SWP_NOACTIVATE,
             )?;
         }
-        self.canvas.paint_notch_shadow(scene)
+        self.canvas.paint_notch_shadow(scene)?;
+        self.painted.set(Some(frame));
+        Ok(())
     }
 }
 
@@ -621,10 +637,10 @@ struct Desktop {
     /// When the next topology read is due, and how many transient reads this change has retried.
     topology_due: Option<Instant>,
     topology_retries: u32,
-    /// Monitor currently covered by a full-screen app; its surfaces are hidden, not released.
-    fullscreen: Option<String>,
+    /// At most one validated full-screen window per settled monitor.
+    fullscreen: Vec<(WindowKey, String)>,
     /// Catalog generation seen by the last full-screen check, and the next shell poll, armed only
-    /// while the foreground window covers its monitor.
+    /// while a current or retained window covers its monitor.
     fullscreen_generation: Option<u64>,
     fullscreen_due: Option<Instant>,
     graphics: Graphics,
@@ -659,7 +675,9 @@ impl Desktop {
             topology_due: None,
             topology_retries: 0,
             fullscreen: native_window::fullscreen_candidate()
-                .filter(|_| native_window::shell_fullscreen()),
+                .filter(|_| native_window::shell_fullscreen())
+                .into_iter()
+                .collect(),
             fullscreen_generation: None,
             fullscreen_due: None,
             graphics: Graphics::create()?,
@@ -729,7 +747,10 @@ impl Desktop {
             self.surfaces[self.surfaces.len() - 1].paint_dock(&self.dock_items, &icons)?;
         }
         // Shown after its first paint, and never on the monitor a full-screen app covers.
-        let visible = self.fullscreen.as_ref() != Some(&monitor.device);
+        let visible = !self
+            .fullscreen
+            .iter()
+            .any(|(_, device)| device == &monitor.device);
         let last = self.surfaces.len() - 1;
         self.surfaces[last].set_visible(visible);
         Ok(())
@@ -1120,17 +1141,37 @@ impl Desktop {
             return Ok(());
         }
         self.fullscreen_generation = Some(generation);
-        // Geometry first: the shell is asked, and polled, only while a window covers its monitor.
-        let candidate = native_window::fullscreen_candidate();
-        self.fullscreen_due = candidate.as_ref().map(|_| now + FULLSCREEN_POLL);
-        let fullscreen = candidate.filter(|_| native_window::shell_fullscreen());
-        if fullscreen == self.fullscreen {
+        let before = self.fullscreen.clone();
+        self.fullscreen.retain(|(key, device)| {
+            native_window::fullscreen_monitor(*key).as_ref() == Some(device)
+        });
+        let foreground = dock::foreground_key();
+        let candidate = foreground
+            .and_then(|key| native_window::fullscreen_monitor(key).map(|device| (key, device)));
+        let admitted = candidate
+            .clone()
+            .filter(|_| native_window::shell_fullscreen());
+        let normal_monitor = admitted
+            .is_none()
+            .then(|| foreground.and_then(native_window::foreground_monitor))
+            .flatten();
+        remember_fullscreen(
+            &mut self.fullscreen,
+            admitted,
+            normal_monitor.as_deref(),
+            &self.monitors,
+        );
+        self.fullscreen_due =
+            (candidate.is_some() || !self.fullscreen.is_empty()).then_some(now + FULLSCREEN_POLL);
+        if before == self.fullscreen {
             return Ok(());
         }
-        self.fullscreen = fullscreen;
         let icons = self.dock_icons();
         for surface in &mut self.surfaces {
-            let visible = self.fullscreen.as_ref() != Some(&surface.monitor);
+            let visible = !self
+                .fullscreen
+                .iter()
+                .any(|(_, device)| device == &surface.monitor);
             if visible && !surface.visible {
                 match surface.kind() {
                     SurfaceKind::Notch => {
@@ -1215,7 +1256,7 @@ impl Desktop {
         if self.text.take_changed() {
             self.rescale_text()?;
         }
-        // One paint per visible notch, and only when the drawn track changed: no frames, no deadline.
+        // One paint per visible notch when the drawn track changes or its pause grace expires.
         let generation = self.media.generation();
         let redraw = self.media.refresh();
         if redraw || generation != self.media.generation() {
@@ -1335,6 +1376,12 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
             .min(clock_wait)
             .min(desktop.topology_wait())
             .min(desktop.fullscreen_wait())
+            .min(
+                desktop
+                    .media
+                    .deadline()
+                    .map_or(INFINITE, |due| milliseconds_until(due, Instant::now())),
+            )
             .min(desktop.rebuild.wait(Instant::now()));
         let wake = if animating {
             next_frame(&events, timeout)
@@ -1472,6 +1519,26 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
     Ok(true)
 }
 
+/// Focus changes preserve other monitors; removed monitors and replacements cannot grow the set.
+fn remember_fullscreen(
+    current: &mut Vec<(WindowKey, String)>,
+    candidate: Option<(WindowKey, String)>,
+    normal_monitor: Option<&str>,
+    monitors: &[Monitor],
+) {
+    // A normal app covering fullscreen on this monitor restores ROQA, as the native taskbar does.
+    current.retain(|(_, device)| {
+        normal_monitor != Some(device.as_str()) && monitors.iter().any(|m| &m.device == device)
+    });
+    if let Some((key, device)) = candidate
+        && monitors.iter().any(|m| m.device == device)
+    {
+        current.retain(|(_, old)| old != &device);
+        current.push((key, device));
+    }
+    current.sort_by(|a, b| a.1.cmp(&b.1));
+}
+
 #[cfg(test)]
 mod clock_wait_tests {
     use super::*;
@@ -1492,6 +1559,55 @@ mod clock_wait_tests {
         assert_eq!(step([false; 3], None, true), None);
         assert_eq!(step([false; 3], Some(1), false), None);
     }
+
+    #[test]
+    fn fullscreen_focus_changes_preserve_monitors_and_state_is_bounded() {
+        let monitors: Vec<_> = ["A", "B"]
+            .into_iter()
+            .map(|device| Monitor {
+                device: device.into(),
+                work: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                dpi: 96,
+            })
+            .collect();
+        let candidate = |handle, device: &str| {
+            (
+                WindowKey {
+                    handle,
+                    process: 10,
+                },
+                device.to_owned(),
+            )
+        };
+        let mut current = vec![];
+        remember_fullscreen(&mut current, Some(candidate(1, "A")), None, &monitors);
+        remember_fullscreen(&mut current, None, None, &monitors);
+        assert_eq!(current, [candidate(1, "A")]);
+        remember_fullscreen(&mut current, Some(candidate(2, "B")), None, &monitors);
+        assert_eq!(current, [candidate(1, "A"), candidate(2, "B")]);
+        remember_fullscreen(&mut current, Some(candidate(3, "A")), None, &monitors);
+        assert_eq!(current, [candidate(3, "A"), candidate(2, "B")]);
+        remember_fullscreen(&mut current, Some(candidate(4, "C")), None, &monitors[1..]);
+        assert_eq!(current, [candidate(2, "B")]);
+        // ROQA foreground has no foreign monitor and retains the entry.
+        remember_fullscreen(&mut current, None, None, &monitors);
+        assert_eq!(current, [candidate(2, "B")]);
+        // Normal foreground on the other monitor retains fullscreen B.
+        remember_fullscreen(&mut current, None, Some("A"), &monitors);
+        assert_eq!(current, [candidate(2, "B")]);
+        // Alt-Tab to a normal app on B releases that monitor's suppression.
+        remember_fullscreen(&mut current, None, Some("B"), &monitors);
+        assert!(current.is_empty());
+        remember_fullscreen(&mut current, Some(candidate(2, "B")), None, &monitors);
+        remember_fullscreen(&mut current, None, None, &[]);
+        assert!(current.is_empty());
+    }
+
     #[test]
     fn graphics_rebuilds_back_off_to_a_cap() {
         let delays: Vec<u128> = (0..8).map(|n| rebuild_delay(n).as_millis()).collect();

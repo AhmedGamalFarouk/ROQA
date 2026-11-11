@@ -1209,16 +1209,11 @@ mod media_tests {
     }
 
     #[test]
-    fn paused_dims_the_glyph_and_title_without_moving_anything() {
-        let (playing, paused) = (track("Song", "", true), track("Song", "", false));
-        let (a, b) = (
-            plan(&playing, "9:50 pm", 0.0, 96),
-            plan(&paused, "9:50 pm", 0.0, 96),
-        );
-        assert!(!b.playing);
-        assert_eq!((b.dim, b.lines[1].alpha), (0.60, 0.85 * 0.60));
-        assert_eq!((a.cover.rect, a.glyph), (b.cover.rect, b.glyph));
-        assert_eq!(a.lines[1].rect, b.lines[1].rect);
+    fn paused_and_pending_metadata_draw_the_plain_clock_shape() {
+        for view in [track("Song", "Artist", false), track("", "", true)] {
+            assert!(view.shown().is_none());
+            assert_eq!(layout::notch_shape(0.0, view.shown().is_some()), NOTCH);
+        }
     }
 
     #[test]
@@ -1284,9 +1279,7 @@ mod media_tests {
             ]
         );
         assert!(panel.ring.is_none());
-        // Paused, the middle control offers play.
-        let paused = track("Song", "Artist", false);
-        assert_eq!(plan_shapes(&paused)[1], Glyph::Play);
+        assert!(track("Song", "Artist", false).shown().is_none());
         // The controls fade in with the artist and keep their place while the body grows.
         let opening = plan(&song, "9:50 pm", 0.6, 96);
         let reveal = motion::reveal(0.6);
@@ -1295,14 +1288,6 @@ mod media_tests {
         assert_eq!(opening.chips[1].rect.left, body.left + 148.0);
         assert_eq!(opening.chips[1].alpha, reveal);
         assert_eq!(opening.chips[0].alpha, reveal * DISABLED);
-    }
-
-    fn plan_shapes(view: &View) -> Vec<Glyph> {
-        plan(view, "9:50 pm", 1.0, 96)
-            .chips
-            .iter()
-            .map(|chip| chip.shape)
-            .collect()
     }
 
     #[test]
@@ -1341,8 +1326,7 @@ mod media_tests {
             plan.lines.iter().map(|l| l.text.to_owned()).collect()
         };
         assert_eq!(texts(&track("Song", "", true)), ["9:50 pm", "Song"]);
-        // Properties not read yet: cover slot, glyph and clock only.
-        assert_eq!(texts(&track("", "", true)), ["9:50 pm"]);
+        assert_eq!(texts(&track("", "Artist", true)), ["9:50 pm", "Artist"]);
     }
 
     #[test]

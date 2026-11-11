@@ -8,6 +8,7 @@ use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicU32, Ordering},
 };
+use std::time::{Duration, Instant};
 use windows::{
     Foundation::TypedEventHandler,
     Media::Control::{
@@ -29,12 +30,13 @@ use windows_future::IAsyncOperation;
 const WAKE: u32 = WM_APP + 50;
 const SESSION: u32 = 1;
 const PROPERTIES: u32 = 2;
-/// Playback info or timeline changed: both are re-read together.
+/// Playback info changed.
 const PLAYBACK: u32 = 4;
 /// An async request completed and filled its slot.
 const READY: u32 = 8;
 /// Title and artist are cut to this many UTF-16 units, so one session holds at most a few KiB.
 const TEXT_LIMIT: usize = 512;
+const PAUSED_GRACE: Duration = Duration::from_secs(5 * 60);
 
 /// WinRT 100 ns ticks; `updated` is a UTC `DateTime` (ticks since 1601).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -55,6 +57,8 @@ pub struct Track {
     pub title: String,
     pub artist: String,
     pub playing: bool,
+    /// One expiry after leaving Playing; repeated pause/stop reports do not extend it.
+    pub paused_until: Option<Instant>,
     /// Whether the player accepts previous, play/pause and next. Play/pause is the action the
     /// button performs now: pause while playing, play otherwise.
     pub controls: [bool; 3],
@@ -99,7 +103,13 @@ impl View {
     /// The track the notch draws; every other view draws the plain clock notch.
     pub fn shown(&self) -> Option<&Track> {
         match self {
-            View::Track(track) => Some(track),
+            View::Track(track)
+                if (track.playing
+                    || track.paused_until.is_some_and(|due| Instant::now() < due))
+                    && (!track.title.is_empty() || !track.artist.is_empty()) =>
+            {
+                Some(track)
+            }
             _ => None,
         }
     }
@@ -123,7 +133,8 @@ pub enum Change {
     /// The current session was replaced, or is gone (`false`); starts a new generation.
     Session(bool),
     Playback {
-        playing: bool,
+        status: Status,
+        observed: Instant,
         controls: [bool; 3],
         rate: f64,
         timeline: Timeline,
@@ -161,12 +172,20 @@ impl State {
                 };
             }
             Change::Playback {
-                playing,
+                status,
+                observed,
                 controls,
                 rate,
                 timeline,
             } => {
                 if let View::Track(track) = &mut self.view {
+                    let playing = status == Status::Playing;
+                    if playing || (status != Status::Paused && status != Status::Stopped) {
+                        track.paused_until = None;
+                    } else if track.playing {
+                        // Playback was known to continue until this pause/stop observation.
+                        track.paused_until = Some(observed + PAUSED_GRACE);
+                    }
                     (track.playing, track.controls) = (playing, controls);
                     (track.rate, track.timeline) = (rate, timeline);
                 }
@@ -183,6 +202,16 @@ impl State {
                 }
             }
         }
+    }
+    /// Consumes the single grace deadline; expiry must repaint even though shown() now hides it.
+    fn expire(&mut self, now: Instant) -> bool {
+        if let View::Track(track) = &mut self.view
+            && track.paused_until.is_some_and(|due| now >= due)
+        {
+            track.paused_until = None;
+            return !track.title.is_empty() || !track.artist.is_empty();
+        }
+        false
     }
 }
 
@@ -272,7 +301,7 @@ fn subscribe_manager(manager: Manager, wake: &Arc<Wake>) -> Result<Subscribed<Ma
 fn subscribe_session(session: Session, wake: &Arc<Wake>) -> Result<Subscribed<Session>> {
     let mut subscribed = Subscribed {
         source: session,
-        tokens: Vec::with_capacity(3),
+        tokens: Vec::with_capacity(2),
     };
     let token = subscribed
         .source
@@ -286,12 +315,7 @@ fn subscribe_session(session: Session, wake: &Arc<Wake>) -> Result<Subscribed<Se
     subscribed
         .tokens
         .push((token, Session::RemovePlaybackInfoChanged));
-    let token = subscribed
-        .source
-        .TimelinePropertiesChanged(&handler(wake, PLAYBACK))?;
-    subscribed
-        .tokens
-        .push((token, Session::RemoveTimelinePropertiesChanged));
+    // shortcut: timeline subscription waits until slice 4 draws progress.
     Ok(subscribed)
 }
 
@@ -360,12 +384,13 @@ fn bounded(text: HSTRING) -> String {
     String::from_utf16_lossy(&units[..end])
 }
 
-fn read_playback(session: &Session) -> Result<Change> {
+fn read_playback(session: &Session, observed: Instant) -> Result<Change> {
     let info = session.GetPlaybackInfo()?;
     let timeline = session.GetTimelineProperties()?;
     // shortcut: a player that leaves PlaybackRate unset is taken as 1x; check real players before progress (slice 4).
     let rate = info.PlaybackRate().and_then(|rate| rate.Value());
-    let playing = info.PlaybackStatus()? == Status::Playing;
+    let status = info.PlaybackStatus()?;
+    let playing = status == Status::Playing;
     let controls = info.Controls()?;
     // shortcut: a player offering only the play/pause toggle shows a disabled button; use TryTogglePlayPauseAsync if a real player does.
     let play_pause = if playing {
@@ -374,7 +399,8 @@ fn read_playback(session: &Session) -> Result<Change> {
         controls.IsPlayEnabled()?
     };
     Ok(Change::Playback {
-        playing,
+        status,
+        observed,
         controls: [
             controls.IsPreviousEnabled()?,
             play_pause,
@@ -451,6 +477,15 @@ impl Media {
     pub fn view(&self) -> &View {
         &self.state.view
     }
+    /// One host wake at grace expiry, and none for a view with nothing to show.
+    pub fn deadline(&self) -> Option<Instant> {
+        match &self.state.view {
+            View::Track(track) if !track.title.is_empty() || !track.artist.is_empty() => {
+                track.paused_until
+            }
+            _ => None,
+        }
+    }
     /// The session generation; UI Automation elements from an older one are stale.
     pub fn generation(&self) -> u64 {
         self.state.generation
@@ -479,12 +514,16 @@ impl Media {
         }
     }
     /// Applies pending media events and returns whether the drawn view changed. Without any events
-    /// it costs one atomic swap: no polling, no deadline.
+    /// it costs one atomic swap, plus a clock check only while a grace deadline exists.
     pub fn refresh(&mut self) -> bool {
+        let expired = self
+            .deadline()
+            .is_some_and(|_| self.state.expire(Instant::now()));
         let mut dirty = self.wake.dirty.swap(0, Ordering::Acquire);
         if dirty == 0 {
-            return false;
+            return expired;
         }
+        let started = Instant::now();
         self.wakes = self.wakes.wrapping_add(1);
         let before = self.state.view.clone();
         if let Some(outcome) = received(&self.request) {
@@ -545,7 +584,7 @@ impl Media {
                 }
             }
             if dirty & PLAYBACK != 0 {
-                match read_playback(&session.source) {
+                match read_playback(&session.source, started) {
                     Ok(change) => self.state.apply(change),
                     Err(error) => eprintln!("Media: playback: {error}"),
                 }
@@ -554,7 +593,11 @@ impl Media {
         if differs(&before, &self.state.view) {
             self.log();
         }
-        redraw(&before, &self.state.view)
+        let elapsed = started.elapsed();
+        if elapsed > Duration::from_millis(8) {
+            eprintln!("Media: slow host refresh {elapsed:?}");
+        }
+        expired || redraw(&before, &self.state.view)
     }
     /// Re-reads the current session; on a change, ends the old one, starts a new generation and
     /// returns the reads the new session needs.
@@ -684,7 +727,8 @@ mod tests {
         let first = state.generation;
         state.apply(properties(first, "One"));
         state.apply(Change::Playback {
-            playing: true,
+            status: Status::Playing,
+            observed: Instant::now(),
             controls: [false, true, true],
             rate: 1.0,
             timeline: Timeline::default(),
@@ -713,7 +757,8 @@ mod tests {
         let generation = state.generation;
         state.apply(properties(generation, "Ghost"));
         state.apply(Change::Playback {
-            playing: true,
+            status: Status::Playing,
+            observed: Instant::now(),
             controls: [true; 3],
             rate: 1.0,
             timeline: Timeline::default(),
@@ -833,13 +878,134 @@ mod tests {
             }
             assert!(redraw(&enabled, &disabled));
         }
-        assert!(redraw(&View::NoPlayer, &View::Track(Track::default())));
+        assert!(!redraw(&View::NoPlayer, &View::Track(Track::default())));
         assert!(redraw(&playing, &View::NoPlayer));
         // The no-media views all draw the plain clock notch.
         assert!(!redraw(&View::NoPlayer, &View::Permission));
         assert!(!redraw(&View::Error, &View::NoPlayer));
         assert_eq!(View::Permission.shown(), None);
         assert!(playing.shown().is_some_and(|t| t.title == "Song"));
+    }
+
+    #[test]
+    fn media_requires_playback_and_metadata_and_transitions_only_repaint_drawn_changes() {
+        let empty = View::Track(Track {
+            playing: true,
+            ..Track::default()
+        });
+        let paused = View::Track(Track {
+            title: "Song".into(),
+            ..Track::default()
+        });
+        let playing = View::Track(Track {
+            title: "Song".into(),
+            playing: true,
+            ..Track::default()
+        });
+        let artist_only = View::Track(Track {
+            artist: "Artist".into(),
+            playing: true,
+            ..Track::default()
+        });
+        for view in [&empty, &paused] {
+            assert!(view.shown().is_none());
+            assert!(!redraw(&View::NoPlayer, view));
+        }
+        for view in [&playing, &artist_only] {
+            assert!(view.shown().is_some());
+            assert!(redraw(&paused, view));
+            assert!(redraw(view, &paused));
+            assert!(redraw(&empty, view));
+        }
+        assert!(!redraw(&empty, &paused));
+    }
+
+    fn playback(status: Status, observed: Instant) -> Change {
+        Change::Playback {
+            status,
+            observed,
+            controls: [true; 3],
+            rate: 1.0,
+            timeline: Timeline::default(),
+        }
+    }
+
+    #[test]
+    fn recent_pause_or_stop_keeps_controls_until_one_deadline_and_resume_clears_it() {
+        let now = Instant::now();
+        for status in [Status::Paused, Status::Stopped] {
+            let mut media = Media::create();
+            media.state.apply(Change::Session(true));
+            media.state.apply(properties(media.generation(), "Song"));
+            media.state.apply(playback(status, now));
+            assert!(media.view().shown().is_none()); // Never observed Playing.
+            assert_eq!(media.deadline(), None);
+            media.state.apply(playback(Status::Playing, now));
+            assert!(media.view().shown().is_some());
+            assert_eq!(media.deadline(), None);
+            media.state.apply(playback(status, now));
+            let due = now + PAUSED_GRACE;
+            assert_eq!(media.deadline(), Some(due));
+            assert!(
+                media
+                    .view()
+                    .shown()
+                    .is_some_and(|track| track.controls[PLAY_PAUSE])
+            );
+            assert!(!media.state.expire(due - Duration::from_nanos(1)));
+            media
+                .state
+                .apply(playback(status, now + Duration::from_secs(1)));
+            assert_eq!(media.deadline(), Some(due)); // Repeated reports never postpone expiry.
+            media.state.apply(playback(Status::Playing, now));
+            assert_eq!(media.deadline(), None);
+            assert!(!media.state.expire(due));
+            assert!(media.view().shown().is_some());
+            media.state.apply(playback(status, now));
+            assert!(media.state.expire(due));
+            assert_eq!(media.deadline(), None);
+            assert!(media.view().shown().is_none());
+            assert!(!media.state.expire(due)); // Expiry repaints only once.
+            media.state.apply(playback(status, due));
+            assert_eq!(media.deadline(), None); // A late pause cannot resurrect the pill.
+        }
+    }
+
+    #[test]
+    fn grace_never_shows_empty_metadata_and_does_not_survive_session_or_status_changes() {
+        let now = Instant::now();
+        let mut media = Media::create();
+        media.state.apply(Change::Session(true));
+        media.state.apply(playback(Status::Playing, now));
+        assert!(media.view().shown().is_none());
+        media.state.apply(playback(Status::Paused, now));
+        assert!(media.view().shown().is_none());
+        assert_eq!(media.deadline(), None); // No expiry wake for an empty pill.
+        media.state.apply(properties(media.generation(), "Song"));
+        assert!(media.view().shown().is_some());
+        assert_eq!(media.deadline(), Some(now + PAUSED_GRACE));
+        media.state.apply(playback(Status::Closed, now));
+        assert!(media.view().shown().is_none());
+        assert_eq!(media.deadline(), None);
+        media.state.apply(playback(Status::Playing, now));
+        media.state.apply(playback(Status::Paused, now));
+        media.state.apply(Change::Session(false));
+        assert_eq!(media.deadline(), None);
+        media.state.apply(Change::Session(true));
+        media.state.apply(properties(media.generation(), "New"));
+        media.state.apply(playback(Status::Paused, now));
+        assert!(media.view().shown().is_none());
+        assert_eq!(media.deadline(), None);
+        // The gate itself rejects elapsed grace before the host consumes its wake.
+        media.state.view = View::Track(Track {
+            title: "Song".into(),
+            paused_until: Some(now - Duration::from_secs(1)),
+            ..Track::default()
+        });
+        assert!(media.view().shown().is_none());
+        assert!(media.refresh());
+        assert_eq!(media.deadline(), None);
+        assert!(!media.refresh());
     }
 
     #[test]
