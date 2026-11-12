@@ -1112,3 +1112,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/f5-features`; [packet](features-f5.md). Focus/short/long phases as tagged timers (existing deadline, store, notch view, chime); auto-advance, Settings start/pause/skip; P5 controls skipped for size.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 369 tests, locked release); 1,137,152 B, within 2% (limit 1,143,705; baseline unchanged); SHA `36FCCC210A2A66028253A3E011749603D9D7F0B58E01778880662FE348887641`.
 - **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN).
+
+## U2-P1 Settings window (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u2-council-fixes`; [packet](ui-council-u2.md). Footer strip + divider, rows clipped above it, message left of Close; wrapped captions measured; dark edits/combos (`DarkMode_CFD`); shell accent for switches; 2 px sidebar focus ring; MDL2 glyph tiles.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 369 tests, locked release); 1,140,224 B (was 1,137,152, +3,072); limit 1,143,705, headroom 3,481; baseline unchanged.
+- **NOT RUN:** native/GUI (CFD theme, glyphs, clipping, DPI/light unverified by eye); reviews paused (REVIEW NOT RUN).

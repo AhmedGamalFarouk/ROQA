@@ -29,7 +29,7 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, HWND, LPARAM, POINT, RECT, WPARAM},
         Graphics::{
-            Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmGetColorizationColor, DwmSetWindowAttribute},
+            Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
             Gdi::*,
         },
         System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
@@ -106,14 +106,14 @@ const PSTART: usize = 192;
 const PSKIP: usize = 193;
 const SIDE: usize = 98;
 const OK: usize = 1;
-/// `SS_CENTERIMAGE | SS_NOTIFY`: the footer strip centres its text and takes clicks, so scrolled rows cannot be hit under it.
-const SS_CENTERIMAGE_NOTIFY: u32 = 0x300;
+/// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
+const SS_NOTIFY: u32 = 0x100;
 /// Timer length shown when the window opens.
 const FIRST_TIMER: &str = "5";
 /// DIPs: sidebar width, content gutter, footer strip, design client size.
 const SIDE_W: i32 = 192;
 const GUTTER: i32 = 22;
-const FOOT: i32 = 44;
+const FOOT: i32 = 52;
 
 /// What the Settings window asks the host to do with the prayer sound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -474,9 +474,17 @@ const PAGES: &[Page] = &[
         ],
     },
 ];
-/// One flat tile colour per sidebar page.
-const TILES: [u32; 8] = [
-    0x8e8e93, 0xaf52de, 0x0a84ff, 0x30b0c7, 0xff9f0a, 0x30c85e, 0xff453a, 0x636366,
+/// One flat tile colour and one Segoe MDL2 Assets glyph per sidebar page (gear, palette, monitor, task view,
+/// sun, moon, stopwatch, info).
+const TILES: [(u32, &str); 8] = [
+    (0x8e8e93, "\u{e713}"),
+    (0xaf52de, "\u{e790}"),
+    (0x0a84ff, "\u{e7f4}"),
+    (0x30b0c7, "\u{e7c4}"),
+    (0xff9f0a, "\u{e706}"),
+    (0x30c85e, "\u{e708}"),
+    (0xff453a, "\u{e916}"),
+    (0x636366, "\u{e946}"),
 ];
 
 struct Item {
@@ -565,22 +573,27 @@ fn system(index: SYS_COLOR_INDEX) -> u32 {
     // SAFETY: scalar query.
     swap(unsafe { GetSysColor(index) })
 }
-/// Windows app mode is dark (read when the window opens and on a settings change, never polled).
-fn dark() -> bool {
-    let (mut light, mut size) = (1u32, 4u32);
+/// One DWORD under HKEY_CURRENT_USER (read when the window opens and on a settings change, never polled).
+fn reg(key: PCWSTR, name: PCWSTR) -> Option<u32> {
+    let (mut value, mut size) = (0u32, 4u32);
     // SAFETY: reads one DWORD into a local.
     let read = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
-            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
-            w!("AppsUseLightTheme"),
+            key,
+            name,
             RRF_RT_REG_DWORD,
             None,
-            Some((&mut light as *mut u32).cast()),
+            Some((&mut value as *mut u32).cast()),
             Some(&mut size),
         )
     };
-    read.is_ok() && light == 0
+    read.is_ok().then_some(value)
+}
+/// Windows app mode is dark.
+fn dark() -> bool {
+    let key = w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    reg(key, w!("AppsUseLightTheme")) == Some(0)
 }
 fn high_contrast() -> bool {
     let mut hc = HIGHCONTRASTW {
@@ -599,14 +612,18 @@ fn high_contrast() -> bool {
     read.is_ok() && hc.dwFlags & HCF_HIGHCONTRASTON == HCF_HIGHCONTRASTON
 }
 
-/// The system accent, or the reference green when it cannot be read.
-fn accent() -> u32 {
-    let (mut colour, mut opaque) = (0u32, BOOL(0));
-    // SAFETY: fills two local scalars.
-    match unsafe { DwmGetColorizationColor(&mut colour, &mut opaque) } {
-        Ok(()) => colour & 0xff_ffff,
-        Err(_) => 0x30c85e,
+/// The accent the shell shows (the personalised one, not the old Aero tint), or the reference green when it
+/// cannot be read; on the dark cards a too dark accent is lightened so a switch that is on still reads.
+fn accent(dark: bool) -> u32 {
+    let key = w!(r"Software\Microsoft\Windows\DWM");
+    let c = reg(key, w!("AccentColor")).map_or(0x30c85e, swap);
+    let at = |s: u32| c >> s & 255;
+    if dark && (at(16) * 299 + at(8) * 587 + at(0) * 114) / 1000 < 110 {
+        return (0..3).fold(0, |o, n| {
+            o | (at(8 * n) + (255 - at(8 * n)) * 2 / 5) << (8 * n)
+        });
     }
+    c & 0xff_ffff
 }
 
 /// The tokens of `design-language.md`: dark or light with the system accent, or the system colours in
@@ -644,7 +661,7 @@ fn palette() -> Pal {
         sel: pick(0x2d2d30, 0xffffff),
         text,
         dim: pick(0x8e8e93, 0x6a6b72),
-        accent: accent(),
+        accent: accent(dark),
         off: pick(0x48484c, 0xc9c9ce),
         thumb: 0xffffff,
         seltext: text,
@@ -731,6 +748,21 @@ fn paint(dc: HDC, window: HWND, p: &Paint) {
                 fill(dc, line, p.pal.line);
             }
         }
+        // The footer is its own strip: scrolled paint never reaches it, and a divider marks its edge.
+        let foot = RECT {
+            left: px(SIDE_W),
+            top: client.bottom - px(FOOT),
+            ..client
+        };
+        fill(dc, foot, p.pal.content);
+        fill(
+            dc,
+            RECT {
+                bottom: foot.top + 1,
+                ..foot
+            },
+            p.pal.line,
+        );
     }
 }
 
@@ -760,29 +792,43 @@ fn draw_side(item: &DRAWITEMSTRUCT, p: &Paint) {
             round(dc, cell, px(8), p.pal.sel, p.pal.sel);
         }
         if item.itemState.0 & ODS_FOCUS.0 != 0 {
-            round(
-                dc,
-                cell,
-                px(8),
-                if item.itemState.0 & ODS_SELECTED.0 != 0 {
-                    p.pal.sel
-                } else {
-                    p.pal.side
-                },
-                p.pal.accent,
-            );
+            // A 2 px accent ring (two nested outlines), not a fill: focus reads differently from selection.
+            let fill = if item.itemState.0 & ODS_SELECTED.0 != 0 {
+                p.pal.sel
+            } else {
+                p.pal.side
+            };
+            round(dc, cell, px(8), fill, p.pal.accent);
+            let inner = RECT {
+                left: cell.left + 1,
+                top: cell.top + 1,
+                right: cell.right - 1,
+                bottom: cell.bottom - 1,
+            };
+            round(dc, inner, px(7), HOLLOW, p.pal.accent);
         }
-        round(
-            dc,
-            tile,
-            px(5),
-            TILES[item.itemID as usize % 8],
-            TILES[item.itemID as usize % 8],
-        );
+        let (colour, glyph) = TILES[item.itemID as usize % 8];
+        round(dc, tile, px(5), colour, colour);
         SetBkMode(dc, TRANSPARENT);
+        // The glyph comes from the icon font, made for this paint and deleted at once.
+        let mut face = LOGFONTW {
+            lfHeight: -px(13),
+            lfCharSet: DEFAULT_CHARSET,
+            ..Default::default()
+        };
+        for (d, s) in face
+            .lfFaceName
+            .iter_mut()
+            .zip("Segoe MDL2 Assets".encode_utf16())
+        {
+            *d = s;
+        }
+        let icons = CreateFontIndirectW(&face);
+        let old = SelectObject(dc, icons.into());
+        write(dc, glyph, tile, 0xffffff, DT_CENTER | DT_NOPREFIX);
+        SelectObject(dc, old);
+        let _ = DeleteObject(icons.into());
         SelectObject(dc, p.font.into());
-        let initial = &page.name[..1];
-        write(dc, initial, tile, 0xffffff, DT_CENTER | DT_NOPREFIX);
         let name = RECT {
             left: tile.right + px(12),
             right: cell.right,
@@ -1253,7 +1299,7 @@ impl SettingsWindow {
                     w!("Edit"),
                     initial,
                     id,
-                    ES_AUTOHSCROLL as u32 | WS_BORDER.0 | tab | clip | extra,
+                    ES_AUTOHSCROLL as u32 | tab | clip | extra,
                     WS_EX_CLIENTEDGE,
                 )?
             }
@@ -1439,7 +1485,7 @@ impl SettingsWindow {
             w!("Static"),
             "",
             STATUS,
-            SS_CENTERIMAGE_NOTIFY | WS_CLIPSIBLINGS.0,
+            SS_NOTIFY | WS_CLIPSIBLINGS.0,
             WS_EX_NOPARENTNOTIFY,
         )?;
         self.close = control(
@@ -1447,7 +1493,7 @@ impl SettingsWindow {
             w!("Button"),
             "&Close",
             CLOSE,
-            WS_TABSTOP.0,
+            WS_TABSTOP.0 | WS_CLIPSIBLINGS.0,
             WINDOW_EX_STYLE(0),
         )?;
         for item in &self.items {
@@ -1649,7 +1695,7 @@ impl SettingsWindow {
         self.show(&next);
         if invalid {
             // The box already shows the value that was kept (`show` above), so the message explains the change.
-            self.say("A prayer shift is a whole number of minutes from -30 to 30. The nearest allowed value is kept.")?;
+            self.say("A shift is whole minutes from -30 to 30; the nearest is kept.")?;
         } else if !kept_a_kind {
             self.say("Keep the dock or the notch on.")?;
         } else if ranged != next {
@@ -1855,22 +1901,24 @@ impl SettingsWindow {
                 size_of::<BOOL>() as u32,
             );
         }
+        // Each child with whether it is an edit or a drop-down (they take the dark "CFD" look).
+        let field = |i: &Item| matches!(i.kind, Kind::Combo(_) | Kind::Edit(_));
         let handles = self
             .items
             .iter()
-            .flat_map(|i| [i.h, i.label, i.cap])
-            .chain([self.side, self.status, self.close])
-            .filter(|h| !h.0.is_null());
-        for child in handles {
-            // The native look of lists, edits and buttons follows the app mode too.
+            .flat_map(|i| [(i.h, field(i)), (i.label, false), (i.cap, false)])
+            .chain([self.side, self.status, self.close].map(|h| (h, false)))
+            .filter(|(h, _)| !h.0.is_null());
+        for (child, field) in handles {
+            // The native look of lists, edits, drop-downs and buttons follows the app mode too.
             // SAFETY: our own live child.
             unsafe {
                 let _ = SetWindowTheme(
                     child,
-                    if self.pal.dark {
-                        w!("DarkMode_Explorer")
-                    } else {
-                        PCWSTR::null()
+                    match (self.pal.dark, field) {
+                        (false, _) => PCWSTR::null(),
+                        (true, true) => w!("DarkMode_CFD"),
+                        (true, false) => w!("DarkMode_Explorer"),
                     },
                     PCWSTR::null(),
                 );
@@ -1936,7 +1984,7 @@ impl SettingsWindow {
         let mut client = RECT::default();
         // SAFETY: our own live window.
         unsafe { GetClientRect(self.window, &mut client)? };
-        let (mut geometry, content) = self.place(scale, client)?;
+        let (mut geometry, content) = self.place(scale, client, handle)?;
         let view = (client.bottom - px(FOOT)).max(1);
         self.scroll_max = (content - view).max(0);
         let clamped = self.scroll.clamp(0, self.scroll_max);
@@ -1957,22 +2005,23 @@ impl SettingsWindow {
             // A scroll bar appearing or a clamped position changes the geometry once more.
             if client.right != before || clamped != self.scroll {
                 self.scroll = clamped;
-                geometry = self.place(scale, client)?.0;
+                geometry = self.place(scale, client, handle)?.0;
             }
             let side = px(SIDE_W);
             let list = &[
                 (self.side, 0, px(10), side, client.bottom - px(10)),
+                // The message (two lines at most) stops short of Close, so the two never overlap.
                 (
                     self.status,
-                    side,
-                    client.bottom - px(FOOT),
-                    client.right - side,
-                    px(FOOT),
+                    side + px(GUTTER),
+                    client.bottom - px(FOOT) + px(6),
+                    (client.right - side - px(GUTTER * 2 + 108)).max(1),
+                    px(FOOT - 12),
                 ),
                 (
                     self.close,
                     client.right - px(GUTTER + 100),
-                    client.bottom - px(FOOT) + px(8),
+                    client.bottom - px(FOOT) + px((FOOT - 28) / 2),
                     px(100),
                     px(28),
                 ),
@@ -2021,7 +2070,22 @@ impl SettingsWindow {
     }
 
     /// Moves the current page's controls (top to bottom, scrolled) and returns the geometry and content height.
-    fn place(&self, scale: f64, client: RECT) -> Result<(Geometry, i32)> {
+    /// Captions are measured with `font` on a DC of the window, so a wrapped caption gets its lines.
+    fn place(&self, scale: f64, client: RECT, font: HFONT) -> Result<(Geometry, i32)> {
+        // SAFETY: a common DC of our own live window, given the live font and released before returning.
+        let dc = unsafe {
+            let dc = GetDC(Some(self.window));
+            SelectObject(dc, font.into());
+            dc
+        };
+        let at = (dc, client.bottom - (FOOT as f64 * scale).round() as i32);
+        let placed = self.place_at(scale, client, at);
+        // SAFETY: the DC taken above.
+        unsafe { ReleaseDC(Some(self.window), dc) };
+        placed
+    }
+
+    fn place_at(&self, scale: f64, client: RECT, at: (HDC, i32)) -> Result<(Geometry, i32)> {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let (left, right) = (
             px(SIDE_W + GUTTER),
@@ -2061,13 +2125,10 @@ impl SettingsWindow {
                 if n > 0 {
                     lines.push(y);
                 }
-                let tall = !item.cap.0.is_null();
-                let height = px(if tall { 52 } else { 40 });
-                self.row(item, scale, (left + px(14), right - px(14)), y, height)?;
-                y += height;
+                y += self.row(item, scale, (left + px(14), right - px(14)), y, at)?;
             }
             if self.page == 0 && index == MAP_CARD {
-                y += self.map(scale, (left + px(14), right - px(14)), y)?;
+                y += self.map(scale, (left + px(14), right - px(14)), y, at.1)?;
             }
             geometry.cards.push((
                 RECT {
@@ -2084,61 +2145,133 @@ impl SettingsWindow {
     }
 
     /// Places the monitor tiles to scale from `y` down and returns the map's height.
-    fn map(&self, scale: f64, (a, b): (i32, i32), y: i32) -> Result<i32> {
+    fn map(&self, scale: f64, (a, b): (i32, i32), y: i32, view: i32) -> Result<i32> {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let rects: Vec<_> = self.monitors.iter().map(|m| m.rect).collect();
         let tiles = topology::fit(&rects, b - a, px(MAP_H), px(3));
         for (index, tile) in tiles.iter().enumerate() {
+            let (h, top) = (self.h(MONITOR + index), y + px(10) + tile.y);
             // SAFETY: our own live tile.
             unsafe {
                 SetWindowPos(
-                    self.h(MONITOR + index),
+                    h,
                     None,
                     a + tile.x,
-                    y + px(10) + tile.y,
+                    top,
                     tile.width,
                     tile.height,
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 )?;
+                clip(h, top, tile.height, tile.width, view);
             }
         }
         Ok(px(MAP_H + 20))
     }
 
-    fn row(&self, item: &Item, scale: f64, (a, b): (i32, i32), y: i32, height: i32) -> Result<()> {
+    /// Places one row from `y` and returns its height: a label or caption that wraps makes the row taller.
+    fn row(
+        &self,
+        item: &Item,
+        scale: f64,
+        (a, b): (i32, i32),
+        y: i32,
+        (dc, view): (HDC, i32),
+    ) -> Result<i32> {
         let px = |v: i32| (v as f64 * scale).round() as i32;
-        let centre = |h: i32| y + (height - h) / 2;
-        let tall = !item.cap.0.is_null();
-        let put = |h: HWND, x: i32, y: i32, w: i32, ht: i32| {
+        // The wrapped height of a static's text at width `w` (0 when there is none).
+        let lines = |h: HWND, w: i32| {
+            if h.0.is_null() {
+                return 0;
+            }
+            let mut words: Vec<u16> = text(h, 256).encode_utf16().collect();
+            let mut r = RECT {
+                right: w,
+                ..Default::default()
+            };
+            // SAFETY: measures a local buffer on the caller's live DC.
+            unsafe { DrawTextW(dc, &mut words, &mut r, DT_CALCRECT | DT_WORDBREAK) };
+            r.bottom
+        };
+        let put = |h: HWND, x: i32, y: i32, w: i32, ht: i32| -> Result<()> {
             if h.0.is_null() {
                 return Ok(());
             }
             // SAFETY: our own live child.
-            unsafe { SetWindowPos(h, None, x, y, w.max(1), ht, SWP_NOZORDER | SWP_NOACTIVATE) }
+            unsafe {
+                SetWindowPos(h, None, x, y, w.max(1), ht, SWP_NOZORDER | SWP_NOACTIVATE)?;
+                clip(h, y, ht, w.max(1), view);
+            }
+            Ok(())
         };
         match item.kind {
             Kind::Check => {
-                let top = if tall { px(6) } else { 0 };
+                let (w, cap) = (b - a - px(22), lines(item.cap, b - a - px(22)));
+                let top = if cap > 0 { px(6) } else { 0 };
+                let height = if cap > 0 {
+                    (px(32) + cap).max(px(52))
+                } else {
+                    px(40)
+                };
                 put(item.h, a, y + top, b - a, height - top)?;
-                put(item.cap, a + px(22), y + px(30), b - a - px(22), px(18))
+                put(item.cap, a + px(22), y + px(30), w, cap)?;
+                Ok(height)
             }
             Kind::Combo(w) | Kind::Edit(w) => {
                 let w = px(w).min((b - a) / 2);
+                let side = (b - a - w - px(8)).max(1);
+                let (l, c) = (lines(item.label, side).max(px(20)), lines(item.cap, side));
+                let height = if c > 0 {
+                    (px(10) + l + c).max(px(52))
+                } else {
+                    (l + px(20)).max(px(40))
+                };
                 let drop = if matches!(item.kind, Kind::Combo(_)) {
                     px(180)
                 } else {
                     px(28)
                 };
-                put(item.h, b - w, centre(px(28)), w, drop)?;
-                let top = if tall { y + px(8) } else { centre(px(20)) };
-                put(item.label, a, top, b - a - w - px(8), px(20))?;
-                put(item.cap, a, y + px(28), b - a - w - px(8), px(18))
+                put(item.h, b - w, y + (height - px(28)) / 2, w, drop)?;
+                let top = if c > 0 {
+                    y + px(8)
+                } else {
+                    y + (height - l) / 2
+                };
+                put(item.label, a, top, side, l)?;
+                put(item.cap, a, top + l, side, c)?;
+                Ok(height)
             }
             Kind::Btn => {
-                put(item.h, b - px(170), centre(px(28)), px(170), px(28))?;
-                put(item.label, a, centre(px(20)), b - a - px(178), px(20))
+                let side = b - a - px(178);
+                let l = lines(item.label, side);
+                let height = (l + px(20)).max(px(40));
+                put(
+                    item.h,
+                    b - px(170),
+                    y + (height - px(28)) / 2,
+                    px(170),
+                    px(28),
+                )?;
+                put(item.label, a, y + (height - l) / 2, side, l)?;
+                Ok(height)
             }
-            Kind::Note => put(item.label, a, centre(px(20)), b - a, px(20)),
+            Kind::Note => {
+                put(item.label, a, y + px(10), b - a, px(20))?;
+                Ok(px(40))
+            }
+        }
+    }
+}
+
+/// Shows only the part of a scrolled control above the footer (`view`), through a window region; a control
+/// that is wholly above it keeps none. Without this a row scrolled under the footer would paint over Close.
+fn clip(h: HWND, top: i32, height: i32, width: i32, view: i32) {
+    let shown = (view - top).clamp(0, height);
+    // SAFETY: our own live child; the system owns a region once it is set.
+    unsafe {
+        if shown < height {
+            SetWindowRgn(h, Some(CreateRectRgn(0, 0, width, shown)), true);
+        } else if GetWindowRgnBox(h, &mut RECT::default()).0 != 0 {
+            SetWindowRgn(h, None, true);
         }
     }
 }
