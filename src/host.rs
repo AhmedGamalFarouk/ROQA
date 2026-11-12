@@ -3502,6 +3502,18 @@ impl Desktop {
             self.start_limits(limits_os::now(), true);
             return true;
         }
+        if matches!(page, Tab::Timer | Tab::Weather | Tab::Prayer)
+            && layout::page_value_at(width, dpi, progress, live, x, y)
+        {
+            // Timer: start (or, once one finished, restart) the default 5 minutes when none runs. Weather and Prayer: the "Set your city"
+            // line opens Settings.
+            if page != Tab::Timer {
+                let _ = self.open_settings();
+            } else if self.timers.view(now).is_none_or(|view| view.done) {
+                self.start_timer(300);
+            }
+            return true;
+        }
         if page == Tab::Shelf {
             if let Some(index) = self.shelf_slot_at(notch, lparam) {
                 // SAFETY: reads this thread's keyboard state as of the message being handled.

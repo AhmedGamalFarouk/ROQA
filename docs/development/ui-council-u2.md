@@ -23,3 +23,10 @@ Source: `docs/development/ui-council-fixes.md` (root checkout, untracked) and `a
 - Right-click menu on the notch closes the hover-opened panel, and hover does not open it while the menu is open.
 - Size 1,140,736 -> 1,141,248 B (+512). 369 tests.
 - Not done (size): Limits adaptive height and bigger body text, timer restart/dismiss buttons. NOT RUN: native/GUI.
+
+## P4 Task panels
+- Timer idle reads "Start a 5 min timer" (accent); a click on that line starts 5 min, and on "Timer finished" restarts it (`layout::page_value_at`, shared `on_slot` with Refresh).
+- Weather and Prayer: a click on the page's value line (where "Set your city in Settings" shows) opens Settings.
+- Media with nothing playing says "Nothing playing" under the date (the media failure line still wins).
+- Size 1,141,248 -> 1,141,760 B (+512). 369 tests.
+- Not done (size): preset buttons beyond the one 5 min start, a drawn "Set city" button, tab handle labels, bigger handle hit targets, Tab/UIA control for the new click lines. NOT RUN: native/GUI.

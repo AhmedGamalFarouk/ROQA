@@ -299,10 +299,32 @@ pub fn refresh(dpi: u32) -> Bounds {
 
 /// Whether a window point is on the Refresh button; false while the panel is closed.
 pub fn refresh_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, y: i32) -> bool {
+    on_slot(refresh(dpi), window_width, dpi, progress, media, x, y)
+}
+/// Whether a window point is on the page's value line (the timer's start, the empty Weather and Prayer
+/// message); false while the panel is closed.
+pub fn page_value_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    x: i32,
+    y: i32,
+) -> bool {
+    on_slot(page_value(dpi), window_width, dpi, progress, media, x, y)
+}
+fn on_slot(
+    button: Bounds,
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    x: i32,
+    y: i32,
+) -> bool {
     if motion::reveal(progress) < 1.0 {
         return false;
     }
-    let button = refresh(dpi);
     let body = notch_body(window_width, dpi, notch_shape(progress, media));
     let x = x - body.left;
     (button.x..button.x + button.width).contains(&x)

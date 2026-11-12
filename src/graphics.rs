@@ -943,7 +943,10 @@ fn media_page(
     status: Option<&str>,
     p: &Palette,
 ) -> Result<()> {
-    let status = status.filter(|_| scene.notice.is_none());
+    let status = scene
+        .notice
+        .is_none()
+        .then(|| status.unwrap_or("Nothing playing"));
     if let Some(track) = scene.track {
         let font = media_clock(motion::smooth(scene.progress), scale);
         let clock = text_width(scene.time, &font)?;

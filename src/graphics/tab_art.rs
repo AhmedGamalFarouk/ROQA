@@ -272,16 +272,16 @@ pub(super) fn page(
             ),
             None => draw_text(
                 context,
-                "No timer running",
+                "Start a 5 min timer",
                 &font(
                     TEXT_FONT,
                     12.0,
-                    DWRITE_FONT_WEIGHT_NORMAL,
+                    DWRITE_FONT_WEIGHT_SEMI_BOLD,
                     1.0,
                     DWRITE_TEXT_ALIGNMENT_LEADING,
                 ),
                 rect(layout::page_value(scene.dpi)),
-                ink(0.6),
+                with_alpha(p.accent, p.ink_alpha(reveal)),
             ),
         },
         Tab::Shelf => {
