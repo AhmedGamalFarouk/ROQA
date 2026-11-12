@@ -286,6 +286,22 @@ mod tests {
     }
 
     #[test]
+    fn a_file_dropped_on_the_notch_selects_shelf_unless_the_tab_is_off() {
+        let mut tabs = Tabs::new([true; 5], Tab::Media);
+        assert!(tabs.select(Tab::Shelf, true), "was Media, now Shelf");
+        assert_eq!(tabs.active(true), Some(Tab::Shelf));
+        assert!(!tabs.select(Tab::Shelf, true), "already there");
+        let mut flags: Flags = [true; 5];
+        flags[Tab::ALL.iter().position(|&t| t == Tab::Shelf).unwrap()] = false;
+        let mut off = Tabs::new(flags, Tab::Media);
+        assert!(
+            !off.select(Tab::Shelf, true),
+            "disabled: behaviour unchanged"
+        );
+        assert_eq!(off.active(true), Some(Tab::Media));
+    }
+
+    #[test]
     fn the_handle_opens_at_once_and_closes_after_the_delay() {
         let t0 = Instant::now();
         let mut handle = Handle::default();

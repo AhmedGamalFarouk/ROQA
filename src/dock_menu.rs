@@ -37,6 +37,9 @@ pub enum Item {
     Close,
     Pin,
     Unpin,
+    /// The app menu (right-click on the notch or the dock outside an app slot).
+    Settings,
+    Quit,
 }
 impl Item {
     pub fn label(self) -> &'static str {
@@ -45,6 +48,8 @@ impl Item {
             Item::Close => "Close window",
             Item::Pin => "Pin to dock",
             Item::Unpin => "Unpin from dock",
+            Item::Settings => "Settings",
+            Item::Quit => "Quit ROQA",
         }
     }
 }
@@ -82,6 +87,20 @@ pub fn place(slot_x: i32, dock: Bounds, work: Bounds, size: (i32, i32)) -> Bound
     Bounds {
         x: (slot_x - width / 2).clamp(work.x, (work.x + work.width - width).max(work.x)),
         y: (dock.y - height).max(work.y),
+        width,
+        height,
+    }
+}
+
+/// The app menu's actions, offered where no dock app slot was clicked.
+pub const APP_ITEMS: [Item; 2] = [Item::Settings, Item::Quit];
+
+/// Where an app menu opens below the notch: centred on the pointer column, its top on `bottom`, inside the work area.
+pub fn place_below(x: i32, bottom: i32, work: Bounds, size: (i32, i32)) -> Bounds {
+    let (width, height) = size;
+    Bounds {
+        x: (x - width / 2).clamp(work.x, (work.x + work.width - width).max(work.x)),
+        y: bottom.min((work.y + work.height - height).max(work.y)),
         width,
         height,
     }
@@ -132,6 +151,10 @@ pub struct Spec {
     pub work: Bounds,
     pub dpi: u32,
     pub app: String,
+    /// The pointer column for an app menu (the slot's centre otherwise), and `Some(bottom)` to open it below that
+    /// screen row (the notch) instead of above the dock.
+    pub x: Option<i32>,
+    pub below: Option<i32>,
     /// The window that had the foreground, which gets it back when the menu ends.
     pub return_to: Option<WindowKey>,
 }
@@ -170,8 +193,13 @@ impl Menu {
     pub fn open(graphics: &Graphics, palette: Palette, spec: Spec) -> Result<Self> {
         let dpi = spec.dpi;
         let (size, panel) = list_layout(dpi, spec.items.len());
-        let slot_x = dock::slot_center_x(spec.dock_bounds.x, spec.slot, dpi);
-        let bounds = place(slot_x, spec.dock_bounds, spec.work, size);
+        let slot_x = spec
+            .x
+            .unwrap_or_else(|| dock::slot_center_x(spec.dock_bounds.x, spec.slot, dpi));
+        let bounds = match spec.below {
+            Some(bottom) => place_below(slot_x, bottom, spec.work, size),
+            None => place(slot_x, spec.dock_bounds, spec.work, size),
+        };
         let window = NativeWindow::create_menu(bounds, &format!("{} menu", spec.app))?;
         let uia: menu_uia::Shared = Arc::new(Mutex::new(menu_uia::State {
             name: format!("{} menu", spec.app),
@@ -377,6 +405,24 @@ mod tests {
         // A work area narrower than the menu pins it to the left edge.
         let narrow = Bounds { width: 100, ..work };
         assert_eq!(place(50, dock, narrow, size).x, 0);
+    }
+
+    #[test]
+    fn the_app_menu_opens_below_the_notch_inside_the_work_area() {
+        let work = Bounds {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1040,
+        };
+        let size = (266, 90);
+        let at = |x, bottom| place_below(x, bottom, work, size);
+        assert_eq!((at(960, 36).x, at(960, 36).y), (960 - 133, 36));
+        assert_eq!(at(5, 36).x, 0);
+        assert_eq!(at(1915, 36).x, 1920 - 266);
+        assert_eq!(at(960, 1030).y, 1040 - 90, "kept on screen");
+        assert_eq!(APP_ITEMS, [Item::Settings, Item::Quit]);
+        assert!(APP_ITEMS.iter().all(|item| !item.label().is_empty()));
     }
 
     #[test]

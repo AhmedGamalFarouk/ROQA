@@ -1,7 +1,8 @@
 //! Mascot eyes (features tabs-eyes, design round 2 variant C "Squash"): the pure mood and pose rules. Eyes are
-//! two capsules in the pill. A blink or a mood change is a short stepped sequence (at most three poses) that
-//! only a trigger starts: the once-a-minute clock repaint, a mood change or the pointer entering the notch.
-//! There is no free-running timer, so `due` is `None` whenever no sequence runs.
+//! two capsules that are NOT shown by default: the pill shows the time. Every minute or so (random-ish, one
+//! deadline) they fade in, blink, look around or smile, and fade out; a happy or surprised mood does the same
+//! once. Between shows nothing runs, so the only wait is the next show's deadline and a paint happens only
+//! for the steps of a show.
 
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,7 @@ pub enum Mood {
     Surprised,
 }
 
-/// Squash and stretch: the shape the eye holds for one step of a sequence.
+/// Squash and stretch: the shape the eye holds for one step of a show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pose {
     Rest,
@@ -92,17 +93,84 @@ pub fn eye(mood: Mood, pose: Pose) -> Eye {
     }
 }
 
-/// The poses held before the eye returns to rest, with how long each lasts: a blink squashes and opens; a mood
-/// change squashes, overshoots tall, then settles.
-const BLINK: [(Pose, Duration); 1] = [(Pose::Squash, Duration::from_millis(130))];
-const CHANGE: [(Pose, Duration); 2] = [
-    (Pose::Squash, Duration::from_millis(120)),
-    (Pose::Stretch, Duration::from_millis(120)),
+/// One step of a show: the eyes' opacity, horizontal look (DIPs), whether they smile, the squash pose and how
+/// long it holds (ms). Stepped opacity is the fade; a show is about a dozen paints.
+type Step = (f32, f32, bool, Pose, u64);
+const R: Pose = Pose::Rest;
+const SQ: Pose = Pose::Squash;
+const ST: Pose = Pose::Stretch;
+/// The last step of every show is the resting one: it ends the show.
+const BLINK: [Step; 8] = [
+    (0.3, 0.0, false, R, 60),
+    (0.7, 0.0, false, R, 60),
+    (1.0, 0.0, false, R, 450),
+    (1.0, 0.0, false, SQ, 120),
+    (1.0, 0.0, false, R, 450),
+    (0.7, 0.0, false, R, 60),
+    (0.3, 0.0, false, R, 60),
+    (0.0, 0.0, false, R, 0),
 ];
+const LOOK: [Step; 9] = [
+    (0.3, 0.0, false, R, 60),
+    (0.7, 0.0, false, R, 60),
+    (1.0, -3.0, false, R, 350),
+    (1.0, 3.0, false, R, 350),
+    (1.0, 0.0, false, SQ, 120),
+    (1.0, 0.0, false, R, 250),
+    (0.6, 0.0, false, R, 60),
+    (0.3, 0.0, false, R, 60),
+    (0.0, 0.0, false, R, 0),
+];
+const SMILE: [Step; 7] = [
+    (0.3, 0.0, false, R, 60),
+    (0.7, 0.0, false, R, 60),
+    (1.0, 0.0, true, SQ, 100),
+    (1.0, 0.0, true, R, 900),
+    (0.6, 0.0, true, R, 60),
+    (0.3, 0.0, true, R, 60),
+    (0.0, 0.0, false, R, 0),
+];
+/// A mood event (happy or surprised): fade in squashing, overshoot, hold, fade out.
+const EVENT: [Step; 8] = [
+    (0.4, 0.0, false, SQ, 80),
+    (1.0, 0.0, false, SQ, 120),
+    (1.0, 0.0, false, ST, 120),
+    (1.0, 0.0, false, R, 1500),
+    (0.7, 0.0, false, R, 60),
+    (0.4, 0.0, false, R, 60),
+    (0.15, 0.0, false, R, 60),
+    (0.0, 0.0, false, R, 0),
+];
+
+/// Waking up (start-up, resume, back from sleepy): the eyes open from a squash, stretch, smile and fade.
+const WAKE: [Step; 9] = [
+    (0.4, 0.0, false, SQ, 80),
+    (1.0, 0.0, false, SQ, 120),
+    (1.0, 0.0, false, ST, 120),
+    (1.0, 0.0, false, R, 250),
+    (1.0, 0.0, true, SQ, 100),
+    (1.0, 0.0, true, R, 800),
+    (0.6, 0.0, true, R, 60),
+    (0.3, 0.0, true, R, 60),
+    (0.0, 0.0, false, R, 0),
+];
+
+/// The gap before the next idle show: `MIN_GAP` plus up to `SPREAD_MS` more.
+pub const MIN_GAP: Duration = Duration::from_secs(40);
+const SPREAD_MS: u32 = 60_000;
+
+/// What the pill draws now: the mood's shape (or a smile), the pose, the opacity and the look offset.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub mood: Mood,
+    pub pose: Pose,
+    pub alpha: f32,
+    pub look: f32,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Run {
-    steps: &'static [(Pose, Duration)],
+    steps: &'static [Step],
     at: usize,
     next: Instant,
 }
@@ -111,70 +179,111 @@ struct Run {
 pub struct Eyes {
     mood: Mood,
     run: Option<Run>,
+    next_show: Instant,
+    seed: u32,
 }
 
 impl Default for Eyes {
     fn default() -> Self {
-        Self {
-            mood: Mood::Idle,
-            run: None,
-        }
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |since| since.subsec_nanos());
+        Self::new(Instant::now(), seed)
     }
 }
 
 impl Eyes {
+    /// Resting, with the first show a random gap after `now`.
+    pub fn new(now: Instant, seed: u32) -> Self {
+        let mut eyes = Self {
+            mood: Mood::Idle,
+            run: None,
+            next_show: now,
+            seed: seed | 1,
+        };
+        eyes.next_show = now + eyes.gap();
+        eyes
+    }
+    #[cfg(test)]
     pub fn mood(&self) -> Mood {
         self.mood
     }
-    pub fn pose(&self) -> Pose {
-        self.run.map_or(Pose::Rest, |run| run.steps[run.at].0)
+    /// xorshift32: cheap, and the shows only need to look unpredictable.
+    fn roll(&mut self) -> u32 {
+        self.seed ^= self.seed << 13;
+        self.seed ^= self.seed >> 17;
+        self.seed ^= self.seed << 5;
+        self.seed
     }
-    fn start(&mut self, steps: &'static [(Pose, Duration)], now: Instant) {
+    fn gap(&mut self) -> Duration {
+        MIN_GAP + Duration::from_millis(u64::from(self.roll() % SPREAD_MS))
+    }
+    /// `None` at rest, when the pill shows only the time.
+    pub fn frame(&self) -> Option<Frame> {
+        let run = self.run?;
+        let (alpha, look, smile, pose, _) = run.steps[run.at];
+        Some(Frame {
+            mood: if smile { Mood::Happy } else { self.mood },
+            pose,
+            alpha,
+            look,
+        })
+    }
+    fn start(&mut self, steps: &'static [Step], now: Instant) {
         self.run = Some(Run {
             steps,
             at: 0,
-            next: now + steps[0].1,
+            next: now + Duration::from_millis(steps[0].4),
         });
     }
-    /// A new mood squashes and settles (a repaint is needed). The same mood does nothing.
+    /// A new happy or surprised mood shows the eyes once; any other change is silent. Returns whether a show
+    /// started (a repaint is needed).
     pub fn set_mood(&mut self, mood: Mood, now: Instant) -> bool {
         if mood == self.mood {
             return false;
         }
-        self.mood = mood;
-        self.start(&CHANGE, now);
-        true
-    }
-    /// A blink, started by the clock repaint or the pointer. A sequence already running keeps going.
-    /// Returns whether the pose changed (the caller paints in the same pass).
-    pub fn blink(&mut self, now: Instant) -> bool {
-        if self.run.is_some() {
-            return false;
+        let was = std::mem::replace(&mut self.mood, mood);
+        if was == Mood::Sleepy && mood == Mood::Idle {
+            return self.wake(now);
         }
-        self.start(&BLINK, now);
+        if matches!(mood, Mood::Happy | Mood::Surprised) {
+            self.start(&EVENT, now);
+            return true;
+        }
+        false
+    }
+    /// Plays the wake animation now, replacing any show; true (a repaint is needed).
+    pub fn wake(&mut self, now: Instant) -> bool {
+        self.start(&WAKE, now);
         true
     }
-    /// Moves to the step now due; returns whether the pose changed.
+    /// Moves to the step now due, or starts the idle show whose deadline passed; returns whether the frame
+    /// changed.
     pub fn tick(&mut self, now: Instant) -> bool {
+        let before = self.frame();
         let Some(mut run) = self.run else {
-            return false;
+            if now >= self.next_show {
+                self.next_show = now + self.gap();
+                let shows: [&'static [Step]; 3] = [&BLINK, &LOOK, &SMILE];
+                let pick = shows[self.roll() as usize % shows.len()];
+                self.start(pick, now);
+            }
+            return self.frame() != before;
         };
-        if now < run.next {
-            return false;
+        if now >= run.next {
+            run.at += 1;
+            self.run = if run.at + 1 < run.steps.len() {
+                run.next = now + Duration::from_millis(run.steps[run.at].4);
+                Some(run)
+            } else {
+                None
+            };
         }
-        let before = run.steps[run.at].0;
-        run.at += 1;
-        self.run = if run.at < run.steps.len() {
-            run.next = now + run.steps[run.at].1;
-            Some(run)
-        } else {
-            None
-        };
-        self.pose() != before
+        self.frame() != before
     }
-    /// The next step's time; `None` at rest, the common case.
-    pub fn due(&self) -> Option<Instant> {
-        self.run.map(|run| run.next)
+    /// The next step's time while a show runs, else the next show's: the only wait the eyes ask for.
+    pub fn due(&self) -> Instant {
+        self.run.map_or(self.next_show, |run| run.next)
     }
 }
 
@@ -234,55 +343,103 @@ mod tests {
                     15.0 + e.dy - e.h / 2.0 >= 0.0 && 15.0 + e.dy + e.h / 2.0 <= 30.0,
                     "{mood:?} {pose:?}"
                 );
-                // Two of them, centred GAP apart, stay inside the 80 DIP lane.
-                assert!(GAP + e.w < 80.0);
+                // Two of them, centred GAP apart and looking 4 aside, stay inside the 80 DIP lane.
+                assert!(GAP + e.w + 8.0 < 80.0);
             }
         }
     }
 
-    #[test]
-    fn a_blink_is_never_scheduled_on_its_own() {
-        let t0 = Instant::now();
-        let mut eyes = Eyes::default();
-        assert_eq!(eyes.due(), None);
-        // Time passing, ticks and the same mood again start nothing.
-        for minutes in [1, 60, 600] {
-            assert!(!eyes.tick(t0 + Duration::from_secs(60 * minutes)));
-            assert!(!eyes.set_mood(Mood::Idle, t0));
-            assert_eq!((eyes.due(), eyes.pose()), (None, Pose::Rest));
+    /// Runs the show now under way to its end; returns the frames painted and the time it ended.
+    fn play(eyes: &mut Eyes, mut now: Instant) -> (Vec<Frame>, Instant) {
+        let mut seen = Vec::new();
+        while eyes.frame().is_some() {
+            now = eyes.due();
+            if eyes.tick(now)
+                && let Some(frame) = eyes.frame()
+            {
+                seen.push(frame);
+            }
         }
+        (seen, now)
     }
 
     #[test]
-    fn a_clock_blink_squashes_then_opens_and_then_asks_for_nothing() {
+    fn at_rest_nothing_is_drawn_and_the_only_wait_is_the_next_show() {
         let t0 = Instant::now();
-        let mut eyes = Eyes::default();
-        assert!(eyes.blink(t0), "painted with the clock in the same pass");
-        assert_eq!(eyes.pose(), Pose::Squash);
-        assert!(!eyes.blink(t0), "one at a time");
-        let due = eyes.due().unwrap();
-        assert_eq!(due, t0 + Duration::from_millis(130));
+        let mut eyes = Eyes::new(t0, 7);
+        assert!(eyes.frame().is_none());
+        let due = eyes.due();
+        assert!(due >= t0 + MIN_GAP && due < t0 + MIN_GAP + Duration::from_millis(60_000));
+        // Time before the deadline, the same mood and a quiet mood start nothing.
         assert!(!eyes.tick(due - Duration::from_millis(1)));
-        assert!(eyes.tick(due));
-        assert_eq!((eyes.pose(), eyes.due()), (Pose::Rest, None));
+        assert!(!eyes.set_mood(Mood::Idle, t0));
+        assert!(!eyes.set_mood(Mood::Sleepy, t0), "sleep is silent");
+        assert!(eyes.frame().is_none() && eyes.mood() == Mood::Sleepy);
     }
 
     #[test]
-    fn a_mood_change_squashes_overshoots_and_settles_on_the_new_mood() {
+    fn every_idle_show_fades_in_does_its_trick_fades_out_and_reschedules() {
         let t0 = Instant::now();
-        let mut eyes = Eyes::default();
-        assert!(eyes.set_mood(Mood::Happy, t0));
-        assert_eq!((eyes.mood(), eyes.pose()), (Mood::Happy, Pose::Squash));
-        let mut now = t0;
-        let mut poses = vec![eyes.pose()];
-        while let Some(due) = eyes.due() {
-            now = due;
-            if eyes.tick(now) {
-                poses.push(eyes.pose());
+        let mut kinds = std::collections::HashSet::new();
+        for seed in 1..40 {
+            let mut eyes = Eyes::new(t0, seed);
+            let mut now = eyes.due();
+            for _ in 0..3 {
+                assert!(eyes.tick(now), "the show's first frame is painted");
+                let first = eyes.frame().unwrap();
+                assert!(first.alpha > 0.0 && first.alpha < 1.0, "fades in");
+                let (frames, end) = play(&mut eyes, now);
+                assert!(frames.iter().any(|f| f.alpha == 1.0));
+                assert!(frames.len() <= 12, "a handful of paints: {}", frames.len());
+                assert!(end - now < Duration::from_secs(3), "short");
+                assert!(frames.iter().all(|f| f.look.abs() <= 4.0));
+                kinds.insert((
+                    frames.iter().any(|f| f.look != 0.0),
+                    frames.iter().any(|f| f.mood == Mood::Happy),
+                ));
+                assert!(eyes.frame().is_none(), "back to the time");
+                assert!(eyes.due() >= end + MIN_GAP - Duration::from_secs(3));
+                now = eyes.due();
             }
         }
-        assert_eq!(poses, [Pose::Squash, Pose::Stretch, Pose::Rest]);
-        assert_eq!(now, t0 + Duration::from_millis(240));
-        assert_eq!(eyes.mood(), Mood::Happy);
+        assert!(
+            kinds.len() >= 3,
+            "blink, look and smile all occur: {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn happy_and_surprised_show_once_and_other_moods_stay_hidden() {
+        let t0 = Instant::now();
+        let mut eyes = Eyes::new(t0, 3);
+        assert!(eyes.set_mood(Mood::Happy, t0));
+        assert_eq!(eyes.frame().unwrap().mood, Mood::Happy);
+        let (frames, _) = play(&mut eyes, t0);
+        assert!(frames.iter().any(|f| f.pose == Pose::Stretch));
+        assert!(eyes.frame().is_none());
+        assert!(
+            !eyes.set_mood(Mood::Happy, t0),
+            "the same mood shows nothing"
+        );
+        assert!(eyes.set_mood(Mood::Surprised, t0));
+        assert!(!eyes.set_mood(Mood::Idle, t0));
+    }
+
+    #[test]
+    fn waking_plays_open_smile_fade_and_waking_from_sleepy_wakes() {
+        let t0 = Instant::now();
+        let mut eyes = Eyes::new(t0, 5);
+        assert!(eyes.wake(t0));
+        let (frames, end) = play(&mut eyes, t0);
+        assert!(frames.iter().any(|f| f.pose == Pose::Stretch));
+        assert!(frames.iter().any(|f| f.mood == Mood::Happy), "smiles");
+        assert!(end - t0 < Duration::from_secs(3) && eyes.frame().is_none());
+        // Falling asleep is silent; coming back to idle wakes; the idle gap is not touched.
+        let gap = eyes.due();
+        assert!(!eyes.set_mood(Mood::Sleepy, t0));
+        assert!(eyes.set_mood(Mood::Idle, t0));
+        assert!(eyes.frame().is_some());
+        play(&mut eyes, t0);
+        assert_eq!(eyes.due(), gap);
     }
 }

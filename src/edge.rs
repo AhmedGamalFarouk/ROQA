@@ -60,8 +60,10 @@ const NOTE_W: i32 = 190;
 const LIST_W: i32 = 250;
 const ROW_H: i32 = 34;
 const LIST_PAD: i32 = 6;
-/// Percent per wheel notch.
-const WHEEL_STEP: i32 = 5;
+/// Percent per wheel notch, and with Shift held.
+const WHEEL_STEP: i32 = 3;
+const FINE_STEP: i32 = 1;
+const MK_SHIFT: usize = 0x0004;
 const WHEEL_DELTA: i32 = 120;
 const MK_LBUTTON: usize = 0x0001;
 /// The text drawn for a monitor that does not answer DDC/CI.
@@ -160,7 +162,7 @@ pub fn layout(dpi: u32, kind: Kind, wide: bool) -> Layout {
         height: pill_h,
     };
     let (pad, caption_h) = (d(6), d(22));
-    let track_w = d(8);
+    let track_w = d(10);
     let icon_size = d(24);
     let icon = Bounds {
         x: pill.x + (pill_w - icon_size) / 2,
@@ -263,8 +265,9 @@ pub fn wheel_steps(acc: i32, delta: i32) -> (i32, i32) {
     (total / WHEEL_DELTA, total % WHEEL_DELTA)
 }
 
-pub fn step_level(level: u8, steps: i32) -> u8 {
-    (i32::from(level) + steps * WHEEL_STEP).clamp(0, 100) as u8
+pub fn step_level(level: u8, steps: i32, fine: bool) -> u8 {
+    let step = if fine { FINE_STEP } else { WHEEL_STEP };
+    (i32::from(level) + steps * step).clamp(0, 100) as u8
 }
 
 // ---- Timing (pure) ---------------------------------------------------------------------------------
@@ -647,7 +650,7 @@ impl Slider {
             WM_MOUSEWHEEL => {
                 let delta = i32::from((message.wParam.0 >> 16) as u16 as i16);
                 if self.canvas.is_some() {
-                    self.wheel_by(delta, audio);
+                    self.wheel_by(delta, message.wParam.0 & MK_SHIFT != 0, audio);
                 } else {
                     let held = match self.input {
                         Some(Input::Wheel(held)) => held,
@@ -750,14 +753,14 @@ impl Slider {
             self.drag = Some(level);
         }
     }
-    fn wheel_by(&mut self, delta: i32, audio: &Audio) {
+    fn wheel_by(&mut self, delta: i32, fine: bool, audio: &Audio) {
         let (steps, rest) = wheel_steps(self.wheel, delta);
         self.wheel = rest;
         if steps != 0
             && matches!(self.mode, Mode::Level)
             && let Some(level) = self.percent(audio)
         {
-            self.set_level(step_level(level, steps), audio);
+            self.set_level(step_level(level, steps, fine), audio);
         }
     }
     /// Applies the click or wheel that opened the pill, once the pill and the level it acts on exist.
@@ -778,7 +781,7 @@ impl Slider {
                     self.set_level(level_at(y - top, &self.layout()), audio);
                 }
             }
-            Input::Wheel(delta) => self.wheel_by(delta, audio),
+            Input::Wheel(delta) => self.wheel_by(delta, false, audio),
         }
     }
     fn end_drag(&mut self) {
@@ -818,8 +821,7 @@ impl Slider {
                     percent,
                     glyph: match self.kind {
                         Kind::Brightness => Glyph::Sun,
-                        Kind::Volume if muted => Glyph::Muted,
-                        Kind::Volume => Glyph::Speaker,
+                        Kind::Volume => Glyph::speaker(percent, muted),
                     },
                     dim: muted || unsupported,
                     caption: if unsupported {
@@ -863,6 +865,7 @@ impl Slider {
                         percent: *percent,
                         glyph: *glyph,
                         dim: *dim,
+                        pressed: self.drag.is_some(),
                         caption,
                         note: unsupported.then(|| self.kind.right()),
                     })
@@ -1194,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn the_wheel_moves_five_percent_a_notch_and_keeps_the_remainder() {
+    fn the_wheel_moves_three_percent_a_notch_one_with_shift_and_keeps_the_remainder() {
         assert_eq!(wheel_steps(0, 120), (1, 0));
         assert_eq!(wheel_steps(0, -240), (-2, 0));
         // High-resolution wheels add up to a notch.
@@ -1205,12 +1208,14 @@ mod tests {
         assert_eq!(wheel_steps(-90, -60), (-1, -30));
         assert_eq!(
             (
-                step_level(50, 1),
-                step_level(98, 1),
-                step_level(3, -1),
-                step_level(0, -9)
+                step_level(50, 1, false),
+                step_level(98, 1, false),
+                step_level(2, -1, false),
+                step_level(0, -9, false),
+                step_level(50, 1, true),
+                step_level(50, -2, true)
             ),
-            (55, 100, 0, 0)
+            (53, 100, 0, 0, 51, 48)
         );
     }
 

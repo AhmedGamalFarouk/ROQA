@@ -990,3 +990,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Done:** pure `weather.rs` (JSON scanner, WMO to 8 icons, refresh rules, back-off, store cache), `weather_os.rs` (WinHTTP + WinRT Geolocator, one thread per fetch), Settings city/detect/units, UIA name, `Tab::Weather` on. No new crates, nothing requested before a city or detection is set.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 268 tests, locked release); 1,070,080 B, ratchet tripped (+10.46%), baseline raised with sign-off; SHA `7D9BD380FC9571076FC1C496D46A2DFAFCDFFA817BE45B682A6564B284F4DE7A`.
 - **NOT RUN:** real fetch, geolocation prompt, offline behaviour, drawing, UIA read, small-screen settings fit; reviews paused (REVIEW NOT RUN).
+
+## F1 user feedback (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/f1-user-feedback`; [packet](features-f1.md). Occasional + wake eyes, volume drag/wheel/thumb, app menu + cog for Settings, file drag opens Shelf, edge sliders diagnosed (off by default, Settings unreachable). No native/GUI run.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 273 tests, locked release); 1,082,880 B, ratchet within 2% (baseline unchanged); SHA `57874520314E2CF89EAC2F354E127FD36614936B73B30E3DD6A379534F1087DC`.
+- **NOT RUN:** all drawing, input, UIA, edge hover, wake on lock/display-on; eased volume animation deferred; reviews paused (REVIEW NOT RUN).

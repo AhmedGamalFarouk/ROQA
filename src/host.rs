@@ -5,10 +5,10 @@ use crate::{
     dock::{self, DockItem},
     dock_menu::{self, Event, Item},
     dock_uia::{self, Accessibility},
-    edge::Edges,
+    edge::{self, Edges},
     eyes::{self, Eyes},
     graphics::{
-        COVER_DIPS, Canvas, DockScene, DockSlot, Graphics, NotchScene, RailScene, ShelfSlot,
+        COVER_DIPS, Canvas, DockScene, DockSlot, Graphics, Grip, NotchScene, RailScene, ShelfSlot,
     },
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
@@ -168,7 +168,12 @@ impl Pages {
     fn new(settings: &Settings, last: Tab) -> Self {
         Self {
             tabs: Tabs::new(settings.tabs, last),
-            eyes: settings.eyes.then(Eyes::default),
+            eyes: settings.eyes.then(|| {
+                // Start-up is a wake: the eyes open once, then give way to the time.
+                let mut eyes = Eyes::default();
+                eyes.wake(Instant::now());
+                eyes
+            }),
             rev: 0,
             last_input: Instant::now(),
             hour: 12,
@@ -241,6 +246,18 @@ struct Surface {
     repaint: Repaint,
     /// Notch: the tab handle's open state.
     hang: Hang,
+    /// Notch: the pointer on the volume bar (hover, and a captured drag).
+    grip: Grip,
+}
+impl Surface {
+    /// Ends a volume-bar drag: the thumb shrinks and the capture goes.
+    fn end_grip(&mut self) {
+        if std::mem::take(&mut self.grip.drag) {
+            // SAFETY: releases this thread's own capture; harmless if it is already gone.
+            let _ = unsafe { ReleaseCapture() };
+            self.request(Repaint::Full);
+        }
+    }
 }
 impl Drop for Surface {
     fn drop(&mut self) {
@@ -341,6 +358,7 @@ impl Surface {
             bars: [0; audio::BARS],
             repaint: Repaint::Nothing,
             hang: Hang::rest(),
+            grip: Grip::default(),
         })
     }
     /// The handle opens at once for the pointer or a focused tab and closes `tabs::COLLAPSE_DELAY` after
@@ -674,7 +692,8 @@ impl Surface {
                 tabs: visible.as_slice(),
                 focus: focus.and_then(|control| control.checked_sub(notch_uia::TAB_BASE)),
             }),
-            eyes: pages.eyes.map(|eyes| (eyes.mood(), eyes.pose())),
+            eyes: pages.eyes.and_then(|eyes| eyes.frame()),
+            grip: self.grip,
             weather: (page == Tab::Weather).then_some(&pages.weather),
         };
         shadow.paint(&scene, self.window.0)?;
@@ -1142,6 +1161,8 @@ struct Desktop {
     popup: Option<preview::Popup>,
     /// The dock's right-click menu while open; nothing exists, and nothing is polled, otherwise.
     menu: Option<dock_menu::Menu>,
+    /// Wheel movement left over after the last whole notch on the volume bar.
+    volume_wheel: i32,
     /// The volume and brightness sliders on every monitor's edges, rebuilt to match the monitors and
     /// settings whenever either changes (`edges_dirty`).
     edges: Edges,
@@ -1227,6 +1248,7 @@ impl Desktop {
             preview: preview::Intent::default(),
             popup: None,
             menu: None,
+            volume_wheel: 0,
             edges: Edges::default(),
             edges_dirty: true,
             pages,
@@ -1330,11 +1352,6 @@ impl Desktop {
             self.pages.hour = clock.hour;
             if clock.time != self.clock || clock.date != self.date {
                 (self.clock, self.date) = (clock.time, clock.date);
-                // A blink starts only here (or on a mood change or the pointer entering): this repaint draws
-                // its first pose, and `refresh_eyes` owns the one deadline that ends it.
-                if let Some(eyes) = &mut self.pages.eyes {
-                    eyes.blink(now);
-                }
                 self.request_notches(Repaint::Full, |_| true);
             }
         }
@@ -1555,9 +1572,8 @@ impl Desktop {
         }
         due.map_or(INFINITE, |due| milliseconds_until(due, now))
     }
-    /// The mascot: picks the mood from the facts and steps a running blink. It never starts a blink itself
-    /// (that is the clock repaint, a mood change or the pointer); with the setting off it returns at once.
-    /// Returns the wait until the running sequence's next step, `INFINITE` at rest.
+    /// The mascot: picks the mood from the facts and steps the running show, or starts the idle one whose
+    /// deadline passed. With the setting off it returns at once. Returns the wait until the next step or show.
     #[inline(never)]
     fn refresh_eyes(&mut self) -> u32 {
         let now = Instant::now();
@@ -1580,7 +1596,7 @@ impl Desktop {
             // A running animation paints every frame already; an open panel does not draw the eyes.
             self.request_notches(Repaint::Full, |s| !s.live && s.motion.value(now) < 0.1);
         }
-        due.map_or(INFINITE, |due| milliseconds_until(due, now))
+        milliseconds_until(due, now)
     }
     /// Opens every visible notch; a notch hidden by a full-screen app stays hidden.
     fn open_notches(&mut self) {
@@ -1764,6 +1780,11 @@ impl Desktop {
     fn close(&mut self, kind: SurfaceKind) {
         self.shown.retain(|shown| *shown != kind);
         self.surfaces.retain(|surface| surface.kind() != kind);
+    }
+    fn is_notch(&self, hwnd: HWND) -> bool {
+        self.surfaces
+            .iter()
+            .any(|s| s.kind() == SurfaceKind::Notch && s.window.0 == hwnd)
     }
     fn dock_at(&self, hwnd: HWND) -> Option<&Surface> {
         self.surfaces
@@ -2097,7 +2118,11 @@ impl Desktop {
     /// Right-click on a dock slot opens its menu above it (the picker slot has none). It needs the
     /// foreground for the keyboard and dismissal; if Windows refuses, no menu opens rather than one that
     /// a click elsewhere could never dismiss.
-    fn open_menu(&mut self, hwnd: HWND, slot: Option<usize>) {
+    fn open_menu(&mut self, hwnd: HWND, slot: Option<usize>, lparam: LPARAM) {
+        // Outside an app slot (the picker slot, a gap) the dock offers the app menu instead.
+        if !slot.is_some_and(|slot| slot >= 1 && slot <= self.dock_items.len()) {
+            return self.open_app_menu(hwnd, lparam);
+        }
         self.dismiss_preview();
         self.close_menu();
         let Some((dock, slot)) = self
@@ -2127,12 +2152,58 @@ impl Desktop {
             work,
             dpi: dock.dpi,
             app: crate::pins::display_name(&item.identity),
+            x: None,
+            below: None,
             return_to: dock::foreground_key(),
         };
         match dock_menu::Menu::open(&self.graphics, self.palette, spec) {
             Ok(menu) if take_foreground(menu.hwnd()) => self.menu = Some(menu),
             Ok(_) => eprintln!("Dock menu: Windows kept another app in front; not opened"),
             Err(error) => eprintln!("Dock menu: {error}"),
+        }
+    }
+    /// Right-click on the notch, or on the dock outside an app slot: Settings and Quit, below the notch or
+    /// above the dock. Needs the foreground like the slot menu.
+    fn open_app_menu(&mut self, hwnd: HWND, lparam: LPARAM) {
+        self.dismiss_preview();
+        self.close_menu();
+        let Some(surface) = self
+            .surfaces
+            .iter()
+            .find(|s| s.window.0 == hwnd && s.visible)
+        else {
+            return;
+        };
+        let Some(work) = self
+            .monitors
+            .iter()
+            .find(|m| m.device == surface.monitor)
+            .map(|m| m.work)
+        else {
+            return;
+        };
+        let below = (surface.kind() == SurfaceKind::Notch).then(|| {
+            let media = self.pages.track(&self.media).is_some();
+            let shape = layout::notch_shape(surface.motion.value(Instant::now()), media);
+            surface.bounds.y + (shape.height * surface.dpi as f32 / 96.0).round() as i32
+        });
+        let spec = dock_menu::Spec {
+            dock: hwnd,
+            slot: 0,
+            identity: crate::window_model::Identity::Unavailable(0),
+            items: dock_menu::APP_ITEMS.to_vec(),
+            dock_bounds: surface.bounds,
+            work,
+            dpi: surface.dpi,
+            app: "ROQA".into(),
+            x: Some(surface.bounds.x + point(lparam).0),
+            below,
+            return_to: dock::foreground_key(),
+        };
+        match dock_menu::Menu::open(&self.graphics, self.palette, spec) {
+            Ok(menu) if take_foreground(menu.hwnd()) => self.menu = Some(menu),
+            Ok(_) => eprintln!("App menu: Windows kept another app in front; not opened"),
+            Err(error) => eprintln!("App menu: {error}"),
         }
     }
     /// Ends the open menu, giving the foreground back to the window it came from if the menu still holds it.
@@ -2169,6 +2240,19 @@ impl Desktop {
         if item != Item::NewInstance {
             dock::restore_foreground(menu.hwnd(), menu.return_to);
         }
+        if menu.slot == 0 {
+            match item {
+                Item::Settings => {
+                    if let Err(error) = self.open_settings() {
+                        eprintln!("Settings: {error}");
+                    }
+                }
+                // SAFETY: a scalar quit request to this thread's own message loop.
+                Item::Quit => unsafe { PostQuitMessage(0) },
+                _ => {}
+            }
+            return;
+        }
         let target = self
             .dock_items
             .get(menu.slot - 1)
@@ -2185,6 +2269,7 @@ impl Desktop {
                 }
             }
             Item::Pin | Item::Unpin => self.toggle_pin(Some(menu.slot)),
+            Item::Settings | Item::Quit => {}
         }
     }
     /// Ends the open menu once it no longer describes the dock (its slot changed, or a full-screen app hid
@@ -2197,8 +2282,15 @@ impl Desktop {
             .surfaces
             .iter()
             .any(|s| s.window.0 == menu.dock() && s.visible);
-        let now = self.dock_items.get(menu.slot - 1);
-        let current = shown && dock_menu::describes(&menu.identity, menu.items(), now, &self.pins);
+        // The app menu (slot 0) describes no dock item, so only its surface being shown matters.
+        let current = shown
+            && (menu.slot == 0
+                || dock_menu::describes(
+                    &menu.identity,
+                    menu.items(),
+                    self.dock_items.get(menu.slot - 1),
+                    &self.pins,
+                ));
         if !current || menu.paint().is_err() {
             self.close_menu();
         }
@@ -2253,8 +2345,22 @@ impl Desktop {
         for event in events {
             match event {
                 DropEvent::Hover(hwnd, over) => {
+                    let shelf = self.pages.tabs.on(Tab::Shelf);
                     if let Some(notch) = self.surfaces.iter_mut().find(|s| s.window.0 == hwnd) {
                         notch.set_notch_hover(over);
+                        // A file over the notch is for the shelf: open it there (a disabled Shelf tab keeps
+                        // the notch as it was).
+                        if over
+                            && shelf
+                            && notch.visible
+                            && let Role::Notch { intent, .. } = &mut notch.role
+                        {
+                            open_notch(intent, &mut notch.motion);
+                            notch.live = true;
+                        }
+                    }
+                    if over && shelf {
+                        self.select_tab(Tab::Shelf);
                     }
                 }
                 DropEvent::Files(paths) if self.pages.tabs.on(Tab::Shelf) => {
@@ -2434,6 +2540,10 @@ impl Desktop {
         if matches!(message.message, WM_LBUTTONUP | WM_KEYDOWN) {
             self.pages.touch();
         }
+        if message.message == WM_LBUTTONUP && self.surfaces[notch].grip.drag {
+            self.surfaces[notch].end_grip();
+            return true;
+        }
         match message.message {
             WM_LBUTTONUP => return self.click_control(notch, message.lParam),
             WM_KEYDOWN => return self.notch_key(notch, message),
@@ -2463,6 +2573,12 @@ impl Desktop {
         {
             if let Some(&tab) = self.pages.tabs.visible().as_slice().get(position) {
                 self.select_tab(tab);
+            }
+            return true;
+        }
+        if layout::gear_at(width, dpi, progress, live, x, y) {
+            if let Err(error) = self.open_settings() {
+                eprintln!("Settings: {error}");
             }
             return true;
         }
@@ -2698,9 +2814,15 @@ impl Desktop {
                 // the post from every surface costs one re-read.
                 self.media.reconnect();
                 self.audio.reconnect();
+                if let Some(eyes) = &mut self.pages.eyes {
+                    eyes.wake(now);
+                    self.request_notches(Repaint::Full, |s| !s.live && s.motion.value(now) < 0.1);
+                }
             }
             return Ok(());
         }
+        // The volume row answers the pointer only on the Media page with a live track.
+        let volume_ui = self.page() == Tab::Media && self.pages.track(&self.media).is_some();
         let slots = self.dock_slots();
         let Some(surface) = self
             .surfaces
@@ -2766,13 +2888,63 @@ impl Desktop {
                         .is_some_and(|focus| focus.control >= notch_uia::TAB_BASE);
                     surface.set_rail(on_rail || tab_focus, now);
                     self.pages.touch();
-                    if entered && let Some(eyes) = &mut self.pages.eyes {
-                        // The pill swells for the pointer; a blink rides those frames.
-                        eyes.blink(now);
+                    if volume_ui {
+                        let bar = layout::volume_at(width, surface.dpi, progress, x, y).is_some();
+                        if surface.grip.drag {
+                            if message.wParam.0 & MK_LBUTTON == 0 {
+                                surface.end_grip(); // the release was lost
+                            } else if let Some(volume) =
+                                layout::volume_fraction(width, surface.dpi, progress, x)
+                            {
+                                self.audio.set(volume);
+                            }
+                        } else if bar != surface.grip.hover {
+                            surface.grip.hover = bar;
+                            surface.request(Repaint::Full);
+                        }
                     }
                 }
             }
-            WM_MOUSELEAVE => surface.leave(),
+            WM_LBUTTONDOWN if volume_ui && matches!(surface.role, Role::Notch { .. }) => {
+                let (x, y) = point(message.lParam);
+                let (width, progress) =
+                    (surface.bounds.width, surface.motion.value(Instant::now()));
+                if layout::volume_at(width, surface.dpi, progress, x, y).is_some()
+                    && let Some(volume) = layout::volume_fraction(width, surface.dpi, progress, x)
+                {
+                    // SAFETY: captures the pointer for this thread's own live notch window; released when
+                    // the button goes up or the capture is lost.
+                    unsafe {
+                        SetCapture(surface.window.0);
+                    }
+                    surface.grip = Grip {
+                        hover: true,
+                        drag: true,
+                    };
+                    surface.request(Repaint::Full);
+                    self.audio.set(volume);
+                }
+            }
+            WM_CAPTURECHANGED => surface.end_grip(),
+            WM_MOUSEWHEEL if volume_ui && surface.grip.hover => {
+                let delta = i32::from((message.wParam.0 >> 16) as u16 as i16);
+                let (steps, rest) = edge::wheel_steps(self.volume_wheel, delta);
+                self.volume_wheel = rest;
+                if steps != 0
+                    && let Some(level) = self.audio.level()
+                {
+                    let fine = message.wParam.0 & 0x0004 != 0; // MK_SHIFT
+                    self.audio
+                        .set(f32::from(edge::step_level(level.percent, steps, fine)) / 100.0);
+                }
+            }
+            WM_MOUSELEAVE => {
+                surface.leave();
+                if !surface.grip.drag && surface.grip.hover {
+                    surface.grip.hover = false;
+                    surface.request(Repaint::Full);
+                }
+            }
             WM_PAINT if self.graphics.removed() => self.lose_graphics(),
             _ => {}
         }
@@ -3275,12 +3447,16 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 && let Some(dock) = desktop.dock_at(message.hwnd)
             {
                 let slot = dock.dock_slot(message.lParam, desktop.dock_slots());
-                desktop.open_menu(message.hwnd, slot);
+                desktop.open_menu(message.hwnd, slot, message.lParam);
                 continue;
             }
             if message.message == WM_RBUTTONUP
                 && desktop.remove_shelf_at(message.hwnd, message.lParam)
             {
+                continue;
+            }
+            if message.message == WM_RBUTTONUP && desktop.is_notch(message.hwnd) {
+                desktop.open_app_menu(message.hwnd, message.lParam);
                 continue;
             }
             if message.message == dock_uia::INVOKE && desktop.dock_at(message.hwnd).is_some() {

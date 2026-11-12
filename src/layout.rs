@@ -194,8 +194,8 @@ const MEDIA_CONTROLS: [(f32, f32, f32, f32); 4] = [
     (200.0, 66.0, 28.0, 32.0),
     (100.0, 100.0, 24.0, 16.0),
 ];
-/// The volume level bar's hit box, right of the mute toggle and ending 16 before the body's right.
-const VOLUME_BAR: (f32, f32, f32, f32) = (132.0, 100.0, 212.0, 16.0);
+/// The volume level bar's hit box, right of the mute toggle and ending before the settings button.
+const VOLUME_BAR: (f32, f32, f32, f32) = (132.0, 100.0, 188.0, 16.0);
 
 fn scaled_bounds((x, y, width, height): (f32, f32, f32, f32), dpi: u32) -> Bounds {
     Bounds {
@@ -223,6 +223,50 @@ pub fn volume_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32) -> 
     let bar = volume_bar(dpi);
     panel_offset(window_width, dpi, progress, bar, (x, y))
         .map(|offset| offset as f32 / (bar.width - 1).max(1) as f32)
+}
+
+/// The volume a drag at window column `x` means: like `volume_at` but clamped to the bar's ends and ignoring the
+/// row, so a captured drag keeps tracking the pointer outside the bar. None while the row is not drawn.
+pub fn volume_fraction(window_width: i32, dpi: u32, progress: f32, x: i32) -> Option<f32> {
+    if motion::reveal(progress) <= 0.0 {
+        return None;
+    }
+    let bar = volume_bar(dpi);
+    let body = notch_body(window_width, dpi, notch_shape(progress, true));
+    let offset = (x - body.left - bar.x) as f32;
+    Some((offset / (bar.width - 1).max(1) as f32).clamp(0.0, 1.0))
+}
+
+/// The settings button in the expanded panel's bottom-right corner, in DIPs from the body's left and top
+/// edges (media panel, plain panel): 16 square, 12 from the right edge and 8 from the bottom.
+const GEAR_SIZE: f32 = 16.0;
+pub fn gear(dpi: u32, media: bool) -> Bounds {
+    let shape = if media {
+        MEDIA_EXPANDED
+    } else {
+        NOTCH_EXPANDED
+    };
+    scaled_bounds(
+        (
+            shape.width - 12.0 - GEAR_SIZE,
+            shape.height - 8.0 - GEAR_SIZE,
+            GEAR_SIZE,
+            GEAR_SIZE,
+        ),
+        dpi,
+    )
+}
+
+/// Whether a window point is on the settings button (a little slack around it); false while the panel is closed.
+pub fn gear_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, y: i32) -> bool {
+    if motion::reveal(progress) < 1.0 {
+        return false;
+    }
+    let (g, slack) = (gear(dpi, media), scaled(4.0, dpi));
+    let body = notch_body(window_width, dpi, notch_shape(progress, media));
+    let x = x - body.left;
+    (g.x - slack..g.x + g.width + slack).contains(&x)
+        && (g.y - slack..g.y + g.height + slack).contains(&y)
 }
 
 /// The visualizer slot right of the controls row (slice 7, provisional), in DIPs from the body's
@@ -739,13 +783,52 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_clamps_to_the_bar_and_the_gear_sits_clear_of_every_control() {
+        // Body x 40..400: the bar spans 172..360. Left of it is silent, right of it full, whatever the row.
+        let drag = |progress, x| volume_fraction(440, 96, progress, x);
+        assert_eq!(drag(1.0, 0), Some(0.0));
+        assert_eq!(drag(1.0, 172), Some(0.0));
+        assert_eq!(drag(1.0, 359), Some(1.0));
+        assert_eq!(drag(1.0, 435), Some(1.0));
+        assert_eq!(drag(0.0, 200), None, "closed");
+        let middle = drag(1.0, 265).unwrap();
+        assert!((middle - 93.0 / 187.0).abs() < 1e-6);
+        // The gear is inside both panels, off the volume bar and the mute toggle, and clickable only open.
+        for dpi in [96, 144, 192] {
+            let window = scaled(440.0, dpi);
+            for media in [true, false] {
+                let shape = if media {
+                    MEDIA_EXPANDED
+                } else {
+                    NOTCH_EXPANDED
+                };
+                let g = gear(dpi, media);
+                assert!(
+                    g.x + g.width <= scaled(shape.width, dpi)
+                        && g.y + g.height <= scaled(shape.height, dpi)
+                );
+                let body = notch_body(window, dpi, notch_shape(1.0, media));
+                let (x, y) = (body.left + g.x + g.width / 2, g.y + g.height / 2);
+                assert!(gear_at(window, dpi, 1.0, media, x, y));
+                assert!(!gear_at(window, dpi, 0.5, media, x, y), "closed");
+                assert!(!gear_at(window, dpi, 1.0, media, x - scaled(40.0, dpi), y));
+                if media {
+                    let bar = volume_bar(dpi);
+                    assert!(bar.x + bar.width + scaled(4.0, dpi) <= g.x, "{dpi}");
+                    assert!(media_controls(dpi).iter().all(|c| c.x + c.width <= g.x));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn volume_bar_maps_its_first_and_last_pixel_to_silent_and_full() {
-        // Body x 40..400: the bar spans 172..384 and 100..116 at 100 %, below the mute toggle's row.
+        // Body x 40..400: the bar spans 172..360 and 100..116 at 100 %, below the mute toggle's row.
         let at = |progress, x, y| volume_at(440, 96, progress, x, y);
         assert_eq!(at(1.0, 172, 100), Some(0.0));
-        assert_eq!(at(1.0, 383, 115), Some(1.0));
-        assert_eq!(at(1.0, 172 + 211 / 2, 108), Some(105.0 / 211.0));
-        for (x, y) in [(171, 108), (384, 108), (200, 99), (200, 116)] {
+        assert_eq!(at(1.0, 359, 115), Some(1.0));
+        assert_eq!(at(1.0, 172 + 187 / 2, 108), Some(93.0 / 187.0));
+        for (x, y) in [(171, 108), (360, 108), (200, 99), (200, 116)] {
             assert_eq!(at(1.0, x, y), None, "{x}, {y}");
         }
         assert_eq!(media_control_at(440, 96, 1.0, 140, 100), Some(3));

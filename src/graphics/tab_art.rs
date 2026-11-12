@@ -828,9 +828,9 @@ fn weather_page(
 }
 
 /// Where the eye pair is centred in the pill, in DIPs from the body's left: the middle of the media pill's
-/// title lane (design: 91 + 40), or left of the plain pill's centred clock.
-fn eye_centre(media: bool) -> f32 {
-    if media { 131.0 } else { 30.0 }
+/// title lane (design: 91 + 40), or the plain pill's middle, where the clock fades out for them.
+fn eye_centre(media: bool, body_width: f32) -> f32 {
+    if media { 131.0 } else { body_width / 2.0 }
 }
 
 /// How visible the eyes are at an open `progress`: fully until the hover swell, gone as the body opens.
@@ -838,18 +838,24 @@ pub(super) fn eye_alpha(progress: f32) -> f32 {
     1.0 - motion::smooth((progress - 0.08) / 0.15)
 }
 
+/// How much of the pill's time (plain) or title (media) the eyes have replaced right now, 0 to 1.
+pub(super) fn eyes_shown(scene: &NotchScene) -> f32 {
+    scene
+        .eyes
+        .map_or(0.0, |frame| frame.alpha * eye_alpha(scene.progress))
+}
+
 /// The two capsules for the scene's mood and pose, at the pill's middle. Lids are flat cuts of the capsule
 /// (a clip), not body-coloured overpaint, so they hold on every theme.
 pub(super) fn draw_eyes(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
-    mood: eyes::Mood,
-    pose: eyes::Pose,
+    frame: eyes::Frame,
     body: &D2D_RECT_F,
     scale: f32,
     p: &Palette,
 ) -> Result<()> {
-    let alpha = eye_alpha(scene.progress);
+    let alpha = eyes_shown(scene);
     if alpha <= 0.0 {
         return Ok(());
     }
@@ -862,7 +868,7 @@ pub(super) fn draw_eyes(
         dy,
         top,
         bottom,
-    } = eyes::eye(mood, pose);
+    } = eyes::eye(frame.mood, frame.pose);
     let (w, h) = (w * scale, h * scale);
     let centre_y = body.top + (middle + dy) * scale;
     // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw and
@@ -870,7 +876,8 @@ pub(super) fn draw_eyes(
     unsafe {
         let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(alpha)), None)?;
         for side in [-1.0f32, 1.0] {
-            let centre_x = body.left + eye_centre(media) * scale + side * eyes::GAP / 2.0 * scale;
+            let middle_x = body.left + eye_centre(media, (body.right - body.left) / scale) * scale;
+            let centre_x = middle_x + (side * eyes::GAP / 2.0 + frame.look) * scale;
             let capsule = D2D_RECT_F {
                 left: centre_x - w / 2.0,
                 top: centre_y - h / 2.0,

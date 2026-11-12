@@ -2,7 +2,7 @@ use crate::{
     audio::{BARS, Level},
     dock,
     edge::{Layout, ListRow},
-    eyes::{Mood, Pose},
+    eyes::Frame,
     icons::IconPixels,
     layout::{self, Bounds},
     media::{PLAY_PAUSE, Progress, Track},
@@ -176,8 +176,10 @@ pub struct NotchScene<'a> {
     pub tab: Tab,
     /// The hanging tab handle; `None` draws none (fewer than two tabs).
     pub rail: Option<RailScene<'a>>,
-    /// The mascot's mood and pose in the pill; `None` draws no eyes and leaves the title where it was.
-    pub eyes: Option<(Mood, Pose)>,
+    /// The mascot's frame in the pill; `None` at rest, when the pill shows only the time.
+    pub eyes: Option<Frame>,
+    /// The volume bar's pointer state: the thumb grows on hover and press, and a press shows the percent.
+    pub grip: Grip,
     /// The Weather page's text and pictures; `Some` only while that page shows.
     pub weather: Option<&'a crate::weather::View>,
 }
@@ -211,6 +213,8 @@ pub struct SliderScene<'a> {
     pub dpi: u32,
     pub layout: &'a Layout,
     pub percent: u8,
+    /// The button is down: the thumb grows.
+    pub pressed: bool,
     pub glyph: Glyph,
     /// Muted or unsupported: the fill and icon are dimmed (the system grey text in high contrast).
     pub dim: bool,
@@ -408,6 +412,23 @@ impl Canvas {
                     let brush =
                         context.CreateSolidColorBrush(&tint(p.accent_dim(scene.dim, 1.0)), None)?;
                     context.FillRoundedRectangle(&shape, &brush);
+                }
+            }
+            if scene.note.is_none() {
+                // The thumb rides the fill's end and grows while pressed.
+                let r = thickness / 2.0 + (if scene.pressed { 4.0 } else { 2.0 }) * scale;
+                let (x, y) = ((track.left + track.right) / 2.0, track.bottom - filled);
+                let dot = D2D_RECT_F {
+                    left: x - r,
+                    top: y - r,
+                    right: x + r,
+                    bottom: y + r,
+                };
+                // SAFETY: live draw context between BeginDraw/EndDraw; the brush is scoped to this draw.
+                unsafe {
+                    let brush =
+                        context.CreateSolidColorBrush(&tint(p.ink_dim(scene.dim, 0.95)), None)?;
+                    context.FillRoundedRectangle(&rounded(dot, r), &brush);
                 }
             }
             let icon = at(layout.icon);
@@ -712,18 +733,46 @@ fn notch_text(
 ) -> Result<()> {
     timer_text(context, scene, body, scale, p)?;
     notice_text(context, scene, body, scale, p)?;
-    if let Some((mood, pose)) = scene.eyes {
-        tab_art::draw_eyes(context, scene, mood, pose, body, scale, p)?;
+    if let Some(frame) = scene.eyes {
+        tab_art::draw_eyes(context, scene, frame, body, scale, p)?;
     }
     if scene.tab == Tab::Media {
-        return media_page(context, scene, body, scale, art, status, p);
+        media_page(context, scene, body, scale, art, status, p)?;
+    } else {
+        // Another page: the pill's content fades out as the page fades in.
+        let reveal = motion::reveal(scene.progress);
+        tab_art::faded(context, 1.0 - reveal, || {
+            media_page(context, scene, body, scale, art, status, p)
+        })?;
+        tab_art::page(context, scene, body, scale, reveal, p)?;
     }
-    // Another page: the pill's content fades out as the page fades in.
+    settings_button(context, scene, body, p)
+}
+
+/// The cog in the open panel's bottom-right corner (`layout::gear`): a click opens Settings. It fades in with
+/// the panel's controls.
+fn settings_button(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    p: &Palette,
+) -> Result<()> {
     let reveal = motion::reveal(scene.progress);
-    tab_art::faded(context, 1.0 - reveal, || {
-        media_page(context, scene, body, scale, art, status, p)
-    })?;
-    tab_art::page(context, scene, body, scale, reveal, p)
+    if reveal <= 0.0 {
+        return Ok(());
+    }
+    let gear = layout::gear(scene.dpi, scene.track.is_some());
+    let square = pixel_square(
+        body.left + gear.x as f32,
+        body.top + gear.y as f32,
+        gear.width as f32,
+    );
+    fill_glyph(
+        context,
+        square,
+        Glyph::Gear,
+        with_alpha(p.ink, p.ink_alpha(0.55 * reveal)),
+    )
 }
 
 /// The Media page, and the pill every page starts from: the media track or the plain clock, date and status.
@@ -763,7 +812,7 @@ fn media_page(
         scene.time,
         &clock,
         row(15.0 + 14.0 * open, 24.0),
-        with_alpha(p.ink, p.ink_alpha(1.0)),
+        with_alpha(p.ink, p.ink_alpha(1.0 - tab_art::eyes_shown(scene))),
     )?;
     let date = motion::reveal(scene.progress);
     if date <= 0.0 {
@@ -1050,11 +1099,17 @@ struct VolumeBar {
     fill_alpha: f32,
     /// Muted or without an endpoint: high contrast draws the fill in the system grey-text colour.
     dim: bool,
+    /// The thumb at the fill's end: centre x, centre y and radius, in pixels.
+    thumb: (f32, f32, f32),
+    /// The percent readout above the thumb while pressed.
+    readout: Option<(String, D2D_RECT_F)>,
 }
 /// The visualizer's bars: secondary, decorative content, white 60 % like the artist.
 const METER_FILL: f32 = 0.60;
 /// The bar's drawn thickness in DIPs, centred in its hit box.
-const VOLUME_THICKNESS: f32 = 4.0;
+const VOLUME_THICKNESS: f32 = 6.0;
+/// The thumb's radius at rest, under the pointer and while pressed, in DIPs.
+const THUMB: [f32; 3] = [4.5, 6.0, 7.5];
 /// The bar's track: white 40 % is about 3.7 : 1 on black, the non-text contrast a target needs.
 const VOLUME_TRACK: f32 = 0.40;
 /// The fill while muted: white 60 % over the track is about 3.2 : 1 against it, and dimmer than the
@@ -1089,16 +1144,35 @@ pub enum Glyph {
     Pause,
     Previous,
     Next,
-    /// The mute toggle: a speaker with sound waves, or without them while muted.
+    /// The mute toggle: a speaker with two sound waves, one wave at a low level, none while muted.
     Speaker,
+    SpeakerLow,
     Muted,
+    /// The settings button: a cog, a core with eight teeth.
+    Gear,
     /// The brightness slider's icon: a core with four rays.
     Sun,
 }
 /// Glyph parts on a 10-unit grid: a triangle's x, y corners, and a bar's left, top, right, bottom.
 type Triangle = [(f32, f32); 3];
 type Bar = (f32, f32, f32, f32);
+
+/// What the pointer is doing on the volume bar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Grip {
+    pub hover: bool,
+    pub drag: bool,
+}
 impl Glyph {
+    /// The speaker for a level: silent or muted shows no waves, up to a third one wave, above it two.
+    pub fn speaker(percent: u8, muted: bool) -> Glyph {
+        match percent {
+            _ if muted => Glyph::Muted,
+            0 => Glyph::Muted,
+            1..=33 => Glyph::SpeakerLow,
+            _ => Glyph::Speaker,
+        }
+    }
     fn parts(self) -> (Option<Triangle>, &'static [Bar]) {
         match self {
             Glyph::Play => (Some([(2.5, 1.0), (9.0, 5.0), (2.5, 9.0)]), &[]),
@@ -1119,9 +1193,27 @@ impl Glyph {
                     (9.0, 2.0, 9.8, 8.0),
                 ],
             ),
+            Glyph::SpeakerLow => (
+                Some([(0.5, 5.0), (6.5, 1.0), (6.5, 9.0)]),
+                &[(1.0, 3.5, 3.5, 6.5), (7.6, 3.5, 8.4, 6.5)],
+            ),
             Glyph::Muted => (
                 Some([(0.5, 5.0), (6.5, 1.0), (6.5, 9.0)]),
                 &[(1.0, 3.5, 3.5, 6.5)],
+            ),
+            Glyph::Gear => (
+                None,
+                &[
+                    (2.5, 2.5, 7.5, 7.5),
+                    (4.0, 0.0, 6.0, 2.0),
+                    (4.0, 8.0, 6.0, 10.0),
+                    (0.0, 4.0, 2.0, 6.0),
+                    (8.0, 4.0, 10.0, 6.0),
+                    (1.2, 1.2, 2.8, 2.8),
+                    (7.2, 1.2, 8.8, 2.8),
+                    (1.2, 7.2, 2.8, 8.8),
+                    (7.2, 7.2, 8.8, 8.8),
+                ],
             ),
             Glyph::Sun => (
                 None,
@@ -1216,8 +1308,8 @@ fn media_plan<'a>(
     };
     let dim = if track.playing { 1.0 } else { 0.60 };
     let artist = motion::reveal(scene.progress);
-    // With the mascot in the pill's title lane the title arrives with the panel.
-    let title_fade = if scene.eyes.is_some() { open } else { 1.0 };
+    // The title makes way while the mascot's eyes are in its lane.
+    let title_fade = 1.0 - tab_art::eyes_shown(scene);
     let mut lines = vec![
         Line {
             text: scene.time.into(),
@@ -1380,6 +1472,9 @@ fn volume_bar(scene: &NotchScene, body: &D2D_RECT_F) -> Option<VolumeBar> {
     let left = body.left + bar.x as f32;
     let top = body.top + bar.y as f32 + ((bar.height as f32 - thickness) / 2.0).round();
     let percent = scene.volume.map_or(0, |level| level.percent);
+    let radius = THUMB[usize::from(scene.grip.hover) + usize::from(scene.grip.drag)]
+        * scene.dpi as f32
+        / 96.0;
     let filled = (bar.width as f32 * f32::from(percent) / 100.0).round();
     let rect = |width: f32| {
         rounded(
@@ -1403,6 +1498,21 @@ fn volume_bar(scene: &NotchScene, body: &D2D_RECT_F) -> Option<VolumeBar> {
                 None => DISABLED,
             },
         dim: scene.volume.is_none_or(|level| level.muted),
+        thumb: (left + filled, top + thickness / 2.0, radius),
+        readout: (scene.grip.drag && scene.volume.is_some()).then(|| {
+            let scale = scene.dpi as f32 / 96.0;
+            let middle = left + filled;
+            let bottom = top + thickness / 2.0 - radius - 2.0 * scale;
+            (
+                format!("{percent}%"),
+                D2D_RECT_F {
+                    left: middle - 22.0 * scale,
+                    top: bottom - 14.0 * scale,
+                    right: middle + 22.0 * scale,
+                    bottom,
+                },
+            )
+        }),
     })
 }
 
@@ -1419,10 +1529,9 @@ fn media_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip
     } else {
         Glyph::Play
     };
-    let speaker = match scene.volume {
-        Some(level) if level.muted => Glyph::Muted,
-        _ => Glyph::Speaker,
-    };
+    let speaker = scene.volume.map_or(Glyph::Speaker, |level| {
+        Glyph::speaker(level.percent, level.muted)
+    });
     let [previous, play_pause, next] = track.controls;
     let enabled = [previous, play_pause, next, scene.volume.is_some()];
     layout::media_controls(scene.dpi)
@@ -1556,6 +1665,32 @@ fn media_text(
             let fill = context
                 .CreateSolidColorBrush(&tint(p.accent_dim(bar.dim, bar.fill_alpha)), None)?;
             context.FillRoundedRectangle(&bar.fill, &fill);
+            let (x, y, r) = bar.thumb;
+            let thumb = context
+                .CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(bar.fill_alpha)), None)?;
+            let dot = D2D_RECT_F {
+                left: x - r,
+                top: y - r,
+                right: x + r,
+                bottom: y + r,
+            };
+            context.FillRoundedRectangle(&rounded(dot, r), &thumb);
+        }
+        if let Some((text, rect)) = &bar.readout {
+            let font = Font {
+                family: TEXT_FONT,
+                size: (rect.bottom - rect.top) * 0.85,
+                weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                designator: 1.0,
+                align: DWRITE_TEXT_ALIGNMENT_CENTER,
+            };
+            draw_text(
+                context,
+                text,
+                &font,
+                *rect,
+                with_alpha(p.ink, p.ink_alpha(0.90)),
+            )?;
         }
     }
     if let Some((bars, alpha)) = &plan.meter {
@@ -2173,6 +2308,7 @@ mod media_tests {
             tab: Tab::Media,
             rail: None,
             eyes: None,
+            grip: Grip::default(),
             weather: None,
         };
         let clock = clock_width(time, progress, dpi);
@@ -2205,6 +2341,7 @@ mod media_tests {
                 tab: Tab::Media,
                 rail: None,
                 eyes: None,
+                grip: Grip::default(),
                 weather: None,
             };
             let clock = clock_width("9:50 pm", progress, 96);
@@ -2467,6 +2604,7 @@ mod media_tests {
                 tab: Tab::Media,
                 rail: None,
                 eyes: None,
+                grip: Grip::default(),
                 weather: None,
             };
             meter_bars(&scene, &body(96, progress))
@@ -2521,6 +2659,7 @@ mod media_tests {
                     tab: Tab::Media,
                     rail: None,
                     eyes: None,
+                    grip: Grip::default(),
                     weather: None,
                 };
                 let (bars, _) = meter_bars(&scene, &body(dpi, 1.0)).unwrap();
@@ -2535,14 +2674,65 @@ mod media_tests {
     }
 
     #[test]
+    fn the_speaker_follows_the_level_and_the_thumb_grows_with_the_pointer() {
+        assert_eq!(Glyph::speaker(0, false), Glyph::Muted);
+        assert_eq!(Glyph::speaker(70, true), Glyph::Muted);
+        assert_eq!(Glyph::speaker(1, false), Glyph::SpeakerLow);
+        assert_eq!(Glyph::speaker(33, false), Glyph::SpeakerLow);
+        assert_eq!(Glyph::speaker(34, false), Glyph::Speaker);
+        assert_eq!(Glyph::speaker(100, false), Glyph::Speaker);
+        let song = track("Song", "Artist", true);
+        let mut scene = NotchScene {
+            time: "9:50 pm",
+            date: "Tuesday",
+            track: song.shown(),
+            art: None,
+            progress: 1.0,
+            dpi: 96,
+            focus: None,
+            played: None,
+            volume: Some(Level {
+                percent: 40,
+                muted: false,
+            }),
+            bars: [0; BARS],
+            timer: None,
+            notice: None,
+            shelf: &[],
+            tab: Tab::Media,
+            rail: None,
+            eyes: None,
+            grip: Grip::default(),
+            weather: None,
+        };
+        let radius = |scene: &NotchScene| volume_bar(scene, &body(96, 1.0)).unwrap().thumb.2;
+        let rest = radius(&scene);
+        scene.grip = Grip {
+            hover: true,
+            drag: false,
+        };
+        let hover = radius(&scene);
+        scene.grip = Grip {
+            hover: true,
+            drag: true,
+        };
+        let press = radius(&scene);
+        assert!(rest < hover && hover < press);
+        let readout = volume_bar(&scene, &body(96, 1.0)).unwrap().readout;
+        assert_eq!(readout.unwrap().0, "40%", "a press shows the percent");
+    }
+
+    #[test]
     fn volume_row_fills_to_the_shown_percent_and_dims_while_muted_or_unavailable() {
         let song = track("Song", "Artist", true);
         let level = |percent, muted| Some(Level { percent, muted });
         let panel = volume(&song, "9:50 pm", 1.0, 96, None, level(40, false));
         let bar = panel.volume.unwrap();
-        // Bar x 172..384 in the body at 40; 4 DIP thick, centred in 100..116.
-        assert_eq!(bar.track.rect, rect(172.0, 106.0, 384.0, 110.0));
-        assert_eq!(bar.fill.rect, rect(172.0, 106.0, 172.0 + 85.0, 110.0));
+        // Bar x 172..360 in the body at 40; 6 DIP thick, centred in 100..116; the thumb sits on the fill end.
+        assert_eq!(bar.track.rect, rect(172.0, 105.0, 360.0, 111.0));
+        assert_eq!(bar.fill.rect, rect(172.0, 105.0, 172.0 + 75.0, 111.0));
+        assert_eq!(bar.thumb, (247.0, 108.0, 4.5));
+        assert!(bar.readout.is_none());
         assert_eq!((bar.track_alpha, bar.fill_alpha), (VOLUME_TRACK, 1.0));
         assert_eq!(
             (panel.chips[3].shape, panel.chips[3].alpha),
