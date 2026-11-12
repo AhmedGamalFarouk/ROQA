@@ -28,3 +28,5 @@ footprint-1 measured 795,136 B without a hook; the hook, its format and `Termina
 - Allocation failure aborts in both profiles.
 
 **NOT RUN:** a real crash (no forced panic in the release binary), the actual `%LOCALAPPDATA%\ROQA\error.log` line, exit code 70 observed, the debug smoke with `--probe-panic`, and all native/GUI/performance gates. The hook's line format is unit-tested only.
+
+**Known limit: unsaved edits.** `TerminateProcess` skips `flush_store(true)`, so pin, shelf, timer and settings edits still inside the store write delay (up to `MAX_WAIT`, 10 s) are lost when the host panics. Flushing from the hook is not safe (it may run while the store or a lock is in use), so the limit is accepted. Found by the M5 gate 1 review (M5).

@@ -5,7 +5,7 @@
 #![allow(non_upper_case_globals)] // Matching on Windows SDK constant names.
 use crate::dock;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     mem::ManuallyDrop,
     sync::{Arc, Mutex},
 };
@@ -332,7 +332,8 @@ impl IInvokeProvider_Impl for Item_Impl {
 
 thread_local! {
     // WM_GETOBJECT arrives in the stateless window procedure; this maps the dock HWND to its root.
-    static ROOTS: RefCell<Vec<(isize, IRawElementProviderSimple)>> = const { RefCell::new(Vec::new()) };
+    // Each root also holds a message to post to its HWND on the first query (0 for none), then 0.
+    static ROOTS: RefCell<Vec<(isize, IRawElementProviderSimple, Cell<u32>)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Answers UIA's WM_GETOBJECT for a registered surface; `None` lets DefWindowProc handle everything else.
@@ -340,14 +341,18 @@ pub fn get_object(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT>
     if lparam.0 as i32 != UiaRootObjectId {
         return None;
     }
-    let provider = ROOTS.with(|roots| {
+    let (provider, notice) = ROOTS.with(|roots| {
         roots
             .try_borrow()
             .ok()?
             .iter()
-            .find(|(window, _)| *window == hwnd.0 as isize)
-            .map(|(_, provider)| provider.clone())
+            .find(|(window, ..)| *window == hwnd.0 as isize)
+            .map(|(_, provider, notice)| (provider.clone(), notice.take()))
     })?;
+    if notice != 0 {
+        // SAFETY: scalar post to the queried live HWND; a lost post only delays the host's reaction.
+        let _ = unsafe { PostMessageW(Some(hwnd), notice, WPARAM(0), LPARAM(0)) };
+    }
     // SAFETY: the provider is registered only while its HWND is alive on this thread.
     Some(unsafe { UiaReturnRawElementProvider(hwnd, wparam, lparam, &provider) })
 }
@@ -372,10 +377,19 @@ impl Accessibility {
     }
     /// Serves `root` for `hwnd`'s WM_GETOBJECT until dropped.
     pub fn register(hwnd: HWND, root: IRawElementProviderSimple) -> Result<Self> {
+        Self::register_noticed(hwnd, root, 0)
+    }
+    /// Like `register`, and posts `notice` to `hwnd` the first time a client queries it, so the host learns
+    /// that something is listening without polling `UiaClientsAreListening`.
+    pub fn register_noticed(
+        hwnd: HWND,
+        root: IRawElementProviderSimple,
+        notice: u32,
+    ) -> Result<Self> {
         ROOTS.with(|roots| {
             roots
                 .try_borrow_mut()
-                .map(|mut roots| roots.push((hwnd.0 as isize, root.clone())))
+                .map(|mut roots| roots.push((hwnd.0 as isize, root.clone(), Cell::new(notice))))
                 .map_err(|_| Error::new(E_FAIL, "Accessibility registry busy."))
         })?;
         Ok(Self {
@@ -393,7 +407,7 @@ impl Accessibility {
         }
         let hwnd = self.hwnd.0 as isize;
         ROOTS.with(|roots| {
-            roots.borrow_mut().retain(|(window, _)| *window != hwnd);
+            roots.borrow_mut().retain(|(window, ..)| *window != hwnd);
         });
         let root = self.root.take().expect("registered accessibility root");
         // SAFETY: documented teardown while the HWND is still alive: release UIA's references, then disconnect.

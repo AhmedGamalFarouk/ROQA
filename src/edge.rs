@@ -28,7 +28,6 @@ use windows::{
         Foundation::LPARAM,
         System::Threading::GetCurrentThreadId,
         UI::{
-            Accessibility::UiaClientsAreListening,
             Controls::WM_MOUSELEAVE,
             Input::KeyboardAndMouse::{
                 ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -48,6 +47,9 @@ pub const SHOW_DELAY: Duration = Duration::from_millis(250);
 pub const HIDE_DELAY: Duration = Duration::from_millis(800);
 /// Brightness writes go out at most this often (about 5 a second); the latest value wins.
 pub const WRITE_GAP: Duration = Duration::from_millis(200);
+/// A brightness reading that has not come back this long after the pill showed means "not supported"
+/// (a hung DDC call would otherwise leave an empty pill).
+pub const READ_LIMIT: Duration = Duration::from_secs(2);
 
 // Geometry in DIPs.
 const STRIP: i32 = 2;
@@ -308,6 +310,12 @@ impl Hover {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
+    /// A click or wheel landed on the bare strip: show the pill now instead of after `SHOW_DELAY`.
+    pub fn request(&mut self, now: Instant) {
+        self.over = true;
+        self.shown = false;
+        self.due = Some(now);
+    }
 }
 
 /// Coalesces brightness writes: the latest value waits for the gap since the last send.
@@ -319,6 +327,10 @@ pub struct Throttle {
 impl Throttle {
     pub fn push(&mut self, value: u8) {
         self.latest = Some(value);
+    }
+    /// Puts back a value `take` returned but the worker's queue refused; a newer value still wins.
+    pub fn restore(&mut self, value: u8) {
+        self.latest.get_or_insert(value);
     }
     /// The value to send now, if one waits and `WRITE_GAP` has passed since the last send.
     pub fn take(&mut self, now: Instant) -> Option<u8> {
@@ -343,6 +355,29 @@ enum Reading {
     Pending,
     Level(u8),
     Unsupported,
+}
+
+/// Whether a still-unanswered reading has outlived `READ_LIMIT` (one deadline, set when the pill shows).
+fn read_expired(reading: Reading, due: Option<Instant>, now: Instant) -> bool {
+    reading == Reading::Pending && due.is_some_and(|due| now >= due)
+}
+
+/// Whether a click or wheel held for the pill must keep waiting for the level it acts on: Core Audio has
+/// not started, or the brightness reading has not come back.
+fn input_waits(kind: Kind, audio_active: bool, reading: Reading) -> bool {
+    match kind {
+        Kind::Volume => !audio_active,
+        Kind::Brightness => reading == Reading::Pending,
+    }
+}
+
+/// A click or wheel that hit the bare strip, held until the pill it opens can apply it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Input {
+    /// Screen row of the press.
+    Press(i32),
+    /// Wheel movement added up so far.
+    Wheel(i32),
 }
 
 enum Mode {
@@ -386,10 +421,14 @@ struct Slider {
     /// The level being dragged, shown instead of the device's until the drag ends.
     drag: Option<u8>,
     wheel: i32,
-    /// The pointer has been on the strip, so the volume level is wanted.
-    touched: bool,
+    /// A UIA client has asked for this element, so a screen reader may want the volume level.
+    queried: bool,
+    /// Input that landed on the bare strip, applied once the pill is up.
+    input: Option<Input>,
     brightness: Reading,
     read_wanted: bool,
+    /// When a pending brightness reading counts as unsupported; set while the pill is shown.
+    read_due: Option<Instant>,
     throttle: Throttle,
     /// The default device's name, for the accessible name; `name_revision` bumps when it changes.
     device: Option<String>,
@@ -455,9 +494,11 @@ impl Slider {
             drawn: None,
             drag: None,
             wheel: 0,
-            touched: false,
+            queried: false,
+            input: None,
             brightness: Reading::Pending,
             read_wanted: false,
+            read_due: None,
             throttle: Throttle::default(),
             device: None,
             name_revision: 0,
@@ -497,13 +538,14 @@ impl Slider {
 
     // Showing and hiding.
 
-    fn open(&mut self, graphics: &Graphics, palette: Palette, audio: &Audio) {
+    fn open(&mut self, graphics: &Graphics, palette: Palette, audio: &Audio, now: Instant) {
         self.mode = Mode::Level;
         if self.kind == Kind::Volume {
             self.set_device(audio.default_name());
         } else {
             self.brightness = Reading::Pending;
             self.read_wanted = true;
+            self.read_due = Some(now + READ_LIMIT);
         }
         self.show_pill(graphics, palette);
     }
@@ -527,6 +569,8 @@ impl Slider {
         self.drawn = None;
         self.mode = Mode::Level;
         self.wheel = 0;
+        self.input = None;
+        self.read_due = None;
         if self.drag.take().is_some() {
             // SAFETY: releases this thread's own capture.
             let _ = unsafe { ReleaseCapture() };
@@ -556,13 +600,22 @@ impl Slider {
         }
     }
 
+    /// Records what the worker found, or what the deadline decided; a note needs the wider window.
+    fn settle(&mut self, reading: Reading, graphics: &Graphics, palette: Palette) {
+        let was = self.wide();
+        self.brightness = reading;
+        self.read_due = None;
+        if self.canvas.is_some() && was != self.wide() {
+            self.show_pill(graphics, palette);
+        }
+    }
+
     // Input.
 
     /// Handles one message for this window; true when it was ours.
     fn message(&mut self, message: &MSG, audio: &Audio, now: Instant) -> bool {
         match message.message {
             WM_MOUSEMOVE => {
-                self.touched = true;
                 self.track();
                 self.hover.enter(now);
                 let (x, y) = point(message.lParam);
@@ -584,19 +637,28 @@ impl Slider {
                 let (x, y) = point(message.lParam);
                 self.press(x, y, audio);
             }
+            // On the bare strip there is no canvas: show the pill now and keep the input for it.
+            WM_LBUTTONDOWN => {
+                let at = strip(self.work, self.dpi, self.kind);
+                self.input = Some(Input::Press(at.y + point(message.lParam).1));
+                self.hover.request(now);
+            }
             WM_LBUTTONUP | WM_CAPTURECHANGED => self.end_drag(),
-            WM_MOUSEWHEEL if self.canvas.is_some() => {
+            WM_MOUSEWHEEL => {
                 let delta = i32::from((message.wParam.0 >> 16) as u16 as i16);
-                let (steps, rest) = wheel_steps(self.wheel, delta);
-                self.wheel = rest;
-                if steps != 0
-                    && matches!(self.mode, Mode::Level)
-                    && let Some(level) = self.percent(audio)
-                {
-                    self.set_level(step_level(level, steps), audio);
+                if self.canvas.is_some() {
+                    self.wheel_by(delta, audio);
+                } else {
+                    let held = match self.input {
+                        Some(Input::Wheel(held)) => held,
+                        _ => 0,
+                    };
+                    self.input = Some(Input::Wheel(held + delta));
+                    self.hover.request(now);
                 }
             }
             edge_uia::SET => self.set_level(message.wParam.0.min(100) as u8, audio),
+            edge_uia::QUERIED => self.queried = true,
             _ => return false,
         }
         true
@@ -686,6 +748,37 @@ impl Slider {
         // A drag is held until the button goes up; a wheel or UIA change is not.
         if self.canvas.is_some() && self.drag.is_none() {
             self.drag = Some(level);
+        }
+    }
+    fn wheel_by(&mut self, delta: i32, audio: &Audio) {
+        let (steps, rest) = wheel_steps(self.wheel, delta);
+        self.wheel = rest;
+        if steps != 0
+            && matches!(self.mode, Mode::Level)
+            && let Some(level) = self.percent(audio)
+        {
+            self.set_level(step_level(level, steps), audio);
+        }
+    }
+    /// Applies the click or wheel that opened the pill, once the pill and the level it acts on exist.
+    fn apply_input(&mut self, audio: &Audio) {
+        let Some(input) = self.input else {
+            return;
+        };
+        if self.canvas.is_none() || input_waits(self.kind, audio.active(), self.brightness) {
+            return;
+        }
+        self.input = None;
+        match input {
+            Input::Press(y) => {
+                // The pointer is on the edge margin, not the pill, and the button may be up by now: set
+                // the level where it pressed, without a drag.
+                let top = place(self.work, self.kind, self.layout().size).y;
+                if self.percent(audio).is_some() {
+                    self.set_level(level_at(y - top, &self.layout()), audio);
+                }
+            }
+            Input::Wheel(delta) => self.wheel_by(delta, audio),
         }
     }
     fn end_drag(&mut self) {
@@ -854,16 +947,20 @@ pub struct Edges {
     brightness: Option<Brightness>,
 }
 impl Edges {
-    /// Whether Core Audio should run for the volume slider: once the pointer has touched its edge (the
-    /// level is read well inside the show delay), or from the start while a UI Automation client listens.
+    /// Whether Core Audio should run for the volume slider: its pill is open, or a UI Automation client has
+    /// asked for its element (`WM_GETOBJECT`). A pointer passing over the bare strip does not load it.
     pub fn wants_audio(&self) -> bool {
-        self.sliders
-            .iter()
-            .any(|slider| slider.kind == Kind::Volume && slider.touched)
-            // shortcut: a screen reader gets the volume level without hovering first; any UIA client counts.
-            || (self.sliders.iter().any(|slider| slider.kind == Kind::Volume)
-                // SAFETY: a parameterless state query.
-                && unsafe { UiaClientsAreListening() }.as_bool())
+        self.sliders.iter().any(|slider| {
+            slider.kind == Kind::Volume && (slider.queried || slider.canvas.is_some())
+        })
+    }
+    /// Core Audio just started: an open volume pill names the default device it could not know before.
+    pub fn audio_started(&mut self, audio: &Audio) {
+        for slider in &mut self.sliders {
+            if slider.kind == Kind::Volume && slider.canvas.is_some() {
+                slider.set_device(audio.default_name());
+            }
+        }
     }
     /// Creates and removes sliders to match the monitors and settings. A monitor the user switched off
     /// gets none; a changed work area or DPI replaces its sliders.
@@ -920,12 +1017,11 @@ impl Edges {
         while let Some(reading) = self.brightness.as_ref().and_then(Brightness::poll) {
             for slider in &mut self.sliders {
                 if slider.kind == Kind::Brightness && slider.target() == reading.target {
-                    let was = slider.wide();
-                    slider.brightness =
-                        reading.percent.map_or(Reading::Unsupported, Reading::Level);
-                    if slider.canvas.is_some() && was != slider.wide() {
-                        slider.show_pill(graphics, palette); // the note needs the wider window
-                    }
+                    slider.settle(
+                        reading.percent.map_or(Reading::Unsupported, Reading::Level),
+                        graphics,
+                        palette,
+                    );
                 }
             }
         }
@@ -937,10 +1033,14 @@ impl Edges {
                 continue;
             }
             match slider.hover.tick(now, slider.drag.is_some()) {
-                Some(true) => slider.open(graphics, palette, audio),
+                Some(true) => slider.open(graphics, palette, audio, now),
                 Some(false) => slider.close(),
                 None => {}
             }
+            if read_expired(slider.brightness, slider.read_due, now) {
+                slider.settle(Reading::Unsupported, graphics, palette);
+            }
+            slider.apply_input(audio);
             let target = slider.target();
             let read = std::mem::take(&mut slider.read_wanted);
             let write = slider.throttle.take(now);
@@ -950,16 +1050,28 @@ impl Edges {
                 if read {
                     worker.read(target);
                 }
-                if let Some(percent) = write {
-                    worker.write(target, percent);
+                if let Some(percent) = write
+                    && !worker.write(target, percent)
+                    && self.sliders[index].canvas.is_some()
+                {
+                    // The queue was full (a slow monitor): keep the value for the next gap while the pill
+                    // is up, so the last drag position is not lost. A closed pill drops it, never polls.
+                    self.sliders[index].throttle.restore(percent);
                 }
             }
             let slider = &mut self.sliders[index];
             slider.paint(audio);
             slider.publish(audio);
-            for due in [slider.hover.deadline(), slider.throttle.deadline(now)]
-                .into_iter()
-                .flatten()
+            let read_due = slider
+                .read_due
+                .filter(|_| slider.brightness == Reading::Pending);
+            for due in [
+                slider.hover.deadline(),
+                slider.throttle.deadline(now),
+                read_due,
+            ]
+            .into_iter()
+            .flatten()
             {
                 wait = Some(wait.map_or(due, |soonest| soonest.min(due)));
             }
@@ -1216,11 +1328,76 @@ mod tests {
     }
 
     #[test]
-    fn sliders_follow_the_settings_and_each_kind_has_its_own_edge() {
+    fn a_refused_write_is_put_back_and_a_newer_value_still_wins() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let mut throttle = Throttle::default();
+        // The last drag value is taken, the queue is full, so it goes back and is sent after the gap.
+        throttle.push(70);
+        assert_eq!(throttle.take(at(0)), Some(70));
+        throttle.restore(70);
+        assert_eq!(throttle.take(at(100)), None);
+        assert_eq!(throttle.deadline(at(100)), Some(at(200)));
+        assert_eq!(throttle.take(at(200)), Some(70));
+        // A value pushed meanwhile is newer than the refused one and is not overwritten by it.
+        throttle.push(80);
+        throttle.restore(70);
+        assert_eq!(throttle.take(at(400)), Some(80));
+        assert_eq!(throttle.take(at(900)), None);
+    }
+
+    #[test]
+    fn a_click_on_the_bare_strip_shows_the_pill_at_once() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let mut hover = Hover::default();
+        hover.request(at(10));
+        assert_eq!(hover.tick(at(10), false), Some(true));
+        // Shown with the pointer in; leaving still hides it after the usual delay.
+        hover.leave(at(500));
+        assert_eq!(hover.tick(at(1299), false), None);
+        assert_eq!(hover.tick(at(1300), false), Some(false));
+        // A pill that failed to show (state says shown, canvas gone) shows again on the next request.
+        hover.enter(at(2000));
+        assert_eq!(hover.tick(at(2250), false), Some(true));
+        hover.request(at(3000));
+        assert_eq!(hover.tick(at(3000), false), Some(true));
+    }
+
+    #[test]
+    fn a_reading_nobody_answers_becomes_unsupported_on_one_deadline() {
+        let t0 = Instant::now();
+        let due = Some(t0 + READ_LIMIT);
+        let before = t0 + READ_LIMIT - Duration::from_millis(1);
+        assert!(!read_expired(Reading::Pending, due, before));
+        assert!(read_expired(Reading::Pending, due, t0 + READ_LIMIT));
+        // An answer, or no deadline (pill hidden), never expires.
+        assert!(!read_expired(Reading::Level(40), due, t0 + READ_LIMIT * 2));
+        assert!(!read_expired(
+            Reading::Unsupported,
+            due,
+            t0 + READ_LIMIT * 2
+        ));
+        assert!(!read_expired(Reading::Pending, None, t0 + READ_LIMIT * 2));
+    }
+
+    #[test]
+    fn held_input_waits_only_for_a_level_that_is_still_coming() {
+        // Volume waits for Core Audio to start, not for a device it will never find.
+        assert!(input_waits(Kind::Volume, false, Reading::Pending));
+        assert!(!input_waits(Kind::Volume, true, Reading::Pending));
+        // Brightness waits for the reading and drops the input once it says unsupported.
+        assert!(input_waits(Kind::Brightness, true, Reading::Pending));
+        assert!(!input_waits(Kind::Brightness, false, Reading::Level(50)));
+        assert!(!input_waits(Kind::Brightness, false, Reading::Unsupported));
+    }
+
+    #[test]
+    fn sliders_are_off_by_default_follow_the_settings_and_each_kind_has_its_own_edge() {
         let mut settings = Settings::default();
-        assert!(Kind::Volume.enabled(&settings) && Kind::Brightness.enabled(&settings));
-        settings.edge_volume = false;
-        assert!(!Kind::Volume.enabled(&settings) && Kind::Brightness.enabled(&settings));
+        assert!(!Kind::Volume.enabled(&settings) && !Kind::Brightness.enabled(&settings));
+        settings.edge_volume = true;
+        assert!(Kind::Volume.enabled(&settings) && !Kind::Brightness.enabled(&settings));
         assert!(Kind::Volume.right() && !Kind::Brightness.right());
     }
 }

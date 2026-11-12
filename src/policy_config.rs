@@ -41,9 +41,57 @@ pub fn set_default(id: &str) -> Result<()> {
     unsafe {
         let policy: IPolicyConfig = CoCreateInstance(&CLIENT, None, CLSCTX_ALL)?;
         let id = HSTRING::from(id);
-        for role in [eConsole, eMultimedia, eCommunications] {
-            policy.SetDefaultEndpoint(PCWSTR(id.as_ptr()), role).ok()?;
+        switch(|role| policy.SetDefaultEndpoint(PCWSTR(id.as_ptr()), role).ok())
+    }
+}
+
+/// Applies `set` to each role. A failed console role is the failure (nothing changed, so the caller opens
+/// Settings); once it has succeeded the device is switched, and a later role that fails is only logged.
+fn switch(mut set: impl FnMut(ERole) -> Result<()>) -> Result<()> {
+    set(eConsole)?;
+    for (name, role) in [
+        ("multimedia", eMultimedia),
+        ("communications", eCommunications),
+    ] {
+        if let Err(error) = set(role) {
+            eprintln!("Policy config: {name} role: {error}");
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::E_FAIL;
+
+    #[test]
+    fn a_console_success_is_a_switch_even_if_a_later_role_fails() {
+        let mut roles = Vec::new();
+        let done = switch(|role| {
+            roles.push(role);
+            if role == eMultimedia {
+                Err(E_FAIL.into())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(done.is_ok());
+        assert_eq!(
+            roles,
+            [eConsole, eMultimedia, eCommunications],
+            "the later roles are still tried"
+        );
+    }
+
+    #[test]
+    fn a_console_failure_is_returned_and_stops_there() {
+        let mut roles = Vec::new();
+        let done = switch(|role| {
+            roles.push(role);
+            Err(E_FAIL.into())
+        });
+        assert!(done.is_err());
+        assert_eq!(roles, [eConsole]);
+    }
 }

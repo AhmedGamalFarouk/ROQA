@@ -41,8 +41,9 @@ impl Default for Settings {
             diagnostics: None,
             theme: Theme::Classic,
             desktop_only: false,
-            edge_volume: true,
-            edge_brightness: true,
+            // Off until a native run proves the 2 px strips leave edge scrollbars alone; a stored value wins.
+            edge_volume: false,
+            edge_brightness: false,
         }
     }
 }
@@ -197,7 +198,7 @@ mod tests {
     fn defaults_are_the_pre_settings_behaviour_and_already_clamped() {
         let defaults = Settings::default();
         assert!(defaults.dock && defaults.notch && defaults.timer_sound && !defaults.desktop_only);
-        assert!(defaults.edge_volume && defaults.edge_brightness);
+        assert!(!defaults.edge_volume && !defaults.edge_brightness);
         assert_eq!(defaults.shelf_cap, shelf::MAX);
         assert_eq!(defaults.diagnostics, None);
         assert_eq!(defaults.clone().clamped(), defaults);
@@ -368,7 +369,7 @@ mod tests {
             diagnostics: Some("C:\\a=b\\r.json".into()),
             theme: Theme::Midnight,
             desktop_only: true,
-            edge_volume: false,
+            edge_volume: true,
             ..Settings::default()
         };
         let mut text = String::new();
@@ -396,6 +397,18 @@ mod tests {
         // An out-of-range stored value is accepted by `set` and brought into range by `clamped`.
         assert!(s.set("shelfcap", "9999"));
         assert_eq!(s.clamped().shelf_cap, shelf::MAX);
+    }
+
+    #[test]
+    fn edge_sliders_default_off_but_a_stored_choice_is_kept() {
+        let mut stored = Settings::default();
+        // An older store without the keys gets the new default; explicit values survive either way.
+        assert!(!stored.edge_volume && !stored.edge_brightness);
+        assert!(stored.set("edgevol", "1") && stored.set("edgebri", "0"));
+        assert!(stored.edge_volume && !stored.edge_brightness);
+        let mut text = String::new();
+        stored.write_lines(&mut text);
+        assert!(text.contains("edgevol=1\n") && text.contains("edgebri=0\n"));
     }
 
     #[test]

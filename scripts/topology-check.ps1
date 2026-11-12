@@ -1,4 +1,7 @@
-﻿param([Parameter(Mandatory = $true)][string]$ExpectedSha256, [string]$EvidenceDirectory = 'artifacts/m3-topology-1/native-1')
+﻿param([Parameter(Mandatory = $true)][string]$ExpectedSha256, [string]$EvidenceDirectory = 'artifacts/m3-topology-1/native-1',
+    # Edge sliders enabled in the settings of the run: each enabled kind adds one 2 px strip per monitor.
+    # The default is off (settings.rs), which expects the three surfaces per monitor only.
+    [ValidateSet('none', 'volume', 'brightness', 'both')][string]$EdgeSliders = 'none')
 # Passive per-monitor placement check: launches the release build once, reads every ROQA surface
 # against its own monitor, then quits gracefully. No input injection, cursor or foreground changes.
 Set-StrictMode -Version Latest
@@ -88,7 +91,9 @@ try {
     $foreground = [NativeProbe]::GetForegroundWindow()
     Assert-Check ($foreground -ne [IntPtr]::Zero) 'Existing foreground window recorded before launch'
     $hostProcess = Start-Process -FilePath $executable -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $evidence 'runtime.log')
-    $expected = 3 * $monitors.Count
+    $strips = switch ($EdgeSliders) { 'none' { @() } 'volume' { @('ROQA Volume Slider') } 'brightness' { @('ROQA Brightness Slider') } 'both' { @('ROQA Volume Slider', 'ROQA Brightness Slider') } }
+    $perMonitor = 3 + $strips.Count
+    $expected = $perMonitor * $monitors.Count
     $deadline = [DateTime]::UtcNow.AddSeconds(5)
     do {
         $surfaces = [TopologyProbe]::Surfaces([uint32]$hostProcess.Id)
@@ -98,7 +103,7 @@ try {
     } while ([DateTime]::UtcNow -lt $deadline)
     Start-Sleep -Milliseconds 400
     $surfaces = [TopologyProbe]::Surfaces([uint32]$hostProcess.Id)
-    Assert-Check ($surfaces.Count -eq $expected) "Exactly one notch, shadow and dock per monitor ($($surfaces.Count) of $expected)"
+    Assert-Check ($surfaces.Count -eq $expected) "Exactly one notch, shadow and dock per monitor, plus $($strips.Count) edge strip(s) ($($surfaces.Count) of $expected)"
     Assert-Check ([NativeProbe]::GetForegroundWindow() -eq $foreground) 'Launch does not change the foreground window'
     foreach ($m in $monitors) {
         $mine = @($surfaces | Where-Object { [TopologyProbe]::MonitorOf($_) -eq $m.Device })
@@ -111,12 +116,12 @@ try {
             $byTitle[$title] = $rect
             $dpi = [NativeProbe]::GetDpiForWindow($window)
             $record.Surfaces += [ordered]@{ Monitor = $m.Device; Title = $title; Dpi = $dpi; Rect = "$($rect.Left),$($rect.Top),$($rect.Width)x$($rect.Height)" }
-            if ($title -ne 'ROQA Notch Shadow') {
+            if ($title -ne 'ROQA Notch Shadow' -and $title -notlike 'ROQA * Slider') {
                 $name = ($title -replace 'ROQA ', '').ToLowerInvariant()
                 $record.Surfaces[-1].CenterPixel = [NativeProbe]::Capture($window, (Join-Path $evidence "$($m.Device -replace '[\\.]', '')-$name.png"))
             }
         }
-        Assert-Check ($mine.Count -eq 3 -and $byTitle.Count -eq 3) "$($m.Device) owns one notch, shadow and dock"
+        Assert-Check ($mine.Count -eq $perMonitor -and $byTitle.Count -eq $perMonitor) "$($m.Device) owns one notch, shadow and dock and $($strips.Count) edge strip(s)"
         $dpi = [NativeProbe]::GetDpiForWindow($mine[0])
         $notch = $byTitle['ROQA Notch']; $dock = $byTitle['ROQA Dock']; $shadow = $byTitle['ROQA Notch Shadow']
         foreach ($pair in @(@('notch', $notch), @('dock', $dock))) {
@@ -128,6 +133,13 @@ try {
         Assert-Check ($notch.Width -eq (Px 440 $dpi) -and $notch.Height -eq (Px 164 $dpi) -and $notch.Top -eq $work.Top) "$($m.Device) notch is flush with the top at $dpi DPI"
         Assert-Check ($dock.Height -eq (Px 64 $dpi) -and $dock.Bottom -eq ($work.Bottom - (Px 12 $dpi))) "$($m.Device) dock sits above the work-area bottom at $dpi DPI"
         Assert-Check ($shadow.Left -eq $notch.Left -and $shadow.Top -eq $notch.Top -and $shadow.Width -eq $notch.Width -and $shadow.Height -eq $notch.Height) "$($m.Device) shadow follows its notch"
+        # Each strip is 2 DIPs wide on its screen edge (volume right, brightness left) over the work area's middle third.
+        $third = [int][Math]::Floor($work.Height / 3)
+        foreach ($name in $strips) {
+            $strip = $byTitle[$name]
+            $edge = if ($name -eq 'ROQA Volume Slider') { $strip.Right -eq $work.Right } else { $strip.Left -eq $work.Left }
+            Assert-Check ($edge -and $strip.Width -ge 2 -and $strip.Top -eq ($work.Top + $third) -and (Near $strip.Height $third)) "$($m.Device) $name is a thin strip on its edge over the middle third"
+        }
     }
     $hostProcess.Refresh()
     $record.Resources = [ordered]@{ PrivateBytes = $hostProcess.PrivateMemorySize64; Handles = $hostProcess.HandleCount;

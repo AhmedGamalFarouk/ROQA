@@ -22,6 +22,8 @@ use windows::{
 
 /// Posted to the slider HWND by a UIA client's `SetValue`: wParam = the percent, 0 to 100.
 pub const SET: u32 = WM_APP + 8;
+/// Posted to the slider HWND the first time a UIA client asks for its element (`WM_GETOBJECT`).
+pub const QUERIED: u32 = WM_APP + 13;
 
 #[derive(Default)]
 pub struct State {
@@ -44,12 +46,13 @@ pub fn accessibility(hwnd: HWND, state: &Shared) -> Result<Accessibility> {
     if let Ok(mut state) = state.lock() {
         state.hwnd = hwnd.0 as isize;
     }
-    Accessibility::register(
+    Accessibility::register_noticed(
         hwnd,
         Root {
             state: Arc::clone(state),
         }
         .into(),
+        QUERIED,
     )
 }
 

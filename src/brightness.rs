@@ -17,7 +17,7 @@ use windows::Win32::{
 
 /// Thread message that only wakes the host loop; results wait in the channel.
 const WAKE: u32 = WM_APP + 52;
-/// Jobs queued at most; a full queue drops the job (the next throttled write resends the latest).
+/// Jobs queued at most; a full queue drops the job (`write` says so, and the caller keeps the value).
 const QUEUE: usize = 8;
 
 /// A monitor, found again on the worker by a point inside it (an HMONITOR does not outlive a topology change).
@@ -55,9 +55,9 @@ impl Brightness {
     pub fn read(&self, target: Target) {
         let _ = self.jobs.try_send(Job::Read(target));
     }
-    /// Asks for a new level, 0 to 100.
-    pub fn write(&self, target: Target, percent: u8) {
-        let _ = self.jobs.try_send(Job::Write(target, percent));
+    /// Asks for a new level, 0 to 100; `false` when the queue was full and nothing was queued.
+    pub fn write(&self, target: Target, percent: u8) -> bool {
+        self.jobs.try_send(Job::Write(target, percent)).is_ok()
     }
     pub fn poll(&self) -> Option<Reading> {
         self.readings.try_recv().ok()
@@ -139,11 +139,12 @@ fn scale(percent: u8, min: u32, max: u32) -> u32 {
     min + ((span * u64::from(percent.min(100)) + 50) / 100) as u32
 }
 
-/// Runs `action` on the first physical monitor of the display containing `target`, then releases them all.
+/// Runs `action` on every physical monitor of the display containing `target` (a duplicated output has
+/// several), keeps the answers, then releases them all.
 fn with_monitor<T>(
     target: Target,
-    action: impl FnOnce(&PHYSICAL_MONITOR) -> Option<T>,
-) -> Option<T> {
+    mut action: impl FnMut(&PHYSICAL_MONITOR) -> Option<T>,
+) -> Vec<T> {
     // SAFETY: documented dxva2 calls on a monitor handle looked up just now; the physical monitors are
     // destroyed before returning, and the array outlives `action`.
     unsafe {
@@ -155,24 +156,25 @@ fn with_monitor<T>(
             MONITOR_DEFAULTTONULL,
         );
         if monitor.is_invalid() {
-            return None;
+            return Vec::new();
         }
         let mut count = 0;
-        GetNumberOfPhysicalMonitorsFromHMONITOR(monitor, &mut count).ok()?;
-        if count == 0 {
-            return None;
+        if GetNumberOfPhysicalMonitorsFromHMONITOR(monitor, &mut count).is_err() || count == 0 {
+            return Vec::new();
         }
         let mut physical = vec![PHYSICAL_MONITOR::default(); count as usize];
-        GetPhysicalMonitorsFromHMONITOR(monitor, &mut physical).ok()?;
-        let result = action(&physical[0]);
+        if GetPhysicalMonitorsFromHMONITOR(monitor, &mut physical).is_err() {
+            return Vec::new();
+        }
+        let results = physical.iter().filter_map(&mut action).collect();
         if let Err(error) = DestroyPhysicalMonitors(&physical) {
             eprintln!("Brightness: release: {error}");
         }
-        result
+        results
     }
 }
 
-/// `(current, min, max)` raw values, or `None` when the monitor does not answer DDC/CI.
+/// `(current, min, max)` raw values of the first physical monitor that answers DDC/CI, else `None`.
 fn read_raw(target: Target) -> Option<(u32, u32, u32)> {
     with_monitor(target, |monitor| {
         let (mut min, mut current, mut max) = (0, 0, 0);
@@ -182,14 +184,17 @@ fn read_raw(target: Target) -> Option<(u32, u32, u32)> {
         };
         (ok != 0 && max > min).then_some((current, min, max))
     })
+    .into_iter()
+    .next()
 }
 
+/// Writes to every physical monitor of the display; logs when none accepted it.
 fn write_raw(target: Target, value: u32) {
     let written = with_monitor(target, |monitor| {
         // SAFETY: a valid physical-monitor handle and a scalar.
         (unsafe { SetMonitorBrightness(monitor.hPhysicalMonitor, value) } != 0).then_some(())
     });
-    if written.is_none() {
+    if written.is_empty() {
         eprintln!("Brightness: write failed");
     }
 }

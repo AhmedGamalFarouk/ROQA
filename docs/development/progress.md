@@ -960,3 +960,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Idle 15 min (2 monitors):** private 22,519,808 B, 0.243 ms/s, 3.21 switches/s, 30 paints, handles 532, GDI 40, USER 27, threads 19; start-warm 21,827,584 B.
 - **Gates:** private bytes and static CPU PASS (1 run); paints, 3-monitor INCONCLUSIVE; SHA `3CE3511F4398CEA1D674CB7854DE97FF5E236D65A5AC40835E0E58DF53FC757A`.
 - **NOT RUN:** Nectar/Nusa, churn, cold start, input p95, expanded media; reviews paused (REVIEW NOT RUN).
+
+## M5 gate 1 fixes (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `fix/m5-gate-1`; [fixes](m5-gate-1-fixes.md), [review](m5-gate-1-review.md). No native/GUI run.
+- **Done:** I1 sliders off by default, bare-strip click/wheel opens the pill and applies; I2 audio only on an open volume pill or `WM_GETOBJECT`; I3 baseline raise needs a sign-off (`baseline-gate.ps1`), `topology-check.ps1` expects edge strips; M1 refused brightness write restored; M2 2 s pending deadline; M3 all physical monitors; M4 console role decides; M5 limit documented; M6 one power post.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 232 tests, locked release); 925,696 B, baseline unchanged (921,600, within 2%); SHA `46B7E3FB968156ABB5E123F45318502BD43DD41F91A08295D6D58E182BB5D45D`.
+- **NOT RUN:** native hover/strip input, UIA query, DDC, power broadcast, topology/smoke scripts, M5 re-measure on HEAD; reviews paused (REVIEW NOT RUN).

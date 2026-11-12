@@ -1353,11 +1353,20 @@ impl Desktop {
             self.edges.reconcile(&self.monitors, &self.settings);
         }
         let fullscreen = &self.fullscreen;
-        let due = self
+        let covered = |device: &str| fullscreen.iter().any(|(_, covered)| covered == device);
+        let mut due = self
             .edges
-            .refresh(now, &self.audio, &self.graphics, self.palette, |device| {
-                fullscreen.iter().any(|(_, covered)| covered == device)
-            });
+            .refresh(now, &self.audio, &self.graphics, self.palette, covered);
+        if !self.audio.active() && self.edges.wants_audio() {
+            // A volume pill just opened: load Core Audio now (nothing else wakes the next pass) and draw
+            // the pill again with the level.
+            self.audio.start();
+            self.audio.refresh();
+            self.edges.audio_started(&self.audio);
+            due = self
+                .edges
+                .refresh(now, &self.audio, &self.graphics, self.palette, covered);
+        }
         due.map_or(INFINITE, |due| milliseconds_until(due, now))
     }
     /// A mouse or UIA message for an edge slider's window.
@@ -2232,7 +2241,9 @@ impl Desktop {
             return Ok(());
         }
         if message.message == native_window::POWER_STATUS {
-            // Every surface posts one; the second finds the state unchanged and starts nothing.
+            // One thread post however many windows got the broadcast; clear it before reading so a
+            // change during the read posts again.
+            native_window::power_read();
             if self.power.update(power::Raw::read(), Instant::now()) {
                 self.open_notches();
                 self.request_notches(Repaint::Full, |_| true);

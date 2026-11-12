@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{
     mem::size_of,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use windows::Win32::{
     Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
@@ -34,6 +34,18 @@ pub const PANIC_PROBE: u32 = WM_APP + 3;
 pub const DEACTIVATED: u32 = WM_APP + 6;
 /// Posted on a power-status change (plugged in, unplugged, low battery); the host reads the status.
 pub const POWER_STATUS: u32 = WM_APP + 7;
+/// A `POWER_STATUS` post is queued and the host has not read the status yet.
+static POWER_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Sets `flag`; true for the caller that found it clear (and so must post).
+fn claim(flag: &AtomicBool) -> bool {
+    !flag.swap(true, Ordering::AcqRel)
+}
+
+/// The host is about to read the power status: the next broadcast posts again.
+pub fn power_read() {
+    POWER_PENDING.store(false, Ordering::Release);
+}
 pub const CLASS: windows::core::PCWSTR = w!("ROQA.NativeSurface.1");
 /// Explorer broadcasts this registered message to every top-level window when it (re)creates the
 /// taskbar. 0 until registered, and stays 0 if registration fails.
@@ -437,7 +449,12 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
     // SAFETY: callback HWND/parameters come from Windows; no pointer parameters are dereferenced here.
     unsafe {
         if message == WM_POWERBROADCAST && wparam.0 == PBT_APMPOWERSTATUSCHANGE as usize {
-            let _ = PostMessageW(Some(hwnd), POWER_STATUS, WPARAM(0), LPARAM(0));
+            // Every window gets the broadcast: one thread post until the host has read the status.
+            if claim(&POWER_PENDING)
+                && PostMessageW(None, POWER_STATUS, WPARAM(0), LPARAM(0)).is_err()
+            {
+                POWER_PENDING.store(false, Ordering::Release);
+            }
             return LRESULT(1); // TRUE grants the broadcast
         }
         if let Some(reconnect) =
@@ -498,6 +515,17 @@ fn repositions(message: u32, wparam: WPARAM, taskbar_created: u32) -> Option<boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn one_power_post_serves_every_window_until_the_host_reads() {
+        let pending = AtomicBool::new(false);
+        // Many windows get the same broadcast: only the first posts.
+        let posts = (0..6).filter(|_| claim(&pending)).count();
+        assert_eq!(posts, 1);
+        // After the host reads, the next change posts again, once.
+        pending.store(false, Ordering::Release);
+        assert!(claim(&pending) && !claim(&pending));
+    }
+
     #[test]
     fn repositions_on_display_resume_and_taskbar_recreation_and_only_the_last_two_reconnect() {
         let taskbar = 0xC123;
