@@ -1,30 +1,31 @@
-//! The settings window (M5 S7): a modeless standard-control window in the `picker.rs` style, created on
-//! demand and destroyed on close. Standard checkboxes, edits and buttons give tab order, mnemonics, Narrator
-//! and text scaling by default. It owns no timer or thread: it exists only while open and does work only in
-//! the message loop turns its own controls cause. A change is handed to the host (`take_change`) which applies
-//! it live; a timer request likewise (`take_start`).
+//! The settings window: a sidebar of pages and a card pane, built from the `PAGES` table (one loop creates the
+//! controls, one lays them out, `commit`/`show` read and write them by id). Standard child controls give tab
+//! order, mnemonics, Narrator and text scaling; only the background, cards and sidebar are drawn here, in GDI
+//! with stock objects. It owns no timer or thread: it exists only while open and does work only in the message
+//! loop turns its own controls cause. A change goes to the host (`take_change`) which applies it live; a timer
+//! request likewise (`take_start`).
 
 use crate::{
-    dock::{Button, foreground_key, restore_foreground},
-    layout::Bounds,
+    dock::{foreground_key, restore_foreground},
     layout::DockStyle,
     native_window,
-    picker::{ACTION, CLOSE, DIALOG_STYLE, RELAYOUT, SCROLL, control, empty_dialog, wide},
+    picker::{
+        ACTION, CLOSE, DIALOG_STYLE, RELAYOUT, SCROLL, control, dialog_proc, empty_dialog, wide,
+    },
     picker_font::PickerFont,
     prayer::Method,
     prayer_os,
     prayer_tab::{self, LEADS, SILENT},
     settings::{MAX_OFF, MAX_PATH, Settings, parse_timer},
-    shelf,
-    tabs::Tab,
     theme::Theme,
     weather::{MAX_CITY, Units},
     window_model::WindowKey,
 };
+use std::cell::RefCell;
 use windows::{
     Win32::{
-        Foundation::{E_FAIL, HWND, LPARAM, POINT, RECT, WPARAM},
-        Graphics::Gdi::ClientToScreen,
+        Foundation::{COLORREF, HWND, LPARAM, POINT, RECT, WPARAM},
+        Graphics::{Dwm::DwmGetColorizationColor, Gdi::*},
         UI::{
             Controls::*,
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow},
@@ -32,7 +33,7 @@ use windows::{
             WindowsAndMessaging::*,
         },
     },
-    core::{Error, PCWSTR, Result, w},
+    core::{BOOL, PCWSTR, Result, w},
 };
 
 const PIN: usize = 140;
@@ -41,44 +42,49 @@ const LATER: usize = 142;
 const DOCK: usize = 100;
 const NOTCH: usize = 101;
 const SOUND: usize = 102;
-const DESKTOP: usize = 111;
-const EDGE_VOLUME: usize = 112;
-const EDGE_BRIGHTNESS: usize = 113;
-/// One checkbox per notch tab (`Tab::ALL` order), then the mascot eyes and the privacy dots.
-const TAB: usize = 150;
-const EYES: usize = TAB + 6;
-const PRIVACY: usize = TAB + 7;
-/// The weather city, the device-location checkbox and the units list.
-const CITY: usize = 114;
-const DETECT: usize = 115;
-const UNITS: usize = 116;
-const DOCKSTYLE: usize = 117;
-/// One checkbox per dock button (`dock::Button::ALL` order).
-const DBTN: usize = 130;
-/// The prayer reminder checkbox, method list, sound list with Browse and Test, and the heads-up list.
-const PRAYER: usize = 160;
-const PMETHOD: usize = 161;
-const PSOUND: usize = 162;
-const PBROWSE: usize = 163;
-const PTEST: usize = 164;
-const PLEAD: usize = 165;
-/// The Limits tab: may ROQA run codex and agy, the Antigravity group list and the statusline snippet.
-const LIMCODEX: usize = 166;
-const LIMAGY: usize = 167;
-const LIMGROUP: usize = 168;
-const LIMSNIP: usize = 169;
 const SHELF: usize = 103;
-const THEME: usize = 110;
 const DIAGNOSTICS: usize = 104;
 const TIMER: usize = 105;
 const START: usize = 106;
 const STATUS: usize = 107;
 const RESET: usize = 108;
 const LABEL: usize = 109;
+const THEME: usize = 110;
+const DESKTOP: usize = 111;
+const EDGE_VOLUME: usize = 112;
+const EDGE_BRIGHTNESS: usize = 113;
+const CITY: usize = 114;
+const DETECT: usize = 115;
+const UNITS: usize = 116;
+const DOCKSTYLE: usize = 117;
+const CAPTION: usize = 119;
 const MONITOR: usize = 120;
+/// One checkbox per dock button (`dock::Button::ALL` order).
+const DBTN: usize = 130;
+/// One checkbox per notch tab (`Tab::ALL` order), then the mascot eyes and the privacy dots.
+const TAB: usize = 150;
+const EYES: usize = TAB + 6;
+const PRIVACY: usize = TAB + 7;
+const PRAYER: usize = 160;
+const PMETHOD: usize = 161;
+const PSOUND: usize = 162;
+const PBROWSE: usize = 163;
+const PTEST: usize = 164;
+const PLEAD: usize = 165;
+const LIMCODEX: usize = 166;
+const LIMAGY: usize = 167;
+const LIMGROUP: usize = 168;
+const LIMSNIP: usize = 169;
+const SIDE: usize = 98;
 const OK: usize = 1;
+/// `SS_CENTERIMAGE | SS_NOTIFY`: the footer strip centres its text and takes clicks, so scrolled rows cannot be hit under it.
+const SS_CENTERIMAGE_NOTIFY: u32 = 0x300;
 /// Timer length shown when the window opens.
 const FIRST_TIMER: &str = "5";
+/// DIPs: sidebar width, content gutter, footer strip, design client size.
+const SIDE_W: i32 = 192;
+const GUTTER: i32 = 22;
+const FOOT: i32 = 44;
 
 /// What the Settings window asks the host to do with the prayer sound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,60 +93,282 @@ pub enum SoundAction {
     Test,
 }
 
+/// How a row's control looks: the title is its accessible name (the checkbox text, or the label before it).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Check,
+    /// A drop-down list of this many DIPs wide.
+    Combo(i32),
+    Edit(i32),
+    /// A push button; the row caption is the text on its left.
+    Btn,
+    /// Text only.
+    Note,
+}
+struct Row {
+    id: usize,
+    kind: Kind,
+    title: &'static str,
+    caption: &'static str,
+}
+struct Card {
+    label: &'static str,
+    rows: &'static [Row],
+}
+struct Page {
+    name: &'static str,
+    cards: &'static [Card],
+}
+const fn r(id: usize, kind: Kind, title: &'static str, caption: &'static str) -> Row {
+    Row {
+        id,
+        kind,
+        title,
+        caption,
+    }
+}
+const C: Kind = Kind::Check;
+
+/// Every setting appears once, in tab order. Monitors are added at runtime after `NOTCH`.
+const PAGES: &[Page] = &[
+    Page {
+        name: "General",
+        cards: &[
+            Card {
+                label: "Show ROQA",
+                rows: &[
+                    r(DOCK, C, "Show the &dock", ""),
+                    r(NOTCH, C, "Show the &notch", ""),
+                ],
+            },
+            Card {
+                label: "Windows",
+                rows: &[r(DESKTOP, C, "Show only windows on this des&ktop", "")],
+            },
+        ],
+    },
+    Page {
+        name: "Appearance",
+        cards: &[
+            Card {
+                label: "Colours",
+                rows: &[r(THEME, Kind::Combo(170), "T&heme", "")],
+            },
+            Card {
+                label: "Dock",
+                rows: &[r(DOCKSTYLE, Kind::Combo(170), "Dock st&yle", "")],
+            },
+        ],
+    },
+    Page {
+        name: "Notch",
+        cards: &[
+            Card {
+                label: "Tabs",
+                rows: &[
+                    r(TAB, C, "&Media tab", ""),
+                    r(TAB + 1, C, "&Weather tab", ""),
+                    r(TAB + 2, C, "Prayer tab", ""),
+                    r(TAB + 3, C, "Timer ta&b", ""),
+                    r(TAB + 4, C, "Shelf ta&b", ""),
+                    r(TAB + 5, C, "Limits tab", ""),
+                ],
+            },
+            Card {
+                label: "In the notch",
+                rows: &[
+                    r(EYES, C, "Mascot e&yes", ""),
+                    r(PRIVACY, C, "Privacy &indicator", ""),
+                ],
+            },
+            Card {
+                label: "Timer",
+                rows: &[
+                    r(SOUND, C, "Play a s&ound when a timer finishes", ""),
+                    r(
+                        TIMER,
+                        Kind::Edit(120),
+                        "&Timer length",
+                        "Minutes, m:ss or h:mm:ss",
+                    ),
+                    r(START, Kind::Btn, "St&art timer", ""),
+                ],
+            },
+            Card {
+                label: "Shelf",
+                rows: &[r(SHELF, Kind::Edit(70), "Shel&f size", "Entries kept")],
+            },
+        ],
+    },
+    Page {
+        name: "Dock & edges",
+        cards: &[
+            Card {
+                label: "Dock buttons",
+                rows: &[
+                    r(DBTN, C, "Start butto&n", ""),
+                    r(DBTN + 1, C, "Searc&h button", ""),
+                    r(DBTN + 2, C, "Task Vie&w button", ""),
+                    r(DBTN + 3, C, "Minimized apps &list", ""),
+                    r(DBTN + 4, C, "Show deskto&p strip", ""),
+                ],
+            },
+            Card {
+                label: "Screen edges",
+                rows: &[
+                    r(
+                        EDGE_VOLUME,
+                        C,
+                        "&Volume slider on the right screen edge",
+                        "",
+                    ),
+                    r(
+                        EDGE_BRIGHTNESS,
+                        C,
+                        "&Brightness slider on the left screen edge",
+                        "",
+                    ),
+                ],
+            },
+            Card {
+                label: "Pinned apps",
+                rows: &[
+                    r(PIN, Kind::Combo(200), "Pinned apps", ""),
+                    r(EARLIER, Kind::Btn, "Move pin &earlier", ""),
+                    r(LATER, Kind::Btn, "Move pin &later", ""),
+                ],
+            },
+        ],
+    },
+    Page {
+        name: "Weather",
+        cards: &[
+            Card {
+                label: "Location",
+                rows: &[
+                    r(DETECT, C, "Detect location a&utomatically", ""),
+                    r(CITY, Kind::Edit(200), "Weather c&ity", "Empty is none"),
+                ],
+            },
+            Card {
+                label: "Units",
+                rows: &[r(UNITS, Kind::Combo(170), "Temperature units", "")],
+            },
+        ],
+    },
+    Page {
+        name: "Prayer",
+        cards: &[
+            Card {
+                label: "Reminders",
+                rows: &[
+                    r(PRAYER, C, "Prayer &reminders", ""),
+                    r(PMETHOD, Kind::Combo(230), "Prayer method", ""),
+                    r(PLEAD, Kind::Combo(170), "Heads-up before the prayer", ""),
+                ],
+            },
+            Card {
+                label: "Sound",
+                rows: &[
+                    r(PSOUND, Kind::Combo(230), "Prayer sound", ""),
+                    r(PBROWSE, Kind::Btn, "Bro&wse...", "Choose a sound file"),
+                    r(PTEST, Kind::Btn, "Te&st sound", "Play it once"),
+                ],
+            },
+        ],
+    },
+    Page {
+        name: "Limits",
+        cards: &[
+            Card {
+                label: "Permissions",
+                rows: &[
+                    r(LIMCODEX, C, "Run codex on Refresh", ""),
+                    r(LIMAGY, C, "Run agy on Refresh", ""),
+                ],
+            },
+            Card {
+                label: "Display",
+                rows: &[r(
+                    LIMGROUP,
+                    Kind::Combo(240),
+                    "Antigravity limits to show",
+                    "",
+                )],
+            },
+            Card {
+                label: "Claude Code",
+                rows: &[r(
+                    LIMSNIP,
+                    Kind::Edit(220),
+                    "Statusline command",
+                    "Optional: copy into settings.json",
+                )],
+            },
+        ],
+    },
+    Page {
+        name: "About",
+        cards: &[
+            Card {
+                label: "Diagnostics",
+                rows: &[r(
+                    DIAGNOSTICS,
+                    Kind::Edit(220),
+                    "Dia&gnostics report file",
+                    "Empty is off",
+                )],
+            },
+            Card {
+                label: "Reset",
+                rows: &[r(
+                    RESET,
+                    Kind::Btn,
+                    "&Reset to defaults",
+                    "Every setting returns to its default",
+                )],
+            },
+            Card {
+                label: "ROQA",
+                rows: &[r(
+                    LABEL,
+                    Kind::Note,
+                    concat!("ROQA ", env!("CARGO_PKG_VERSION")),
+                    "",
+                )],
+            },
+        ],
+    },
+];
+/// One flat tile colour per sidebar page.
+const TILES: [u32; 8] = [
+    0x8e8e93, 0xaf52de, 0x0a84ff, 0x30b0c7, 0xff9f0a, 0x30c85e, 0xff453a, 0x636366,
+];
+
+struct Item {
+    id: usize,
+    kind: Kind,
+    page: u8,
+    card: u8,
+    /// The control, its label and its caption: a null handle is absent.
+    h: HWND,
+    label: HWND,
+    cap: HWND,
+}
+
 pub struct SettingsWindow {
     window: HWND,
-    pin_label: HWND,
-    pins: HWND,
-    earlier: HWND,
-    later: HWND,
+    side: HWND,
+    status: HWND,
+    close: HWND,
+    items: Vec<Item>,
+    page: usize,
     move_pin: Option<(usize, bool)>,
-    dock: HWND,
-    notch: HWND,
-    sound: HWND,
-    /// "Show only windows on this desktop".
-    desktop: HWND,
-    /// The volume (right) and brightness (left) edge sliders.
-    edge_volume: HWND,
-    edge_brightness: HWND,
-    /// "Media tab" and so on, in `Tab::ALL` order, and "Mascot eyes".
-    tabs: [HWND; 6],
-    eyes: HWND,
-    privacy: HWND,
-    city: HWND,
-    detect: HWND,
-    /// Drop-down list of `Units::ALL`, in that order.
-    units: HWND,
-    /// Drop-down list of `DockStyle::ALL`.
-    dock_style: HWND,
-    dock_buttons: [HWND; 5],
-    prayer: HWND,
-    /// Drop-down list of `Method::ALL`.
-    pmethod: HWND,
-    /// Drop-down list: row 0 is silent, then `sounds` in order.
-    psound: HWND,
-    pbrowse: HWND,
-    ptest: HWND,
-    /// Drop-down list of `LEADS`.
-    plead: HWND,
-    limcodex: HWND,
-    limagy: HWND,
-    /// Drop-down list: the Antigravity group to show.
-    limgroup: HWND,
-    /// Read-only, selectable: the statusline command to paste into Claude Code's settings.
-    limsnip: HWND,
+    /// The connected monitors' GDI devices (at most `MAX_OFF`); monitor `n` is the checkbox `MONITOR + n`.
+    devices: Vec<String>,
     /// The audio files found (and the chosen one if it is elsewhere), full paths.
     sounds: Vec<String>,
     sound_action: Option<SoundAction>,
-    /// Drop-down list of `Theme::ALL`, in that order.
-    theme: HWND,
-    /// One checkbox per connected monitor (at most `MAX_OFF`), named by its GDI device.
-    monitors: Vec<(HWND, String)>,
-    shelf: HWND,
-    diagnostics: HWND,
-    timer: HWND,
-    status: HWND,
-    /// Every other child, in tab order, for the font and the layout.
-    others: Vec<HWND>,
     font: Option<PickerFont>,
     factor: f64,
     scroll: i32,
@@ -151,6 +379,236 @@ pub struct SettingsWindow {
     start: Option<u64>,
     return_to: Option<WindowKey>,
     closed: bool,
+}
+
+/// Colours as 0xRRGGBB.
+#[derive(Clone, Copy)]
+struct Pal {
+    side: u32,
+    content: u32,
+    card: u32,
+    line: u32,
+    sel: u32,
+    text: u32,
+    dim: u32,
+    accent: u32,
+}
+
+/// What `WM_ERASEBKGND` draws: the page title, section labels and cards, in client coordinates.
+struct Paint {
+    pal: Pal,
+    scale: f64,
+    font: HFONT,
+    title_font: HFONT,
+    title: (RECT, &'static str),
+    labels: Vec<(RECT, &'static str)>,
+    /// A card and the y of each divider inside it.
+    cards: Vec<(RECT, Vec<i32>)>,
+}
+thread_local! {
+    static PAINT: RefCell<Option<Paint>> = const { RefCell::new(None) };
+}
+
+fn rgb(value: u32) -> COLORREF {
+    COLORREF((value & 0xff) << 16 | value & 0xff00 | value >> 16 & 0xff)
+}
+
+/// The system accent, or the reference green when it cannot be read.
+fn accent() -> u32 {
+    let (mut colour, mut opaque) = (0u32, BOOL(0));
+    // SAFETY: fills two local scalars.
+    match unsafe { DwmGetColorizationColor(&mut colour, &mut opaque) } {
+        Ok(()) => colour & 0xff_ffff,
+        Err(_) => 0x30c85e,
+    }
+}
+
+fn palette() -> Pal {
+    Pal {
+        side: 0xececef,
+        content: 0xf6f6f8,
+        card: 0xffffff,
+        line: 0xe4e4e8,
+        sel: 0xffffff,
+        text: 0x16171a,
+        dim: 0x6a6b72,
+        accent: accent(),
+    }
+}
+
+/// A fill in one colour: the stock DC brush and pen carry it, so nothing is created or leaked.
+unsafe fn round(dc: HDC, r: RECT, radius: i32, fill: u32, line: u32) {
+    // SAFETY: stock objects on the caller's live DC.
+    unsafe {
+        SetDCBrushColor(dc, rgb(fill));
+        SetDCPenColor(dc, rgb(line));
+        SelectObject(dc, GetStockObject(DC_BRUSH));
+        SelectObject(dc, GetStockObject(DC_PEN));
+        let _ = RoundRect(dc, r.left, r.top, r.right, r.bottom, radius * 2, radius * 2);
+    }
+}
+
+unsafe fn fill(dc: HDC, r: RECT, colour: u32) {
+    // SAFETY: stock brush on the caller's live DC.
+    unsafe {
+        SetDCBrushColor(dc, rgb(colour));
+        FillRect(dc, &r, HBRUSH(GetStockObject(DC_BRUSH).0));
+    }
+}
+
+unsafe fn write(dc: HDC, text: &str, mut r: RECT, colour: u32, flags: DRAW_TEXT_FORMAT) {
+    let mut text: Vec<u16> = text.encode_utf16().collect();
+    // SAFETY: draws a local buffer into the caller's live DC.
+    unsafe {
+        SetTextColor(dc, rgb(colour));
+        DrawTextW(
+            dc,
+            &mut text,
+            &mut r,
+            flags | DT_NOPREFIX | DT_SINGLELINE | DT_VCENTER,
+        );
+    }
+}
+
+fn paint(dc: HDC, window: HWND, p: &Paint) {
+    let px = |v: i32| (v as f64 * p.scale).round() as i32;
+    let mut client = RECT::default();
+    // SAFETY: our own live window and the DC Windows gave this message.
+    unsafe {
+        let _ = GetClientRect(window, &mut client);
+        fill(dc, client, p.pal.content);
+        fill(
+            dc,
+            RECT {
+                right: px(SIDE_W),
+                ..client
+            },
+            p.pal.side,
+        );
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, p.title_font.into());
+        write(dc, p.title.1, p.title.0, p.pal.text, DT_LEFT);
+        SelectObject(dc, p.font.into());
+        for (rect, text) in &p.labels {
+            write(dc, text, *rect, p.pal.dim, DT_LEFT);
+        }
+        for (rect, lines) in &p.cards {
+            round(dc, *rect, px(10), p.pal.card, p.pal.line);
+            for &y in lines {
+                let line = RECT {
+                    left: rect.left + px(14),
+                    top: y,
+                    right: rect.right - px(14),
+                    bottom: y + 1,
+                };
+                fill(dc, line, p.pal.line);
+            }
+        }
+    }
+}
+
+/// A sidebar row: the selected one is a lighter rounded fill, each page has a flat coloured tile with its initial.
+fn draw_side(item: &DRAWITEMSTRUCT, p: &Paint) {
+    let px = |v: i32| (v as f64 * p.scale).round() as i32;
+    let Some(page) = PAGES.get(item.itemID as usize) else {
+        return;
+    };
+    let (dc, row) = (item.hDC, item.rcItem);
+    let cell = RECT {
+        left: row.left + px(8),
+        top: row.top + px(2),
+        right: row.right - px(8),
+        bottom: row.bottom - px(2),
+    };
+    let tile = RECT {
+        left: cell.left + px(8),
+        top: cell.top + (cell.bottom - cell.top - px(20)) / 2,
+        right: cell.left + px(28),
+        bottom: cell.top + (cell.bottom - cell.top - px(20)) / 2 + px(20),
+    };
+    // SAFETY: the DC and rectangle come from this owner-draw message.
+    unsafe {
+        fill(dc, row, p.pal.side);
+        if item.itemState.0 & ODS_SELECTED.0 != 0 {
+            round(dc, cell, px(8), p.pal.sel, p.pal.sel);
+        }
+        if item.itemState.0 & ODS_FOCUS.0 != 0 {
+            round(
+                dc,
+                cell,
+                px(8),
+                if item.itemState.0 & ODS_SELECTED.0 != 0 {
+                    p.pal.sel
+                } else {
+                    p.pal.side
+                },
+                p.pal.accent,
+            );
+        }
+        round(
+            dc,
+            tile,
+            px(5),
+            TILES[item.itemID as usize % 8],
+            TILES[item.itemID as usize % 8],
+        );
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, p.font.into());
+        let initial = &page.name[..1];
+        write(dc, initial, tile, 0xffffff, DT_CENTER);
+        let name = RECT {
+            left: tile.right + px(12),
+            right: cell.right,
+            ..cell
+        };
+        write(dc, page.name, name, p.pal.text, DT_LEFT);
+    }
+}
+
+/// Dialog procedure: the settings colours, background and sidebar rows; everything else is the shared one.
+unsafe extern "system" fn settings_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> isize {
+    let handled = PAINT.with(|cell| {
+        let guard = cell.try_borrow().ok()?;
+        let p = guard.as_ref()?;
+        match message {
+            WM_ERASEBKGND => {
+                paint(HDC(wparam.0 as *mut _), hwnd, p);
+                Some(1)
+            }
+            WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+                let dc = HDC(wparam.0 as *mut _);
+                // SAFETY: the DC is the one this message carries; the child is live.
+                unsafe {
+                    let (text, back) = match GetDlgCtrlID(HWND(lparam.0 as *mut _)) as usize {
+                        STATUS => (p.pal.dim, p.pal.content),
+                        SIDE => (p.pal.text, p.pal.side),
+                        CAPTION => (p.pal.dim, p.pal.card),
+                        _ => (p.pal.text, p.pal.card),
+                    };
+                    SetTextColor(dc, rgb(text));
+                    SetBkColor(dc, rgb(back));
+                    SetDCBrushColor(dc, rgb(back));
+                    Some(GetStockObject(DC_BRUSH).0 as isize)
+                }
+            }
+            WM_DRAWITEM => {
+                // SAFETY: for WM_DRAWITEM lparam is a DRAWITEMSTRUCT that lives through this call.
+                draw_side(unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) }, p);
+                Some(1)
+            }
+            _ => None,
+        }
+    });
+    match handled {
+        Some(result) => result,
+        // SAFETY: forwards the same arguments to the shared dialog procedure.
+        None => unsafe { dialog_proc(hwnd, message, wparam, lparam) },
+    }
 }
 
 /// A combo row kept inside `len` items; `CB_ERR` (no selection) becomes the first row.
@@ -184,70 +642,91 @@ fn checked(control: HWND) -> bool {
     // SAFETY: scalar query of our own checkbox.
     unsafe { SendMessageW(control, BM_GETCHECK, None, None) }.0 == 1
 }
-
 fn set_checked(control: HWND, on: bool) {
     // SAFETY: scalar message to our own checkbox.
     unsafe {
         SendMessageW(control, BM_SETCHECK, Some(WPARAM(usize::from(on))), None);
     }
 }
-
 fn text(control: HWND, capacity: usize) -> String {
     let mut buffer = vec![0u16; capacity + 1];
     // SAFETY: our own edit control; Windows writes at most the provided slice capacity.
     let length = unsafe { GetWindowTextW(control, &mut buffer) }.max(0) as usize;
     String::from_utf16_lossy(&buffer[..length])
 }
-
 fn set_text(control: HWND, value: &str) -> Result<()> {
     let value = wide(value);
     // SAFETY: the control synchronously copies the terminated string.
     unsafe { SetWindowTextW(control, PCWSTR(value.as_ptr())) }
 }
 
+/// The boolean setting a checkbox id stands for (monitors are not one: they are per device).
+fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
+    Some(match id {
+        DOCK => &mut s.dock,
+        NOTCH => &mut s.notch,
+        SOUND => &mut s.timer_sound,
+        DESKTOP => &mut s.desktop_only,
+        EDGE_VOLUME => &mut s.edge_volume,
+        EDGE_BRIGHTNESS => &mut s.edge_brightness,
+        EYES => &mut s.eyes,
+        PRIVACY => &mut s.privacy,
+        DETECT => &mut s.detect,
+        PRAYER => &mut s.prayer_remind,
+        LIMCODEX => &mut s.limits_codex,
+        LIMAGY => &mut s.limits_agy,
+        TAB..=159 if id - TAB < 6 => &mut s.tabs[id - TAB],
+        DBTN..=134 => &mut s.dock_buttons.shown[id - DBTN],
+        _ => return None,
+    })
+}
+/// The row of `all` that `now` is (the first row when it is not listed).
+fn row_of<T: PartialEq>(all: &[T], now: &T) -> usize {
+    all.iter().position(|x| x == now).unwrap_or(0)
+}
+/// Sets `slot` to the row `row` of `all`; nothing chosen or out of range keeps it.
+fn pick<T: Copy>(all: &[T], slot: &mut T, row: Option<usize>) {
+    if let Some(v) = row.and_then(|i| all.get(i)) {
+        *slot = *v;
+    }
+}
+/// The rows of a drop-down list that a table row names.
+fn combo_rows(id: usize) -> Vec<String> {
+    let names = |it: &mut dyn Iterator<Item = &'static str>| it.map(str::to_owned).collect();
+    match id {
+        THEME => names(&mut Theme::ALL.iter().map(|t| t.label())),
+        DOCKSTYLE => names(&mut DockStyle::ALL.iter().map(|s| s.label())),
+        UNITS => names(&mut Units::ALL.iter().map(|u| u.label())),
+        PMETHOD => names(&mut Method::ALL.iter().map(|m| m.label())),
+        PLEAD => LEADS
+            .iter()
+            .map(|&l| {
+                if l == 0 {
+                    "Off".to_owned()
+                } else {
+                    format!("{l} minutes before")
+                }
+            })
+            .collect(),
+        LIMGROUP => names(&mut ["Gemini models", "Claude and GPT models"].into_iter()),
+        _ => Vec::new(),
+    }
+}
+
 impl SettingsWindow {
     pub fn create(current: &Settings, devices: &[String], factor: f64) -> Result<Self> {
-        let window = empty_dialog(480, 300)?;
+        let window = empty_dialog(480, 300, Some(settings_proc))?;
         let mut this = Self {
             window,
-            pin_label: HWND::default(),
-            pins: HWND::default(),
-            earlier: HWND::default(),
-            later: HWND::default(),
+            side: HWND::default(),
+            status: HWND::default(),
+            close: HWND::default(),
+            items: Vec::new(),
+            page: 0,
             move_pin: None,
-            dock: HWND::default(),
-            notch: HWND::default(),
-            sound: HWND::default(),
-            desktop: HWND::default(),
-            edge_volume: HWND::default(),
-            edge_brightness: HWND::default(),
-            tabs: [HWND::default(); 6],
-            eyes: HWND::default(),
-            privacy: HWND::default(),
-            city: HWND::default(),
-            detect: HWND::default(),
-            units: HWND::default(),
-            dock_style: HWND::default(),
-            dock_buttons: [HWND::default(); 5],
-            prayer: HWND::default(),
-            pmethod: HWND::default(),
-            psound: HWND::default(),
-            pbrowse: HWND::default(),
-            ptest: HWND::default(),
-            plead: HWND::default(),
-            limcodex: HWND::default(),
-            limagy: HWND::default(),
-            limgroup: HWND::default(),
-            limsnip: HWND::default(),
+            devices: devices.iter().take(MAX_OFF).cloned().collect(),
             sounds: prayer_os::discover(),
             sound_action: None,
-            theme: HWND::default(),
-            monitors: Vec::new(),
-            shelf: HWND::default(),
-            diagnostics: HWND::default(),
-            timer: HWND::default(),
-            status: HWND::default(),
-            others: Vec::new(),
             font: None,
             factor,
             scroll: 0,
@@ -258,7 +737,7 @@ impl SettingsWindow {
             return_to: foreground_key(),
             closed: false,
         };
-        this.build(devices)?;
+        this.build()?;
         this.fill_sounds(&current.prayer_sound);
         this.show(current);
         this.relayout()?;
@@ -267,95 +746,194 @@ impl SettingsWindow {
             SetWindowTextW(window, w!("ROQA settings"))?;
             let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
             if SetForegroundWindow(window).as_bool() {
-                SetFocus(Some(this.dock))?;
+                SetFocus(Some(this.side))?;
             }
         }
         Ok(this)
     }
 
+    fn h(&self, id: usize) -> HWND {
+        self.items
+            .iter()
+            .find(|i| i.id == id)
+            .map_or(HWND::default(), |i| i.h)
+    }
+
     pub fn set_pins(&self, names: &[String], selected: usize) {
+        let pins = self.h(PIN);
         // SAFETY: synchronous string copies to our own native combo box.
         unsafe {
-            SendMessageW(self.pins, CB_RESETCONTENT, None, None);
-            for name in names {
-                let name = wide(name);
-                SendMessageW(
-                    self.pins,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(name.as_ptr() as isize)),
-                );
-            }
-            SendMessageW(
-                self.pins,
-                CB_SETCURSEL,
-                Some(WPARAM(clamp_selection(selected as isize, names.len()))),
-                None,
-            );
+            SendMessageW(pins, CB_RESETCONTENT, None, None);
         }
+        for name in names {
+            add_row(pins, name);
+        }
+        select(pins, Some(clamp_selection(selected as isize, names.len())));
     }
     /// The pin combo's current row (0 when none), so a refresh keeps the user's place.
     pub fn pin_selection(&self) -> usize {
-        // SAFETY: synchronous query of our own combo box.
-        let row = unsafe { SendMessageW(self.pins, CB_GETCURSEL, None, None) }.0;
-        clamp_selection(row, usize::MAX)
+        clamp_selection(
+            chosen_row(self.h(PIN)).map_or(-1, |r| r as isize),
+            usize::MAX,
+        )
     }
     /// Selects pin row `row` (kept inside the list), so the next refresh keeps it.
     pub fn select_pin(&self, row: usize) {
-        // SAFETY: synchronous queries and selection on our own combo box.
-        unsafe {
-            let count = SendMessageW(self.pins, CB_GETCOUNT, None, None).0;
-            let row = clamp_selection(row as isize, count.max(0) as usize);
-            SendMessageW(self.pins, CB_SETCURSEL, Some(WPARAM(row)), None);
-        }
+        let pins = self.h(PIN);
+        // SAFETY: synchronous query of our own combo box.
+        let count = unsafe { SendMessageW(pins, CB_GETCOUNT, None, None) }.0;
+        select(
+            pins,
+            Some(clamp_selection(row as isize, count.max(0) as usize)),
+        );
     }
     pub fn take_move(&mut self) -> Option<(usize, bool)> {
         self.move_pin.take()
     }
+
+    /// One control row: the label before its control and the caption after it keep the tab and reading order.
+    fn add(
+        &self,
+        id: usize,
+        kind: Kind,
+        title: &str,
+        caption: &str,
+        page: usize,
+        card: usize,
+    ) -> Result<Item> {
+        let window = self.window;
+        let (tab, clip, flat) = (WS_TABSTOP.0, WS_CLIPSIBLINGS.0, WINDOW_EX_STYLE(0));
+        let stat = |text: &str, id: usize| {
+            control(window, w!("Static"), text, id, clip, WS_EX_NOPARENTNOTIFY)
+        };
+        let none = HWND::default();
+        let (mut label, mut cap) = (none, none);
+        let tall = !caption.is_empty() && kind != Kind::Btn;
+        let h = match kind {
+            Kind::Check => control(
+                window,
+                w!("Button"),
+                title,
+                id,
+                BS_AUTOCHECKBOX as u32 | tab | clip | if tall { BS_TOP as u32 } else { 0 },
+                flat,
+            )?,
+            Kind::Combo(_) => {
+                label = stat(title, LABEL)?;
+                control(
+                    window,
+                    w!("ComboBox"),
+                    "",
+                    id,
+                    CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | tab | clip,
+                    flat,
+                )?
+            }
+            Kind::Edit(_) => {
+                label = stat(title, LABEL)?;
+                let extra = match id {
+                    SHELF => ES_NUMBER as u32,
+                    LIMSNIP => ES_READONLY as u32,
+                    _ => 0,
+                };
+                let initial = match id {
+                    TIMER => FIRST_TIMER,
+                    LIMSNIP => crate::limits::SNIPPET,
+                    _ => "",
+                };
+                control(
+                    window,
+                    w!("Edit"),
+                    initial,
+                    id,
+                    ES_AUTOHSCROLL as u32 | WS_BORDER.0 | tab | clip | extra,
+                    WS_EX_CLIENTEDGE,
+                )?
+            }
+            Kind::Btn => {
+                if !caption.is_empty() {
+                    label = stat(caption, LABEL)?;
+                }
+                control(window, w!("Button"), title, id, tab | clip, flat)?
+            }
+            Kind::Note => {
+                label = stat(title, LABEL)?;
+                none
+            }
+        };
+        if tall {
+            cap = stat(caption, CAPTION)?;
+        }
+        let limit = match id {
+            SHELF => 3,
+            CITY => MAX_CITY,
+            DIAGNOSTICS => MAX_PATH,
+            TIMER => 8,
+            _ => 0,
+        };
+        // SAFETY: scalar limits and strings on our own controls; Windows bounds what a user can type or paste.
+        unsafe {
+            if limit > 0 {
+                SendMessageW(h, EM_SETLIMITTEXT, Some(WPARAM(limit)), Some(LPARAM(0)));
+            }
+        }
+        for name in combo_rows(id) {
+            add_row(h, &name);
+        }
+        Ok(Item {
+            id,
+            kind,
+            page: page as u8,
+            card: card as u8,
+            h,
+            label,
+            cap,
+        })
+    }
+
+    fn monitor_item(&self, index: usize) -> Result<Item> {
+        let name = format!(
+            "Show on monitor {} ({})",
+            index + 1,
+            self.devices[index].trim_start_matches(r"\\.\")
+        );
+        self.add(MONITOR + index, Kind::Check, &name, "", 0, 0)
+    }
+
+    /// Replaces the monitor checkboxes after the monitor list changed; focus stays in a live control.
     pub fn refresh_monitors(&mut self, devices: &[String]) -> Result<()> {
-        if self
-            .monitors
-            .iter()
-            .map(|(_, device)| device)
-            .eq(devices.iter().take(MAX_OFF))
-        {
+        if self.devices.iter().eq(devices.iter().take(MAX_OFF)) {
             return Ok(());
         }
-        // Keep keyboard focus in a live control when the focused monitor disappears.
+        self.devices = devices.iter().take(MAX_OFF).cloned().collect();
         // SAFETY: own controls and current thread focus; no foreground activation.
-        unsafe {
-            if self.monitors.iter().any(|(handle, _)| {
-                *handle == windows::Win32::UI::Input::KeyboardAndMouse::GetFocus()
-            }) {
-                SetFocus(Some(self.dock))?;
-            }
+        let focus = unsafe { GetFocus() };
+        let is_monitor = |i: &Item| (MONITOR..MONITOR + MAX_OFF).contains(&i.id);
+        if self.items.iter().any(|i| is_monitor(i) && i.h == focus) {
+            // SAFETY: our own sidebar list.
+            unsafe { SetFocus(Some(self.side))? };
         }
-        // Retain edit contents and settings; replace only monitor checkboxes.
-        for (handle, _) in self.monitors.drain(..) {
+        for item in self.items.iter().filter(|i| is_monitor(i)) {
             // SAFETY: owned monitor checkbox, no retained references.
-            unsafe {
-                DestroyWindow(handle)?;
-            }
+            unsafe { DestroyWindow(item.h)? };
         }
+        self.items.retain(|i| !is_monitor(i));
         // Tab order follows the screen: each new checkbox goes right after the previous one.
-        let mut previous = self.notch;
-        for (index, device) in devices.iter().take(MAX_OFF).enumerate() {
-            let handle = control(
-                self.window,
-                w!("Button"),
-                &format!(
-                    "Show on monitor {} ({})",
-                    index + 1,
-                    device.trim_start_matches(r"\\.\")
-                ),
-                MONITOR + index,
-                BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
-                WINDOW_EX_STYLE(0),
-            )?;
+        let at = self
+            .items
+            .iter()
+            .position(|i| i.id == NOTCH)
+            .map_or(0, |i| i + 1);
+        let mut previous = self
+            .items
+            .get(at.wrapping_sub(1))
+            .map_or(HWND::default(), |i| i.h);
+        for index in 0..self.devices.len() {
+            let item = self.monitor_item(index)?;
             // SAFETY: both are our own live children; this only reorders them, no move, size or activation.
             unsafe {
                 SetWindowPos(
-                    handle,
+                    item.h,
                     Some(previous),
                     0,
                     0,
@@ -363,440 +941,163 @@ impl SettingsWindow {
                     0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                 )?;
+                if self.page != 0 {
+                    let _ = ShowWindow(item.h, SW_HIDE);
+                }
             }
-            previous = handle;
-            set_checked(handle, !self.current.off_monitors.contains(device));
-            self.monitors.push((handle, device.clone()));
+            set_checked(
+                item.h,
+                !self.current.off_monitors.contains(&self.devices[index]),
+            );
+            previous = item.h;
+            self.items.insert(at + index, item);
         }
-        self.relayout()
+        let font = self.font.as_ref().map(|f| f.handle);
+        for item in self.items.iter().filter(|i| is_monitor(i)) {
+            // SAFETY: the new child borrows the live font.
+            unsafe {
+                SendMessageW(
+                    item.h,
+                    WM_SETFONT,
+                    font.map(|f| WPARAM(f.0 as usize)),
+                    Some(LPARAM(1)),
+                );
+            }
+        }
+        self.layout()
     }
-    /// Creates the controls in tab order, which matches the top-to-bottom layout in `position`.
-    fn build(&mut self, devices: &[String]) -> Result<()> {
+
+    /// Creates the controls in tab order: the sidebar, each page's rows top to bottom, then the footer.
+    fn build(&mut self) -> Result<()> {
         let window = self.window;
-        let tab = WS_TABSTOP.0;
-        let flat = WINDOW_EX_STYLE(0);
-        let check = BS_AUTOCHECKBOX as u32 | tab;
-        let edit = ES_AUTOHSCROLL as u32 | WS_BORDER.0 | tab;
-        let label =
-            |text: &str| control(window, w!("Static"), text, LABEL, 0, WS_EX_NOPARENTNOTIFY);
-        self.dock = control(window, w!("Button"), "Show the &dock", DOCK, check, flat)?;
-        self.notch = control(window, w!("Button"), "Show the &notch", NOTCH, check, flat)?;
-        for (index, device) in devices.iter().take(MAX_OFF).enumerate() {
-            let name = format!(
-                "Show on monitor {} ({})",
-                index + 1,
-                device.trim_start_matches(r"\\.\")
-            );
-            let id = MONITOR + index;
-            let handle = control(window, w!("Button"), &name, id, check, flat)?;
-            self.monitors.push((handle, device.clone()));
-        }
-        self.sound = control(
+        self.side = control(
             window,
-            w!("Button"),
-            "Play a s&ound when a timer finishes",
-            SOUND,
-            check,
-            flat,
-        )?;
-        self.desktop = control(
-            window,
-            w!("Button"),
-            "Show only windows on this &desktop",
-            DESKTOP,
-            check,
-            flat,
-        )?;
-        self.edge_volume = control(
-            window,
-            w!("Button"),
-            "&Volume slider on the right screen edge",
-            EDGE_VOLUME,
-            check,
-            flat,
-        )?;
-        self.edge_brightness = control(
-            window,
-            w!("Button"),
-            "&Brightness slider on the left screen edge",
-            EDGE_BRIGHTNESS,
-            check,
-            flat,
-        )?;
-        // Tab order follows the screen: the tabs, left to right and top to bottom, then the mascot.
-        for tab in Tab::ALL {
-            let name = match tab {
-                Tab::Media => "&Media tab",
-                Tab::Weather => "&Weather tab",
-                Tab::Prayer => "Prayer tab",
-                Tab::Timer => "Timer ta&b",
-                Tab::Shelf => "Shelf ta&b",
-                Tab::Limits => "Limits tab",
-            };
-            self.tabs[tab.index()] =
-                control(window, w!("Button"), name, TAB + tab.index(), check, flat)?;
-        }
-        self.eyes = control(window, w!("Button"), "Mascot e&yes", EYES, check, flat)?;
-        self.privacy = control(
-            window,
-            w!("Button"),
-            "Privacy &indicator",
-            PRIVACY,
-            check,
-            flat,
-        )?;
-        let theme_label = label("T&heme")?;
-        self.theme = control(
-            window,
-            w!("ComboBox"),
+            w!("ListBox"),
             "",
-            THEME,
-            CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | tab,
-            flat,
+            SIDE,
+            (LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT) as u32
+                | WS_TABSTOP.0,
+            WINDOW_EX_STYLE(0),
         )?;
-        for theme in Theme::ALL {
-            let name = wide(theme.label());
-            // SAFETY: the combo box copies the terminated string synchronously.
+        for page in PAGES {
+            let name = wide(page.name);
+            // SAFETY: the list box copies the terminated string synchronously.
             unsafe {
                 SendMessageW(
-                    self.theme,
-                    CB_ADDSTRING,
+                    self.side,
+                    LB_ADDSTRING,
                     None,
                     Some(LPARAM(name.as_ptr() as isize)),
                 );
             }
         }
-        let dock_label = label("Dock st&yle")?;
-        self.dock_style = control(
-            window,
-            w!("ComboBox"),
-            "",
-            DOCKSTYLE,
-            CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | tab,
-            flat,
-        )?;
-        for style in DockStyle::ALL {
-            let name = wide(style.label());
-            // SAFETY: the combo box copies the terminated string synchronously.
-            unsafe {
-                SendMessageW(
-                    self.dock_style,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(name.as_ptr() as isize)),
-                );
+        // SAFETY: scalar selection on our own list box.
+        unsafe {
+            SendMessageW(self.side, LB_SETCURSEL, Some(WPARAM(0)), None);
+        }
+        for (page, p) in PAGES.iter().enumerate() {
+            for (card, c) in p.cards.iter().enumerate() {
+                for row in c.rows {
+                    let item = self.add(row.id, row.kind, row.title, row.caption, page, card)?;
+                    self.items.push(item);
+                    if row.id == NOTCH {
+                        for index in 0..self.devices.len() {
+                            let item = self.monitor_item(index)?;
+                            self.items.push(item);
+                        }
+                    }
+                }
             }
         }
-        let buttons_label = label("Dock buttons")?;
-        for button in Button::ALL {
-            let name = match button {
-                Button::Start => "Start butto&n",
-                Button::Search => "Searc&h button",
-                Button::TaskView => "Task Vie&w button",
-                Button::Minimized => "Minimized apps &list",
-                Button::Desktop => "Show deskto&p strip",
-            };
-            self.dock_buttons[button.index()] = control(
-                window,
-                w!("Button"),
-                name,
-                DBTN + button.index(),
-                check,
-                flat,
-            )?;
-        }
-        let shelf_label = label(&format!("Shel&f size (1 to {})", shelf::MAX))?;
-        self.shelf = control(
-            window,
-            w!("Edit"),
-            "",
-            SHELF,
-            edit | ES_NUMBER as u32,
-            WS_EX_CLIENTEDGE,
-        )?;
-        let city_label = label("Weather c&ity (empty is none)")?;
-        self.city = control(window, w!("Edit"), "", CITY, edit, WS_EX_CLIENTEDGE)?;
-        self.detect = control(
-            window,
-            w!("Button"),
-            "Detect location a&utomatically",
-            DETECT,
-            check,
-            flat,
-        )?;
-        self.units = control(
-            window,
-            w!("ComboBox"),
-            "",
-            UNITS,
-            CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | tab,
-            flat,
-        )?;
-        for units in Units::ALL {
-            let name = wide(units.label());
-            // SAFETY: the combo box copies the terminated string synchronously.
-            unsafe {
-                SendMessageW(
-                    self.units,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(name.as_ptr() as isize)),
-                );
-            }
-        }
-        self.prayer = control(
-            window,
-            w!("Button"),
-            "Prayer &reminders",
-            PRAYER,
-            check,
-            flat,
-        )?;
-        let combo = CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | tab;
-        self.pmethod = control(
-            window,
-            w!("ComboBox"),
-            "Prayer method",
-            PMETHOD,
-            combo,
-            flat,
-        )?;
-        for method in Method::ALL {
-            add_row(self.pmethod, method.label());
-        }
-        self.psound = control(window, w!("ComboBox"), "Prayer sound", PSOUND, combo, flat)?;
-        self.pbrowse = control(window, w!("Button"), "Bro&wse...", PBROWSE, tab, flat)?;
-        self.ptest = control(window, w!("Button"), "Te&st sound", PTEST, tab, flat)?;
-        let lead_label = label("Heads-up before the prayer")?;
-        self.plead = control(
-            window,
-            w!("ComboBox"),
-            "Heads-up before the prayer",
-            PLEAD,
-            combo,
-            flat,
-        )?;
-        for lead in LEADS {
-            add_row(
-                self.plead,
-                &if lead == 0 {
-                    "Off".to_owned()
-                } else {
-                    format!("{lead} minutes before")
-                },
-            );
-        }
-        self.limcodex = control(
-            window,
-            w!("Button"),
-            "Run codex on Refresh",
-            LIMCODEX,
-            check,
-            flat,
-        )?;
-        self.limagy = control(
-            window,
-            w!("Button"),
-            "Run agy on Refresh",
-            LIMAGY,
-            check,
-            flat,
-        )?;
-        let group_label = label("Antigravity limits to show")?;
-        self.limgroup = control(
-            window,
-            w!("ComboBox"),
-            "Antigravity limits to show",
-            LIMGROUP,
-            combo,
-            flat,
-        )?;
-        for name in ["Gemini models", "Claude and GPT models"] {
-            add_row(self.limgroup, name);
-        }
-        let snippet_label =
-            label("Claude Code statusline command (optional, copy into settings.json)")?;
-        self.limsnip = control(
-            window,
-            w!("Edit"),
-            "",
-            LIMSNIP,
-            edit | ES_READONLY as u32,
-            WS_EX_CLIENTEDGE,
-        )?;
-        set_text(self.limsnip, crate::limits::SNIPPET)?;
-        let diagnostics_label = label("Dia&gnostics report file (empty is off)")?;
-        self.diagnostics = control(window, w!("Edit"), "", DIAGNOSTICS, edit, WS_EX_CLIENTEDGE)?;
-        let timer_label = label("&Timer length (minutes, m:ss or h:mm:ss)")?;
-        self.timer = control(
-            window,
-            w!("Edit"),
-            FIRST_TIMER,
-            TIMER,
-            edit,
-            WS_EX_CLIENTEDGE,
-        )?;
-        let start = control(window, w!("Button"), "St&art timer", START, tab, flat)?;
-        self.pin_label = control(
+        self.status = control(
             window,
             w!("Static"),
-            "Pinned apps",
-            LABEL,
-            0,
+            "",
+            STATUS,
+            SS_CENTERIMAGE_NOTIFY | WS_CLIPSIBLINGS.0,
             WS_EX_NOPARENTNOTIFY,
         )?;
-        self.pins = control(
-            window,
-            w!("ComboBox"),
-            "Pinned apps",
-            PIN,
-            CBS_DROPDOWNLIST as u32 | tab | WS_VSCROLL.0,
-            flat,
-        )?;
-        self.earlier = control(
+        self.close = control(
             window,
             w!("Button"),
-            "Move pin &earlier",
-            EARLIER,
-            tab,
-            flat,
+            "&Close",
+            CLOSE,
+            WS_TABSTOP.0,
+            WINDOW_EX_STYLE(0),
         )?;
-        self.later = control(window, w!("Button"), "Move pin &later", LATER, tab, flat)?;
-        let reset = control(window, w!("Button"), "&Reset to defaults", RESET, tab, flat)?;
-        let close = control(window, w!("Button"), "&Close", CLOSE, tab, flat)?;
-        self.status = control(window, w!("Static"), "", STATUS, 0, WS_EX_NOPARENTNOTIFY)?;
-        self.others = vec![
-            theme_label,
-            shelf_label,
-            city_label,
-            diagnostics_label,
-            timer_label,
-            start,
-            reset,
-            close,
-            lead_label,
-            dock_label,
-            buttons_label,
-            group_label,
-            snippet_label,
-        ];
-        // SAFETY: scalar limits on our own edits; Windows bounds what a user can type or paste.
-        unsafe {
-            for (edit, limit) in [
-                (self.shelf, 3),
-                (self.city, MAX_CITY),
-                (self.diagnostics, MAX_PATH),
-                (self.timer, 8),
-            ] {
-                SendMessageW(edit, EM_SETLIMITTEXT, Some(WPARAM(limit)), Some(LPARAM(0)));
+        for item in &self.items {
+            if item.page != 0 {
+                for h in [item.h, item.label, item.cap] {
+                    if !h.0.is_null() {
+                        // SAFETY: our own live child.
+                        let _ = unsafe { ShowWindow(h, SW_HIDE) };
+                    }
+                }
             }
         }
         Ok(())
     }
 
-    fn children(&self) -> Vec<HWND> {
-        let mut all = vec![
-            self.dock,
-            self.notch,
-            self.sound,
-            self.desktop,
-            self.edge_volume,
-            self.edge_brightness,
-            self.theme,
-            self.dock_style,
-            self.shelf,
-            self.city,
-            self.detect,
-            self.units,
-            self.prayer,
-            self.pmethod,
-            self.psound,
-            self.pbrowse,
-            self.ptest,
-            self.plead,
-            self.limcodex,
-            self.limagy,
-            self.limgroup,
-            self.limsnip,
-        ];
-        all.extend(self.tabs);
-        all.extend(self.dock_buttons);
-        all.extend([self.eyes, self.privacy]);
-        all.extend([self.pin_label, self.pins, self.earlier, self.later]);
-        all.extend(self.monitors.iter().map(|(handle, _)| *handle));
-        all.extend([self.diagnostics, self.timer, self.status]);
-        all.extend(&self.others);
-        all
+    /// Shows page `page`: only its controls are visible (hidden ones leave the tab order), scrolled to the top.
+    fn show_page(&mut self, page: usize) -> Result<()> {
+        self.page = page.min(PAGES.len() - 1);
+        self.scroll = 0;
+        for item in &self.items {
+            let command = if item.page as usize == self.page {
+                SW_SHOWNA
+            } else {
+                SW_HIDE
+            };
+            for h in [item.h, item.label, item.cap] {
+                if !h.0.is_null() {
+                    // SAFETY: our own live child.
+                    let _ = unsafe { ShowWindow(h, command) };
+                }
+            }
+        }
+        self.layout()?;
+        // SAFETY: our own live window.
+        let _ = unsafe { InvalidateRect(Some(self.window), None, true) };
+        Ok(())
     }
 
     /// Writes `settings` into the controls (not the timer length, which is not a setting).
     fn show(&self, settings: &Settings) {
-        set_checked(self.dock, settings.dock);
-        set_checked(self.notch, settings.notch);
-        set_checked(self.sound, settings.timer_sound);
-        set_checked(self.desktop, settings.desktop_only);
-        set_checked(self.edge_volume, settings.edge_volume);
-        set_checked(self.edge_brightness, settings.edge_brightness);
-        for tab in Tab::ALL {
-            set_checked(self.tabs[tab.index()], settings.tabs[tab.index()]);
+        let mut copy = settings.clone();
+        for item in &self.items {
+            let h = item.h;
+            match item.kind {
+                Kind::Check => {
+                    if let Some(on) = flag(&mut copy, item.id) {
+                        set_checked(h, *on);
+                    } else if let Some(device) = self.devices.get(item.id.wrapping_sub(MONITOR)) {
+                        set_checked(h, !settings.off_monitors.contains(device));
+                    }
+                }
+                Kind::Combo(_) => {
+                    let row = match item.id {
+                        THEME => row_of(&Theme::ALL, &settings.theme),
+                        DOCKSTYLE => row_of(&DockStyle::ALL, &settings.dock_style),
+                        UNITS => row_of(&Units::ALL, &settings.units),
+                        PMETHOD => row_of(&Method::ALL, &settings.prayer_method),
+                        PLEAD => row_of(&LEADS, &settings.prayer_lead),
+                        LIMGROUP => usize::from(settings.limits_group),
+                        PSOUND => self.sound_row(&settings.prayer_sound),
+                        _ => continue,
+                    };
+                    select(h, Some(row));
+                }
+                Kind::Edit(_) => {
+                    let _ = match item.id {
+                        SHELF => set_text(h, &settings.shelf_cap.to_string()),
+                        CITY => set_text(h, &settings.city),
+                        DIAGNOSTICS => set_text(h, settings.diagnostics.as_deref().unwrap_or("")),
+                        _ => Ok(()),
+                    };
+                }
+                _ => {}
+            }
         }
-        set_checked(self.eyes, settings.eyes);
-        set_checked(self.privacy, settings.privacy);
-        for button in Button::ALL {
-            set_checked(
-                self.dock_buttons[button.index()],
-                settings.dock_buttons.on(button),
-            );
-        }
-        let index = Theme::ALL
-            .iter()
-            .position(|t| *t == settings.theme)
-            .unwrap_or(0);
-        // SAFETY: scalar selection index on our own combo box.
-        unsafe {
-            SendMessageW(self.theme, CB_SETCURSEL, Some(WPARAM(index)), None);
-        }
-        let style = DockStyle::ALL
-            .iter()
-            .position(|s| *s == settings.dock_style)
-            .unwrap_or(0);
-        // SAFETY: scalar selection index on our own combo box.
-        unsafe {
-            SendMessageW(self.dock_style, CB_SETCURSEL, Some(WPARAM(style)), None);
-        }
-        for (handle, device) in &self.monitors {
-            set_checked(*handle, !settings.off_monitors.contains(device));
-        }
-        let _ = set_text(self.shelf, &settings.shelf_cap.to_string());
-        let _ = set_text(self.city, &settings.city);
-        set_checked(self.detect, settings.detect);
-        let units = Units::ALL
-            .iter()
-            .position(|u| *u == settings.units)
-            .unwrap_or(0);
-        // SAFETY: scalar selection index on our own combo box.
-        unsafe {
-            SendMessageW(self.units, CB_SETCURSEL, Some(WPARAM(units)), None);
-        }
-        let _ = set_text(
-            self.diagnostics,
-            settings.diagnostics.as_deref().unwrap_or(""),
-        );
-        set_checked(self.prayer, settings.prayer_remind);
-        set_checked(self.limcodex, settings.limits_codex);
-        set_checked(self.limagy, settings.limits_agy);
-        select(self.limgroup, Some(usize::from(settings.limits_group)));
-        select(
-            self.pmethod,
-            Method::ALL
-                .iter()
-                .position(|m| *m == settings.prayer_method),
-        );
-        select(
-            self.plead,
-            LEADS.iter().position(|l| *l == settings.prayer_lead),
-        );
-        select(self.psound, Some(self.sound_row(&settings.prayer_sound)));
     }
 
     /// The sound list row for a stored setting: silent is 0; the default is its file's row (or silent without one).
@@ -816,13 +1117,14 @@ impl SettingsWindow {
         if !matches!(setting, "" | SILENT) && !self.sounds.iter().any(|s| s == setting) {
             self.sounds.push(setting.to_owned());
         }
+        let combo = self.h(PSOUND);
         // SAFETY: our own combo box.
         unsafe {
-            SendMessageW(self.psound, CB_RESETCONTENT, None, None);
+            SendMessageW(combo, CB_RESETCONTENT, None, None);
         }
-        add_row(self.psound, "None (silent)");
+        add_row(combo, "None (silent)");
         for sound in &self.sounds {
-            add_row(self.psound, prayer_tab::label(sound));
+            add_row(combo, prayer_tab::label(sound));
         }
     }
 
@@ -830,7 +1132,7 @@ impl SettingsWindow {
     pub fn set_sound(&mut self, setting: &str) {
         self.current.prayer_sound = setting.to_owned();
         self.fill_sounds(setting);
-        select(self.psound, Some(self.sound_row(setting)));
+        select(self.h(PSOUND), Some(self.sound_row(setting)));
     }
 
     /// What the user asked of the sound since the host last asked.
@@ -840,72 +1142,58 @@ impl SettingsWindow {
 
     /// Reads the controls, brings them into range, shows what was kept and hands a real change to the host.
     fn commit(&mut self) -> Result<()> {
-        let devices: Vec<String> = self.monitors.iter().map(|(_, d)| d.clone()).collect();
         let mut next = self.current.clone();
-        next.dock = checked(self.dock);
-        next.notch = checked(self.notch);
-        next.timer_sound = checked(self.sound);
-        next.desktop_only = checked(self.desktop);
-        next.edge_volume = checked(self.edge_volume);
-        next.edge_brightness = checked(self.edge_brightness);
-        for tab in Tab::ALL {
-            next.tabs[tab.index()] = checked(self.tabs[tab.index()]);
+        let mut off = Vec::new();
+        for item in &self.items {
+            let h = item.h;
+            match item.kind {
+                Kind::Check => {
+                    if let Some(on) = flag(&mut next, item.id) {
+                        *on = checked(h);
+                    } else if !checked(h) {
+                        off.extend(self.devices.get(item.id.wrapping_sub(MONITOR)).cloned());
+                    }
+                }
+                Kind::Combo(_) => {
+                    let row = chosen_row(h);
+                    match item.id {
+                        THEME => pick(&Theme::ALL, &mut next.theme, row),
+                        DOCKSTYLE => pick(&DockStyle::ALL, &mut next.dock_style, row),
+                        UNITS => pick(&Units::ALL, &mut next.units, row),
+                        PMETHOD => pick(&Method::ALL, &mut next.prayer_method, row),
+                        PLEAD => pick(&LEADS, &mut next.prayer_lead, row),
+                        LIMGROUP => {
+                            next.limits_group = row.map_or(next.limits_group, |r| r.min(1) as u8)
+                        }
+                        // A row differing from what the stored setting shows is a pick; otherwise "default" stays "default".
+                        PSOUND => {
+                            if let Some(row) =
+                                row.filter(|&r| r != self.sound_row(&next.prayer_sound))
+                            {
+                                next.prayer_sound = match row {
+                                    0 => SILENT.to_owned(),
+                                    n => self.sounds.get(n - 1).cloned().unwrap_or_default(),
+                                };
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Kind::Edit(_) => match item.id {
+                    SHELF => next.shelf_cap = text(h, 3).trim().parse().unwrap_or(next.shelf_cap),
+                    CITY => next.city = text(h, MAX_CITY),
+                    DIAGNOSTICS => next.diagnostics = Some(text(h, MAX_PATH)),
+                    _ => {}
+                },
+                _ => {}
+            }
         }
-        next.eyes = checked(self.eyes);
-        next.privacy = checked(self.privacy);
-        for button in Button::ALL {
-            next.dock_buttons.shown[button.index()] = checked(self.dock_buttons[button.index()]);
-        }
-        // SAFETY: scalar query of our own combo box; -1 (nothing chosen) keeps the current theme.
-        let chosen = unsafe { SendMessageW(self.theme, CB_GETCURSEL, None, None) }.0;
-        next.theme = usize::try_from(chosen)
-            .ok()
-            .and_then(|index| Theme::ALL.get(index).copied())
-            .unwrap_or(next.theme);
         // A monitor that is not connected now keeps its stored state.
-        next.off_monitors.retain(|d| !devices.contains(d));
-        next.off_monitors.extend(
-            self.monitors
-                .iter()
-                .filter(|(handle, _)| !checked(*handle))
-                .map(|(_, d)| d.clone()),
-        );
-        next.shelf_cap = text(self.shelf, 3).trim().parse().unwrap_or(next.shelf_cap);
-        next.city = text(self.city, MAX_CITY);
-        next.detect = checked(self.detect);
-        // SAFETY: scalar query of our own combo box; -1 (nothing chosen) keeps the current units.
-        let chosen = unsafe { SendMessageW(self.units, CB_GETCURSEL, None, None) }.0;
-        next.units = usize::try_from(chosen)
-            .ok()
-            .and_then(|index| Units::ALL.get(index).copied())
-            .unwrap_or(next.units);
-        next.dock_style = chosen_row(self.dock_style)
-            .and_then(|i| DockStyle::ALL.get(i).copied())
-            .unwrap_or(next.dock_style);
-        next.diagnostics = Some(text(self.diagnostics, MAX_PATH));
-        next.prayer_remind = checked(self.prayer);
-        next.limits_codex = checked(self.limcodex);
-        next.limits_agy = checked(self.limagy);
-        next.limits_group =
-            chosen_row(self.limgroup).map_or(next.limits_group, |row| row.min(1) as u8);
-        next.prayer_method = chosen_row(self.pmethod)
-            .and_then(|i| Method::ALL.get(i).copied())
-            .unwrap_or(next.prayer_method);
-        next.prayer_lead = chosen_row(self.plead)
-            .and_then(|i| LEADS.get(i).copied())
-            .unwrap_or(next.prayer_lead);
-        // A row differing from what the stored setting shows is a pick; otherwise "default" stays "default".
-        if let Some(row) =
-            chosen_row(self.psound).filter(|&r| r != self.sound_row(&next.prayer_sound))
-        {
-            next.prayer_sound = match row {
-                0 => SILENT.to_owned(),
-                n => self.sounds.get(n - 1).cloned().unwrap_or_default(),
-            };
-        }
+        next.off_monitors.retain(|d| !self.devices.contains(d));
+        next.off_monitors.extend(off);
         let kept_a_kind = next.dock || next.notch;
         let ranged = next.clamped();
-        let next = ranged.clone().keep_one_monitor(&devices);
+        let next = ranged.clone().keep_one_monitor(&self.devices);
         self.show(&next);
         if !kept_a_kind {
             self.say("Keep the dock or the notch on.")?;
@@ -943,51 +1231,46 @@ impl SettingsWindow {
             ACTION => {
                 let id = message.wParam.0 & 0xffff;
                 let notification = (message.wParam.0 >> 16) as u32;
-                let monitor = (MONITOR..MONITOR + self.monitors.len()).contains(&id);
-                match id {
-                    PBROWSE | PTEST if notification == BN_CLICKED => {
+                let kind = self.items.iter().find(|i| i.id == id).map(|i| i.kind);
+                match (id, kind) {
+                    (SIDE, _) if notification == LBN_SELCHANGE => {
+                        // SAFETY: scalar query of our own list box.
+                        let row = unsafe { SendMessageW(self.side, LB_GETCURSEL, None, None) }.0;
+                        self.show_page(row.max(0) as usize)?;
+                    }
+                    (PBROWSE | PTEST, _) if notification == BN_CLICKED => {
                         self.sound_action = Some(if id == PTEST {
                             SoundAction::Test
                         } else {
                             SoundAction::Browse
                         });
                     }
-                    PMETHOD | PSOUND | PLEAD | LIMGROUP if notification == CBN_SELCHANGE => {
-                        self.commit()?
-                    }
-                    DOCK | NOTCH | SOUND | DESKTOP | EDGE_VOLUME | EDGE_BRIGHTNESS | DETECT
-                    | PRAYER | LIMCODEX | LIMAGY
-                        if notification == BN_CLICKED =>
-                    {
-                        self.commit()?
-                    }
-                    EARLIER | LATER if notification == BN_CLICKED => {
-                        // SAFETY: scalar selection query of our own native combo.
-                        let index = unsafe { SendMessageW(self.pins, CB_GETCURSEL, None, None) }.0;
-                        if index >= 0 {
-                            self.move_pin = Some((index as usize, id == LATER));
+                    (EARLIER | LATER, _) if notification == BN_CLICKED => {
+                        if let Some(index) = chosen_row(self.h(PIN)) {
+                            self.move_pin = Some((index, id == LATER));
                         }
                     }
-                    TAB..=PRIVACY | DBTN..=134 if notification == BN_CLICKED => self.commit()?,
-                    THEME | UNITS | DOCKSTYLE if notification == CBN_SELCHANGE => self.commit()?,
-                    _ if monitor && notification == BN_CLICKED => self.commit()?,
-                    SHELF | CITY | DIAGNOSTICS if notification == EN_KILLFOCUS => self.commit()?,
-                    OK => self.commit()?,
-                    START => match parse_timer(&text(self.timer, 8)) {
-                        Some(seconds) => self.start = Some(seconds),
-                        None => {
-                            self.say("Enter minutes, m:ss or h:mm:ss, from 1 second to 24 hours.")?
+                    (START, _) if notification == BN_CLICKED => {
+                        match parse_timer(&text(self.h(TIMER), 8)) {
+                            Some(seconds) => self.start = Some(seconds),
+                            None => self.say(
+                                "Enter minutes, m:ss or h:mm:ss, from 1 second to 24 hours.",
+                            )?,
                         }
-                    },
-                    RESET => {
+                    }
+                    (RESET, _) if notification == BN_CLICKED => {
                         self.show(&Settings::default());
                         self.commit()?;
                     }
-                    CLOSE => {
+                    (CLOSE, _) => {
                         self.commit()?; // an edit still being typed is kept
                         self.closed = true;
                         restore_foreground(self.window, self.return_to);
                     }
+                    (OK, _) => self.commit()?,
+                    (_, Some(Kind::Check)) if notification == BN_CLICKED => self.commit()?,
+                    (_, Some(Kind::Combo(_))) if notification == CBN_SELCHANGE => self.commit()?,
+                    (_, Some(Kind::Edit(_))) if notification == EN_KILLFOCUS => self.commit()?,
                     _ => {}
                 }
             }
@@ -1019,10 +1302,10 @@ impl SettingsWindow {
             fMask: SIF_ALL,
             ..Default::default()
         };
-        // SAFETY: queries and moves only this dialog's scroll bar and child windows, without callbacks into Rust state.
-        unsafe {
+        // SAFETY: queries our own scroll bar and focus rectangle; no callbacks into Rust state.
+        let next = unsafe {
             GetScrollInfo(self.window, SB_VERT, &mut scroll)?;
-            let next = match action as i32 {
+            match action as i32 {
                 0 => self.scroll - 48,
                 1 => self.scroll + 48,
                 2 => self.scroll - scroll.nPage as i32,
@@ -1032,12 +1315,12 @@ impl SettingsWindow {
                 7 => self.scroll_max,
                 9 => {
                     let focus = GetFocus();
-                    if !IsChild(self.window, focus).as_bool() {
-                        return Ok(());
-                    }
                     let mut origin = POINT::default();
                     let mut rect = RECT::default();
-                    if !ClientToScreen(self.window, &mut origin).as_bool() {
+                    if !IsChild(self.window, focus).as_bool()
+                        || focus == self.side
+                        || !ClientToScreen(self.window, &mut origin).as_bool()
+                    {
                         return Ok(());
                     }
                     GetWindowRect(focus, &mut rect)?;
@@ -1050,23 +1333,11 @@ impl SettingsWindow {
                 }
                 _ => return Ok(()),
             }
-            .clamp(0, self.scroll_max);
-            if next != self.scroll {
-                ScrollWindowEx(
-                    self.window,
-                    0,
-                    self.scroll - next,
-                    None,
-                    None,
-                    None,
-                    None,
-                    SW_SCROLLCHILDREN | SW_INVALIDATE,
-                );
-                self.scroll = next;
-                scroll.fMask = SIF_POS;
-                scroll.nPos = next;
-                SetScrollInfo(self.window, SB_VERT, &scroll, true);
-            }
+        }
+        .clamp(0, self.scroll_max);
+        if next != self.scroll {
+            self.scroll = next;
+            self.layout()?;
         }
         Ok(())
     }
@@ -1077,12 +1348,19 @@ impl SettingsWindow {
         self.relayout()
     }
 
+    /// New font (DPI or text size changed): applies it to every control, sizes the window, then lays out.
     fn relayout(&mut self) -> Result<()> {
         let work = native_window::primary_work_area()?;
         // SAFETY: owned dialog is live.
         let dpi = unsafe { GetDpiForWindow(self.window) }.max(96);
         let font = PickerFont::create(dpi, self.factor)?;
-        for child in self.children() {
+        let handles = self
+            .items
+            .iter()
+            .flat_map(|i| [i.h, i.label, i.cap])
+            .chain([self.side, self.status, self.close])
+            .filter(|h| !h.0.is_null());
+        for child in handles {
             // SAFETY: child controls are live and borrow this font until replaced or destroyed.
             unsafe {
                 SendMessageW(
@@ -1095,36 +1373,13 @@ impl SettingsWindow {
         }
         let scale = font.scale;
         self.font = Some(font);
-        self.position(scale, dpi, work)
-    }
-
-    fn position(&mut self, scale: f64, dpi: u32, work: Bounds) -> Result<()> {
-        let px = |value: f64| (value * scale).round() as i32;
-        // Row heights in DIPs, top to bottom: one list gives both the window height and every control's top.
-        // dock, notch, monitors, sound, desktop, two edge sliders, then the tabs and mascot in two columns (four rows)
-        let mut heights = vec![24.0; 6 + self.monitors.len() + 4];
-        // theme, dock style, dock buttons (label, three rows), shelf, weather city, detect and units, prayer, sound,
-        // lead, limits (run boxes, group, snippet label and box), diagnostics label and edit, timer label and row,
-        // status, pins, buttons
-        heights.extend([
-            28.0, 28.0, 20.0, 24.0, 24.0, 24.0, 28.0, 28.0, 28.0, 28.0, 28.0, 28.0, 24.0, 28.0,
-            20.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0, 28.0,
-        ]);
-        let tops: Vec<i32> = heights
-            .iter()
-            .scan(16.0, |y, height| {
-                let top = *y;
-                *y += height + 8.0;
-                Some(px(top))
-            })
-            .collect();
-        let last = heights.len() - 1;
+        let px = |v: i32| (v as f64 * scale).round() as i32;
         let mut frame = RECT {
-            right: px(480.0),
-            bottom: tops[last] + px(heights[last] + 16.0),
+            right: px(654),
+            bottom: px(556),
             ..Default::default()
         };
-        // SAFETY: fills the local RECT for the dialog's fixed style at this DPI; positions only our own windows.
+        // SAFETY: fills the local RECT for the dialog's fixed style at this DPI; positions only our own window.
         unsafe {
             AdjustWindowRectExForDpi(
                 &mut frame,
@@ -1136,7 +1391,11 @@ impl SettingsWindow {
             let width = (frame.right - frame.left).min(work.width);
             let height = (frame.bottom - frame.top).min(work.height);
             let style = GetWindowLongPtrW(self.window, GWL_STYLE);
-            SetWindowLongPtrW(self.window, GWL_STYLE, style | WS_VSCROLL.0 as isize);
+            SetWindowLongPtrW(
+                self.window,
+                GWL_STYLE,
+                style | (WS_VSCROLL.0 | WS_CLIPCHILDREN.0) as isize,
+            );
             SetWindowPos(
                 self.window,
                 None,
@@ -1146,300 +1405,216 @@ impl SettingsWindow {
                 height,
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             )?;
-            let mut client = RECT::default();
+        }
+        self.layout()?;
+        // SAFETY: our own live window.
+        let _ = unsafe { InvalidateRect(Some(self.window), None, true) };
+        Ok(())
+    }
+
+    /// Places the sidebar, the current page's rows and the footer, and hands the painter what to draw.
+    fn layout(&mut self) -> Result<()> {
+        let Some(font) = self.font.as_ref() else {
+            return Ok(());
+        };
+        let (handle, scale) = (font.handle, font.scale);
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let mut client = RECT::default();
+        // SAFETY: our own live window.
+        unsafe { GetClientRect(self.window, &mut client)? };
+        let (mut geometry, content) = self.place(scale, client)?;
+        let view = (client.bottom - px(FOOT)).max(1);
+        self.scroll_max = (content - view).max(0);
+        let clamped = self.scroll.clamp(0, self.scroll_max);
+        let info = SCROLLINFO {
+            cbSize: size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+            nMin: 0,
+            nMax: content - 1,
+            nPage: view as u32,
+            nPos: clamped,
+            ..Default::default()
+        };
+        // SAFETY: our own live window and children.
+        unsafe {
+            SetScrollInfo(self.window, SB_VERT, &info, true);
+            let before = client.right;
             GetClientRect(self.window, &mut client)?;
-            let content = tops[last] + px(heights[last] + 16.0);
-            self.scroll_max = (content - client.bottom).max(0);
-            self.scroll = self.scroll.clamp(0, self.scroll_max);
-            let scroll = SCROLLINFO {
-                cbSize: size_of::<SCROLLINFO>() as u32,
-                fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
-                nMin: 0,
-                nMax: content - 1,
-                nPage: client.bottom.max(0) as u32,
-                nPos: self.scroll,
-                ..Default::default()
-            };
-            SetScrollInfo(self.window, SB_VERT, &scroll, true);
-            GetClientRect(self.window, &mut client)?;
-            let margin = px(16.0);
-            let inner = (client.right - margin * 2).max(1);
-            let half = |units: f64| px(units).min(inner);
-            let after = 3 + self.monitors.len(); // the desktop checkbox, then two more
-            let grid = after + 3; // four rows of two checkboxes: the six tabs, the mascot, the privacy dots
-            let end = grid + 3;
-            let mut places = vec![
-                (self.dock, margin, tops[0], inner, px(24.0)),
-                (self.notch, margin, tops[1], inner, px(24.0)),
-                (self.sound, margin, tops[after - 1], inner, px(24.0)),
-                (self.desktop, margin, tops[after], inner, px(24.0)),
-                (self.edge_volume, margin, tops[after + 1], inner, px(24.0)),
+            // A scroll bar appearing or a clamped position changes the geometry once more.
+            if client.right != before || clamped != self.scroll {
+                self.scroll = clamped;
+                geometry = self.place(scale, client)?.0;
+            }
+            let side = px(SIDE_W);
+            let list = &[
+                (self.side, 0, px(10), side, client.bottom - px(10)),
                 (
-                    self.edge_brightness,
-                    margin,
-                    tops[after + 2],
-                    inner,
-                    px(24.0),
+                    self.status,
+                    side,
+                    client.bottom - px(FOOT),
+                    client.right - side,
+                    px(FOOT),
+                ),
+                (
+                    self.close,
+                    client.right - px(GUTTER + 100),
+                    client.bottom - px(FOOT) + px(8),
+                    px(100),
+                    px(28),
                 ),
             ];
-            for (index, (handle, _)) in self.monitors.iter().enumerate() {
-                places.push((*handle, margin, tops[2 + index], inner, px(24.0)));
+            for &(h, x, y, w, ht) in list {
+                SetWindowPos(h, None, x, y, w, ht, SWP_NOZORDER | SWP_NOACTIVATE)?;
             }
-            let column = (inner / 2).max(1);
-            for (index, handle) in self
-                .tabs
-                .iter()
-                .chain([&self.eyes, &self.privacy])
-                .enumerate()
-            {
-                places.push((
-                    *handle,
-                    margin + column * (index as i32 % 2),
-                    tops[grid + index / 2],
-                    column,
-                    px(24.0),
-                ));
-            }
-            let [
-                theme_label,
-                shelf_label,
-                city_label,
-                diagnostics_label,
-                timer_label,
-                start,
-                reset,
-                close,
-                lead_label,
-                dock_label,
-                buttons_label,
-                group_label,
-                snippet_label,
-            ] = self.others[..]
-            else {
-                return Err(Error::new(E_FAIL, "Settings controls missing."));
+            SendMessageW(
+                self.side,
+                LB_SETITEMHEIGHT,
+                Some(WPARAM(0)),
+                Some(LPARAM(px(36) as isize)),
+            );
+            // The title font is made once per body font (a scroll step reuses it).
+            let old = PAINT.with(|p| p.take());
+            let title_font = match &old {
+                Some(old) if old.font == handle => old.title_font,
+                _ => {
+                    if let Some(old) = &old {
+                        let _ = DeleteObject(old.title_font.into());
+                    }
+                    let mut face = LOGFONTW::default();
+                    GetObjectW(
+                        handle.into(),
+                        size_of::<LOGFONTW>() as i32,
+                        Some((&mut face as *mut LOGFONTW).cast()),
+                    );
+                    face.lfHeight = face.lfHeight * 3 / 2;
+                    face.lfWeight = 600;
+                    CreateFontIndirectW(&face)
+                }
             };
-            places.extend([(buttons_label, margin, tops[end + 3], inner, px(20.0))]);
-            for (index, handle) in self.dock_buttons.iter().enumerate() {
-                places.push((
-                    *handle,
-                    margin + column * (index as i32 % 2),
-                    tops[end + 4 + index / 2],
-                    column,
-                    px(24.0),
-                ));
-            }
-            places.extend([
-                (
-                    self.pin_label,
-                    margin,
-                    tops[last - 1] + px(5.0),
-                    px(80.0),
-                    px(20.0),
-                ),
-                (
-                    self.pins,
-                    margin + px(80.0),
-                    tops[last - 1],
-                    (inner - px(320.0)).max(1),
-                    px(180.0),
-                ),
-                (
-                    self.earlier,
-                    margin + (inner - px(240.0)).max(1),
-                    tops[last - 1],
-                    px(120.0),
-                    px(28.0),
-                ),
-                (
-                    self.later,
-                    margin + (inner - px(120.0)).max(1),
-                    tops[last - 1],
-                    px(120.0),
-                    px(28.0),
-                ),
-                (
-                    theme_label,
-                    margin,
-                    tops[end + 1] + px(5.0),
-                    inner - half(180.0),
-                    px(20.0),
-                ),
-                // The height is the dropped-down list's; the closed box is one row.
-                (
-                    self.theme,
-                    margin + inner - half(170.0),
-                    tops[end + 1],
-                    half(170.0),
-                    px(160.0),
-                ),
-                (
-                    dock_label,
-                    margin,
-                    tops[end + 2] + px(5.0),
-                    inner - half(260.0),
-                    px(20.0),
-                ),
-                (
-                    self.dock_style,
-                    margin + inner - half(250.0),
-                    tops[end + 2],
-                    half(250.0),
-                    px(120.0),
-                ),
-                (
-                    shelf_label,
-                    margin,
-                    tops[end + 7] + px(5.0),
-                    inner - half(80.0),
-                    px(20.0),
-                ),
-                (
-                    self.shelf,
-                    margin + inner - half(70.0),
-                    tops[end + 7],
-                    half(70.0),
-                    px(28.0),
-                ),
-                (
-                    city_label,
-                    margin,
-                    tops[end + 8] + px(5.0),
-                    inner - half(230.0),
-                    px(20.0),
-                ),
-                (
-                    self.city,
-                    margin + inner - half(220.0),
-                    tops[end + 8],
-                    half(220.0),
-                    px(28.0),
-                ),
-                (
-                    self.detect,
-                    margin,
-                    tops[end + 9] + px(2.0),
-                    inner - half(190.0),
-                    px(24.0),
-                ),
-                (
-                    self.units,
-                    margin + inner - half(180.0),
-                    tops[end + 9],
-                    half(180.0),
-                    px(160.0),
-                ),
-                (
-                    self.prayer,
-                    margin,
-                    tops[end + 10] + px(2.0),
-                    inner - half(240.0),
-                    px(24.0),
-                ),
-                (
-                    self.pmethod,
-                    margin + inner - half(230.0),
-                    tops[end + 10],
-                    half(230.0),
-                    px(160.0),
-                ),
-                (
-                    self.psound,
-                    margin,
-                    tops[end + 11],
-                    (inner - half(200.0)).max(1),
-                    px(160.0),
-                ),
-                (
-                    self.pbrowse,
-                    margin + (inner - half(190.0)).max(0),
-                    tops[end + 11],
-                    half(90.0),
-                    px(28.0),
-                ),
-                (
-                    self.ptest,
-                    margin + (inner - half(94.0)).max(0),
-                    tops[end + 11],
-                    half(94.0),
-                    px(28.0),
-                ),
-                (
-                    lead_label,
-                    margin,
-                    tops[end + 12] + px(5.0),
-                    inner - half(190.0),
-                    px(20.0),
-                ),
-                (
-                    self.plead,
-                    margin + inner - half(180.0),
-                    tops[end + 12],
-                    half(180.0),
-                    px(160.0),
-                ),
-                (self.limcodex, margin, tops[end + 13], column, px(24.0)),
-                (
-                    self.limagy,
-                    margin + column,
-                    tops[end + 13],
-                    column,
-                    px(24.0),
-                ),
-                (
-                    group_label,
-                    margin,
-                    tops[end + 14] + px(5.0),
-                    inner - half(250.0),
-                    px(20.0),
-                ),
-                (
-                    self.limgroup,
-                    margin + inner - half(240.0),
-                    tops[end + 14],
-                    half(240.0),
-                    px(120.0),
-                ),
-                (snippet_label, margin, tops[end + 15], inner, px(20.0)),
-                (self.limsnip, margin, tops[end + 16], inner, px(28.0)),
-                (diagnostics_label, margin, tops[end + 17], inner, px(20.0)),
-                (self.diagnostics, margin, tops[end + 18], inner, px(28.0)),
-                (timer_label, margin, tops[end + 19], inner, px(20.0)),
-                (self.timer, margin, tops[end + 20], half(120.0), px(28.0)),
-                (
-                    start,
-                    margin + half(128.0),
-                    tops[end + 20],
-                    half(150.0),
-                    px(28.0),
-                ),
-                (self.status, margin, tops[end + 21], inner, px(42.0)),
-                (reset, margin, tops[last], half(180.0), px(28.0)),
-                (
-                    close,
-                    client.right - margin - half(100.0),
-                    tops[last],
-                    half(100.0),
-                    px(28.0),
-                ),
-            ]);
-            for (child, x, y, w, h) in places {
-                SetWindowPos(
-                    child,
-                    None,
-                    x,
-                    y - self.scroll,
-                    w,
-                    h,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                )?;
-            }
+            PAINT.with(|p| {
+                p.replace(Some(Paint {
+                    pal: palette(),
+                    scale,
+                    font: handle,
+                    title_font,
+                    title: geometry.title,
+                    labels: geometry.labels,
+                    cards: geometry.cards,
+                }))
+            });
         }
         Ok(())
     }
+
+    /// Moves the current page's controls (top to bottom, scrolled) and returns the geometry and content height.
+    fn place(&self, scale: f64, client: RECT) -> Result<(Geometry, i32)> {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let (left, right) = (
+            px(SIDE_W + GUTTER),
+            (client.right - px(GUTTER)).max(px(SIDE_W + GUTTER + 100)),
+        );
+        let mut geometry = Geometry {
+            title: (RECT::default(), PAGES[self.page].name),
+            labels: Vec::new(),
+            cards: Vec::new(),
+        };
+        let mut y = px(GUTTER) - self.scroll;
+        geometry.title.0 = RECT {
+            left,
+            top: y,
+            right,
+            bottom: y + px(30),
+        };
+        y += px(30 + 14);
+        for (index, card) in PAGES[self.page].cards.iter().enumerate() {
+            geometry.labels.push((
+                RECT {
+                    left,
+                    top: y,
+                    right,
+                    bottom: y + px(16),
+                },
+                card.label,
+            ));
+            y += px(16 + 6);
+            let (top, mut lines) = (y, Vec::new());
+            let rows = self
+                .items
+                .iter()
+                .filter(|i| i.page as usize == self.page && i.card as usize == index);
+            for (n, item) in rows.enumerate() {
+                if n > 0 {
+                    lines.push(y);
+                }
+                let tall = !item.cap.0.is_null();
+                let height = px(if tall { 52 } else { 40 });
+                self.row(item, scale, (left + px(14), right - px(14)), y, height)?;
+                y += height;
+            }
+            geometry.cards.push((
+                RECT {
+                    left,
+                    top,
+                    right,
+                    bottom: y,
+                },
+                lines,
+            ));
+            y += px(14);
+        }
+        Ok((geometry, y + self.scroll + px(8)))
+    }
+
+    fn row(&self, item: &Item, scale: f64, (a, b): (i32, i32), y: i32, height: i32) -> Result<()> {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let centre = |h: i32| y + (height - h) / 2;
+        let tall = !item.cap.0.is_null();
+        let put = |h: HWND, x: i32, y: i32, w: i32, ht: i32| {
+            if h.0.is_null() {
+                return Ok(());
+            }
+            // SAFETY: our own live child.
+            unsafe { SetWindowPos(h, None, x, y, w.max(1), ht, SWP_NOZORDER | SWP_NOACTIVATE) }
+        };
+        match item.kind {
+            Kind::Check => {
+                let top = if tall { px(6) } else { 0 };
+                put(item.h, a, y + top, b - a, height - top)?;
+                put(item.cap, a + px(22), y + px(30), b - a - px(22), px(18))
+            }
+            Kind::Combo(w) | Kind::Edit(w) => {
+                let w = px(w).min((b - a) / 2);
+                let drop = if matches!(item.kind, Kind::Combo(_)) {
+                    px(180)
+                } else {
+                    px(28)
+                };
+                put(item.h, b - w, centre(px(28)), w, drop)?;
+                let top = if tall { y + px(8) } else { centre(px(20)) };
+                put(item.label, a, top, b - a - w - px(8), px(20))?;
+                put(item.cap, a, y + px(28), b - a - w - px(8), px(18))
+            }
+            Kind::Btn => {
+                put(item.h, b - px(170), centre(px(28)), px(170), px(28))?;
+                put(item.label, a, centre(px(20)), b - a - px(178), px(20))
+            }
+            Kind::Note => put(item.label, a, centre(px(20)), b - a, px(20)),
+        }
+    }
+}
+
+struct Geometry {
+    title: (RECT, &'static str),
+    labels: Vec<(RECT, &'static str)>,
+    cards: Vec<(RECT, Vec<i32>)>,
 }
 
 impl Drop for SettingsWindow {
     fn drop(&mut self) {
+        if let Some(paint) = PAINT.with(|p| p.take()) {
+            // SAFETY: the font is ours alone and the window that used it is destroyed next.
+            let _ = unsafe { DeleteObject(paint.title_font.into()) };
+        }
         // SAFETY: sole owner; destroying the parent synchronously destroys all child controls before the font drops.
         unsafe {
             if let Err(error) = DestroyWindow(self.window) {
@@ -1461,8 +1636,8 @@ fn focus_scroll(scroll: i32, top: i32, bottom: i32, viewport: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::clamp_selection;
-    use super::focus_scroll;
+    use super::*;
+    use crate::{dock::Button, tabs::Tab};
 
     #[test]
     fn keyboard_focus_scrolls_both_ends_into_the_viewport() {
@@ -1479,5 +1654,60 @@ mod tests {
         assert_eq!(clamp_selection(4, 3), 2);
         // CB_ERR (-1) and an empty list both give row 0.
         assert_eq!((clamp_selection(-1, 3), clamp_selection(3, 0)), (0, 0));
+    }
+
+    fn rows() -> Vec<&'static Row> {
+        PAGES
+            .iter()
+            .flat_map(|p| p.cards)
+            .flat_map(|c| c.rows)
+            .collect()
+    }
+
+    #[test]
+    fn every_control_id_appears_on_exactly_one_page_and_one_row() {
+        let mut ids: Vec<usize> = rows()
+            .iter()
+            .filter(|r| r.kind != Kind::Note)
+            .map(|r| r.id)
+            .collect();
+        ids.sort_unstable();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "an id is on two rows");
+        assert_eq!(PAGES.len(), TILES.len());
+    }
+
+    #[test]
+    fn every_tab_button_and_toggle_is_a_row_with_a_setting() {
+        let ids: Vec<usize> = rows().iter().map(|r| r.id).collect();
+        let mut s = Settings::default();
+        for tab in Tab::ALL {
+            assert!(
+                ids.contains(&(TAB + tab.index())) && flag(&mut s, TAB + tab.index()).is_some()
+            );
+        }
+        for button in Button::ALL {
+            assert!(
+                ids.contains(&(DBTN + button.index()))
+                    && flag(&mut s, DBTN + button.index()).is_some()
+            );
+        }
+        for row in rows().iter().filter(|r| r.kind == Kind::Check) {
+            assert!(flag(&mut s, row.id).is_some(), "{}", row.title);
+        }
+        assert!(flag(&mut s, TAB + 9).is_none() && flag(&mut s, MONITOR).is_none());
+    }
+
+    #[test]
+    fn every_drop_down_has_its_rows() {
+        for row in rows().iter().filter(|r| matches!(r.kind, Kind::Combo(_))) {
+            // The pin and sound lists are filled by the host and the sound scan.
+            if !matches!(row.id, PIN | PSOUND) {
+                assert!(!combo_rows(row.id).is_empty(), "{}", row.title);
+            }
+        }
+        assert_eq!(combo_rows(PLEAD).len(), LEADS.len());
+        assert_eq!(combo_rows(THEME).len(), Theme::ALL.len());
     }
 }

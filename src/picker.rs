@@ -63,7 +63,7 @@ pub struct Picker {
 }
 impl Picker {
     pub fn create(model: &WindowModel) -> Result<Self> {
-        let window = empty_dialog(440, 280)?;
+        let window = empty_dialog(440, 280, Some(dialog_proc))?;
         let mut picker = Self {
             window,
             filter: HWND::default(),
@@ -434,7 +434,7 @@ pub(crate) fn control(
 }
 /// An empty standard dialog (caption and close box) whose commands `dialog_proc` posts to the host loop.
 /// The settings window reuses it.
-pub(crate) fn empty_dialog(cx: i16, cy: i16) -> Result<HWND> {
+pub(crate) fn empty_dialog(cx: i16, cy: i16, proc: DLGPROC) -> Result<HWND> {
     // SAFETY: initialize standard themed classes before creating this process's first interactive controls.
     unsafe {
         InitCommonControlsEx(&INITCOMMONCONTROLSEX {
@@ -460,7 +460,7 @@ pub(crate) fn empty_dialog(cx: i16, cy: i16) -> Result<HWND> {
             Some(HINSTANCE(GetModuleHandleW(None)?.0)),
             &template.header,
             None,
-            Some(dialog_proc),
+            proc,
             LPARAM(0),
         )
     }
@@ -485,7 +485,7 @@ fn window_text(window: HWND) -> String {
     let length = unsafe { GetWindowTextW(window, &mut text) }.max(0) as usize;
     String::from_utf16_lossy(&text[..length])
 }
-unsafe extern "system" fn dialog_proc(
+pub(crate) unsafe extern "system" fn dialog_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
