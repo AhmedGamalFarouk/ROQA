@@ -1031,3 +1031,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Size:** first candidate 1,157,120 B tripped the ratchet; trimmed (shared `sort::by` insertion sort replaces extra `sort_by` instantiations, layout fns not inlined). Baseline NOT raised.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 309 tests, locked release); 1,134,080 B, ratchet within 2% (limit 1,145,272); SHA `9096BC7BEC7A8A62EA2558C104F72521A0B4F4D72C97E9855CEDE86181BBC59A`.
 - **NOT RUN:** drawing, real clicks/key injection, tooltips, focus ring, Narrator/keyboard, RTL on Arabic UI, multi-monitor, Settings fit; reviews paused (REVIEW NOT RUN). Not landed.
+
+## I1 shared line icons (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/i1-glass`; [packet](features-icons-glass.md). Direction B cached D2D registry, active wash, pixel snapping; old glyph art removed. Limits gauge ready for U1.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 314 tests, locked release); 1,135,616 B, unchanged size ratchet; SHA `DA4D8F913DE461410844CCDC25853A073C344EFC5BADEFFACC2ECE7E575123FA`.
+- **NOT RUN:** native visual/DPI/input checks (no desktop authorization); G1 implementation follows separately.

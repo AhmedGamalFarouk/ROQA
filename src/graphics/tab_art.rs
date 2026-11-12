@@ -1,21 +1,14 @@
 //! Direct2D drawing for the notch tabs and the mascot (features tabs-eyes): the hanging handle with its five
 //! icons, the pages other than Media, the opacity layer that fades the pill out as a page fades in, and the
-//! squash-capsule eyes. Icons are small paths on a 16-unit grid drawn in the theme and accent colours; there
-//! are no asset files. Nothing here runs unless the host puts a rail, a page or eyes in the scene.
+//! squash-capsule eyes. The icons are `glyphs.rs`, drawn in the theme and accent colours. Nothing here runs unless the host puts a rail, a page or eyes in the scene.
 
 use super::*;
 use crate::{
     eyes::{self, Eye},
     layout::NotchBody,
     tabs::Tab,
-    weather::Icon,
 };
-use windows::Win32::Graphics::Direct2D::{
-    Common::{D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN},
-    D2D1_ARC_SIZE_LARGE, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_ELLIPSE,
-    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_LINE_JOIN_ROUND,
-    D2D1_STROKE_STYLE_PROPERTIES,
-};
+use windows::Win32::Graphics::Direct2D::{D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1};
 
 /// Draws `draw` at `opacity` (a layer), or directly at full opacity. The layer exists only for the open and
 /// close frames, where the pill and a page cross-fade.
@@ -51,410 +44,6 @@ pub(super) fn faded(
     // SAFETY: balances the PushLayer above.
     unsafe { context.PopLayer() };
     drawn
-}
-
-/// One path segment on the 16-unit icon grid.
-#[derive(Clone, Copy)]
-enum Seg {
-    M(f32, f32),
-    L(f32, f32),
-    /// Arc to (x, y) with radius r: clockwise, large.
-    A(f32, f32, f32, bool, bool),
-    Z,
-}
-use Seg::{A, L, M, Z};
-
-struct Art {
-    /// Segments, and whether the closed figure is filled as well as stroked.
-    paths: &'static [(&'static [Seg], bool)],
-    /// Centre, radius and whether it is filled.
-    circles: &'static [(f32, f32, f32, bool)],
-}
-
-const MEDIA: Art = Art {
-    paths: &[(
-        &[
-            M(6.4, 11.4),
-            L(6.4, 3.1),
-            L(13.4, 1.6),
-            L(13.4, 9.9),
-            M(6.4, 5.3),
-            L(13.4, 3.8),
-        ],
-        false,
-    )],
-    circles: &[(4.6, 11.8, 1.9, true), (11.6, 10.2, 1.9, true)],
-};
-const WEATHER: Art = Art {
-    paths: &[
-        (
-            &[
-                M(5.0, 0.9),
-                L(5.0, 1.9),
-                M(1.0, 5.0),
-                L(2.0, 5.0),
-                M(2.2, 2.2),
-                L(2.9, 2.9),
-                M(7.8, 2.2),
-                L(7.1, 2.9),
-            ],
-            false,
-        ),
-        (
-            &[
-                M(5.6, 14.2),
-                L(12.2, 14.2),
-                A(12.5, 9.4, 2.4, false, false),
-                A(5.6, 10.3, 3.6, false, false),
-                A(5.6, 14.2, 2.1, false, false),
-                Z,
-            ],
-            false,
-        ),
-    ],
-    circles: &[(5.0, 5.0, 1.9, false)],
-};
-const PRAYER: Art = Art {
-    paths: &[
-        (
-            &[
-                M(8.0, 2.2),
-                A(14.0, 10.4, 6.0, false, true),
-                A(8.0, 2.2, 4.9, true, false),
-                Z,
-            ],
-            false,
-        ),
-        (
-            &[
-                M(12.6, 1.8),
-                L(13.1, 3.0),
-                L(14.3, 3.5),
-                L(13.1, 4.0),
-                L(12.6, 5.2),
-                L(12.1, 4.0),
-                L(10.9, 3.5),
-                L(12.1, 3.0),
-                Z,
-            ],
-            true,
-        ),
-    ],
-    circles: &[],
-};
-const TIMER: Art = Art {
-    paths: &[(
-        &[
-            M(8.0, 9.2),
-            L(8.0, 6.4),
-            M(6.0, 1.6),
-            L(10.0, 1.6),
-            M(12.3, 4.3),
-            L(13.3, 3.3),
-        ],
-        false,
-    )],
-    circles: &[(8.0, 9.2, 5.2, false)],
-};
-const SHELF: Art = Art {
-    paths: &[
-        (
-            &[
-                M(1.8, 9.4),
-                L(3.5, 3.8),
-                A(4.5, 3.0, 1.0, true, false),
-                L(11.5, 3.0),
-                A(12.5, 3.8, 1.0, true, false),
-                L(14.2, 9.4),
-                L(14.2, 12.4),
-                A(13.2, 13.4, 1.0, true, false),
-                L(2.8, 13.4),
-                A(1.8, 12.4, 1.0, true, false),
-                Z,
-            ],
-            false,
-        ),
-        (
-            &[
-                M(1.8, 9.4),
-                L(5.6, 9.4),
-                A(10.4, 9.4, 2.4, false, false),
-                L(14.2, 9.4),
-            ],
-            false,
-        ),
-    ],
-    circles: &[],
-};
-
-// The Weather page's pictures (features W1), on the same grid. A cloud is the Weather tab's own outline, moved.
-const SUN: Art = Art {
-    paths: &[(
-        &[
-            M(8.0, 1.4),
-            L(8.0, 2.8),
-            M(8.0, 13.2),
-            L(8.0, 14.6),
-            M(1.4, 8.0),
-            L(2.8, 8.0),
-            M(13.2, 8.0),
-            L(14.6, 8.0),
-            M(3.3, 3.3),
-            L(4.4, 4.4),
-            M(12.7, 3.3),
-            L(11.6, 4.4),
-            M(3.3, 12.7),
-            L(4.4, 11.6),
-            M(12.7, 12.7),
-            L(11.6, 11.6),
-        ],
-        false,
-    )],
-    circles: &[(8.0, 8.0, 2.9, false)],
-};
-const CLOUD: Art = Art {
-    paths: &[(
-        &[
-            M(4.6, 12.2),
-            L(11.2, 12.2),
-            A(11.5, 7.4, 2.4, false, false),
-            A(4.6, 8.3, 3.6, false, false),
-            A(4.6, 12.2, 2.1, false, false),
-            Z,
-        ],
-        false,
-    )],
-    circles: &[],
-};
-const FOG: Art = Art {
-    paths: &[(
-        &[
-            M(3.0, 4.5),
-            L(13.0, 4.5),
-            M(2.0, 7.5),
-            L(12.0, 7.5),
-            M(4.0, 10.5),
-            L(14.0, 10.5),
-            M(3.0, 13.5),
-            L(11.0, 13.5),
-        ],
-        false,
-    )],
-    circles: &[],
-};
-const DRIZZLE: Art = Art {
-    paths: &[
-        (
-            &[
-                M(4.6, 9.7),
-                L(11.2, 9.7),
-                A(11.5, 4.9, 2.4, false, false),
-                A(4.6, 5.8, 3.6, false, false),
-                A(4.6, 9.7, 2.1, false, false),
-                Z,
-            ],
-            false,
-        ),
-        (
-            &[M(6.0, 12.0), L(5.6, 13.4), M(9.6, 12.0), L(9.2, 13.4)],
-            false,
-        ),
-    ],
-    circles: &[],
-};
-const RAIN: Art = Art {
-    paths: &[
-        (
-            &[
-                M(4.6, 9.7),
-                L(11.2, 9.7),
-                A(11.5, 4.9, 2.4, false, false),
-                A(4.6, 5.8, 3.6, false, false),
-                A(4.6, 9.7, 2.1, false, false),
-                Z,
-            ],
-            false,
-        ),
-        (
-            &[
-                M(5.6, 11.6),
-                L(4.8, 14.4),
-                M(8.6, 11.6),
-                L(7.8, 14.4),
-                M(11.6, 11.6),
-                L(10.8, 14.4),
-            ],
-            false,
-        ),
-    ],
-    circles: &[],
-};
-const SNOW: Art = Art {
-    paths: &[(
-        &[
-            M(4.6, 9.7),
-            L(11.2, 9.7),
-            A(11.5, 4.9, 2.4, false, false),
-            A(4.6, 5.8, 3.6, false, false),
-            A(4.6, 9.7, 2.1, false, false),
-            Z,
-        ],
-        false,
-    )],
-    circles: &[
-        (5.6, 12.8, 0.3, true),
-        (8.8, 13.9, 0.3, true),
-        (12.0, 12.8, 0.3, true),
-    ],
-};
-const STORM: Art = Art {
-    paths: &[
-        (
-            &[
-                M(4.6, 9.7),
-                L(11.2, 9.7),
-                A(11.5, 4.9, 2.4, false, false),
-                A(4.6, 5.8, 3.6, false, false),
-                A(4.6, 9.7, 2.1, false, false),
-                Z,
-            ],
-            false,
-        ),
-        (
-            &[M(9.0, 10.8), L(6.8, 13.2), L(9.4, 13.2), L(7.2, 15.6)],
-            false,
-        ),
-    ],
-    circles: &[],
-};
-
-fn weather_art(icon: Icon) -> &'static Art {
-    match icon {
-        Icon::Clear => &SUN,
-        Icon::PartlyCloudy => &WEATHER,
-        Icon::Cloud => &CLOUD,
-        Icon::Fog => &FOG,
-        Icon::Drizzle => &DRIZZLE,
-        Icon::Rain => &RAIN,
-        Icon::Snow => &SNOW,
-        Icon::Storm => &STORM,
-    }
-}
-
-fn art(tab: Tab) -> &'static Art {
-    match tab {
-        Tab::Media => &MEDIA,
-        Tab::Weather => &WEATHER,
-        Tab::Prayer => &PRAYER,
-        Tab::Timer => &TIMER,
-        Tab::Shelf => &SHELF,
-    }
-}
-
-/// Strokes `tab`'s icon (1.5 of 16 units, round caps and joins) in the `square`, filling the marked parts.
-fn icon(
-    context: &ID2D1DeviceContext,
-    tab: Tab,
-    square: D2D_RECT_F,
-    color: D2D1_COLOR_F,
-) -> Result<()> {
-    draw_art(context, art(tab), square, color)
-}
-
-fn draw_art(
-    context: &ID2D1DeviceContext,
-    art: &Art,
-    square: D2D_RECT_F,
-    color: D2D1_COLOR_F,
-) -> Result<()> {
-    let unit = (square.right - square.left) / 16.0;
-    let at = |x: f32, y: f32| Vector2 {
-        X: square.left + x * unit,
-        Y: square.top + y * unit,
-    };
-    // SAFETY: context is live between surface BeginDraw/EndDraw; the brush, stroke style, geometry and sink
-    // are local COM objects scoped to this draw, and each sink is closed before its geometry is used.
-    unsafe {
-        let factory = context.GetFactory()?;
-        let brush = context.CreateSolidColorBrush(&color, None)?;
-        let style = factory.CreateStrokeStyle(
-            &D2D1_STROKE_STYLE_PROPERTIES {
-                startCap: D2D1_CAP_STYLE_ROUND,
-                endCap: D2D1_CAP_STYLE_ROUND,
-                dashCap: D2D1_CAP_STYLE_ROUND,
-                lineJoin: D2D1_LINE_JOIN_ROUND,
-                miterLimit: 1.0,
-                dashStyle: D2D1_DASH_STYLE_SOLID,
-                dashOffset: 0.0,
-            },
-            None,
-        )?;
-        let stroke = 1.5 * unit;
-        for &(segments, filled) in art.paths {
-            let path = factory.CreatePathGeometry()?;
-            let sink = path.Open()?;
-            let mut open = false;
-            for &segment in segments {
-                match segment {
-                    M(x, y) => {
-                        if open {
-                            sink.EndFigure(D2D1_FIGURE_END_OPEN);
-                        }
-                        let begin = if filled {
-                            D2D1_FIGURE_BEGIN_FILLED
-                        } else {
-                            D2D1_FIGURE_BEGIN_HOLLOW
-                        };
-                        sink.BeginFigure(at(x, y), begin);
-                        open = true;
-                    }
-                    L(x, y) => sink.AddLine(at(x, y)),
-                    A(x, y, radius, clockwise, large) => sink.AddArc(&D2D1_ARC_SEGMENT {
-                        point: at(x, y),
-                        size: D2D_SIZE_F {
-                            width: radius * unit,
-                            height: radius * unit,
-                        },
-                        rotationAngle: 0.0,
-                        sweepDirection: if clockwise {
-                            D2D1_SWEEP_DIRECTION_CLOCKWISE
-                        } else {
-                            D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE
-                        },
-                        arcSize: if large {
-                            D2D1_ARC_SIZE_LARGE
-                        } else {
-                            D2D1_ARC_SIZE_SMALL
-                        },
-                    }),
-                    Z => {
-                        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-                        open = false;
-                    }
-                }
-            }
-            if open {
-                sink.EndFigure(D2D1_FIGURE_END_OPEN);
-            }
-            sink.Close()?;
-            if filled {
-                context.FillGeometry(&path, &brush, None);
-            }
-            context.DrawGeometry(&path, &brush, stroke, Some(&style));
-        }
-        for &(x, y, radius, filled) in art.circles {
-            let circle = D2D1_ELLIPSE {
-                point: at(x, y),
-                radiusX: radius * unit,
-                radiusY: radius * unit,
-            };
-            if filled {
-                context.FillEllipse(&circle, &brush);
-            }
-            context.DrawEllipse(&circle, &brush, stroke, Some(&style));
-        }
-    }
-    Ok(())
 }
 
 /// The hanging handle (design T3), drawn after the body clip is popped because it lies below the body: a
@@ -552,7 +141,7 @@ fn items(
             }
             if active && open > 0.0 {
                 let wash = context.CreateSolidColorBrush(
-                    &with_alpha(p.accent, p.ink_alpha(0.26 * open * reveal)),
+                    &with_alpha(p.accent, p.ink_alpha(0.22 * open * reveal)),
                     None,
                 )?;
                 context.FillRoundedRectangle(&rounded(cell, corner), &wash);
@@ -560,8 +149,8 @@ fn items(
         }
         let shown = (open * 1.7 - 0.5).clamp(0.0, 1.0) * reveal;
         if shown > 0.0 {
-            // 14 DIP glyphs grown from 40 % of that, centred in the button.
-            let side = (14.0 * scale * (0.4 + 0.6 * open)).round();
+            // 16 DIP glyphs grown from 40 % of that, centred in the button.
+            let side = (16.0 * scale * (0.4 + 0.6 * open)).round();
             let (cx, cy) = (
                 (cell.left + cell.right) / 2.0,
                 (cell.top + cell.bottom) / 2.0,
@@ -573,11 +162,11 @@ fn items(
                 bottom: (cy - side / 2.0).round() + side,
             };
             let color = if active {
-                with_alpha(p.accent, p.ink_alpha(shown))
+                with_alpha(glyphs::active_ink(p), p.ink_alpha(shown))
             } else {
                 with_alpha(p.ink, p.ink_alpha(0.7 * shown))
             };
-            icon(context, tab, square, color)?;
+            glyphs::draw(context, square, Glyph::tab(tab), color)?;
         }
         if handle.focus == Some(position) {
             // SAFETY: as above.
@@ -759,10 +348,10 @@ fn weather_page(
             ink(0.6),
         );
     }
-    draw_art(
+    glyphs::draw(
         context,
-        weather_art(view.icon),
         at(16.0, 33.0, 28.0, 28.0),
+        Glyph::weather(view.icon),
         ink(1.0),
     )?;
     let temp = font(DISPLAY_FONT, 26.0, DWRITE_FONT_WEIGHT_BOLD, lead);
@@ -799,10 +388,10 @@ fn weather_page(
             at(x, 29.0, 40.0, 12.0),
             ink(0.6),
         )?;
-        draw_art(
+        glyphs::draw(
             context,
-            weather_art(cell.icon),
-            at(x + 15.0, 42.0, 10.0, 10.0),
+            at(x + 14.0, 41.0, 12.0, 12.0),
+            Glyph::weather(cell.icon),
             ink(0.85),
         )?;
         let value = font(TEXT_FONT, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, middle);

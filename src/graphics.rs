@@ -34,7 +34,7 @@ use windows::Win32::{
             D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
             D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
             D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateDevice, ID2D1Bitmap1, ID2D1Brush,
-            ID2D1DeviceContext, ID2D1LinearGradientBrush, ID2D1PathGeometry, ID2D1SolidColorBrush,
+            ID2D1DeviceContext, ID2D1LinearGradientBrush, ID2D1PathGeometry,
         },
         Direct3D::D3D_DRIVER_TYPE_HARDWARE,
         Direct3D11::{
@@ -64,7 +64,9 @@ use windows::Win32::{
 use windows::core::{Error, HRESULT, Interface, PCWSTR, Result, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
+mod glyphs;
 mod tab_art;
+pub use glyphs::Glyph;
 
 #[derive(Clone)]
 pub struct Graphics {
@@ -443,7 +445,7 @@ impl Canvas {
             }
             let icon = at(layout.icon);
             let square = pixel_square(icon.left, icon.top, icon.right - icon.left);
-            fill_glyph(
+            glyphs::draw(
                 context,
                 square,
                 scene.glyph,
@@ -828,7 +830,7 @@ fn settings_button(
             );
         }
     }
-    fill_glyph(
+    glyphs::draw(
         context,
         square,
         Glyph::Gear,
@@ -1045,47 +1047,13 @@ fn shelf_row(
                 );
             }
         }
-        if slot.add {
-            // SAFETY: scoped brush and live context, a plus marks the empty shelf's add action.
-            unsafe {
-                let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, reveal), None)?;
-                context.FillRectangle(
-                    &D2D_RECT_F {
-                        left: square.left + 7.0 * scale,
-                        top: square.top + 2.0 * scale,
-                        right: square.left + 9.0 * scale,
-                        bottom: square.top + 14.0 * scale,
-                    },
-                    &brush,
-                );
-                context.FillRectangle(
-                    &D2D_RECT_F {
-                        left: square.left + 2.0 * scale,
-                        top: square.top + 7.0 * scale,
-                        right: square.left + 14.0 * scale,
-                        bottom: square.top + 9.0 * scale,
-                    },
-                    &brush,
-                );
-            }
-            continue;
-        }
-        if slot.more {
-            // SAFETY: scoped brush and live draw context; three dots distinguish paging from a file.
-            unsafe {
-                let brush =
-                    context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(reveal)), None)?;
-                for dot in 0..3 {
-                    context.FillRectangle(
-                        &pixel_square(
-                            square.left + (2.0 + 5.0 * dot as f32) * scale,
-                            square.top + 7.0 * scale,
-                            2.0 * scale,
-                        ),
-                        &brush,
-                    );
-                }
-            }
+        if slot.add || slot.more {
+            glyphs::draw(
+                context,
+                square,
+                if slot.add { Glyph::Add } else { Glyph::More },
+                with_alpha(p.ink, p.ink_alpha(reveal)),
+            )?;
             continue;
         }
         match slot.icon {
@@ -1177,7 +1145,7 @@ const VOLUME_TRACK: f32 = 0.40;
 /// audible white fill.
 const MUTED_FILL: f32 = 0.60;
 
-/// One media control: a white glyph, or for play/pause a black glyph on a white circle. A control
+/// One media control: a line glyph, with a soft accent wash for play/pause. A control
 /// the player does not accept now is drawn at `DISABLED` opacity.
 struct Chip {
     rect: D2D_RECT_F,
@@ -1199,97 +1167,12 @@ const DISABLED: f32 = 0.30;
 const FOCUS_STROKE: f32 = 2.0;
 const FOCUS_GAP: f32 = 2.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Glyph {
-    Play,
-    Pause,
-    Previous,
-    Next,
-    /// The mute toggle: a speaker with two sound waves, one wave at a low level, none while muted.
-    Speaker,
-    SpeakerLow,
-    Muted,
-    /// The settings button: a cog, a core with eight teeth.
-    Gear,
-    /// The brightness slider's icon: a core with four rays.
-    Sun,
-}
-/// Glyph parts on a 10-unit grid: a triangle's x, y corners, and a bar's left, top, right, bottom.
-type Triangle = [(f32, f32); 3];
-type Bar = (f32, f32, f32, f32);
-
 /// What the pointer is doing on the volume bar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Grip {
     pub hover: bool,
     pub drag: bool,
 }
-impl Glyph {
-    /// The speaker for a level: silent or muted shows no waves, up to a third one wave, above it two.
-    pub fn speaker(percent: u8, muted: bool) -> Glyph {
-        match percent {
-            _ if muted => Glyph::Muted,
-            0 => Glyph::Muted,
-            1..=33 => Glyph::SpeakerLow,
-            _ => Glyph::Speaker,
-        }
-    }
-    fn parts(self) -> (Option<Triangle>, &'static [Bar]) {
-        match self {
-            Glyph::Play => (Some([(2.5, 1.0), (9.0, 5.0), (2.5, 9.0)]), &[]),
-            Glyph::Pause => (None, &[(2.0, 1.0, 4.2, 9.0), (5.8, 1.0, 8.0, 9.0)]),
-            Glyph::Previous => (
-                Some([(9.0, 1.0), (9.0, 9.0), (3.8, 5.0)]),
-                &[(1.5, 1.0, 3.1, 9.0)],
-            ),
-            Glyph::Next => (
-                Some([(1.0, 1.0), (6.2, 5.0), (1.0, 9.0)]),
-                &[(7.0, 1.0, 8.6, 9.0)],
-            ),
-            Glyph::Speaker => (
-                Some([(0.5, 5.0), (6.5, 1.0), (6.5, 9.0)]),
-                &[
-                    (1.0, 3.5, 3.5, 6.5),
-                    (7.6, 3.5, 8.4, 6.5),
-                    (9.0, 2.0, 9.8, 8.0),
-                ],
-            ),
-            Glyph::SpeakerLow => (
-                Some([(0.5, 5.0), (6.5, 1.0), (6.5, 9.0)]),
-                &[(1.0, 3.5, 3.5, 6.5), (7.6, 3.5, 8.4, 6.5)],
-            ),
-            Glyph::Muted => (
-                Some([(0.5, 5.0), (6.5, 1.0), (6.5, 9.0)]),
-                &[(1.0, 3.5, 3.5, 6.5)],
-            ),
-            Glyph::Gear => (
-                None,
-                &[
-                    (2.5, 2.5, 7.5, 7.5),
-                    (4.0, 0.0, 6.0, 2.0),
-                    (4.0, 8.0, 6.0, 10.0),
-                    (0.0, 4.0, 2.0, 6.0),
-                    (8.0, 4.0, 10.0, 6.0),
-                    (1.2, 1.2, 2.8, 2.8),
-                    (7.2, 1.2, 8.8, 2.8),
-                    (1.2, 7.2, 2.8, 8.8),
-                    (7.2, 7.2, 8.8, 8.8),
-                ],
-            ),
-            Glyph::Sun => (
-                None,
-                &[
-                    (3.0, 3.0, 7.0, 7.0),
-                    (4.5, 0.0, 5.5, 2.0),
-                    (4.5, 8.0, 5.5, 10.0),
-                    (0.0, 4.5, 2.0, 5.5),
-                    (8.0, 4.5, 10.0, 5.5),
-                ],
-            ),
-        }
-    }
-}
-
 /// The media clock at `open` (`smooth(progress)`): the pill's 15 DIP bold clock settles into the
 /// panel's 12 DIP regular one, trailing-aligned so it is never trimmed.
 fn media_clock(open: f32, scale: f32) -> Font {
@@ -1607,8 +1490,11 @@ fn media_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip
                 bottom: body.top + (control.y + control.height) as f32,
             };
             let filled = index == PLAY_PAUSE;
-            // A 12 DIP glyph inside the circle, 14 DIP on its own.
-            let size = (if filled { 12.0 } else { 14.0 } * scale).round();
+            // A 16 DIP glyph inside the circle, 18 DIP on its own (the 24-unit icon grid has its own margin).
+            let size = (if filled { 16.0 } else { 18.0 } * scale)
+                .round()
+                .min(rect.right - rect.left)
+                .min(rect.bottom - rect.top);
             let centre = |extent: i32| ((extent as f32 - size) / 2.0).round();
             Chip {
                 rect,
@@ -1668,7 +1554,7 @@ fn media_text(
             let slot = context.CreateSolidColorBrush(&tint(p.track(COVER_FILL)), None)?;
             context.FillRoundedRectangle(&plan.cover, &slot);
         }
-        fill_glyph(
+        glyphs::draw(
             context,
             plan.glyph,
             state,
@@ -1682,7 +1568,7 @@ fn media_text(
             context.FillRoundedRectangle(&badge.circle, &circle);
         }
         let color = with_alpha(p.ink, p.ink_alpha(plan.dim * badge.alpha));
-        fill_glyph(context, badge.glyph, state, color)?;
+        glyphs::draw(context, badge.glyph, state, color)?;
     }
     if let Some(([track, fill], alpha)) = &plan.bar {
         // SAFETY: as above.
@@ -1710,13 +1596,20 @@ fn media_text(
             let radius = (chip.rect.bottom - chip.rect.top) / 2.0;
             // SAFETY: as above.
             unsafe {
-                let circle = context.CreateSolidColorBrush(&color, None)?;
+                let circle = context.CreateSolidColorBrush(
+                    &with_alpha(p.accent, p.ink_alpha(0.22 * chip.alpha)),
+                    None,
+                )?;
                 context.FillRoundedRectangle(&rounded(chip.rect, radius), &circle);
             }
-            // Body-coloured on the circle; over the body it vanishes as the circle fades.
-            fill_glyph(context, chip.glyph, chip.shape, with_alpha(p.on_ink, 1.0))?;
+            glyphs::draw(
+                context,
+                chip.glyph,
+                chip.shape,
+                with_alpha(glyphs::active_ink(p), p.ink_alpha(chip.alpha)),
+            )?;
         } else {
-            fill_glyph(context, chip.glyph, chip.shape, color)?;
+            glyphs::draw(context, chip.glyph, chip.shape, color)?;
         }
     }
     if let Some(bar) = &plan.volume {
@@ -1869,47 +1762,6 @@ fn pixel_square(left: f32, top: f32, size: f32) -> D2D_RECT_F {
         right: left.round() + size,
         bottom: top.round() + size,
     }
-}
-
-/// Fills `shape` on its 10-unit grid inside `square`; bars snap to whole pixels.
-fn fill_glyph(
-    context: &ID2D1DeviceContext,
-    square: D2D_RECT_F,
-    shape: Glyph,
-    color: D2D1_COLOR_F,
-) -> Result<()> {
-    let unit = (square.right - square.left) / 10.0;
-    let point = |(x, y): (f32, f32)| Vector2 {
-        X: square.left + x * unit,
-        Y: square.top + y * unit,
-    };
-    let (triangle, bars) = shape.parts();
-    // SAFETY: context is live between surface BeginDraw/EndDraw; the brush and path geometry are
-    // local COM objects scoped to this draw, and the sink is closed before the fill.
-    unsafe {
-        let brush = context.CreateSolidColorBrush(&color, None)?;
-        if let Some([first, second, third]) = triangle {
-            let path = context.GetFactory()?.CreatePathGeometry()?;
-            let sink = path.Open()?;
-            sink.BeginFigure(point(first), D2D1_FIGURE_BEGIN_FILLED);
-            sink.AddLine(point(second));
-            sink.AddLine(point(third));
-            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-            sink.Close()?;
-            context.FillGeometry(&path, &brush, None);
-        }
-        for &(left, top, right, bottom) in bars {
-            let (top_left, bottom_right) = (point((left, top)), point((right, bottom)));
-            let bar = D2D_RECT_F {
-                left: top_left.X.round(),
-                top: top_left.Y.round(),
-                right: bottom_right.X.round(),
-                bottom: bottom_right.Y.round(),
-            };
-            context.FillRectangle(&bar, &brush);
-        }
-    }
-    Ok(())
 }
 
 struct Font {
@@ -2148,107 +2000,16 @@ fn draw_button(
             let brush = context.CreateSolidColorBrush(&tint(p.track(0.12 * hover)), None)?;
             context.FillRoundedRectangle(&rounded(chip, px(10)), &brush);
         }
-        let ink = context.CreateSolidColorBrush(&with_alpha(p.glyph, 1.0), None)?;
-        match button {
-            dock::Button::Start => glyph_start(context, centre, px, &ink),
-            dock::Button::Search => glyph_search(context, centre, px, &ink),
-            dock::Button::TaskView => glyph_task_view(context, centre, px, &ink),
-            _ => glyph_minimized(context, centre, px, &ink),
-        }
     }
-    Ok(())
-}
-
-// The glyphs below are placeholders, one function each (features D2); the line-icon pass replaces only these.
-// Each draws with the button's ink brush, on the live draw context.
-
-/// The Windows logo: four rounded squares.
-fn glyph_start(
-    context: &ID2D1DeviceContext,
-    (cx, cy): (f32, f32),
-    px: &dyn Fn(i32) -> f32,
-    ink: &ID2D1SolidColorBrush,
-) {
-    let (tile, gap) = (px(9), px(2));
-    for (column, row) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
-        let left = cx - tile - gap / 2.0 + column * (tile + gap);
-        let top = cy - tile - gap / 2.0 + row * (tile + gap);
-        let square = D2D_RECT_F {
-            left,
-            top,
-            right: left + tile,
-            bottom: top + tile,
-        };
-        // SAFETY: a draw call on the live context, as the caller guarantees.
-        unsafe { context.FillRoundedRectangle(&rounded(square, px(1)), ink) };
-    }
-}
-
-/// A magnifier: a ring and a handle.
-fn glyph_search(
-    context: &ID2D1DeviceContext,
-    (cx, cy): (f32, f32),
-    px: &dyn Fn(i32) -> f32,
-    ink: &ID2D1SolidColorBrush,
-) {
-    let (radius, stroke) = (px(7), px(2));
-    let (ring_x, ring_y) = (cx - px(2), cy - px(2));
-    let ring = D2D_RECT_F {
-        left: ring_x - radius,
-        top: ring_y - radius,
-        right: ring_x + radius,
-        bottom: ring_y + radius,
+    let side = px(22);
+    let square = pixel_square(centre.0 - side / 2.0, centre.1 - side / 2.0, side);
+    let shape = match button {
+        dock::Button::Start => Glyph::Start,
+        dock::Button::Search => Glyph::Search,
+        dock::Button::TaskView => Glyph::TaskView,
+        _ => Glyph::Chevron,
     };
-    let point = |x: f32, y: f32| Vector2 { X: x, Y: y };
-    let (from, to) = (radius * 0.72, radius * 0.72 + px(6));
-    // SAFETY: draw calls on the live context, as the caller guarantees.
-    unsafe {
-        context.DrawRoundedRectangle(&rounded(ring, radius), ink, stroke, None);
-        context.DrawLine(
-            point(ring_x + from, ring_y + from),
-            point(ring_x + to, ring_y + to),
-            ink,
-            stroke,
-            None,
-        );
-    }
-}
-
-/// Task View: two overlapping windows.
-fn glyph_task_view(
-    context: &ID2D1DeviceContext,
-    (cx, cy): (f32, f32),
-    px: &dyn Fn(i32) -> f32,
-    ink: &ID2D1SolidColorBrush,
-) {
-    let window = |left: i32, top: i32| D2D_RECT_F {
-        left: cx + px(left),
-        top: cy + px(top),
-        right: cx + px(left + 14),
-        bottom: cy + px(top + 10),
-    };
-    for rect in [window(-10, -7), window(-4, -3)] {
-        // SAFETY: a draw call on the live context, as the caller guarantees.
-        unsafe { context.DrawRoundedRectangle(&rounded(rect, px(2)), ink, px(1) * 1.5, None) };
-    }
-}
-
-/// The minimized-apps chevron.
-fn glyph_minimized(
-    context: &ID2D1DeviceContext,
-    (cx, cy): (f32, f32),
-    px: &dyn Fn(i32) -> f32,
-    ink: &ID2D1SolidColorBrush,
-) {
-    let point = |x: i32, y: i32| Vector2 {
-        X: cx + px(x),
-        Y: cy + px(y),
-    };
-    // SAFETY: draw calls on the live context, as the caller guarantees.
-    unsafe {
-        context.DrawLine(point(-6, 2), point(0, -4), ink, px(2), None);
-        context.DrawLine(point(0, -4), point(6, 2), ink, px(2), None);
-    }
+    glyphs::draw(context, square, shape, with_alpha(p.glyph, 1.0))
 }
 
 /// The show-desktop strip: a thin bar down the dock's far end, brighter under the pointer.
@@ -2259,19 +2020,18 @@ fn glyph_desktop(
     px: &dyn Fn(i32) -> f32,
     p: &Palette,
 ) -> Result<()> {
-    let centre = (cell.left + cell.right) / 2.0;
-    let bar = D2D_RECT_F {
-        left: centre - px(2),
-        top: cell.top + px(14),
-        right: centre + px(2),
-        bottom: cell.bottom - px(14),
-    };
-    // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw.
-    unsafe {
-        let brush = context.CreateSolidColorBrush(&tint(p.track(0.18 + 0.30 * hover)), None)?;
-        context.FillRoundedRectangle(&rounded(bar, px(2)), &brush);
-    }
-    Ok(())
+    let side = px(24);
+    let square = pixel_square(
+        (cell.left + cell.right - side) / 2.0,
+        (cell.top + cell.bottom - side) / 2.0,
+        side,
+    );
+    glyphs::draw(
+        context,
+        square,
+        Glyph::Desktop,
+        tint(p.track(0.4 + 0.3 * hover)),
+    )
 }
 
 /// The notch outline turned over: rounded top corners, flat bottom flush with the surface's bottom edge.
@@ -2341,21 +2101,8 @@ fn draw_slot(
             let brush = context.CreateSolidColorBrush(&tint(p.track(0.12 * slot.hover)), None)?;
             context.FillRoundedRectangle(&rounded(highlight, px(12)), &brush);
         }
-        let glyph = context.CreateSolidColorBrush(&with_alpha(p.glyph, 1.0), None)?;
         if slot.picker {
-            // Our own glyph: a 2x2 grid meaning "all windows".
-            let (tile, gap) = (px(12), px(4));
-            for (column, row) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
-                let left = center_x - tile - gap / 2.0 + column * (tile + gap);
-                let top = center_y - tile - gap / 2.0 + row * (tile + gap);
-                let square = D2D_RECT_F {
-                    left,
-                    top,
-                    right: left + tile,
-                    bottom: top + tile,
-                };
-                context.FillRoundedRectangle(&rounded(square, px(3)), &glyph);
-            }
+            glyphs::draw(context, frame, Glyph::Start, with_alpha(p.glyph, 1.0))?;
         } else if let Some(pixels) = slot.icon {
             // shortcut: bitmaps are rebuilt per paint (catalog/icon/hover changes and the frames of a ~0.2 s hover animation); cache per device if profiling shows cost.
             context.DrawBitmap(
@@ -2795,21 +2542,21 @@ mod media_tests {
             [
                 (
                     rect(140.0, 66.0, 168.0, 98.0),
-                    rect(147.0, 75.0, 161.0, 89.0),
+                    rect(145.0, 73.0, 163.0, 91.0),
                     Glyph::Previous,
                     false,
                     DISABLED
                 ),
                 (
                     rect(188.0, 66.0, 220.0, 98.0),
-                    rect(198.0, 76.0, 210.0, 88.0),
+                    rect(196.0, 74.0, 212.0, 90.0),
                     Glyph::Pause,
                     true,
                     1.0
                 ),
                 (
                     rect(240.0, 66.0, 268.0, 98.0),
-                    rect(247.0, 75.0, 261.0, 89.0),
+                    rect(245.0, 73.0, 263.0, 91.0),
                     Glyph::Next,
                     false,
                     1.0
@@ -2817,7 +2564,7 @@ mod media_tests {
                 // Mute, disabled here: the scene has no audio endpoint.
                 (
                     rect(140.0, 100.0, 164.0, 116.0),
-                    rect(145.0, 101.0, 159.0, 115.0),
+                    rect(144.0, 100.0, 160.0, 116.0),
                     Glyph::Speaker,
                     false,
                     DISABLED

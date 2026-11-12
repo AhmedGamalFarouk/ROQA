@@ -6,6 +6,8 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
 - [x] Media island (M4), pins, shelf, countdown timers, fullscreen suppression, multi-monitor, themes.
 
 ## Queue
+- [x] I1: direction B line icons ([packet](features-icons-glass.md)); native visual checks NOT RUN.
+- [ ] G1: Frosted tint migration and native Liquid glass ([packet](features-icons-glass.md)); native gate required.
 - [x] B1: power/battery pill and system accent colour ([packet](features-b1.md)).
 - [x] B2: DWM hover thumbnails on dock slots, plus a virtual-desktop filter ([packet](features-b2.md)).
       (`IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop`).
