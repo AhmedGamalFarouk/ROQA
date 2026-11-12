@@ -7,6 +7,7 @@ use crate::{
     dock_uia::Accessibility,
     edge::{ListRow, list_layout, row_at, row_rect},
     graphics::{Canvas, Graphics, ListScene},
+    icons::IconPixels,
     layout::Bounds,
     menu_uia,
     native_window::{self, NativeWindow},
@@ -40,6 +41,8 @@ pub enum Item {
     /// The app menu (right-click on the notch or the dock outside an app slot).
     Settings,
     Quit,
+    /// A minimized window in the chevron's list; its row shows the window's title (`Spec::titles`).
+    Restore(WindowKey),
 }
 impl Item {
     pub fn label(self) -> &'static str {
@@ -50,6 +53,7 @@ impl Item {
             Item::Unpin => "Unpin from dock",
             Item::Settings => "Settings",
             Item::Quit => "Quit ROQA",
+            Item::Restore(_) => "Window",
         }
     }
 }
@@ -151,9 +155,12 @@ pub struct Spec {
     pub work: Bounds,
     pub dpi: u32,
     pub app: String,
-    /// The pointer column for an app menu (the slot's centre otherwise), and `Some(bottom)` to open it below that
-    /// screen row (the notch) instead of above the dock.
-    pub x: Option<i32>,
+    /// Row text and icon per item when the labels are not fixed (the minimized list); empty otherwise.
+    pub titles: Vec<String>,
+    pub icons: Vec<Option<Arc<IconPixels>>>,
+    /// The screen column the menu centres on (a slot's centre, or the pointer), and `Some(bottom)` to open it
+    /// below that screen row (the notch) instead of above the dock.
+    pub x: i32,
     pub below: Option<i32>,
     /// The window that had the foreground, which gets it back when the menu ends.
     pub return_to: Option<WindowKey>,
@@ -169,6 +176,8 @@ pub struct Menu {
     pub slot: usize,
     pub identity: Identity,
     items: Vec<Item>,
+    titles: Vec<String>,
+    icons: Vec<Option<Arc<IconPixels>>>,
     dpi: u32,
     selected: Option<usize>,
     drawn: Option<Option<usize>>,
@@ -179,6 +188,13 @@ impl Drop for Menu {
         self.accessibility.disconnect();
         menu_uia::invalidate(&self.uia);
     }
+}
+
+/// A row's text: its window title when it has one, else the action's fixed label.
+fn row_label<'a>(items: &'a [Item], titles: &'a [String], index: usize) -> &'a str {
+    titles
+        .get(index)
+        .map_or_else(|| items[index].label(), String::as_str)
 }
 
 fn point(lparam: windows::Win32::Foundation::LPARAM) -> (i32, i32) {
@@ -193,9 +209,7 @@ impl Menu {
     pub fn open(graphics: &Graphics, palette: Palette, spec: Spec) -> Result<Self> {
         let dpi = spec.dpi;
         let (size, panel) = list_layout(dpi, spec.items.len());
-        let slot_x = spec
-            .x
-            .unwrap_or_else(|| dock::slot_center_x(spec.dock_bounds.x, spec.slot, dpi));
+        let slot_x = spec.x;
         let bounds = match spec.below {
             Some(bottom) => place_below(slot_x, bottom, spec.work, size),
             None => place(slot_x, spec.dock_bounds, spec.work, size),
@@ -203,11 +217,11 @@ impl Menu {
         let window = NativeWindow::create_menu(bounds, &format!("{} menu", spec.app))?;
         let uia: menu_uia::Shared = Arc::new(Mutex::new(menu_uia::State {
             name: format!("{} menu", spec.app),
-            rows: spec
-                .items
-                .iter()
-                .enumerate()
-                .map(|(index, item)| (item.label().to_owned(), row_rect(dpi, panel, index)))
+            rows: (0..spec.items.len())
+                .map(|index| {
+                    let label = row_label(&spec.items, &spec.titles, index);
+                    (label.to_owned(), row_rect(dpi, panel, index))
+                })
                 .collect(),
             ..Default::default()
         }));
@@ -228,6 +242,8 @@ impl Menu {
             slot: spec.slot,
             identity: spec.identity,
             items: spec.items,
+            titles: spec.titles,
+            icons: spec.icons,
             dpi,
             selected: None,
             drawn: None,
@@ -256,9 +272,10 @@ impl Menu {
             .items
             .iter()
             .enumerate()
-            .map(|(index, item)| ListRow {
-                name: item.label(),
+            .map(|(index, _)| ListRow {
+                name: row_label(&self.items, &self.titles, index),
                 current: false,
+                icon: self.icons.get(index).and_then(|icon| icon.as_deref()),
                 rect: row_rect(self.dpi, panel, index),
             })
             .collect();
@@ -457,5 +474,15 @@ mod tests {
         assert_eq!(at(VK_ESCAPE, Some(1), false), Key::Dismiss);
         assert_eq!(at(VIRTUAL_KEY(0x41), Some(1), false), Key::Ignore);
         assert_eq!(key(VK_DOWN, None, 0, false), Key::Ignore);
+    }
+
+    #[test]
+    fn restore_rows_show_the_window_title_and_other_rows_their_label() {
+        let items = [Item::Restore(key_of(4)), Item::Close];
+        let titles = vec!["Report".to_string()];
+        assert_eq!(row_label(&items, &titles, 0), "Report");
+        // No title for the row (a fixed-label menu): the action's own label.
+        assert_eq!(row_label(&items, &titles, 1), "Close window");
+        assert_eq!(row_label(&items, &[], 0), "Window");
     }
 }

@@ -2,8 +2,9 @@ use crate::{
     audio::{self, Audio},
     catalog_timing::milliseconds_until,
     clock,
-    dock::{self, DockItem},
+    dock::{self, Button, Buttons, DockItem, Hit},
     dock_menu::{self, Event, Item},
+    dock_tips::Tips,
     dock_uia::{self, Accessibility},
     edge::{self, Edges},
     eyes::{self, Eyes},
@@ -25,6 +26,7 @@ use crate::{
     settings_window::{SettingsWindow, SoundAction},
     shelf::{self, Check, Shelf},
     shelf_os::{self, DropEvent, Drops},
+    sort,
     store::{self, Flush, Pending, Store},
     tabs::{self, Handle, Tab, Tabs},
     text_settings::TextSettings,
@@ -255,8 +257,9 @@ struct Surface {
     grip: Grip,
     /// Notch: the volume bar's drawn fill (percent), easing toward the real level; a drag sets it at once.
     volume_fill: Tween,
-    /// Dock: floating or attached to the bottom edge.
+    /// Dock: floating or attached to the bottom edge, and which taskbar buttons it shows.
     dock_style: DockStyle,
+    dock_buttons: Buttons,
     /// Notch: shown over a full-screen app for a prayer alert only; hidden again once it has retracted.
     overlay: bool,
 }
@@ -298,12 +301,15 @@ enum Role {
         intent: Option<Instant>,
         area: Vec<Bounds>,
     },
-    /// Hovered slot, per-slot hover progress and this dock's UIA geometry/names.
+    /// Hovered cell, per-cell hover progress, this dock's UIA geometry/names, the cell with keyboard focus
+    /// (`Focus::control` is the cell index) and the tooltips of its buttons (none if the control could not be made).
     Dock {
-        _accessible: Accessibility,
+        accessible: Accessibility,
         hover: Option<usize>,
         slots: Vec<Tween>,
         uia: dock_uia::Shared,
+        focus: Option<Focus>,
+        tips: Option<Tips>,
     },
 }
 impl Surface {
@@ -317,8 +323,9 @@ impl Surface {
         drops: &Drops,
         palette: Palette,
         dock_style: DockStyle,
+        dock_buttons: Buttons,
     ) -> Result<Self> {
-        let bounds = placement_styled(monitor.work, dpi, kind, slots, dock_style);
+        let bounds = placement_styled(monitor.work, dpi, kind, slots, dock_style, dock_buttons);
         let shadow = if kind == SurfaceKind::Notch {
             Some(NotchShadow::create(graphics, bounds, palette)?)
         } else {
@@ -333,11 +340,17 @@ impl Surface {
         let role = match shadow {
             None => {
                 let uia = dock_uia::Shared::default();
+                let tips = Tips::create(window.0)
+                    .inspect(|tips| tips.place(dock_buttons, bounds.width, bounds.height, dpi))
+                    .inspect_err(|error| eprintln!("Dock tooltips unavailable: {error}"))
+                    .ok();
                 Role::Dock {
-                    _accessible: Accessibility::dock(window.0, &uia)?,
+                    accessible: Accessibility::dock(window.0, &uia)?,
                     hover: None,
-                    slots: vec![Tween::rest(0.0); slots],
+                    slots: vec![Tween::rest(0.0); dock::cell_count(dock_buttons, slots)],
                     uia,
+                    focus: None,
+                    tips,
                 }
             }
             // The first paint, which always precedes showing the window, applies the input region
@@ -376,6 +389,7 @@ impl Surface {
             volume_fill: Tween::rest(0.0),
             overlay: false,
             dock_style,
+            dock_buttons,
         })
     }
     /// The handle opens at once for the pointer or a focused tab and closes `tabs::COLLAPSE_DELAY` after
@@ -789,8 +803,32 @@ impl Surface {
             Instant::now(),
         );
     }
+    /// Moves a dock's keyboard focus to `cell`; the next frame draws the ring. `return_to` is kept from the first entry.
+    fn focus_cell(&mut self, cell: usize, return_to: Option<WindowKey>) {
+        let Role::Dock { focus, uia, .. } = &mut self.role else {
+            return;
+        };
+        let return_to = focus.as_ref().map_or(return_to, |focus| focus.return_to);
+        *focus = Some(Focus {
+            control: cell,
+            return_to,
+        });
+        self.live = true;
+        // Published now, not at the next frame, so the focus event reads the new state.
+        if let Ok(mut state) = uia.lock() {
+            state.focus = Some(cell);
+        }
+    }
     /// Ends keyboard focus, closing the panel unless the pointer still holds it.
     fn blur(&mut self) -> Option<Focus> {
+        if let Role::Dock { focus, uia, .. } = &mut self.role {
+            let ended = focus.take()?;
+            self.live = true;
+            if let Ok(mut state) = uia.lock() {
+                state.focus = None;
+            }
+            return Some(ended);
+        }
         let Role::Notch {
             focus,
             engaged,
@@ -813,8 +851,7 @@ impl Surface {
     }
     fn focused(&self) -> Option<&Focus> {
         match &self.role {
-            Role::Notch { focus, .. } => focus.as_ref(),
-            Role::Dock { .. } => None,
+            Role::Notch { focus, .. } | Role::Dock { focus, .. } => focus.as_ref(),
         }
     }
     /// Restore only while this HWND still owns foreground; another app's focus is never stolen.
@@ -834,14 +871,20 @@ impl Surface {
     }
     /// Tells UIA clients where keyboard focus now is.
     fn announce_focus(&self) {
-        if let Role::Notch {
-            accessible,
-            uia,
-            focus: Some(focus),
-            ..
-        } = &self.role
-        {
-            notch_uia::focus_changed(accessible, uia, focus.control);
+        match &self.role {
+            Role::Notch {
+                accessible,
+                uia,
+                focus: Some(focus),
+                ..
+            } => notch_uia::focus_changed(accessible, uia, focus.control),
+            Role::Dock {
+                accessible,
+                uia,
+                focus: Some(focus),
+                ..
+            } => dock_uia::focus_changed(accessible, uia, focus.control),
+            _ => {}
         }
     }
     /// Highlights the hovered slot (or none) and the bar fill while the pointer is inside.
@@ -864,13 +907,21 @@ impl Surface {
         *hover = slot;
         self.live = true;
     }
+    /// The layout version this dock's UIA elements are valid for.
+    fn layout_version(&self) -> Option<u32> {
+        match &self.role {
+            Role::Dock { uia, .. } => uia.lock().map(|state| state.version).ok(),
+            Role::Notch { .. } => None,
+        }
+    }
     /// Shares slot names/geometry with this dock's UIA providers; a layout change retires every older element.
-    fn publish_accessibility(&self, names: &[String], layout_changed: bool) {
+    fn publish_accessibility(&self, names: &[String], minimized: usize, layout_changed: bool) {
         if let Role::Dock { uia, .. } = &self.role
             && let Ok(mut state) = uia.lock()
         {
             state.dpi = self.dpi;
-            state.names = names.to_vec();
+            state.names = dock::cell_names(self.dock_buttons, names, minimized);
+            state.buttons = self.dock_buttons;
             if layout_changed {
                 state.version = state.version.wrapping_add(1);
             }
@@ -881,12 +932,17 @@ impl Surface {
             return Ok(());
         };
         let now = Instant::now();
-        let hover = |slot: usize| tweens.get(slot).map_or(0.0, |t| t.value(now));
+        let count = items.len() + 1;
+        let hover = |hit| {
+            dock::cell_index(self.dock_buttons, count, hit)
+                .and_then(|cell| tweens.get(cell))
+                .map_or(0.0, |t| t.value(now))
+        };
         let mut slots = vec![DockSlot {
             icon: None,
             active: false,
             picker: true,
-            hover: hover(0),
+            hover: hover(Hit::Slot(0)),
         }];
         slots.extend(
             items
@@ -897,19 +953,34 @@ impl Surface {
                     icon: icon.as_deref(),
                     active: item.active,
                     picker: false,
-                    hover: hover(index + 1),
+                    hover: hover(Hit::Slot(index + 1)),
                 }),
         );
         self.canvas.paint_dock(&DockScene {
             slots,
+            layout: self.dock_buttons,
+            buttons: Button::ALL
+                .into_iter()
+                .filter(|button| self.dock_buttons.on(*button))
+                .map(|button| (button, hover(Hit::Button(button))))
+                .collect(),
+            focus: self
+                .focused()
+                .and_then(|focus| dock::cell(self.dock_buttons, count, focus.control)),
             inside: self.motion.value(now),
             dpi: self.dpi,
             attached: self.dock_style == DockStyle::Attached,
         })
     }
-    fn dock_slot(&self, lparam: LPARAM, slots: usize) -> Option<usize> {
+    /// The slot or button under the pointer.
+    fn dock_hit(&self, lparam: LPARAM, slots: usize) -> Option<Hit> {
         let x = i32::from((lparam.0 & 0xffff) as u16 as i16);
-        dock::slot_at(x, self.bounds.width, self.dpi, slots)
+        dock::hit_at(self.dock_buttons, x, self.bounds.width, self.dpi, slots)
+    }
+    /// The pointer's cell index (the hover tween and UIA child), if over a slot or button.
+    fn dock_cell(&self, lparam: LPARAM, slots: usize) -> Option<usize> {
+        self.dock_hit(lparam, slots)
+            .and_then(|hit| dock::cell_index(self.dock_buttons, slots, hit))
     }
 }
 
@@ -1148,6 +1219,10 @@ struct Desktop {
     settings: Settings,
     dock_items: Vec<DockItem>,
     dock_names: Vec<String>,
+    /// Minimized windows in the last catalog generation, for the chevron's accessible name.
+    dock_minimized: usize,
+    /// The display language reads right to left: the dock is mirrored (`dock::Buttons::rtl`).
+    rtl: bool,
     dock_generation: Option<u64>,
     /// Pinned apps, their persisted form, and the unwritten-change times. Read once at startup; written on
     /// a host-loop deadline (`store_wait`) after a change and once at quit, never by a timer or thread.
@@ -1266,6 +1341,8 @@ impl Desktop {
             icons: IconService::create()?,
             dock_items: Vec::new(),
             dock_names: dock::names(&[], &WindowModel::default()),
+            dock_minimized: 0,
+            rtl: dock::system_rtl(),
             dock_generation: None,
             pins: Pins::from_store(&store),
             shelf: ShelfView {
@@ -1325,6 +1402,13 @@ impl Desktop {
     fn dock_slots(&self) -> usize {
         self.dock_items.len() + 1
     }
+    /// The chosen buttons with the system reading direction applied.
+    fn dock_buttons(&self) -> Buttons {
+        Buttons {
+            rtl: self.rtl,
+            ..self.settings.dock_buttons
+        }
+    }
     fn show(&mut self, kind: SurfaceKind) -> Result<()> {
         if !self.shown.contains(&kind) {
             self.shown.push(kind);
@@ -1360,6 +1444,7 @@ impl Desktop {
             &self.drops,
             self.palette,
             self.settings.dock_style,
+            self.dock_buttons(),
         )?;
         if kind == SurfaceKind::Notch {
             // Advances every existing notch first, so all monitors show the same minute.
@@ -1375,7 +1460,7 @@ impl Desktop {
             )?;
             self.surfaces.push(surface);
         } else {
-            surface.publish_accessibility(&self.dock_names, false);
+            surface.publish_accessibility(&self.dock_names, self.dock_minimized, false);
             self.surfaces.push(surface);
             // Sized after the push: icons are extracted once, for the densest dock.
             let icons = self.dock_icons();
@@ -1805,21 +1890,27 @@ impl Desktop {
     #[inline(never)]
     fn refresh_preview(&mut self) -> u32 {
         let now = Instant::now();
+        let slots = self.dock_slots();
         let hovered = self
             .surfaces
             .iter()
             .enumerate()
-            .find_map(|(index, surface)| match surface.role {
-                // Slot 0 is the picker; a pinned app that is not running has nothing to show.
-                Role::Dock {
-                    hover: Some(slot @ 1..),
-                    ..
-                } if surface.visible => self
-                    .dock_items
+            .find_map(|(index, surface)| {
+                let Role::Dock {
+                    hover: Some(cell), ..
+                } = surface.role
+                else {
+                    return None;
+                };
+                // Slot 0 is the picker and buttons have no windows; a pinned app that is not running has
+                // nothing to show.
+                let slot = dock::cell(surface.dock_buttons, slots, cell)?
+                    .slot()
+                    .filter(|slot| *slot >= 1 && surface.visible)?;
+                self.dock_items
                     .get(slot - 1)
                     .filter(|item| !item.windows.is_empty())
-                    .map(|item| (index, slot, item)),
-                _ => None,
+                    .map(|item| (index, slot, item))
             });
         // A thumbnail would float over the open menu.
         let hovered = hovered.filter(|_| self.menu.is_none());
@@ -1843,7 +1934,14 @@ impl Desktop {
                     .find(|m| m.device == dock.monitor)?
                     .work;
                 let app = crate::pins::display_name(&item.identity);
-                preview::Popup::show(&item.windows, &app, slot, dock.bounds, work, dock.dpi).ok()
+                let slot_x = dock::slot_center_x(
+                    dock.bounds.x,
+                    dock.dock_buttons,
+                    dock.bounds.width,
+                    slot,
+                    dock.dpi,
+                );
+                preview::Popup::show(&item.windows, &app, slot_x, dock.bounds, work, dock.dpi).ok()
             });
             match shown {
                 Some(popup) => self.popup = Some(popup),
@@ -2106,28 +2204,10 @@ impl Desktop {
         if eyes_changed {
             self.pages.eyes = self.settings.eyes.then(Eyes::default);
         }
-        if old.dock_style != self.settings.dock_style {
-            // Same slots, new place and shape: move and repaint each dock (the window keeps its size).
-            let (style, slots, icons) = (
-                self.settings.dock_style,
-                self.dock_slots(),
-                self.dock_icons(),
-            );
-            for dock in &mut self.surfaces {
-                let Some(monitor) = self.monitors.iter().find(|m| m.device == dock.monitor) else {
-                    continue;
-                };
-                if dock.kind() != SurfaceKind::Dock {
-                    continue;
-                }
-                dock.dock_style = style;
-                dock.bounds =
-                    placement_styled(monitor.work, dock.dpi, SurfaceKind::Dock, slots, style);
-                dock.window.resize(dock.bounds)?;
-                dock.canvas.resize(dock.bounds)?;
-                dock.publish_accessibility(&self.dock_names, true);
-                dock.paint_dock(&self.dock_items, &icons)?;
-            }
+        if old.dock_style != self.settings.dock_style
+            || old.dock_buttons != self.settings.dock_buttons
+        {
+            self.relayout_docks()?;
         }
         if old.desktop_only != self.settings.desktop_only {
             self.dock_generation = None; // the dock is rebuilt on the next pass
@@ -2201,6 +2281,55 @@ impl Desktop {
         self.picker = Some(Picker::create(catalog.model())?);
         Ok(())
     }
+    /// Moves, resizes and repaints every dock for the current style, buttons and slot count. Same slots in a
+    /// new place or width: no new surface and no timer; hover restarts and keyboard focus ends (cells moved).
+    fn relayout_docks(&mut self) -> Result<()> {
+        let (style, buttons, slots) = (
+            self.settings.dock_style,
+            self.dock_buttons(),
+            self.dock_slots(),
+        );
+        let icons = self.dock_icons();
+        for dock in &mut self.surfaces {
+            let Some(monitor) = self.monitors.iter().find(|m| m.device == dock.monitor) else {
+                continue;
+            };
+            if dock.kind() != SurfaceKind::Dock {
+                continue;
+            }
+            dock.release_focus();
+            let Role::Dock {
+                hover,
+                slots: tweens,
+                tips,
+                ..
+            } = &mut dock.role
+            else {
+                continue;
+            };
+            (*hover, *tweens) = (
+                None,
+                vec![Tween::rest(0.0); dock::cell_count(buttons, slots)],
+            );
+            (dock.dock_style, dock.dock_buttons) = (style, buttons);
+            dock.bounds = placement_styled(
+                monitor.work,
+                dock.dpi,
+                SurfaceKind::Dock,
+                slots,
+                style,
+                buttons,
+            );
+            if let Some(tips) = tips {
+                tips.place(buttons, dock.bounds.width, dock.bounds.height, dock.dpi);
+            }
+            dock.window.resize(dock.bounds)?;
+            dock.canvas.resize(dock.bounds)?;
+            dock.publish_accessibility(&self.dock_names, self.dock_minimized, true);
+            dock.paint_dock(&self.dock_items, &icons)?;
+        }
+        Ok(())
+    }
     /// Rebuilds dock items only when the catalog generation or an icon changed.
     fn refresh_dock(&mut self, model: &WindowModel) -> Result<()> {
         let icons_arrived = self.icons.collect();
@@ -2213,12 +2342,13 @@ impl Desktop {
             let items = dock::items_with_pins(model, &self.pins, self.settings.desktop_only);
             let changed = items != self.dock_items;
             self.dock_names = dock::names(&items, model);
+            self.dock_minimized = dock::minimized_windows(model, self.settings.desktop_only).len();
             for dock in self
                 .surfaces
                 .iter()
                 .filter(|s| s.kind() == SurfaceKind::Dock)
             {
-                dock.publish_accessibility(&self.dock_names, changed);
+                dock.publish_accessibility(&self.dock_names, self.dock_minimized, changed);
             }
             // Title-only changes publish new generations; they rename UIA items but leave pixels untouched.
             if !changed && !icons_arrived {
@@ -2234,31 +2364,7 @@ impl Desktop {
             let resized = items.len() != self.dock_items.len();
             self.dock_items = items;
             if resized {
-                let slots = self.dock_slots();
-                for dock in &mut self.surfaces {
-                    let Role::Dock {
-                        hover,
-                        slots: tweens,
-                        ..
-                    } = &mut dock.role
-                    else {
-                        continue;
-                    };
-                    let Some(monitor) = self.monitors.iter().find(|m| m.device == dock.monitor)
-                    else {
-                        continue;
-                    };
-                    (*hover, *tweens) = (None, vec![Tween::rest(0.0); slots]);
-                    dock.bounds = placement_styled(
-                        monitor.work,
-                        dock.dpi,
-                        SurfaceKind::Dock,
-                        slots,
-                        dock.dock_style,
-                    );
-                    dock.window.resize(dock.bounds)?;
-                    dock.canvas.resize(dock.bounds)?;
-                }
+                return self.relayout_docks();
             }
         }
         let icons = self.dock_icons();
@@ -2307,28 +2413,26 @@ impl Desktop {
             })
             .collect()
     }
-    /// A UIA Invoke from an element of the current layout acts exactly like a click on that slot.
+    /// A UIA Invoke from an element of the current layout acts exactly like a click on that cell.
     fn invoke_dock(
         &mut self,
         hwnd: HWND,
-        slot: usize,
+        cell: usize,
         version: u32,
         catalog: &Catalog,
     ) -> Result<()> {
-        let current = self.dock_at(hwnd).and_then(|dock| match &dock.role {
-            Role::Dock { uia, .. } => uia.lock().map(|state| state.version).ok(),
-            Role::Notch { .. } => None,
-        });
+        let current = self.dock_at(hwnd).and_then(Surface::layout_version);
         if current == Some(version) {
-            self.activate_slot(Some(slot), catalog)?;
+            let hit = dock::cell(self.settings.dock_buttons, self.dock_slots(), cell);
+            self.activate(hwnd, hit, catalog)?;
         }
         Ok(())
     }
-    /// Slot 0 opens the accessible picker; other slots act on their real window group.
-    fn activate_slot(&mut self, slot: Option<usize>, catalog: &Catalog) -> Result<()> {
-        match slot {
-            Some(0) => self.open_picker(catalog),
-            Some(slot) => {
+    /// Slot 0 opens the accessible picker, other slots act on their real window group, a button does its job.
+    fn activate(&mut self, hwnd: HWND, hit: Option<Hit>, catalog: &Catalog) -> Result<()> {
+        match hit {
+            Some(Hit::Slot(0)) => self.open_picker(catalog),
+            Some(Hit::Slot(slot)) => {
                 if let Some(action) = self
                     .dock_items
                     .get(slot - 1)
@@ -2346,7 +2450,95 @@ impl Desktop {
                 }
                 Ok(())
             }
+            Some(Hit::Button(button)) => {
+                self.press_button(hwnd, button, catalog.model());
+                Ok(())
+            }
             None => Ok(()),
+        }
+    }
+    /// A taskbar button: the shell shortcut it stands for (sent on this click only), or the minimized list.
+    fn press_button(&mut self, hwnd: HWND, button: Button, model: &WindowModel) {
+        match button.keys() {
+            Some(keys) => {
+                if !dock::send_keys(keys) {
+                    eprintln!("Dock button: Windows refused the key input");
+                }
+            }
+            None => self.open_minimized_menu(hwnd, model),
+        }
+    }
+    /// The chevron's popup above it: the minimized windows right now (at most `MINIMIZED_MAX`), each with
+    /// its icon from the cache; a click restores and activates that window. Nothing is listed, and nothing
+    /// opens, when none is minimized.
+    fn open_minimized_menu(&mut self, hwnd: HWND, model: &WindowModel) {
+        self.dismiss_preview();
+        self.close_menu();
+        let Some(dock) = self.dock_at(hwnd).filter(|dock| dock.visible) else {
+            return;
+        };
+        let (bounds, dpi, monitor, buttons) = (
+            dock.bounds,
+            dock.dpi,
+            dock.monitor.clone(),
+            dock.dock_buttons,
+        );
+        // From the keyboard the dock holds the foreground: the window it took it from gets it back.
+        let return_to = dock
+            .focused()
+            .map_or_else(dock::foreground_key, |focus| focus.return_to);
+        let Some(work) = self
+            .monitors
+            .iter()
+            .find(|m| m.device == monitor)
+            .map(|m| m.work)
+        else {
+            return;
+        };
+        let windows: Vec<_> = dock::minimized_windows(model, self.settings.desktop_only)
+            .into_iter()
+            .take(dock::MINIMIZED_MAX)
+            .collect();
+        if windows.is_empty() {
+            return;
+        }
+        let size = self.icon_size();
+        let icons = windows
+            .iter()
+            .map(|window| {
+                let sources = icons::sources(&window.identity, window.executable.as_deref());
+                size.and_then(|size| self.icons.icon(&window.identity, sources, size))
+            })
+            .collect();
+        let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Button(Button::Minimized));
+        let spec = dock_menu::Spec {
+            dock: hwnd,
+            slot: 0,
+            identity: Identity::Unavailable(0),
+            items: windows.iter().map(|w| Item::Restore(w.key)).collect(),
+            dock_bounds: bounds,
+            work,
+            dpi,
+            app: "Minimized apps".into(),
+            titles: windows
+                .iter()
+                .map(|w| {
+                    if w.title.is_empty() {
+                        "Window".to_owned()
+                    } else {
+                        w.title.clone()
+                    }
+                })
+                .collect(),
+            icons,
+            x: bounds.x + left + width / 2,
+            below: None,
+            return_to,
+        };
+        match dock_menu::Menu::open(&self.graphics, self.palette, spec) {
+            Ok(menu) if take_foreground(menu.hwnd()) => self.menu = Some(menu),
+            Ok(_) => eprintln!("Minimized list: Windows kept another app in front; not opened"),
+            Err(error) => eprintln!("Minimized list: {error}"),
         }
     }
     /// Pins the slot's app, or unpins it if pinned (the menu's Pin and Unpin). The dock is rebuilt on the
@@ -2401,7 +2593,15 @@ impl Desktop {
             work,
             dpi: dock.dpi,
             app: crate::pins::display_name(&item.identity),
-            x: None,
+            titles: Vec::new(),
+            icons: Vec::new(),
+            x: dock::slot_center_x(
+                dock.bounds.x,
+                dock.dock_buttons,
+                dock.bounds.width,
+                slot,
+                dock.dpi,
+            ),
             below: None,
             return_to: dock::foreground_key(),
         };
@@ -2445,7 +2645,9 @@ impl Desktop {
             work,
             dpi: surface.dpi,
             app: "ROQA".into(),
-            x: Some(surface.bounds.x + point(lparam).0),
+            titles: Vec::new(),
+            icons: Vec::new(),
+            x: surface.bounds.x + point(lparam).0,
             below,
             return_to: dock::foreground_key(),
         };
@@ -2486,7 +2688,8 @@ impl Desktop {
         let Some(menu) = self.menu.take() else {
             return;
         };
-        if item != Item::NewInstance {
+        // A new instance or a restored window takes the foreground itself.
+        if !matches!(item, Item::NewInstance | Item::Restore(_)) {
             dock::restore_foreground(menu.hwnd(), menu.return_to);
         }
         if menu.slot == 0 {
@@ -2498,6 +2701,9 @@ impl Desktop {
                 }
                 // SAFETY: a scalar quit request to this thread's own message loop.
                 Item::Quit => unsafe { PostQuitMessage(0) },
+                Item::Restore(key) => {
+                    dock::perform(dock::Action::Activate(key));
+                }
                 _ => {}
             }
             return;
@@ -2518,7 +2724,7 @@ impl Desktop {
                 }
             }
             Item::Pin | Item::Unpin => self.toggle_pin(Some(menu.slot)),
-            Item::Settings | Item::Quit => {}
+            Item::Settings | Item::Quit | Item::Restore(_) => {}
         }
     }
     /// Ends the open menu once it no longer describes the dock (its slot changed, or a full-screen app hid
@@ -2578,7 +2784,14 @@ impl Desktop {
         let (slots, pins) = (self.dock_slots(), self.pins.items().len());
         let target = self.dock_at(hwnd).and_then(|dock| {
             let (x, _) = point(lparam);
-            dock::drop_index(x, dock.bounds.width, dock.dpi, slots, pins)
+            dock::drop_index(
+                dock.dock_buttons,
+                x,
+                dock.bounds.width,
+                dock.dpi,
+                slots,
+                pins,
+            )
         });
         if let Some(to) = target {
             self.change_pins(|pins| pins.move_to(drag.from, to));
@@ -2772,6 +2985,91 @@ impl Desktop {
             self.request_topology();
         }
         Ok(!self.shown.is_empty())
+    }
+    /// Keyboard input on a dock: a UIA focus request, keys while a cell has focus, or losing the foreground.
+    /// Returns whether `message` is consumed.
+    fn dock_input(&mut self, message: &MSG, catalog: &Catalog) -> Result<bool> {
+        if !matches!(
+            message.message,
+            notch_uia::FOCUS | native_window::DEACTIVATED | WM_KEYDOWN
+        ) {
+            return Ok(false);
+        }
+        let Some(dock) = self
+            .surfaces
+            .iter()
+            .position(|s| s.kind() == SurfaceKind::Dock && s.window.0 == message.hwnd)
+        else {
+            return Ok(false);
+        };
+        match message.message {
+            notch_uia::FOCUS => {
+                self.enter_dock_focus(dock, message.wParam.0, message.lParam.0 as u32)
+            }
+            // The user went elsewhere: focus is theirs to place, so nothing is restored.
+            native_window::DEACTIVATED => {
+                self.surfaces[dock].blur();
+            }
+            _ => return self.dock_key(dock, message, catalog),
+        }
+        Ok(true)
+    }
+    /// A UIA client focused `cell` of layout `version`: the dock takes the foreground if Windows allows it,
+    /// remembering the window it came from, and draws the ring.
+    fn enter_dock_focus(&mut self, dock: usize, cell: usize, version: u32) {
+        let slots = self.dock_slots();
+        let surface = &mut self.surfaces[dock];
+        let (buttons, width, dpi) = (surface.dock_buttons, surface.bounds.width, surface.dpi);
+        if surface.layout_version() != Some(version)
+            || !surface.visible
+            || !dock::reachable(buttons, width, dpi, slots, cell)
+        {
+            return;
+        }
+        let previous = dock::foreground_key();
+        if surface.focused().is_none() && !take_foreground(surface.window.0) {
+            eprintln!("Dock: Windows kept another app in front; no keyboard focus");
+            return;
+        }
+        surface.focus_cell(cell, previous);
+        surface.announce_focus();
+        self.dismiss_preview();
+    }
+    /// Keys while a dock cell has focus: Tab and the arrows walk the cells (the arrows follow the screen, so a
+    /// mirrored dock runs them right to left), Enter and Space press, Escape returns the foreground.
+    fn dock_key(&mut self, dock: usize, message: &MSG, catalog: &Catalog) -> Result<bool> {
+        let slots = self.dock_slots();
+        let surface = &mut self.surfaces[dock];
+        let Some(cell) = surface.focused().map(|focus| focus.control) else {
+            return Ok(false);
+        };
+        let (buttons, width, dpi) = (surface.dock_buttons, surface.bounds.width, surface.dpi);
+        let step = |forward| dock::step_cell(buttons, width, dpi, slots, cell, forward);
+        // SAFETY: reads this thread's keyboard state as of the message being handled.
+        let shift = unsafe { GetKeyState(VK_SHIFT.0.into()) } < 0;
+        let next = match VIRTUAL_KEY(message.wParam.0 as u16) {
+            VK_TAB => step(!shift),
+            VK_RIGHT => step(!buttons.rtl),
+            VK_LEFT => step(buttons.rtl),
+            VK_RETURN | VK_SPACE => {
+                // Held keys repeat; one press is one action.
+                if message.lParam.0 & (1 << 30) == 0 {
+                    let hit = dock::cell(buttons, slots, cell);
+                    self.activate(message.hwnd, hit, catalog)?;
+                }
+                return Ok(true);
+            }
+            VK_ESCAPE => {
+                surface.release_focus();
+                return Ok(true);
+            }
+            _ => return Ok(false),
+        };
+        if next != cell {
+            surface.focus_cell(next, None);
+            surface.announce_focus();
+        }
+        Ok(true)
     }
     /// Media control input on a notch: a click on a control, a UIA Invoke or focus request, a key
     /// while it has keyboard focus, or losing the foreground. Returns whether `message` is consumed.
@@ -3013,7 +3311,12 @@ impl Desktop {
                 &self.shelf,
                 &self.pages,
             );
-            let Some(control) = notch.focused().map(|focus| focus.control) else {
+            // A dock's focus is a cell index, not a notch control.
+            let Some(control) = notch
+                .focused()
+                .filter(|_| notch.kind() == SurfaceKind::Notch)
+                .map(|focus| focus.control)
+            else {
                 continue;
             };
             match refocus(enabled, control, replaced(control)) {
@@ -3108,7 +3411,8 @@ impl Desktop {
             WM_LBUTTONDOWN if matches!(surface.role, Role::Dock { .. }) => {
                 // Only a pinned slot can be dragged; pins are always the first items.
                 let from = surface
-                    .dock_slot(message.lParam, slots)
+                    .dock_hit(message.lParam, slots)
+                    .and_then(Hit::slot)
                     .and_then(|slot| slot.checked_sub(1))
                     .filter(|&index| index < self.pins.items().len());
                 self.drag = from.map(|from| Drag {
@@ -3135,9 +3439,9 @@ impl Desktop {
                     }
                 }
                 if let Role::Dock { hover, .. } = surface.role {
-                    let slot = surface.dock_slot(message.lParam, slots);
-                    if entered || slot != hover {
-                        surface.hover_dock(slot, true);
+                    let cell = surface.dock_cell(message.lParam, slots);
+                    if entered || cell != hover {
+                        surface.hover_dock(cell, true);
                     }
                 } else {
                     let (x, y) = point(message.lParam);
@@ -3707,17 +4011,19 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             }
             if message.message == WM_LBUTTONUP && desktop.dock_at(message.hwnd).is_some() {
                 if !desktop.end_drag(message.hwnd, message.lParam) {
-                    let slot = desktop
+                    let hit = desktop
                         .dock_at(message.hwnd)
-                        .and_then(|dock| dock.dock_slot(message.lParam, desktop.dock_slots()));
-                    desktop.activate_slot(slot, catalog)?;
+                        .and_then(|dock| dock.dock_hit(message.lParam, desktop.dock_slots()));
+                    desktop.activate(message.hwnd, hit, catalog)?;
                 }
                 continue;
             }
             if message.message == WM_RBUTTONUP
                 && let Some(dock) = desktop.dock_at(message.hwnd)
             {
-                let slot = dock.dock_slot(message.lParam, desktop.dock_slots());
+                let slot = dock
+                    .dock_hit(message.lParam, desktop.dock_slots())
+                    .and_then(Hit::slot);
                 desktop.open_menu(message.hwnd, slot, message.lParam);
                 continue;
             }
@@ -3736,6 +4042,9 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 continue;
             }
             if desktop.edge_message(&message) {
+                continue;
+            }
+            if desktop.dock_input(&message, catalog)? {
                 continue;
             }
             if desktop.notch_input(&message) {
@@ -3790,7 +4099,7 @@ fn remember_fullscreen(
         current.retain(|(_, old)| old != &device);
         current.push((key, device));
     }
-    current.sort_by(|a, b| a.1.cmp(&b.1));
+    sort::by(current, |a, b| a.1.cmp(&b.1));
 }
 
 #[cfg(test)]

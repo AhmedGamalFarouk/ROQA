@@ -136,12 +136,12 @@ pub struct Popup {
     window: NativeWindow,
 }
 impl Popup {
-    /// Shows the preview of the most recent window of `windows` above dock slot `slot`. The popup is
+    /// Shows the preview of the most recent window of `windows` above the screen column `slot_x`. The popup is
     /// named "Preview, <app>" for UI Automation, and is never activated.
     pub fn show(
         windows: &[WindowKey],
         app: &str,
-        slot: usize,
+        slot_x: i32,
         dock: Bounds,
         work: Bounds,
         dpi: u32,
@@ -160,7 +160,6 @@ impl Popup {
         };
         // SAFETY: the id was just registered and is released only by `Drop`.
         let size = unsafe { DwmQueryThumbnailSourceSize(thumbnail) }?;
-        let slot_x = dock::slot_center_x(dock.x, slot, dpi);
         let bounds = popup_bounds((size.cx, size.cy), slot_x, dock, work, dpi)
             .ok_or_else(|| Error::new(E_FAIL, "No room for a preview."))?;
         popup.window.resize(bounds)?;

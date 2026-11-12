@@ -1023,3 +1023,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Done:** Settings "Dock style" Floating (default) / Attached; attached dock flush on the work area's bottom edge, notch material, flat bottom, rounded top corners; live apply; slots, UIA, menu, previews unchanged. Slide-up animation skipped.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 295 tests, locked release); 1,126,912 B, ratchet within 2% (baseline unchanged); SHA `FE7D76ACD9168869D047B6DD822CB9A0749DAFD1749DABA96B712D5ED8F74E80`.
 - **NOT RUN:** drawing, hit-testing, taskbar placement, multi-monitor, Settings fit on small screens; reviews paused (REVIEW NOT RUN).
+
+## D2 dock taskbar buttons (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/d2-dock-system`; [packet](features-dock-system.md). Start, Search, Task View, minimized-apps list, show-desktop strip, each a Settings switch, live, both dock styles; keyboard focus (UIA, ring, Tab/arrows/Enter/Esc), native tooltips on the buttons, RTL mirror. No native/GUI run.
+- **Done:** cell layout and hit-testing in `dock.rs`, `SendInput` only on click, minimized popup via `dock_menu` from the catalog (no new EnumWindows, no timers), UIA names. Tray overflow impossible (no public API).
+- **Size:** first candidate 1,157,120 B tripped the ratchet; trimmed (shared `sort::by` insertion sort replaces extra `sort_by` instantiations, layout fns not inlined). Baseline NOT raised.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 309 tests, locked release); 1,134,080 B, ratchet within 2% (limit 1,145,272); SHA `9096BC7BEC7A8A62EA2558C104F72521A0B4F4D72C97E9855CEDE86181BBC59A`.
+- **NOT RUN:** drawing, real clicks/key injection, tooltips, focus ring, Narrator/keyboard, RTL on Arabic UI, multi-monitor, Settings fit; reviews paused (REVIEW NOT RUN). Not landed.

@@ -225,6 +225,8 @@ pub fn on_icon(x: i32, y: i32, layout: &Layout, dpi: u32) -> bool {
 pub struct ListRow<'a> {
     pub name: &'a str,
     pub current: bool,
+    /// An app icon drawn before the name (the minimized-apps list); none for plain rows.
+    pub icon: Option<&'a crate::icons::IconPixels>,
     pub rect: Bounds,
 }
 
@@ -878,6 +880,7 @@ impl Slider {
                         .map(|(index, device)| ListRow {
                             name: &device.name,
                             current: device.current,
+                            icon: None,
                             rect: row_rect(self.dpi, panel, index),
                         })
                         .collect();

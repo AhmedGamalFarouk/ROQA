@@ -1,4 +1,8 @@
-use crate::{audio::BARS, dock, motion};
+use crate::{
+    audio::BARS,
+    dock::{self, Buttons},
+    motion,
+};
 
 /// Notch outline in DIPs: body size, bottom corner radius and the concave "ear" fillets that
 /// blend the top corners into the screen edge.
@@ -587,22 +591,30 @@ pub fn attached_radius(bounds: Bounds, dpi: u32) -> f32 {
 /// The floating placement, as the tests across modules use it.
 #[cfg(test)]
 pub fn placement(work: Bounds, dpi: u32, kind: SurfaceKind, dock_slots: usize) -> Bounds {
-    placement_styled(work, dpi, kind, dock_slots, DockStyle::Floating)
+    placement_styled(
+        work,
+        dpi,
+        kind,
+        dock_slots,
+        DockStyle::Floating,
+        Buttons::NONE,
+    )
 }
 
-/// `dock_slots` sizes the dock (picker slot plus app groups); the notch ignores it and `style`.
+/// `dock_slots` and `buttons` size the dock (picker slot plus app groups, taskbar buttons); the notch ignores them and `style`.
 pub fn placement_styled(
     work: Bounds,
     dpi: u32,
     kind: SurfaceKind,
     dock_slots: usize,
     style: DockStyle,
+    buttons: Buttons,
 ) -> Bounds {
     let scale = |dips: i32| dock::px(dips, dpi);
     let (width, height) = match kind {
         SurfaceKind::Notch => (scale(NOTCH_WINDOW.0), scale(NOTCH_WINDOW.1)),
         SurfaceKind::Dock => (
-            scale(dock::width_dips(dock_slots)),
+            dock::width_px(buttons, dock_slots, dpi),
             scale(dock::HEIGHT_DIPS),
         ),
     };
@@ -632,6 +644,50 @@ pub fn placement_styled(
 mod tests {
     use super::*;
     #[test]
+    fn buttons_widen_both_dock_styles_around_the_same_centre() {
+        let work = Bounds {
+            x: 100,
+            y: 50,
+            width: 1920,
+            height: 1040,
+        };
+        for style in [DockStyle::Floating, DockStyle::Attached] {
+            let plain = placement_styled(work, 144, SurfaceKind::Dock, 5, style, Buttons::NONE);
+            for mask in 1..32u32 {
+                let buttons = Buttons::of(std::array::from_fn(|i| mask >> i & 1 == 1));
+                let at = placement_styled(work, 144, SurfaceKind::Dock, 5, style, buttons);
+                assert_eq!(at.width, dock::width_px(buttons, 5, 144));
+                assert!(at.width > plain.width, "{style:?} {mask}");
+                assert_eq!((at.y, at.height), (plain.y, plain.height));
+                // Centred on the work area, to the pixel.
+                assert_eq!(at.x, work.x + (work.width - at.width) / 2);
+            }
+            // The notch ignores buttons.
+            assert_eq!(
+                placement_styled(
+                    work,
+                    144,
+                    SurfaceKind::Notch,
+                    0,
+                    style,
+                    Buttons::of([true; 5])
+                ),
+                placement(work, 144, SurfaceKind::Notch, 0)
+            );
+            // A dock wider than the work area is clamped to it.
+            let wide = placement_styled(
+                work,
+                96,
+                SurfaceKind::Dock,
+                100,
+                style,
+                Buttons::of([true; 5]),
+            );
+            assert_eq!(wide.width, work.width);
+        }
+    }
+
+    #[test]
     fn the_attached_dock_sits_flush_on_the_bottom_edge_and_floating_does_not_move() {
         let work = Bounds {
             x: -1920,
@@ -640,7 +696,8 @@ mod tests {
             height: 1040,
         };
         let floating = placement(work, 144, SurfaceKind::Dock, 5);
-        let styled = |style| placement_styled(work, 144, SurfaceKind::Dock, 5, style);
+        let styled =
+            |style| placement_styled(work, 144, SurfaceKind::Dock, 5, style, Buttons::NONE);
         assert_eq!(styled(DockStyle::Floating), floating);
         let attached = styled(DockStyle::Attached);
         assert_eq!(
@@ -651,7 +708,14 @@ mod tests {
         assert!(floating.y + floating.height < work.y + work.height);
         // The notch ignores the style.
         assert_eq!(
-            placement_styled(work, 144, SurfaceKind::Notch, 0, DockStyle::Attached),
+            placement_styled(
+                work,
+                144,
+                SurfaceKind::Notch,
+                0,
+                DockStyle::Attached,
+                Buttons::NONE
+            ),
             placement(work, 144, SurfaceKind::Notch, 0)
         );
     }
@@ -665,7 +729,14 @@ mod tests {
                 width: 30,
                 height: 10,
             };
-            let at = placement_styled(work, dpi, SurfaceKind::Dock, 40, DockStyle::Attached);
+            let at = placement_styled(
+                work,
+                dpi,
+                SurfaceKind::Dock,
+                40,
+                DockStyle::Attached,
+                Buttons::NONE,
+            );
             assert!(at.x >= 10 && at.y >= 20);
             assert!(at.x + at.width <= 40 && at.y + at.height <= 30);
             let radius = attached_radius(at, dpi);
@@ -682,6 +753,7 @@ mod tests {
             SurfaceKind::Dock,
             5,
             DockStyle::Attached,
+            Buttons::NONE,
         );
         assert_eq!(attached_radius(at, 96), 20.0);
     }

@@ -1,9 +1,17 @@
 use crate::pins::{self, Pins};
-use crate::window_model::{Identity, WindowKey, WindowModel};
+use crate::sort;
+use crate::window_model::{Identity, WindowKey, WindowModel, WindowRecord};
 use windows::Win32::{
     Foundation::{HWND, LPARAM, WPARAM},
+    Globalization::{
+        GetLocaleInfoW, GetUserDefaultUILanguage, LOCALE_IREADINGLAYOUT, LOCALE_RETURN_NUMBER,
+    },
     System::Threading::GetCurrentProcessId,
     UI::{
+        Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
+            VK_D, VK_LWIN, VK_S, VK_TAB,
+        },
         Shell::{SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, ShellExecuteExW},
         WindowsAndMessaging::{
             GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
@@ -39,7 +47,9 @@ pub fn items(model: &WindowModel, desktop_only: bool) -> Vec<DockItem> {
         .iter()
         .filter(|window| window.current_desktop || !desktop_only)
         .collect();
-    windows.sort_by(|a, b| (&a.identity, a.key).cmp(&(&b.identity, b.key)));
+    sort::by(&mut windows, |a, b| {
+        (&a.identity, a.key).cmp(&(&b.identity, b.key))
+    });
     for window in windows {
         match items.last_mut() {
             Some(item) if item.identity == window.identity => {
@@ -125,32 +135,358 @@ pub fn names(items: &[DockItem], model: &WindowModel) -> Vec<String> {
     names
 }
 
-pub fn width_dips(slots: usize) -> i32 {
-    PAD_DIPS * 2 + SLOT_DIPS * slots.max(1) as i32
+/// Taskbar-style buttons beside the app slots (features D2). Start, Search and Task View sit left of the
+/// picker; the minimized-apps chevron and the show-desktop strip sit at the right end.
+pub const BTN_DIPS: i32 = 44;
+pub const SEP_DIPS: i32 = 8;
+pub const STRIP_DIPS: i32 = 12;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    Start,
+    Search,
+    TaskView,
+    Minimized,
+    Desktop,
+}
+impl Button {
+    pub const ALL: [Button; 5] = [
+        Button::Start,
+        Button::Search,
+        Button::TaskView,
+        Button::Minimized,
+        Button::Desktop,
+    ];
+    pub fn index(self) -> usize {
+        self as usize
+    }
+    /// The accessible name and the hover tooltip.
+    pub fn label(self) -> &'static str {
+        [
+            "Start",
+            "Search",
+            "Task View",
+            "Show minimized apps",
+            "Show desktop",
+        ][self.index()]
+    }
+    /// Settings store key.
+    pub fn key(self) -> &'static str {
+        ["dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk"][self.index()]
+    }
+    /// The keys a click sends: the Windows key alone opens Start; the rest are shell shortcuts. None for the
+    /// chevron, which opens ROQA's own list.
+    pub fn keys(self) -> Option<&'static [VIRTUAL_KEY]> {
+        match self {
+            Button::Start => Some(&[VK_LWIN]),
+            Button::Search => Some(&[VK_LWIN, VK_S]),
+            Button::TaskView => Some(&[VK_LWIN, VK_TAB]),
+            Button::Desktop => Some(&[VK_LWIN, VK_D]),
+            Button::Minimized => None,
+        }
+    }
+}
+
+/// Which buttons are on, and the dock's reading direction. Default: Start, Search, the minimized list and show-desktop; Task View off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Buttons {
+    pub shown: [bool; 5],
+    /// Mirrored for a right-to-left UI language: the dock runs from the right edge, as the taskbar does.
+    /// The host sets it from the system; it is not a stored setting.
+    pub rtl: bool,
+}
+impl Buttons {
+    #[cfg(test)]
+    pub const NONE: Buttons = Buttons::of([false; 5]);
+    pub const fn of(shown: [bool; 5]) -> Self {
+        Self { shown, rtl: false }
+    }
+    pub fn on(self, button: Button) -> bool {
+        self.shown[button.index()]
+    }
+    /// Start, Search and Task View, in that order.
+    fn lead(self) -> impl Iterator<Item = Button> {
+        [Button::Start, Button::Search, Button::TaskView]
+            .into_iter()
+            .filter(move |b| self.on(*b))
+    }
+    fn has_tail(self) -> bool {
+        self.on(Button::Minimized) || self.on(Button::Desktop)
+    }
+    /// The chevron, then the strip.
+    fn tail(self) -> impl Iterator<Item = Button> {
+        [Button::Minimized, Button::Desktop]
+            .into_iter()
+            .filter(move |b| self.on(*b))
+    }
+}
+impl Default for Buttons {
+    fn default() -> Self {
+        Buttons::of([true, true, false, true, true])
+    }
+}
+
+/// What a point or a UIA element is: an app slot (0 is the picker) or a button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    Slot(usize),
+    Button(Button),
+}
+impl Hit {
+    pub fn slot(self) -> Option<usize> {
+        match self {
+            Hit::Slot(slot) => Some(slot),
+            Hit::Button(_) => None,
+        }
+    }
+}
+
+// The layout functions below are `#[inline(never)]`: each has many callers (paint, hit-testing, UIA, menus),
+// and inlining every copy cost ~2.5 KB of release binary.
+
+/// Cells in visual order (also the UIA child order): lead buttons, `slots` slots, tail buttons.
+#[inline(never)]
+pub fn cell_count(buttons: Buttons, slots: usize) -> usize {
+    buttons.lead().count() + slots + buttons.tail().count()
+}
+#[inline(never)]
+pub fn cell(buttons: Buttons, slots: usize, index: usize) -> Option<Hit> {
+    let lead = buttons.lead().count();
+    if index < lead {
+        buttons.lead().nth(index).map(Hit::Button)
+    } else if index < lead + slots {
+        Some(Hit::Slot(index - lead))
+    } else {
+        buttons.tail().nth(index - lead - slots).map(Hit::Button)
+    }
+}
+#[inline(never)]
+pub fn cell_index(buttons: Buttons, slots: usize, hit: Hit) -> Option<usize> {
+    let lead = buttons.lead().count();
+    match hit {
+        Hit::Slot(slot) => (slot < slots).then_some(lead + slot),
+        Hit::Button(button) => match buttons.lead().position(|b| b == button) {
+            Some(at) => Some(at),
+            None => buttons
+                .tail()
+                .position(|b| b == button)
+                .map(|at| lead + slots + at),
+        },
+    }
+}
+
+/// Accessible names in cell order: the buttons around the slots' own names.
+pub fn cell_names(buttons: Buttons, slot_names: &[String], minimized: usize) -> Vec<String> {
+    let name = |button: Button| match button {
+        Button::Minimized => format!("{}, {minimized} windows", button.label()),
+        _ => button.label().to_string(),
+    };
+    let mut names: Vec<String> = buttons.lead().map(name).collect();
+    names.extend_from_slice(slot_names);
+    names.extend(buttons.tail().map(name));
+    names
+}
+
+/// Whether a catalog window belongs in the minimized-apps list: minimized, and on this desktop when the
+/// dock is limited to it.
+pub fn lists_minimized(window: &WindowRecord, desktop_only: bool) -> bool {
+    window.minimized && (window.current_desktop || !desktop_only)
+}
+
+/// The most rows the minimized popup shows.
+pub const MINIMIZED_MAX: usize = 12;
+
+/// Minimized windows for the chevron, in title order (then key) so the list is stable.
+pub fn minimized_windows(model: &WindowModel, desktop_only: bool) -> Vec<&WindowRecord> {
+    let mut list: Vec<_> = model
+        .windows
+        .iter()
+        .filter(|window| lists_minimized(window, desktop_only))
+        .collect();
+    sort::by(&mut list, |a, b| (&a.title, a.key).cmp(&(&b.title, b.key)));
+    list
+}
+
+/// Whether the user's Windows display language reads right to left (Arabic, Hebrew, ...), which mirrors the
+/// dock. Read once at startup: changing the display language needs a new sign-in.
+pub fn system_rtl() -> bool {
+    let mut layout = [0u16; 2]; // LOCALE_RETURN_NUMBER fills a DWORD
+    // SAFETY: the buffer holds the DWORD the flag asks for; a language id is a valid locale id.
+    let read = unsafe {
+        GetLocaleInfoW(
+            u32::from(GetUserDefaultUILanguage()),
+            LOCALE_IREADINGLAYOUT | LOCALE_RETURN_NUMBER,
+            Some(&mut layout),
+        )
+    };
+    read > 0 && layout[0] == 1
 }
 
 pub fn px(dips: i32, dpi: u32) -> i32 {
     ((i64::from(dips) * i64::from(dpi.max(1)) + 48) / 96) as i32
 }
 
+/// Window x of the first slot, and the width the tail takes at the right end (pixels).
+#[inline(never)]
+fn lead_px(buttons: Buttons, dpi: u32) -> i32 {
+    let lead = buttons.lead().count() as i32;
+    px(PAD_DIPS, dpi)
+        + if lead > 0 {
+            lead * px(BTN_DIPS, dpi) + px(SEP_DIPS, dpi)
+        } else {
+            0
+        }
+}
+#[inline(never)]
+fn tail_px(buttons: Buttons, dpi: u32) -> i32 {
+    if !buttons.has_tail() {
+        return px(PAD_DIPS, dpi);
+    }
+    px(SEP_DIPS, dpi)
+        + if buttons.on(Button::Minimized) {
+            px(BTN_DIPS, dpi)
+        } else {
+            0
+        }
+        + px(
+            if buttons.on(Button::Desktop) {
+                STRIP_DIPS
+            } else {
+                PAD_DIPS
+            },
+            dpi,
+        )
+}
+
+/// Total width in pixels, the sum of the scaled parts so no cell is clipped by rounding. With no buttons:
+/// the pad, the slots and the pad.
+#[inline(never)]
+pub fn width_px(buttons: Buttons, slots: usize, dpi: u32) -> i32 {
+    lead_px(buttons, dpi) + px(SLOT_DIPS, dpi) * slots.max(1) as i32 + tail_px(buttons, dpi)
+}
+
+/// Window-pixel span `(left, width)` of a slot or button in a dock `width_px` wide.
+pub fn span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
+    let (left, cell) = ltr_span(buttons, width_px, dpi, hit);
+    (
+        if buttons.rtl {
+            width_px - left - cell
+        } else {
+            left
+        },
+        cell,
+    )
+}
+
+/// Window x as the left-to-right layout sees it: a mirrored dock flips pixel columns.
+fn ltr_x(buttons: Buttons, x_px: i32, width_px: i32) -> i32 {
+    if buttons.rtl {
+        width_px - 1 - x_px
+    } else {
+        x_px
+    }
+}
+
+/// `span` of the left-to-right layout; the others mirror it.
+#[inline(never)]
+fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
+    let (btn, strip) = (px(BTN_DIPS, dpi), px(STRIP_DIPS, dpi));
+    match hit {
+        Hit::Slot(slot) => (
+            lead_px(buttons, dpi) + px(SLOT_DIPS, dpi) * slot as i32,
+            px(SLOT_DIPS, dpi),
+        ),
+        Hit::Button(Button::Desktop) => (width_px - strip, strip),
+        Hit::Button(Button::Minimized) => {
+            let end = if buttons.on(Button::Desktop) {
+                STRIP_DIPS
+            } else {
+                PAD_DIPS
+            };
+            (width_px - px(end, dpi) - btn, btn)
+        }
+        Hit::Button(button) => {
+            let at = buttons.lead().position(|b| b == button).unwrap_or(0) as i32;
+            (px(PAD_DIPS, dpi) + at * btn, btn)
+        }
+    }
+}
+
+/// The centre of dock slot `slot` (slot 0 is the picker) for a dock `width_px` wide whose left edge is `dock_x`.
+pub fn slot_center_x(dock_x: i32, buttons: Buttons, width_px: i32, slot: usize, dpi: u32) -> i32 {
+    let (left, width) = span(buttons, width_px, dpi, Hit::Slot(slot));
+    dock_x + left + width / 2
+}
+
 /// Slots that fit inside the realized window width; the rest stay reachable through the picker.
-/// The centre of dock slot `slot` (slot 0 is the picker) for a dock whose left edge is `dock_x`.
-pub fn slot_center_x(dock_x: i32, slot: usize, dpi: u32) -> i32 {
-    dock_x + px(PAD_DIPS, dpi) + px(SLOT_DIPS, dpi) * slot as i32 + px(SLOT_DIPS, dpi) / 2
+#[inline(never)]
+pub fn visible_slots(buttons: Buttons, width_px: i32, dpi: u32, slots: usize) -> usize {
+    let room = width_px - lead_px(buttons, dpi) - tail_px(buttons, dpi);
+    slots.min((room / px(SLOT_DIPS, dpi).max(1)).max(0) as usize)
 }
 
-pub fn visible_slots(width_px: i32, dpi: u32, slots: usize) -> usize {
-    let fit = (width_px - px(PAD_DIPS, dpi) * 2) / px(SLOT_DIPS, dpi).max(1);
-    slots.min(fit.max(0) as usize)
-}
-
-pub fn slot_at(x_px: i32, width_px: i32, dpi: u32, slots: usize) -> Option<usize> {
-    let offset = x_px - px(PAD_DIPS, dpi);
+/// What is under window x `x_px`: a button, or a fully visible slot.
+#[inline(never)]
+pub fn hit_at(buttons: Buttons, x_px: i32, width_px: i32, dpi: u32, slots: usize) -> Option<Hit> {
+    let x_px = ltr_x(buttons, x_px, width_px);
+    let on_button = Button::ALL
+        .into_iter()
+        .filter(|b| buttons.on(*b))
+        .find(|b| {
+            let (left, width) = ltr_span(buttons, width_px, dpi, Hit::Button(*b));
+            (left..left + width).contains(&x_px)
+        });
+    if let Some(button) = on_button {
+        return Some(Hit::Button(button));
+    }
+    let offset = x_px - lead_px(buttons, dpi);
     if offset < 0 {
         return None;
     }
     let slot = (offset / px(SLOT_DIPS, dpi).max(1)) as usize;
-    (slot < visible_slots(width_px, dpi, slots)).then_some(slot)
+    (slot < visible_slots(buttons, width_px, dpi, slots)).then_some(Hit::Slot(slot))
+}
+
+/// Window x of the hairline between the lead buttons and the slots, and between the slots and the tail,
+/// for the groups that exist.
+pub fn separators(buttons: Buttons, width_px: i32, dpi: u32) -> [Option<i32>; 2] {
+    let half = px(SEP_DIPS, dpi) / 2;
+    let at = |x| if buttons.rtl { width_px - x } else { x };
+    [
+        (buttons.lead().count() > 0).then(|| at(lead_px(buttons, dpi) - half)),
+        buttons
+            .has_tail()
+            .then(|| at(width_px - tail_px(buttons, dpi) + half)),
+    ]
+}
+
+/// Whether the keyboard can rest on `cell`: a button, or a slot that is not clipped off the bar.
+pub fn reachable(buttons: Buttons, width_px: i32, dpi: u32, slots: usize, cell: usize) -> bool {
+    let lead = buttons.lead().count();
+    let visible = visible_slots(buttons, width_px, dpi, slots);
+    cell < cell_count(buttons, slots) && !(lead + visible..lead + slots).contains(&cell)
+}
+
+/// The next reachable cell after `from` in index order, wrapping; `from` itself when it is the only one.
+pub fn step_cell(
+    buttons: Buttons,
+    width_px: i32,
+    dpi: u32,
+    slots: usize,
+    from: usize,
+    forward: bool,
+) -> usize {
+    let count = cell_count(buttons, slots);
+    (1..count)
+        .map(|n| {
+            if forward {
+                (from + n) % count
+            } else {
+                (from + count - n) % count
+            }
+        })
+        .find(|&cell| reachable(buttons, width_px, dpi, slots, cell))
+        .unwrap_or(from)
 }
 
 /// Pointer travel (DIPs) before a press on a pinned slot becomes a reorder drag instead of a click.
@@ -162,12 +498,20 @@ pub fn drag_started(origin_x: i32, x: i32, dpi: u32) -> bool {
 
 /// Pin index a drag released at `x_px` drops on: the slot under the pointer (clamped to the visible pins, so
 /// releasing beyond either end drops on the first or last), or `None` with no visible pin. Item `i` is pin `i`.
-pub fn drop_index(x_px: i32, width_px: i32, dpi: u32, slots: usize, pins: usize) -> Option<usize> {
-    let last = visible_slots(width_px, dpi, slots)
+pub fn drop_index(
+    buttons: Buttons,
+    x_px: i32,
+    width_px: i32,
+    dpi: u32,
+    slots: usize,
+    pins: usize,
+) -> Option<usize> {
+    let last = visible_slots(buttons, width_px, dpi, slots)
         .saturating_sub(1)
         .min(pins)
         .checked_sub(1)?;
-    let slot = (x_px - px(PAD_DIPS, dpi)).div_euclid(px(SLOT_DIPS, dpi).max(1));
+    let x_px = ltr_x(buttons, x_px, width_px);
+    let slot = (x_px - lead_px(buttons, dpi)).div_euclid(px(SLOT_DIPS, dpi).max(1));
     Some((slot - 1).clamp(0, last as i32) as usize)
 }
 
@@ -271,6 +615,32 @@ pub fn launch_with(target: &str, parameters: Option<&str>) -> bool {
     unsafe { ShellExecuteExW(&mut info).is_ok() }
 }
 
+/// Taps `keys` together (down in order, up in reverse) with one `SendInput`, on the user's click only. No
+/// hook and nothing stays pressed. False when Windows injected fewer events than asked.
+pub fn send_keys(keys: &[VIRTUAL_KEY]) -> bool {
+    let key = |vk: VIRTUAL_KEY, up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    Default::default()
+                },
+                ..Default::default()
+            },
+        },
+    };
+    let events: Vec<INPUT> = keys
+        .iter()
+        .map(|&vk| key(vk, false))
+        .chain(keys.iter().rev().map(|&vk| key(vk, true)))
+        .collect();
+    // SAFETY: `events` is a live slice of fully initialized INPUT structs and the size is theirs.
+    unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) as usize == events.len() }
+}
+
 /// Asks each window to close (`WM_CLOSE`, posted: an app may refuse or prompt, and ROQA never waits).
 pub fn close(windows: &[WindowKey]) {
     for key in windows.iter().filter(|&&key| valid_target(key)) {
@@ -314,6 +684,11 @@ pub fn perform(action: Action) -> bool {
 mod tests {
     use super::*;
     use crate::window_model::WindowRecord;
+
+    const N: Buttons = Buttons::NONE;
+    fn slot_at(x: i32, width: i32, dpi: u32, slots: usize) -> Option<usize> {
+        hit_at(N, x, width, dpi, slots).and_then(Hit::slot)
+    }
 
     fn record(handle: usize, identity: Identity, foreground: bool) -> WindowRecord {
         WindowRecord {
@@ -554,7 +929,7 @@ mod tests {
     #[test]
     fn slot_hit_testing_matches_scaled_geometry_and_clipping() {
         // 150%: pad 12px, slot 84px. Three slots need 276px.
-        assert_eq!(px(width_dips(3), 144), 276);
+        assert_eq!(width_px(N, 3, 144), 276);
         assert_eq!(slot_at(11, 276, 144, 3), None);
         assert_eq!(slot_at(12, 276, 144, 3), Some(0));
         assert_eq!(slot_at(95, 276, 144, 3), Some(0));
@@ -562,9 +937,9 @@ mod tests {
         assert_eq!(slot_at(263, 276, 144, 3), Some(2));
         assert_eq!(slot_at(264, 276, 144, 3), None);
         // Work area narrower than the content: only fully visible slots are hit targets.
-        assert_eq!(visible_slots(200, 144, 3), 2);
+        assert_eq!(visible_slots(N, 200, 144, 3), 2);
         assert_eq!(slot_at(190, 200, 144, 3), None);
-        assert_eq!(width_dips(0), width_dips(1));
+        assert_eq!(width_px(N, 0, 96), width_px(N, 1, 96));
     }
 
     #[test]
@@ -579,7 +954,7 @@ mod tests {
     #[test]
     fn drop_index_uses_the_dock_slots_and_clamps_to_the_pins() {
         // 96 dpi: pad 8, slot 56; slot 0 is the picker, so item i is slot i + 1 at x = 8 + 56 * (i + 1).
-        let at = |x, slots, pins| drop_index(x, px(width_dips(slots), 96), 96, slots, pins);
+        let at = |x, slots, pins| drop_index(N, x, width_px(N, slots, 96), 96, slots, pins);
         // 4 pins among 8 slots (picker, 4 pins, 3 running): slots 1..=4 are pins.
         assert_eq!(at(8 + 56, 8, 4), Some(0));
         assert_eq!(at(8 + 56 * 3 + 55, 8, 4), Some(2));
@@ -592,17 +967,17 @@ mod tests {
         // No pins: nothing to drop on.
         assert_eq!(at(70, 8, 0), None);
         // Clipped bar (width for 3 slots, so only 2 pins visible): the drop never lands on a hidden pin.
-        assert_eq!(drop_index(10_000, px(width_dips(3), 96), 96, 8, 4), Some(1));
+        assert_eq!(drop_index(N, 10_000, width_px(N, 3, 96), 96, 8, 4), Some(1));
         // Agrees with `slot_at`: the slot a click would hit is the slot a drop lands on.
-        let width = px(width_dips(8), 96);
+        let width = width_px(N, 8, 96);
         for x in 0..width {
             if let Some(slot @ 1..=4) = slot_at(x, width, 96, 8) {
-                assert_eq!(drop_index(x, width, 96, 8, 4), Some(slot - 1), "x {x}");
+                assert_eq!(drop_index(N, x, width, 96, 8, 4), Some(slot - 1), "x {x}");
             }
         }
         // 150%: pad 12, slot 84.
         assert_eq!(
-            drop_index(12 + 84 * 2, px(width_dips(5), 144), 144, 5, 3),
+            drop_index(N, 12 + 84 * 2, width_px(N, 5, 144), 144, 5, 3),
             Some(1)
         );
     }
@@ -638,5 +1013,260 @@ mod tests {
         assert_eq!(pinned_as(&gone, &pins), None);
         let unavailable = running(Identity::Unavailable(3), r"c:\other.exe");
         assert_eq!(pinned_as(&unavailable, &pins), None);
+    }
+
+    fn only(button: Button) -> Buttons {
+        let mut on = [false; 5];
+        on[button.index()] = true;
+        Buttons::of(on)
+    }
+    const ALL: Buttons = Buttons::of([true; 5]);
+
+    #[test]
+    fn width_grows_by_each_button_and_none_keeps_the_old_dock() {
+        let base = width_px(N, 3, 96);
+        assert_eq!(base, PAD_DIPS * 2 + SLOT_DIPS * 3);
+        // Lead buttons share one separator; the tail has one separator, the chevron and the strip.
+        assert_eq!(
+            width_px(only(Button::Start), 3, 96),
+            base + BTN_DIPS + SEP_DIPS
+        );
+        assert_eq!(
+            width_px(only(Button::TaskView), 3, 96),
+            base + BTN_DIPS + SEP_DIPS
+        );
+        assert_eq!(
+            width_px(only(Button::Minimized), 3, 96),
+            base + SEP_DIPS + BTN_DIPS
+        );
+        assert_eq!(
+            width_px(only(Button::Desktop), 3, 96),
+            base - PAD_DIPS + SEP_DIPS + STRIP_DIPS
+        );
+        assert_eq!(
+            width_px(ALL, 3, 96),
+            PAD_DIPS + 3 * BTN_DIPS + SEP_DIPS + SLOT_DIPS * 3 + SEP_DIPS + BTN_DIPS + STRIP_DIPS
+        );
+        assert_eq!(Buttons::default().shown, [true, true, false, true, true]);
+    }
+
+    #[test]
+    fn cells_never_overlap_and_tile_the_dock_at_any_scale() {
+        for dpi in [96, 120, 144, 192] {
+            for mask in 0..32u32 {
+                let b = Buttons::of(std::array::from_fn(|i| mask >> i & 1 == 1));
+                let slots = 4;
+                let width = width_px(b, slots, dpi);
+                assert_eq!(cell_count(b, slots), slots + mask.count_ones() as usize);
+                let mut end = 0;
+                for index in 0..cell_count(b, slots) {
+                    let hit = cell(b, slots, index).unwrap();
+                    assert_eq!(cell_index(b, slots, hit), Some(index));
+                    let (left, w) = span(b, width, dpi, hit);
+                    assert!(left >= end && w > 0, "mask {mask} dpi {dpi} cell {index}");
+                    end = left + w;
+                    // The centre of every cell hits that cell.
+                    assert_eq!(hit_at(b, left + w / 2, width, dpi, slots), Some(hit));
+                }
+                assert!(end <= width);
+                assert_eq!(cell(b, slots, cell_count(b, slots)), None);
+            }
+        }
+    }
+
+    #[test]
+    fn hit_testing_maps_buttons_slots_and_gaps() {
+        // 96 dpi, Start + Search + chevron + strip, 2 slots: pad 8, buttons 44, sep 8, slots 56.
+        let b = Buttons::of([true, true, false, true, true]);
+        let width = width_px(b, 2, 96);
+        let at = |x| hit_at(b, x, width, 96, 2);
+        assert_eq!(at(7), None);
+        assert_eq!(at(8), Some(Hit::Button(Button::Start)));
+        assert_eq!(at(8 + 44), Some(Hit::Button(Button::Search)));
+        assert_eq!(at(8 + 88), None); // the separator
+        assert_eq!(at(8 + 88 + 8), Some(Hit::Slot(0)));
+        assert_eq!(at(8 + 88 + 8 + 56), Some(Hit::Slot(1)));
+        assert_eq!(at(8 + 88 + 8 + 112), None); // the tail separator
+        assert_eq!(at(width - 12 - 44), Some(Hit::Button(Button::Minimized)));
+        assert_eq!(at(width - 12), Some(Hit::Button(Button::Desktop)));
+        assert_eq!(at(width - 1), Some(Hit::Button(Button::Desktop)));
+        // Without a strip the chevron ends one pad from the edge.
+        let b = only(Button::Minimized);
+        let width = width_px(b, 1, 96);
+        assert_eq!(
+            hit_at(b, width - 8 - 1, width, 96, 1),
+            Some(Hit::Button(Button::Minimized))
+        );
+        assert_eq!(hit_at(b, width - 1, width, 96, 1), None);
+        // A narrow work area clips slots, never the buttons at either end.
+        let b = ALL;
+        let narrow = width_px(b, 1, 96) + 56;
+        assert_eq!(visible_slots(b, narrow, 96, 5), 2);
+        assert_eq!(
+            hit_at(b, narrow - 1, narrow, 96, 5),
+            Some(Hit::Button(Button::Desktop))
+        );
+        assert_eq!(
+            hit_at(b, 8, narrow, 96, 5),
+            Some(Hit::Button(Button::Start))
+        );
+    }
+
+    #[test]
+    fn slot_centres_and_drops_follow_the_lead_buttons() {
+        let b = Buttons::of([true, true, false, false, false]);
+        // pad 8 + two buttons 88 + separator 8 = 104; slot 1 centre = 104 + 56 + 28.
+        let width = width_px(b, 6, 96);
+        assert_eq!(slot_center_x(1000, b, width, 1, 96), 1000 + 104 + 56 + 28);
+        assert_eq!(slot_center_x(1000, N, 0, 0, 96), 1000 + 8 + 28);
+        assert_eq!(drop_index(b, 104 + 56 * 2, width, 96, 6, 3), Some(1));
+        assert_eq!(drop_index(b, 0, width, 96, 6, 3), Some(0));
+    }
+
+    #[test]
+    fn names_and_keys_follow_the_buttons() {
+        let slots = vec!["All windows".to_string(), "w1".to_string()];
+        assert_eq!(cell_names(N, &slots, 3), slots);
+        assert_eq!(
+            cell_names(Buttons::default(), &slots, 3),
+            [
+                "Start",
+                "Search",
+                "All windows",
+                "w1",
+                "Show minimized apps, 3 windows",
+                "Show desktop"
+            ]
+        );
+        assert_eq!(
+            cell_names(only(Button::TaskView), &slots, 0)[0],
+            "Task View"
+        );
+        assert_eq!(Button::Start.keys(), Some(&[VK_LWIN][..]));
+        assert_eq!(Button::Search.keys(), Some(&[VK_LWIN, VK_S][..]));
+        assert_eq!(Button::TaskView.keys(), Some(&[VK_LWIN, VK_TAB][..]));
+        assert_eq!(Button::Desktop.keys(), Some(&[VK_LWIN, VK_D][..]));
+        assert_eq!(Button::Minimized.keys(), None);
+        let keys: Vec<_> = Button::ALL.iter().map(|b| b.key()).collect();
+        assert_eq!(keys, ["dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk"]);
+    }
+
+    #[test]
+    fn minimized_filter_keeps_minimized_windows_on_this_desktop() {
+        let mut model = WindowModel::default();
+        for (handle, title, minimized, here) in [
+            (1, "zeta", true, true),
+            (2, "alpha", true, true),
+            (3, "open", false, true),
+            (4, "away", true, false),
+        ] {
+            let mut w = record(handle, Identity::Unavailable(handle as u32), false);
+            (w.title, w.minimized, w.current_desktop) = (title.into(), minimized, here);
+            model.windows.push(w);
+        }
+        let titles = |desktop_only| -> Vec<_> {
+            minimized_windows(&model, desktop_only)
+                .iter()
+                .map(|w| w.title.clone())
+                .collect()
+        };
+        assert_eq!(titles(false), ["alpha", "away", "zeta"]);
+        assert_eq!(titles(true), ["alpha", "zeta"]);
+        assert!(minimized_windows(&WindowModel::default(), false).is_empty());
+    }
+
+    fn mirrored(b: Buttons) -> Buttons {
+        Buttons { rtl: true, ..b }
+    }
+
+    #[test]
+    fn a_mirrored_dock_is_the_exact_mirror_of_the_left_to_right_one() {
+        for dpi in [96, 144, 192] {
+            for mask in 0..32u32 {
+                let ltr = Buttons::of(std::array::from_fn(|i| mask >> i & 1 == 1));
+                let rtl = mirrored(ltr);
+                let slots = 4;
+                let width = width_px(ltr, slots, dpi);
+                assert_eq!(width_px(rtl, slots, dpi), width);
+                for index in 0..cell_count(ltr, slots) {
+                    let hit = cell(ltr, slots, index).unwrap();
+                    let (left, w) = span(ltr, width, dpi, hit);
+                    // The same cell sits at the opposite edge, and the first cell is now the rightmost.
+                    assert_eq!(span(rtl, width, dpi, hit), (width - left - w, w));
+                    assert_eq!(
+                        hit_at(rtl, width - left - w / 2 - 1, width, dpi, slots),
+                        Some(hit)
+                    );
+                }
+                for x in 0..width {
+                    assert_eq!(
+                        hit_at(rtl, x, width, dpi, slots),
+                        hit_at(ltr, width - 1 - x, width, dpi, slots),
+                        "mask {mask} dpi {dpi} x {x}"
+                    );
+                    assert_eq!(
+                        drop_index(rtl, x, width, dpi, slots, 3),
+                        drop_index(ltr, width - 1 - x, width, dpi, slots, 3)
+                    );
+                }
+                let flipped = separators(ltr, width, dpi).map(|x| x.map(|x| width - x));
+                assert_eq!(separators(rtl, width, dpi), flipped);
+                assert_eq!(
+                    slot_center_x(0, rtl, width, 1, dpi),
+                    width - slot_center_x(0, ltr, width, 1, dpi)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn separators_sit_between_the_button_groups_and_the_slots() {
+        let width = width_px(Buttons::default(), 2, 96);
+        // Lead: pad 8 + two buttons 88 = 96, then half of the 8 separator.
+        let [lead, tail] = separators(Buttons::default(), width, 96);
+        assert_eq!(lead, Some(8 + 88 + 4));
+        // Tail: separator 8, chevron 44, strip 12 from the right edge.
+        assert_eq!(tail, Some(width - (8 + 44 + 12) + 4));
+        assert_eq!(separators(N, width, 96), [None, None]);
+        assert_eq!(separators(only(Button::Start), width, 96)[1], None);
+        assert_eq!(separators(only(Button::Desktop), width, 96)[0], None);
+    }
+
+    #[test]
+    fn the_keyboard_walks_every_reachable_cell_in_a_ring() {
+        let b = Buttons::default(); // Start, Search, 4 slots, chevron, strip = 8 cells
+        let width = width_px(b, 4, 96);
+        let walk = |from, forward| step_cell(b, width, 96, 4, from, forward);
+        assert_eq!(
+            (walk(0, true), walk(1, true), walk(5, true), walk(6, true)),
+            (1, 2, 6, 7)
+        );
+        assert_eq!((walk(7, true), walk(0, false), walk(2, false)), (0, 7, 1));
+        let mut seen = vec![0];
+        while seen.len() < 8 {
+            seen.push(walk(*seen.last().unwrap(), true));
+        }
+        assert_eq!(seen, [0, 1, 2, 3, 4, 5, 6, 7]);
+        // A bar too narrow for the last two slots skips them in both directions, never the buttons.
+        let narrow = width - 2 * px(SLOT_DIPS, 96);
+        assert_eq!(visible_slots(b, narrow, 96, 4), 2);
+        let walk = |from, forward| step_cell(b, narrow, 96, 4, from, forward);
+        assert!(!reachable(b, narrow, 96, 4, 4) && !reachable(b, narrow, 96, 4, 5));
+        assert_eq!((walk(3, true), walk(6, false)), (6, 3));
+        // The only cell steps to itself, and a cell past the end is not reachable.
+        assert_eq!(step_cell(N, 100, 96, 1, 0, true), 0);
+        assert!(!reachable(b, width, 96, 4, 8));
+    }
+
+    #[test]
+    fn every_button_has_a_distinct_tooltip_label() {
+        let labels: Vec<_> = Button::ALL.iter().map(|b| b.label()).collect();
+        assert!(labels.iter().all(|label| !label.is_empty()));
+        assert!(
+            labels
+                .iter()
+                .enumerate()
+                .all(|(at, label)| !labels[..at].contains(label))
+        );
     }
 }

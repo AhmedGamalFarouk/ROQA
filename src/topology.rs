@@ -1,4 +1,4 @@
-use crate::layout::Bounds;
+use crate::{layout::Bounds, sort};
 
 /// One display monitor as observed in a single enumeration pass.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,7 +14,7 @@ pub struct Monitor {
 /// sorted so enumeration order never causes a rebuild. `None` marks a transient observation
 /// (Windows reports these mid-change); the host keeps its surfaces and retries.
 pub fn settle(mut observed: Vec<Monitor>) -> Option<Vec<Monitor>> {
-    observed.sort_by(|a, b| a.device.cmp(&b.device));
+    sort::by(&mut observed, |a, b| a.device.cmp(&b.device));
     let valid =
         |m: &Monitor| !m.device.is_empty() && m.work.width > 0 && m.work.height > 0 && m.dpi > 0;
     let unique = observed

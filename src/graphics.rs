@@ -34,7 +34,7 @@ use windows::Win32::{
             D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
             D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
             D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateDevice, ID2D1Bitmap1, ID2D1Brush,
-            ID2D1DeviceContext, ID2D1LinearGradientBrush, ID2D1PathGeometry,
+            ID2D1DeviceContext, ID2D1LinearGradientBrush, ID2D1PathGeometry, ID2D1SolidColorBrush,
         },
         Direct3D::D3D_DRIVER_TYPE_HARDWARE,
         Direct3D11::{
@@ -143,6 +143,11 @@ pub struct DockSlot<'a> {
 
 pub struct DockScene<'a> {
     pub slots: Vec<DockSlot<'a>>,
+    /// Which taskbar buttons are on, and each enabled one's hover progress.
+    pub layout: dock::Buttons,
+    pub buttons: Vec<(dock::Button, f32)>,
+    /// The slot or button with keyboard focus, drawn with a ring.
+    pub focus: Option<dock::Hit>,
     /// Pointer-inside animation progress for the bar fill; keeps the M1 hover background semantic.
     pub inside: f32,
     pub dpi: u32,
@@ -498,11 +503,32 @@ impl Canvas {
                         context.FillRoundedRectangle(&rounded(shape, dot / 2.0), &brush);
                     }
                 }
-                let text = D2D_RECT_F {
+                let mut text = D2D_RECT_F {
                     left: left + dot + 8.0 * scale,
                     right: cell.right - 8.0 * scale,
                     ..cell
                 };
+                if let Some(pixels) = row.icon {
+                    let side = 16.0 * scale;
+                    let frame = D2D_RECT_F {
+                        left,
+                        top: middle - side / 2.0,
+                        right: left + side,
+                        bottom: middle + side / 2.0,
+                    };
+                    // SAFETY: live draw context between BeginDraw/EndDraw; the bitmap is scoped to this draw.
+                    unsafe {
+                        context.DrawBitmap(
+                            &upload(context, pixels)?,
+                            Some(&frame),
+                            1.0,
+                            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                            None,
+                            None,
+                        );
+                    }
+                    text.left = left + side + 8.0 * scale;
+                }
                 draw_text(context, row.name, &font, text, tint(p.ink_dim(false, 0.90)))?;
             }
             Ok(())
@@ -2020,7 +2046,7 @@ fn rounded(rect: D2D_RECT_F, radius: f32) -> D2D1_ROUNDED_RECT {
     }
 }
 
-/// The dock's slots, left to right inside `rect` (either style).
+/// The dock's slots and taskbar buttons inside `rect` (either style), in the dock's reading direction.
 fn paint_slots(
     context: &ID2D1DeviceContext,
     rect: &D2D_RECT_F,
@@ -2029,16 +2055,221 @@ fn paint_slots(
     px: &dyn Fn(i32) -> f32,
     p: &Palette,
 ) -> Result<()> {
-    let visible = dock::visible_slots(width, scene.dpi, scene.slots.len());
-    for (index, slot) in scene.slots.iter().take(visible).enumerate() {
-        let left = rect.left + px(dock::PAD_DIPS) + px(dock::SLOT_DIPS) * index as f32;
-        let cell = D2D_RECT_F {
-            left,
+    let visible = dock::visible_slots(scene.layout, width, scene.dpi, scene.slots.len());
+    let cell = |hit| {
+        let (left, cell) = dock::span(scene.layout, width, scene.dpi, hit);
+        D2D_RECT_F {
+            left: rect.left + left as f32,
             top: rect.top,
-            right: left + px(dock::SLOT_DIPS),
+            right: rect.left + (left + cell) as f32,
             bottom: rect.bottom,
+        }
+    };
+    for (index, slot) in scene.slots.iter().take(visible).enumerate() {
+        draw_slot(
+            context,
+            &cell(dock::Hit::Slot(index)),
+            slot,
+            scene.dpi,
+            px,
+            p,
+        )?;
+    }
+    for &(button, hover) in &scene.buttons {
+        draw_button(
+            context,
+            &cell(dock::Hit::Button(button)),
+            button,
+            hover,
+            px,
+            p,
+        )?;
+    }
+    // SAFETY: context is live between surface BeginDraw/EndDraw; the brushes are scoped to this draw.
+    unsafe {
+        // Hairlines between the button groups and the slots.
+        let line = context.CreateSolidColorBrush(&tint(p.track(0.22)), None)?;
+        for x in dock::separators(scene.layout, width, scene.dpi)
+            .into_iter()
+            .flatten()
+        {
+            let at = rect.left + x as f32;
+            let hairline = D2D_RECT_F {
+                left: at - 0.5,
+                top: rect.top + px(20),
+                right: at + 0.5,
+                bottom: rect.bottom - px(20),
+            };
+            context.FillRectangle(&hairline, &line);
+        }
+        // The keyboard focus ring, as the notch draws it.
+        if let Some(hit) = scene.focus {
+            let c = cell(hit);
+            let ring = D2D_RECT_F {
+                left: c.left + px(2),
+                top: c.top + px(10),
+                right: c.right - px(2),
+                bottom: c.bottom - px(10),
+            };
+            let brush =
+                context.CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(1.0)), None)?;
+            context.DrawRoundedRectangle(&rounded(ring, px(12)), &brush, px(2), None);
+        }
+    }
+    Ok(())
+}
+
+/// One taskbar button: the hover chip, then its glyph.
+fn draw_button(
+    context: &ID2D1DeviceContext,
+    cell: &D2D_RECT_F,
+    button: dock::Button,
+    hover: f32,
+    px: &dyn Fn(i32) -> f32,
+    p: &Palette,
+) -> Result<()> {
+    let centre = (
+        (cell.left + cell.right) / 2.0,
+        (cell.top + cell.bottom) / 2.0,
+    );
+    if button == dock::Button::Desktop {
+        return glyph_desktop(context, cell, hover, px, p);
+    }
+    // SAFETY: context is live between surface BeginDraw/EndDraw; the brushes are scoped to this draw.
+    unsafe {
+        if hover > 0.0 {
+            let (half_w, half_h) = ((cell.right - cell.left) / 2.0 - px(2), px(18));
+            let chip = D2D_RECT_F {
+                left: centre.0 - half_w,
+                top: centre.1 - half_h,
+                right: centre.0 + half_w,
+                bottom: centre.1 + half_h,
+            };
+            let brush = context.CreateSolidColorBrush(&tint(p.track(0.12 * hover)), None)?;
+            context.FillRoundedRectangle(&rounded(chip, px(10)), &brush);
+        }
+        let ink = context.CreateSolidColorBrush(&with_alpha(p.glyph, 1.0), None)?;
+        match button {
+            dock::Button::Start => glyph_start(context, centre, px, &ink),
+            dock::Button::Search => glyph_search(context, centre, px, &ink),
+            dock::Button::TaskView => glyph_task_view(context, centre, px, &ink),
+            _ => glyph_minimized(context, centre, px, &ink),
+        }
+    }
+    Ok(())
+}
+
+// The glyphs below are placeholders, one function each (features D2); the line-icon pass replaces only these.
+// Each draws with the button's ink brush, on the live draw context.
+
+/// The Windows logo: four rounded squares.
+fn glyph_start(
+    context: &ID2D1DeviceContext,
+    (cx, cy): (f32, f32),
+    px: &dyn Fn(i32) -> f32,
+    ink: &ID2D1SolidColorBrush,
+) {
+    let (tile, gap) = (px(9), px(2));
+    for (column, row) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+        let left = cx - tile - gap / 2.0 + column * (tile + gap);
+        let top = cy - tile - gap / 2.0 + row * (tile + gap);
+        let square = D2D_RECT_F {
+            left,
+            top,
+            right: left + tile,
+            bottom: top + tile,
         };
-        draw_slot(context, &cell, slot, scene.dpi, px, p)?;
+        // SAFETY: a draw call on the live context, as the caller guarantees.
+        unsafe { context.FillRoundedRectangle(&rounded(square, px(1)), ink) };
+    }
+}
+
+/// A magnifier: a ring and a handle.
+fn glyph_search(
+    context: &ID2D1DeviceContext,
+    (cx, cy): (f32, f32),
+    px: &dyn Fn(i32) -> f32,
+    ink: &ID2D1SolidColorBrush,
+) {
+    let (radius, stroke) = (px(7), px(2));
+    let (ring_x, ring_y) = (cx - px(2), cy - px(2));
+    let ring = D2D_RECT_F {
+        left: ring_x - radius,
+        top: ring_y - radius,
+        right: ring_x + radius,
+        bottom: ring_y + radius,
+    };
+    let point = |x: f32, y: f32| Vector2 { X: x, Y: y };
+    let (from, to) = (radius * 0.72, radius * 0.72 + px(6));
+    // SAFETY: draw calls on the live context, as the caller guarantees.
+    unsafe {
+        context.DrawRoundedRectangle(&rounded(ring, radius), ink, stroke, None);
+        context.DrawLine(
+            point(ring_x + from, ring_y + from),
+            point(ring_x + to, ring_y + to),
+            ink,
+            stroke,
+            None,
+        );
+    }
+}
+
+/// Task View: two overlapping windows.
+fn glyph_task_view(
+    context: &ID2D1DeviceContext,
+    (cx, cy): (f32, f32),
+    px: &dyn Fn(i32) -> f32,
+    ink: &ID2D1SolidColorBrush,
+) {
+    let window = |left: i32, top: i32| D2D_RECT_F {
+        left: cx + px(left),
+        top: cy + px(top),
+        right: cx + px(left + 14),
+        bottom: cy + px(top + 10),
+    };
+    for rect in [window(-10, -7), window(-4, -3)] {
+        // SAFETY: a draw call on the live context, as the caller guarantees.
+        unsafe { context.DrawRoundedRectangle(&rounded(rect, px(2)), ink, px(1) * 1.5, None) };
+    }
+}
+
+/// The minimized-apps chevron.
+fn glyph_minimized(
+    context: &ID2D1DeviceContext,
+    (cx, cy): (f32, f32),
+    px: &dyn Fn(i32) -> f32,
+    ink: &ID2D1SolidColorBrush,
+) {
+    let point = |x: i32, y: i32| Vector2 {
+        X: cx + px(x),
+        Y: cy + px(y),
+    };
+    // SAFETY: draw calls on the live context, as the caller guarantees.
+    unsafe {
+        context.DrawLine(point(-6, 2), point(0, -4), ink, px(2), None);
+        context.DrawLine(point(0, -4), point(6, 2), ink, px(2), None);
+    }
+}
+
+/// The show-desktop strip: a thin bar down the dock's far end, brighter under the pointer.
+fn glyph_desktop(
+    context: &ID2D1DeviceContext,
+    cell: &D2D_RECT_F,
+    hover: f32,
+    px: &dyn Fn(i32) -> f32,
+    p: &Palette,
+) -> Result<()> {
+    let centre = (cell.left + cell.right) / 2.0;
+    let bar = D2D_RECT_F {
+        left: centre - px(2),
+        top: cell.top + px(14),
+        right: centre + px(2),
+        bottom: cell.bottom - px(14),
+    };
+    // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw.
+    unsafe {
+        let brush = context.CreateSolidColorBrush(&tint(p.track(0.18 + 0.30 * hover)), None)?;
+        context.FillRoundedRectangle(&rounded(bar, px(2)), &brush);
     }
     Ok(())
 }

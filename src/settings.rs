@@ -2,6 +2,7 @@
 //! the host applies a change live through `surface_diff`. No launch-at-login: PLAN forbids startup registration.
 
 use crate::{
+    dock::{Button, Buttons},
     layout::{DockStyle, SurfaceKind},
     prayer::Method,
     prayer_tab::LEADS,
@@ -34,6 +35,8 @@ pub struct Settings {
     pub theme: Theme,
     /// Floating (default) or attached to the bottom edge.
     pub dock_style: DockStyle,
+    /// Which taskbar-style buttons the dock shows (`dock::Buttons`).
+    pub dock_buttons: Buttons,
     /// The dock lists only windows on the current virtual desktop (pins stay).
     pub desktop_only: bool,
     /// The hover sliders on each monitor's right (volume) and left (brightness) edge (`edge.rs`).
@@ -67,6 +70,7 @@ impl Default for Settings {
             diagnostics: None,
             theme: Theme::Classic,
             dock_style: DockStyle::Floating,
+            dock_buttons: Buttons::default(),
             desktop_only: false,
             // Off until a native run proves the 2 px strips leave edge scrollbars alone; a stored value wins.
             edge_volume: false,
@@ -184,6 +188,12 @@ impl Settings {
                 .is_some(),
             "shelfcap" => value.parse().map(|v| self.shelf_cap = v).is_ok(),
             "theme" => Theme::from_key(value).map(|v| self.theme = v).is_some(),
+            _ if Button::ALL.iter().any(|b| b.key() == key) => Button::ALL
+                .iter()
+                .find(|b| b.key() == key)
+                .zip(flag(value))
+                .map(|(button, on)| self.dock_buttons.shown[button.index()] = on)
+                .is_some(),
             "dockstyle" => DockStyle::from_key(value)
                 .map(|v| self.dock_style = v)
                 .is_some(),
@@ -238,6 +248,13 @@ plead={}
         }
         if !self.city.is_empty() && one_line(&&self.city) {
             out.push_str(&format!("city={}\n", self.city));
+        }
+        for button in Button::ALL {
+            out.push_str(&format!(
+                "{}={}\n",
+                button.key(),
+                u8::from(self.dock_buttons.on(button))
+            ));
         }
         for tab in Tab::ALL {
             out.push_str(&format!(
@@ -326,6 +343,7 @@ mod tests {
             diagnostics: Some("  \"C:\\logs\\roqa.json\"  ".into()),
             theme: Theme::Glass,
             dock_style: DockStyle::Attached,
+            dock_buttons: Buttons::of([false, true, true, false, true]),
             desktop_only: true,
             edge_volume: false,
             edge_brightness: false,
@@ -507,6 +525,7 @@ mod tests {
             diagnostics: Some("C:\\a=b\\r.json".into()),
             theme: Theme::Midnight,
             dock_style: DockStyle::Attached,
+            dock_buttons: Buttons::of([false, true, true, false, true]),
             desktop_only: true,
             edge_volume: true,
             tabs: [false, true, false, true, false],
@@ -602,6 +621,25 @@ mod tests {
         for (key, value) in [("tabfuture", "0"), ("tabmedia", "2"), ("eyes", "x")] {
             assert!(!read.set(key, value), "{key}={value}");
         }
+        assert_eq!(read, off);
+    }
+
+    #[test]
+    fn dock_buttons_default_round_trip_and_ignore_bad_values() {
+        let defaults = Settings::default();
+        assert_eq!(defaults.dock_buttons.shown, [true, true, false, true, true]);
+        let mut off = Settings::default();
+        assert!(off.set("dbstart", "0") && off.set("dbtask", "1"));
+        assert_eq!(off.dock_buttons.shown, [false, true, true, true, true]);
+        let mut text = String::new();
+        off.write_lines(&mut text);
+        let mut read = Settings::default();
+        for line in text.lines() {
+            let (key, value) = line.split_once('=').unwrap();
+            assert!(read.set(key, value), "{line}");
+        }
+        assert_eq!(read, off);
+        assert!(!read.set("dbsearch", "x") && !read.set("dbfuture", "1"));
         assert_eq!(read, off);
     }
 
