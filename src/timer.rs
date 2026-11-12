@@ -42,6 +42,8 @@ pub struct View {
     pub panel: String,
     /// The accessible name part, such as "Timer, 4:32 remaining".
     pub name: String,
+    /// A timer just finished and none is left running: the panel says so, in the accent colour.
+    pub done: bool,
 }
 
 pub fn wall_now() -> u64 {
@@ -210,7 +212,7 @@ impl Timers {
         if left.is_empty() && !finished {
             return None;
         }
-        let soonest = left.first().copied().unwrap_or(0);
+        let (soonest, done) = (left.first().copied().unwrap_or(0), left.is_empty());
         let others = left.len().saturating_sub(1);
         let mut names: Vec<String> = finished
             .then(|| "Timer finished".to_owned())
@@ -229,10 +231,12 @@ impl Timers {
         Some(View {
             pill: format!("{}m", soonest.div_ceil(60)),
             panel: match others {
+                _ if done => "Timer finished".to_owned(),
                 0 => clock(soonest),
                 n => format!("{} +{n}", clock(soonest)),
             },
             name: names.join("; "),
+            done,
         })
     }
 }
@@ -454,7 +458,7 @@ mod tests {
         let view = finished.view(now + secs(1)).unwrap();
         assert_eq!(
             (view.pill.as_str(), view.panel.as_str(), view.name.as_str()),
-            ("0m", "0:00", "Timer finished")
+            ("0m", "Timer finished", "Timer finished")
         );
         assert_eq!(
             (clock(0), clock(59), clock(3600), clock(86_399)),

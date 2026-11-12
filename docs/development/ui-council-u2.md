@@ -15,3 +15,11 @@ Source: `docs/development/ui-council-fixes.md` (root checkout, untracked) and `a
 - Each slot is 96 x 36 DIP: a 20 DIP shell icon with the file name under it (10 pt, centred, ellipsis), the focus ring surrounds the cell; add and more slots are labelled "Add" and "More". The empty-shelf hint moved right of the add slot.
 - No icon yet, or the shell had none: a new `File` glyph replaces the blank square.
 - Size 1,140,224 -> 1,140,736 B (+512). 369 tests. NOT RUN: native/GUI (icon delivery for txt/png/pdf not confirmed by eye; the council capture showed none arriving).
+
+## P3 Notch
+- Prayer: columns 40/44 DIP at 9.5 pt so "Maghrib" fits; the wash marks the prayer the headline names (the next), the current one is only brighter and bolder; chips are 29 DIP tall and the gear sits 2 DIP lower, so they no longer touch.
+- Timer: when the last timer finished the panel reads "Timer finished" in the accent colour (`View::done`), for the existing 10 s alert.
+- Limits: Refresh pill moved to x 96 and 18 DIP tall (clear of the title and the column labels); column labels 8.5 pt.
+- Right-click menu on the notch closes the hover-opened panel, and hover does not open it while the menu is open.
+- Size 1,140,736 -> 1,141,248 B (+512). 369 tests.
+- Not done (size): Limits adaptive height and bigger body text, timer restart/dismiss buttons. NOT RUN: native/GUI.

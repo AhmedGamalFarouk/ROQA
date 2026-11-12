@@ -264,7 +264,11 @@ pub(super) fn page(
                     DWRITE_TEXT_ALIGNMENT_LEADING,
                 ),
                 rect(layout::page_value(scene.dpi)),
-                ink(1.0),
+                if view.done {
+                    with_alpha(p.accent, p.ink_alpha(reveal))
+                } else {
+                    ink(1.0)
+                },
             ),
             None => draw_text(
                 context,
@@ -458,7 +462,8 @@ fn prayer_page(
             ink(0.6),
         );
     }
-    let column = if media { 40.0 } else { 36.0 };
+    // Wide enough for "Maghrib" at the name size, so no name is cut.
+    let column = if media { 44.0 } else { 40.0 };
     let left = 16.0 + width - column * view.rows.len() as f32;
     let name = font(DISPLAY_FONT, 18.0, DWRITE_FONT_WEIGHT_BOLD, lead);
     draw_text(
@@ -478,7 +483,8 @@ fn prayer_page(
     )?;
     for (index, row) in view.rows.iter().enumerate() {
         let x = left + column * index as f32;
-        if row.current {
+        // The wash marks the prayer the headline names (the next); the current one is only brighter and bolder.
+        if row.name == view.next {
             // SAFETY: a brush and a fill on the frame's own device context.
             unsafe {
                 let wash = context.CreateSolidColorBrush(
@@ -486,7 +492,7 @@ fn prayer_page(
                     None,
                 )?;
                 context.FillRoundedRectangle(
-                    &rounded(at(x + 1.0, 27.0, column - 2.0, 34.0), 6.0 * scale),
+                    &rounded(at(x + 1.0, 27.0, column - 2.0, 29.0), 6.0 * scale),
                     &wash,
                 );
             }
@@ -500,7 +506,7 @@ fn prayer_page(
         draw_text(
             context,
             row.name,
-            &font(TEXT_FONT, 10.0, normal, middle),
+            &font(TEXT_FONT, 9.5, normal, middle),
             at(x, 29.0, column, 12.0),
             ink(alpha),
         )?;
@@ -508,7 +514,7 @@ fn prayer_page(
             context,
             &row.time,
             &font(TEXT_FONT, 11.0, weight, middle),
-            at(x, 44.0, column, 14.0),
+            at(x, 41.0, column, 14.0),
             ink(if row.current { 1.0 } else { 0.85 }),
         )?;
     }
@@ -601,8 +607,8 @@ fn limits_page(
         draw_text(
             context,
             label,
-            &font(7.5, normal, lead),
-            at(x, 28.0, 76.0, 10.0),
+            &font(8.5, normal, lead),
+            at(x, 27.0, 76.0, 11.0),
             ink(0.6),
         )?;
     }

@@ -260,7 +260,7 @@ pub fn volume_fraction(window_width: i32, dpi: u32, progress: f32, x: i32) -> Op
 }
 
 /// The settings button in the expanded panel's bottom-right corner, in DIPs from the body's left and top
-/// edges (media panel, plain panel): 16 square, 12 from the right edge and 8 from the bottom.
+/// edges (media panel, plain panel): 16 square, 12 from the right edge and 6 from the bottom.
 const GEAR_SIZE: f32 = 16.0;
 pub fn gear(dpi: u32, media: bool) -> Bounds {
     let shape = if media {
@@ -271,7 +271,7 @@ pub fn gear(dpi: u32, media: bool) -> Bounds {
     scaled_bounds(
         (
             shape.width - 12.0 - GEAR_SIZE,
-            shape.height - 8.0 - GEAR_SIZE,
+            shape.height - 6.0 - GEAR_SIZE,
             GEAR_SIZE,
             GEAR_SIZE,
         ),
@@ -292,7 +292,7 @@ pub fn gear_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, 
 }
 
 /// The Limits page's Refresh button beside its title, in DIPs from the body's left and top edges.
-const REFRESH: (f32, f32, f32, f32) = (80.0, 8.0, 76.0, 20.0);
+const REFRESH: (f32, f32, f32, f32) = (96.0, 6.0, 76.0, 18.0);
 pub fn refresh(dpi: u32) -> Bounds {
     scaled_bounds(REFRESH, dpi)
 }

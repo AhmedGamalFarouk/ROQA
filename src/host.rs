@@ -3004,7 +3004,13 @@ impl Desktop {
             return_to: dock::foreground_key(),
         };
         match dock_menu::Menu::open(&self.graphics, self.palette, spec) {
-            Ok(menu) if take_foreground(menu.hwnd()) => self.menu = Some(menu),
+            Ok(menu) if take_foreground(menu.hwnd()) => {
+                self.menu = Some(menu);
+                // The panel the pointer had opened closes, so the menu does not sit on it.
+                self.surfaces
+                    .iter_mut()
+                    .for_each(|s| s.set_notch_hover(false));
+            }
             Ok(_) => eprintln!("App menu: Windows kept another app in front; not opened"),
             Err(error) => eprintln!("App menu: {error}"),
         }
@@ -3821,7 +3827,8 @@ impl Desktop {
                     let media = self.pages.track(&self.media).is_some();
                     let rail = self.pages.rail(media, surface.hang.tween.value(now));
                     let over = layout::notch_hit(width, surface.dpi, progress, media, rail, x, y);
-                    surface.set_notch_hover(over);
+                    // While a menu is open the notch does not open under it.
+                    surface.set_notch_hover(over && self.menu.is_none());
                     // The handle opens under the pointer, or while a tab has keyboard focus.
                     let on_rail = rail.is_some_and(|rail| {
                         layout::rail_hit(width, surface.dpi, progress, media, rail, (x, y))
