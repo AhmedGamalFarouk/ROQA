@@ -13,4 +13,7 @@
 
 ## Part 2: G1
 
-Not implemented yet. Native DWM/DComp compatibility and exact shape clipping require a fresh Chief-confirmed desktop-free native check before landing.
+- **Landed:** the old "Liquid glass" is now **Frosted tint**, look unchanged. Stored key `frosted-tint`; the old saved value `glass` still loads (tests: alias, key, label; palette unchanged).
+- **NOT landed, DWM Liquid glass fails on our windows (native check 2026-11-12, Chief-confirmed desktop-free, own process only, private `%LOCALAPPDATA%`):** a build set `DWMWA_SYSTEMBACKDROP_TYPE` (Acrylic and Mica) plus `DwmExtendFrameIntoClientArea(-1)` on the notch, dock and edge windows, with the Frosted body tint over it and `SetWindowRgn` shapes. Result on `WS_EX_NOREDIRECTIONBITMAP` + DirectComposition + no-activate windows: no blur. DWM fills the whole window rectangle with a flat fallback colour (light grey for Acrylic, near-white for Mica, as for an inactive window), and `SetWindowRgn` does not clip it (`GetWindowRgnBox` confirmed the regions were set): a 440x164 grey rectangle around the notch pill, square grey corners around the rounded dock. That is not a clean fallback, so it was removed, not shipped (about 90 KB of binary growth avoided too). Windows-side fallbacks (build < 22621, transparency off, Battery Saver, RDP) were not exercised natively, per instruction.
+- **Left open:** real blur in our own shape needs the compositor route (Windows.UI.Composition backdrop brush, research candidate 2) or the undocumented accent policy; the baked D2D look (research candidate 3) is the safe alternative. Not started.
+- **Checks:** `verify.ps1` PASS on the final tree (see ledger).

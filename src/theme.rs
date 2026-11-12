@@ -38,11 +38,11 @@ pub enum Theme {
     Classic,
     Light,
     Midnight,
-    Glass,
+    Frosted,
 }
 
 impl Theme {
-    pub const ALL: [Self; 4] = [Self::Classic, Self::Light, Self::Midnight, Self::Glass];
+    pub const ALL: [Self; 4] = [Self::Classic, Self::Light, Self::Midnight, Self::Frosted];
 
     /// The stored name.
     pub fn key(self) -> &'static str {
@@ -50,11 +50,13 @@ impl Theme {
             Self::Classic => "classic",
             Self::Light => "light",
             Self::Midnight => "midnight",
-            Self::Glass => "glass",
+            Self::Frosted => "frosted-tint",
         }
     }
 
     pub fn from_key(key: &str) -> Option<Self> {
+        // The old name of Frosted tint, still in saved settings.
+        let key = if key == "glass" { "frosted-tint" } else { key };
         Self::ALL.into_iter().find(|theme| theme.key() == key)
     }
 
@@ -64,7 +66,7 @@ impl Theme {
             Self::Classic => "Classic (black)",
             Self::Light => "Light",
             Self::Midnight => "Midnight",
-            Self::Glass => "Liquid glass",
+            Self::Frosted => "Frosted tint",
         }
     }
 
@@ -125,7 +127,7 @@ impl Theme {
                 shadow: 0.9,
                 rim: None,
             },
-            Self::Glass => Palette {
+            Self::Frosted => Palette {
                 high_contrast: None,
                 body: Rgba(22, 28, 40, 0.82),
                 dock_hover: Rgba(22, 28, 40, 0.90),
@@ -342,6 +344,9 @@ mod tests {
 
     #[test]
     fn keys_round_trip_and_unknown_names_are_refused() {
+        assert_eq!(Theme::from_key("glass"), Some(Theme::Frosted));
+        assert_eq!(Theme::Frosted.key(), "frosted-tint");
+        assert_eq!(Theme::Frosted.label(), "Frosted tint");
         for theme in Theme::ALL {
             assert_eq!(Theme::from_key(theme.key()), Some(theme));
             assert!(!theme.label().is_empty());
@@ -429,7 +434,7 @@ mod tests {
     fn only_glass_is_translucent_and_has_a_rim() {
         for theme in Theme::ALL {
             let p = theme.palette();
-            let glass = theme == Theme::Glass;
+            let glass = theme == Theme::Frosted;
             assert_eq!(p.body.3 < 1.0, glass, "{theme:?}");
             assert_eq!(p.rim.is_some(), glass, "{theme:?}");
             assert!(

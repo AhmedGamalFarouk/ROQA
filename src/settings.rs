@@ -367,7 +367,7 @@ mod tests {
             timer_sound: false,
             shelf_cap: 999,
             diagnostics: Some("  \"C:\\logs\\roqa.json\"  ".into()),
-            theme: Theme::Glass,
+            theme: Theme::Frosted,
             dock_style: DockStyle::Attached,
             dock_buttons: Buttons::of([false, true, true, false, true]),
             desktop_only: true,
@@ -400,7 +400,7 @@ mod tests {
         assert!(!wild.dock && wild.notch, "one surface kind always stays on");
         assert_eq!(wild.off_monitors, ["a", "b"]);
         assert_eq!(wild.shelf_cap, shelf::MAX);
-        assert_eq!(wild.theme, Theme::Glass);
+        assert_eq!(wild.theme, Theme::Frosted);
         assert!(wild.desktop_only && !wild.edge_volume && !wild.edge_brightness);
         assert_eq!(wild.diagnostics.as_deref(), Some(r"C:\logs\roqa.json"));
         assert_eq!(
@@ -529,7 +529,7 @@ mod tests {
             timer_sound: false,
             shelf_cap: 4,
             diagnostics: Some("C:\\r.json".into()),
-            theme: Theme::Glass,
+            theme: Theme::Frosted,
             ..Settings::default()
         };
         let reset = Settings::default();
