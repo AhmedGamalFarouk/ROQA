@@ -1063,3 +1063,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/s1-settings`; [packet](features-settings-shell.md). 8-page sidebar shell from one `PAGES` table, switches, dark/high-contrast/RTL, seven new settings (`fshide notchopen notchsize animspeed rsounds ppause pshift`). Landed f982f94 (W1), 9879fa6 (W2+W3).
 - **Checks:** verify.ps1 PASS (fmt/clippy, 346 tests, locked release); 1,236,992 B, ratchet within 2% (baseline unchanged; `Tween::retarget` not inlined saved 8 KB); SHA `8CA579007018C1D2C2756650E96AB6547B07ACB487B60E7B74AFB8F4A064D14B`.
 - **NOT RUN:** drawing, hit/focus, dark/HC/RTL, 150% text, Narrator; not built: steppers, segmented, tiles, monitor map. Reviews paused (REVIEW NOT RUN).
+
+## G1b baked Liquid glass (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/g1b-slideup`; [packet](features-icons-glass.md). Theme "Liquid glass": cached unit-square gradient, specular and rim brushes placed by brush transform; Frosted tint unchanged. Wallpaper snapshot/lens skipped.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 341 tests, locked release); 1,231,360 B, ratchet within 2% (baseline 1,218,048 unchanged).
+- **Native:** dock (both styles) and resting notch screenshots seen. NOT RUN: open notch, edge pill, DPI; reviews paused (REVIEW NOT RUN).

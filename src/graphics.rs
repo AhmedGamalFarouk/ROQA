@@ -8,7 +8,7 @@ use crate::{
     media::{PLAY_PAUSE, Progress, Track},
     motion,
     tabs::Tab,
-    theme::{Palette, Rgba},
+    theme::{Palette, Rgba, Sheen},
     timer,
 };
 use std::{borrow::Cow, cell::RefCell, mem::ManuallyDrop};
@@ -30,11 +30,12 @@ use windows::Win32::{
             D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
             D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_INTERPOLATION_MODE_LINEAR,
             D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PROPERTY_TYPE_FLOAT,
-            D2D1_PROPERTY_TYPE_VECTOR4, D2D1_ROUNDED_RECT,
+            D2D1_PROPERTY_TYPE_VECTOR4, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
             D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
             D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
             D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateDevice, ID2D1Bitmap1, ID2D1Brush,
-            ID2D1DeviceContext, ID2D1LinearGradientBrush, ID2D1PathGeometry,
+            ID2D1DeviceContext, ID2D1GradientStopCollection1, ID2D1LinearGradientBrush,
+            ID2D1PathGeometry, ID2D1RadialGradientBrush,
         },
         Direct3D::D3D_DRIVER_TYPE_HARDWARE,
         Direct3D11::{
@@ -258,6 +259,8 @@ pub struct Canvas {
     art: RefCell<Option<(u64, ID2D1Bitmap1)>>,
     /// The theme's colours, fixed for this canvas: a theme change rebuilds the surfaces.
     palette: Palette,
+    /// The baked liquid-glass brushes, built on first paint and kept until the canvas is replaced.
+    glass: RefCell<Option<(Sheen, Glass)>>,
 }
 impl Canvas {
     pub fn create(
@@ -282,6 +285,7 @@ impl Canvas {
                 height: bounds.height as u32,
                 art: RefCell::default(),
                 palette,
+                glass: RefCell::default(),
             };
             // Transparent until the host paints real content, so no placeholder rectangle flashes.
             canvas.draw(|_, _| Ok(()))?;
@@ -342,14 +346,17 @@ impl Canvas {
                 layout::notch_radius(pixels, shape, scene.dpi),
                 pixels.ears as f32,
             )?;
+            self.body(context, &body, p.body, None, &|brush, width| {
+                // SAFETY: context is live between surface BeginDraw/EndDraw.
+                unsafe {
+                    match width {
+                        None => context.FillGeometry(&outline, brush, None),
+                        Some(width) => context.DrawGeometry(&outline, brush, width, None),
+                    }
+                }
+            })?;
             // SAFETY: context is live between surface BeginDraw/EndDraw; the clip is popped below.
             unsafe {
-                let fill = context.CreateSolidColorBrush(&color(p.body), None)?;
-                context.FillGeometry(&outline, &fill, None);
-                if let Some((top, bottom)) = p.rim {
-                    let rim = rim_brush(context, p.ink, (top, bottom), (body.top, body.bottom))?;
-                    context.DrawGeometry(&outline, &rim, 1.0, None);
-                }
                 context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
                 context.PushAxisAlignedClip(&body, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             }
@@ -380,19 +387,30 @@ impl Canvas {
                 top: rect.top,
                 ..rect
             };
+            let slot = D2D_RECT_F {
+                left: rect.left + update.left as f32,
+                top: rect.top + update.top as f32,
+                right: rect.left + update.right as f32,
+                bottom: rect.top + update.bottom as f32,
+            };
             // SAFETY: context is live between surface BeginDraw/EndDraw; brushes are scoped to this draw.
             unsafe {
-                // The cleared slot sits inside the panel body, a single flat fill: refill it, then the bars.
-                let black = context.CreateSolidColorBrush(&color(p.body), None)?;
-                context.FillRectangle(
-                    &D2D_RECT_F {
-                        left: rect.left + update.left as f32,
-                        top: rect.top + update.top as f32,
-                        right: rect.left + update.right as f32,
-                        bottom: rect.top + update.bottom as f32,
-                    },
-                    &black,
-                );
+                // The cleared slot sits inside the panel body: refill it with the body (the glass layers
+                // placed on the whole open body, so the slot matches its surroundings), then the bars.
+                if let Some(glass) = self.glass(context)? {
+                    let size =
+                        layout::notch_body(self.width as i32, dpi, layout::notch_shape(1.0, true));
+                    glass.place(&D2D_RECT_F {
+                        right: body.left + size.width as f32,
+                        bottom: rect.top + size.height as f32,
+                        ..body
+                    });
+                    context.FillRectangle(&slot, &glass.body);
+                    context.FillRectangle(&slot, &glass.spec);
+                } else {
+                    let black = context.CreateSolidColorBrush(&color(p.body), None)?;
+                    context.FillRectangle(&slot, &black);
+                }
                 if let Some((bars, alpha)) = meter_rects(1.0, dpi, bars, &body) {
                     let brush = context
                         .CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(alpha)), None)?;
@@ -412,7 +430,7 @@ impl Canvas {
         self.draw(|context, rect| {
             let at = |b: Bounds| surface_rect(rect, b);
             let layout = scene.layout;
-            panel(context, &p, at(layout.pill), layout.pill.width as f32 / 2.0)?;
+            self.panel(context, at(layout.pill), layout.pill.width as f32 / 2.0)?;
             let track = at(layout.track);
             let thickness = track.right - track.left;
             draw_track(context, &p, &rounded(track, thickness / 2.0), 0.40)?;
@@ -479,7 +497,7 @@ impl Canvas {
         let p = self.palette;
         let scale = scene.dpi as f32 / 96.0;
         self.draw(|context, rect| {
-            panel(context, &p, surface_rect(rect, scene.panel), 12.0 * scale)?;
+            self.panel(context, surface_rect(rect, scene.panel), 12.0 * scale)?;
             let font = Font {
                 family: TEXT_FONT,
                 size: 13.0 * scale,
@@ -554,38 +572,115 @@ impl Canvas {
                 };
                 let corner = layout::attached_radius(bounds, scene.dpi);
                 let outline = attached_outline(context, &rect, corner)?;
-                // SAFETY: context is live between surface BeginDraw/EndDraw.
-                unsafe {
-                    let fill = context.CreateSolidColorBrush(&color(p.body), None)?;
-                    context.FillGeometry(&outline, &fill, None);
-                    if let Some(rim) = p.rim {
-                        let rim = rim_brush(context, p.ink, rim, (rect.top, rect.bottom))?;
-                        context.DrawGeometry(&outline, &rim, 1.0, None);
+                self.body(context, &rect, p.body, None, &|brush, width| {
+                    // SAFETY: context is live between surface BeginDraw/EndDraw.
+                    unsafe {
+                        match width {
+                            None => context.FillGeometry(&outline, brush, None),
+                            Some(width) => context.DrawGeometry(&outline, brush, width, None),
+                        }
                     }
-                }
+                })?;
                 return paint_slots(context, &rect, self.width as i32, scene, &px, &p);
             }
             // A one-physical-pixel inner hairline separates the black bar from dark wallpapers.
-            let edge = D2D_RECT_F {
-                left: rect.left + 0.5,
-                top: rect.top + 0.5,
-                right: rect.right - 0.5,
-                bottom: rect.bottom - 0.5,
-            };
-            // SAFETY: context is live between surface BeginDraw/EndDraw.
-            unsafe {
-                let bar = context.CreateSolidColorBrush(&color(p.dock_fill(scene.inside)), None)?;
-                context.FillRoundedRectangle(&rounded(rect, radius), &bar);
-                let hairline: ID2D1Brush = match p.rim {
-                    Some(rim) => rim_brush(context, p.ink, rim, (rect.top, rect.bottom))?.into(),
-                    None => context
-                        .CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(0.10)), None)?
-                        .into(),
-                };
-                context.DrawRoundedRectangle(&rounded(edge, radius - 0.5), &hairline, 1.0, None);
+            self.rounded_body(context, rect, radius, p.dock_fill(scene.inside))?;
+            if p.sheen.is_some() && scene.inside > 0.0 {
+                // Glass has no flat fill to blend, so the hover is a faint white wash.
+                // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this call.
+                unsafe {
+                    let wash = context.CreateSolidColorBrush(
+                        &with_alpha((255, 255, 255), 0.08 * scene.inside),
+                        None,
+                    )?;
+                    context.FillRoundedRectangle(&rounded(rect, radius), &wash);
+                }
             }
             paint_slots(context, &rect, self.width as i32, scene, &px, &p)
         })
+    }
+    /// The baked liquid-glass brushes for this palette, or `None` in the other themes. Built once per
+    /// canvas (the theme is fixed for it) and shared by every later paint.
+    fn glass(&self, context: &ID2D1DeviceContext) -> Result<Option<Glass>> {
+        let Some(sheen) = self.palette.sheen else {
+            return Ok(None);
+        };
+        baked(&mut self.glass.borrow_mut(), sheen, || {
+            bake(context, &self.palette, &sheen)
+        })
+        .map(Some)
+    }
+    /// One body: the flat fill with the rim (or `hairline` alpha, if any), or the baked glass layers placed
+    /// on `span`. `shape(brush, None)` fills the shape, `shape(brush, Some(width))` strokes its outline.
+    fn body(
+        &self,
+        context: &ID2D1DeviceContext,
+        span: &D2D_RECT_F,
+        flat: Rgba,
+        hairline: Option<f32>,
+        shape: &dyn Fn(&ID2D1Brush, Option<f32>),
+    ) -> Result<()> {
+        let p = &self.palette;
+        if let Some(glass) = self.glass(context)? {
+            glass.place(span);
+            shape(&glass.body, None);
+            shape(&glass.spec, None);
+            shape(&glass.rim, Some(1.0));
+            return Ok(());
+        }
+        // SAFETY: context is live between surface BeginDraw/EndDraw; brushes are scoped to this call.
+        unsafe {
+            shape(
+                &context.CreateSolidColorBrush(&color(flat), None)?.into(),
+                None,
+            );
+            match (p.rim, hairline) {
+                (Some(rim), _) => shape(
+                    &rim_brush(context, p.ink, rim, (span.top, span.bottom))?.into(),
+                    Some(1.0),
+                ),
+                (None, Some(alpha)) => shape(
+                    &context
+                        .CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(alpha)), None)?
+                        .into(),
+                    Some(1.0),
+                ),
+                (None, None) => {}
+            }
+        }
+        Ok(())
+    }
+    /// A rounded body in the theme's fill with the hairline (or glass rim) the dock bar has.
+    fn rounded_body(
+        &self,
+        context: &ID2D1DeviceContext,
+        rect: D2D_RECT_F,
+        radius: f32,
+        flat: Rgba,
+    ) -> Result<()> {
+        let edge = D2D_RECT_F {
+            left: rect.left + 0.5,
+            top: rect.top + 0.5,
+            right: rect.right - 0.5,
+            bottom: rect.bottom - 0.5,
+        };
+        self.body(context, &rect, flat, Some(0.10), &|brush, width| {
+            // SAFETY: context is live between surface BeginDraw/EndDraw.
+            unsafe {
+                match width {
+                    None => context.FillRoundedRectangle(&rounded(rect, radius), brush),
+                    Some(width) => context.DrawRoundedRectangle(
+                        &rounded(edge, radius - 0.5),
+                        brush,
+                        width,
+                        None,
+                    ),
+                }
+            }
+        })
+    }
+    fn panel(&self, context: &ID2D1DeviceContext, rect: D2D_RECT_F, radius: f32) -> Result<()> {
+        self.rounded_body(context, rect, radius, self.palette.body)
     }
     fn draw(
         &self,
@@ -2144,6 +2239,52 @@ fn color(Rgba(red, green, blue, alpha): Rgba) -> D2D1_COLOR_F {
     rgba(red, green, blue, alpha)
 }
 
+/// A gradient's stops, straight sRGB, clamped.
+fn gradient(
+    context: &ID2D1DeviceContext,
+    stops: &[(f32, D2D1_COLOR_F)],
+) -> Result<ID2D1GradientStopCollection1> {
+    let stops: Vec<_> = stops
+        .iter()
+        .map(|&(position, color)| D2D1_GRADIENT_STOP { position, color })
+        .collect();
+    // SAFETY: context is live between surface BeginDraw/EndDraw; the stops are a local value the call copies.
+    unsafe {
+        context.CreateGradientStopCollection(
+            &stops,
+            D2D1_COLOR_SPACE_SRGB,
+            D2D1_COLOR_SPACE_SRGB,
+            D2D1_BUFFER_PRECISION_8BPC_UNORM,
+            D2D1_EXTEND_MODE_CLAMP,
+            D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
+        )
+    }
+}
+
+/// A linear gradient brush from `from` to `to` (in the brush's own space).
+fn line(
+    context: &ID2D1DeviceContext,
+    from: (f32, f32),
+    to: (f32, f32),
+    stops: &[(f32, D2D1_COLOR_F)],
+) -> Result<ID2D1LinearGradientBrush> {
+    let stops = gradient(context, stops)?;
+    // SAFETY: the properties are local values the call copies; the brush is scoped to the caller.
+    unsafe {
+        context.CreateLinearGradientBrush(
+            &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                startPoint: Vector2 {
+                    X: from.0,
+                    Y: from.1,
+                },
+                endPoint: Vector2 { X: to.0, Y: to.1 },
+            },
+            None,
+            &stops,
+        )
+    }
+}
+
 /// A 1 px glass rim: `ink` at the top alpha along `span.0` fading to the bottom alpha at `span.1` (device y).
 fn rim_brush(
     context: &ID2D1DeviceContext,
@@ -2151,30 +2292,96 @@ fn rim_brush(
     (top, bottom): (f32, f32),
     span: (f32, f32),
 ) -> Result<ID2D1LinearGradientBrush> {
-    let stop = |position, alpha| D2D1_GRADIENT_STOP {
-        position,
-        color: with_alpha(ink, alpha),
-    };
-    // SAFETY: context is live between surface BeginDraw/EndDraw; the stops and properties are local values
-    // the calls copy, and the returned brush is scoped to the caller's draw.
-    unsafe {
-        let stops = context.CreateGradientStopCollection(
-            &[stop(0.0, top), stop(1.0, bottom)],
-            D2D1_COLOR_SPACE_SRGB,
-            D2D1_COLOR_SPACE_SRGB,
-            D2D1_BUFFER_PRECISION_8BPC_UNORM,
-            D2D1_EXTEND_MODE_CLAMP,
-            D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
-        )?;
-        context.CreateLinearGradientBrush(
-            &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                startPoint: Vector2 { X: 0.0, Y: span.0 },
-                endPoint: Vector2 { X: 0.0, Y: span.1 },
-            },
-            None,
-            &stops,
-        )
+    line(
+        context,
+        (0.0, span.0),
+        (0.0, span.1),
+        &[(0.0, with_alpha(ink, top)), (1.0, with_alpha(ink, bottom))],
+    )
+}
+
+/// Liquid glass, baked once: the body gradient, the specular blob and the lit rim, each a brush over the
+/// unit square. `place` maps them onto a body with a brush transform, so a resize, a morphing notch or a
+/// repaint never rebuilds them; the look is drawn, never sampled from behind the window.
+#[derive(Clone)]
+struct Glass {
+    body: ID2D1LinearGradientBrush,
+    spec: ID2D1RadialGradientBrush,
+    rim: ID2D1LinearGradientBrush,
+}
+impl Glass {
+    fn place(&self, span: &D2D_RECT_F) {
+        let map = Matrix3x2 {
+            M11: span.right - span.left,
+            M12: 0.0,
+            M21: 0.0,
+            M22: span.bottom - span.top,
+            M31: span.left,
+            M32: span.top,
+        };
+        // SAFETY: the brushes are owned by this canvas on the UI thread; the matrix is a local value.
+        unsafe {
+            self.body.SetTransform(&map);
+            self.spec.SetTransform(&map);
+            self.rim.SetTransform(&map);
+        }
     }
+}
+
+fn bake(context: &ID2D1DeviceContext, p: &Palette, sheen: &Sheen) -> Result<Glass> {
+    let (lit, dim) = p.rim.unwrap_or_default();
+    let white = |alpha| with_alpha((255, 255, 255), alpha);
+    let blob = gradient(context, &[(0.0, white(sheen.spec)), (1.0, white(0.0))])?;
+    Ok(Glass {
+        body: line(
+            context,
+            (0.0, 0.0),
+            (0.0, 1.0),
+            &[
+                (0.0, color(sheen.top)),
+                (0.5, color(p.body)),
+                (1.0, color(sheen.bottom)),
+            ],
+        )?,
+        // Light from the upper left: bright along the top and left, dim along the bottom and right.
+        rim: line(
+            context,
+            (0.0, 0.0),
+            (0.4, 1.0),
+            &[(0.0, with_alpha(p.ink, lit)), (1.0, with_alpha(p.ink, dim))],
+        )?,
+        // SAFETY: the properties are local values the call copies.
+        spec: unsafe {
+            context.CreateRadialGradientBrush(
+                &D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
+                    center: Vector2 { X: 0.3, Y: 0.0 },
+                    gradientOriginOffset: Vector2 { X: 0.0, Y: 0.0 },
+                    radiusX: 0.7,
+                    radiusY: 0.9,
+                },
+                None,
+                &blob,
+            )?
+        },
+    })
+}
+
+/// The value built for `key`, kept in `slot`: built again only when the key changes (a theme change
+/// gives the canvas a new slot anyway) and never on a plain repaint or resize, which the unit-square
+/// glass does not depend on. A failed build leaves the slot as it was.
+fn baked<K: PartialEq, T: Clone>(
+    slot: &mut Option<(K, T)>,
+    key: K,
+    build: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if let Some((held, value)) = slot.as_ref()
+        && *held == key
+    {
+        return Ok(value.clone());
+    }
+    let value = build()?;
+    *slot = Some((key, value.clone()));
+    Ok(value)
 }
 
 /// `bounds` (surface pixels) in the draw context's coordinates, where `origin` is the surface's rectangle.
@@ -2185,29 +2392,6 @@ fn surface_rect(origin: D2D_RECT_F, bounds: Bounds) -> D2D_RECT_F {
         right: origin.left + (bounds.x + bounds.width) as f32,
         bottom: origin.top + (bounds.y + bounds.height) as f32,
     }
-}
-
-/// A rounded body in the theme's fill with the hairline (or Glass rim) the dock bar has.
-fn panel(context: &ID2D1DeviceContext, p: &Palette, rect: D2D_RECT_F, radius: f32) -> Result<()> {
-    let edge = D2D_RECT_F {
-        left: rect.left + 0.5,
-        top: rect.top + 0.5,
-        right: rect.right - 0.5,
-        bottom: rect.bottom - 0.5,
-    };
-    // SAFETY: live draw context between BeginDraw/EndDraw; brushes are scoped to this call.
-    unsafe {
-        let body = context.CreateSolidColorBrush(&color(p.body), None)?;
-        context.FillRoundedRectangle(&rounded(rect, radius), &body);
-        let hairline: ID2D1Brush = match p.rim {
-            Some(rim) => rim_brush(context, p.ink, rim, (rect.top, rect.bottom))?.into(),
-            None => context
-                .CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(0.10)), None)?
-                .into(),
-        };
-        context.DrawRoundedRectangle(&rounded(edge, radius - 0.5), &hairline, 1.0, None);
-    }
-    Ok(())
 }
 
 /// A bar's track: a faint fill, the system track colour in high contrast, or a 1 px ink outline when
@@ -2943,6 +3127,35 @@ mod media_tests {
             let rtl = layout.GetReadingDirection() == DWRITE_READING_DIRECTION_RIGHT_TO_LEFT;
             (metrics, rtl)
         }
+    }
+
+    #[test]
+    fn baked_glass_is_built_once_and_again_only_for_a_new_key_or_after_a_failure() {
+        let (mut slot, mut builds) = (None, 0);
+        let mut get = |key: u32, fail: bool| {
+            baked(&mut slot, key, || {
+                builds += 1;
+                if fail {
+                    Err(Error::new(E_FAIL, "build"))
+                } else {
+                    Ok(key * 10)
+                }
+            })
+        };
+        // Repaints and resizes ask with the same key: one build.
+        assert_eq!(
+            (
+                get(1, false).unwrap(),
+                get(1, false).unwrap(),
+                get(1, true).unwrap()
+            ),
+            (10, 10, 10)
+        );
+        // A new key (another theme's sheen) rebuilds; a failed rebuild keeps the old value and retries.
+        assert!(get(2, true).is_err());
+        assert_eq!(get(2, false).unwrap(), 20);
+        assert_eq!(get(2, false).unwrap(), 20);
+        assert_eq!(builds, 3);
     }
 
     #[test]

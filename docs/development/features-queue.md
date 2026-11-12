@@ -8,7 +8,7 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
 ## Queue
 - [x] I1: direction B line icons ([packet](features-icons-glass.md)); native visual checks NOT RUN.
 - [x] G1a: Frosted tint rename with `glass` alias ([packet](features-icons-glass.md)).
-- [ ] G1b: real Liquid glass: DWM system backdrop FAILED natively on our windows (flat rect, no region clip); needs the Composition backdrop brush or a baked D2D look.
+- [x] G1b: baked Liquid glass theme (cached gradient brushes, no live blur; DWM backdrop FAILED natively, see packet); wallpaper snapshot/lens skipped ([packet](features-icons-glass.md)).
 - [x] B1: power/battery pill and system accent colour ([packet](features-b1.md)).
 - [x] B2: DWM hover thumbnails on dock slots, plus a virtual-desktop filter ([packet](features-b2.md)).
       (`IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop`).

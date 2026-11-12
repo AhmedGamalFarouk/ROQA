@@ -29,6 +29,17 @@ pub struct Palette {
     pub shadow: f32,
     /// Glass only: a 1 px stroke along the outline, with its alpha at the top and at the bottom.
     pub rim: Option<(f32, f32)>,
+    /// Liquid glass only: the baked body gradient (`top` and `bottom` around `body`) and the specular blob.
+    pub sheen: Option<Sheen>,
+}
+
+/// The extra layers of the baked glass look, drawn from cached brushes (`graphics::Glass`); never live blur.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sheen {
+    pub top: Rgba,
+    pub bottom: Rgba,
+    /// Peak alpha of the white specular blob near the top.
+    pub spec: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,10 +50,18 @@ pub enum Theme {
     Light,
     Midnight,
     Frosted,
+    /// Baked liquid glass: gradient, specular blob and a lit rim, no live blur.
+    Liquid,
 }
 
 impl Theme {
-    pub const ALL: [Self; 4] = [Self::Classic, Self::Light, Self::Midnight, Self::Frosted];
+    pub const ALL: [Self; 5] = [
+        Self::Classic,
+        Self::Light,
+        Self::Midnight,
+        Self::Frosted,
+        Self::Liquid,
+    ];
 
     /// The stored name.
     pub fn key(self) -> &'static str {
@@ -51,6 +70,7 @@ impl Theme {
             Self::Light => "light",
             Self::Midnight => "midnight",
             Self::Frosted => "frosted-tint",
+            Self::Liquid => "liquid-glass",
         }
     }
 
@@ -67,6 +87,7 @@ impl Theme {
             Self::Light => "Light",
             Self::Midnight => "Midnight",
             Self::Frosted => "Frosted tint",
+            Self::Liquid => "Liquid glass",
         }
     }
 
@@ -75,10 +96,11 @@ impl Theme {
     /// is translucent), like the text rule in the tests.
     pub fn palette_with(self, accent: Rgb) -> Palette {
         let palette = self.palette();
-        let Rgba(r, g, b, alpha) = palette.body;
-        let reads = [(255, 255, 255), (0, 0, 0)]
-            .into_iter()
-            .all(|backdrop| contrast(accent, over((r, g, b), alpha, backdrop)) >= ACCENT_CONTRAST);
+        let reads = palette.fills().into_iter().all(|Rgba(r, g, b, alpha)| {
+            [(255, 255, 255), (0, 0, 0)].into_iter().all(|backdrop| {
+                contrast(accent, over((r, g, b), alpha, backdrop)) >= ACCENT_CONTRAST
+            })
+        });
         Palette {
             accent: if self != Self::Light && reads {
                 accent
@@ -102,6 +124,7 @@ impl Theme {
                 tile: Rgba(58, 58, 64, 1.0),
                 shadow: 0.9,
                 rim: None,
+                sheen: None,
             },
             Self::Light => Palette {
                 high_contrast: None,
@@ -114,6 +137,7 @@ impl Theme {
                 tile: Rgba(205, 208, 214, 1.0),
                 shadow: 0.35,
                 rim: None,
+                sheen: None,
             },
             Self::Midnight => Palette {
                 high_contrast: None,
@@ -126,6 +150,7 @@ impl Theme {
                 tile: Rgba(40, 50, 84, 1.0),
                 shadow: 0.9,
                 rim: None,
+                sheen: None,
             },
             Self::Frosted => Palette {
                 high_contrast: None,
@@ -138,6 +163,24 @@ impl Theme {
                 tile: Rgba(255, 255, 255, 0.16),
                 shadow: 0.0,
                 rim: Some((0.55, 0.10)),
+                sheen: None,
+            },
+            Self::Liquid => Palette {
+                high_contrast: None,
+                body: Rgba(22, 30, 48, 0.86),
+                dock_hover: Rgba(22, 30, 48, 0.92),
+                ink: (255, 255, 255),
+                accent: (255, 255, 255),
+                on_ink: (10, 14, 22),
+                glyph: (235, 240, 250),
+                tile: Rgba(255, 255, 255, 0.16),
+                shadow: 0.0,
+                rim: Some((0.80, 0.10)),
+                sheen: Some(Sheen {
+                    top: Rgba(36, 48, 76, 0.86),
+                    bottom: Rgba(30, 42, 66, 0.86),
+                    spec: 0.14,
+                }),
             },
         }
     }
@@ -203,7 +246,15 @@ impl Palette {
             tile: opaque(tile),
             shadow: 0.0,
             rim: None,
+            sheen: None,
             high_contrast: Some((track, gray)),
+        }
+    }
+    /// Every body fill a text or accent colour must read on: the gradient stops, or the one flat fill.
+    pub fn fills(&self) -> [Rgba; 3] {
+        match self.sheen {
+            Some(s) => [s.top, self.body, s.bottom],
+            None => [self.body; 3],
         }
     }
     /// Settled secondary text and glyphs use the selected system foreground at full contrast.
@@ -364,9 +415,12 @@ mod tests {
     fn text_stays_readable_over_the_worst_backdrop_in_every_theme() {
         for theme in Theme::ALL {
             let p = theme.palette();
-            let Rgba(r, g, b, alpha) = p.body;
             // A translucent body is judged over white and over black; an opaque one is the same either way.
-            for backdrop in [(255, 255, 255), (0, 0, 0)] {
+            for (Rgba(r, g, b, alpha), backdrop) in p
+                .fills()
+                .into_iter()
+                .flat_map(|fill| [(fill, (255, 255, 255)), (fill, (0, 0, 0))])
+            {
                 let body = over((r, g, b), alpha, backdrop);
                 let primary = contrast(p.ink, body);
                 let dim = contrast(over(p.ink, 0.60, body), body);
@@ -403,7 +457,6 @@ mod tests {
         // The chosen accent always reads over the worst backdrop, whatever the system gives.
         for theme in Theme::ALL {
             let p = theme.palette();
-            let Rgba(r, g, b, alpha) = p.body;
             for accent in [
                 blue,
                 bright,
@@ -415,7 +468,11 @@ mod tests {
                 let chosen = theme.palette_with(accent).accent;
                 assert!(chosen == p.ink || chosen == accent, "{theme:?}");
                 if chosen != p.ink {
-                    for backdrop in [(255, 255, 255), (0, 0, 0)] {
+                    for (Rgba(r, g, b, alpha), backdrop) in p
+                        .fills()
+                        .into_iter()
+                        .flat_map(|fill| [(fill, (255, 255, 255)), (fill, (0, 0, 0))])
+                    {
                         let body = over((r, g, b), alpha, backdrop);
                         assert!(
                             contrast(chosen, body) >= ACCENT_CONTRAST,
@@ -434,7 +491,7 @@ mod tests {
     fn only_glass_is_translucent_and_has_a_rim() {
         for theme in Theme::ALL {
             let p = theme.palette();
-            let glass = theme == Theme::Frosted;
+            let glass = matches!(theme, Theme::Frosted | Theme::Liquid);
             assert_eq!(p.body.3 < 1.0, glass, "{theme:?}");
             assert_eq!(p.rim.is_some(), glass, "{theme:?}");
             assert!(
@@ -445,6 +502,31 @@ mod tests {
                 assert!(top > bottom && bottom > 0.0 && top <= 1.0);
             }
         }
+    }
+
+    #[test]
+    fn liquid_glass_is_its_own_theme_and_keeps_text_readable_under_the_specular_blob() {
+        assert_eq!(Theme::from_key("liquid-glass"), Some(Theme::Liquid));
+        assert_eq!(Theme::Liquid.label(), "Liquid glass");
+        assert_ne!(Theme::Liquid.palette(), Theme::Frosted.palette());
+        assert!(Theme::Frosted.palette().sheen.is_none());
+        let p = Theme::Liquid.palette();
+        let sheen = p.sheen.expect("liquid glass has a sheen");
+        let (top, bottom) = (sheen.top, sheen.bottom);
+        assert!(top.3 < 1.0 && bottom.3 < 1.0 && sheen.spec > 0.0 && sheen.spec < 0.3);
+        // The blob adds white over the lightest stop: large text and glyphs still keep 4.5:1.
+        let Rgba(r, g, b, alpha) = top;
+        for backdrop in [(255, 255, 255), (0, 0, 0)] {
+            let lit = over(
+                (255, 255, 255),
+                sheen.spec,
+                over((r, g, b), alpha, backdrop),
+            );
+            assert!(contrast(p.ink, lit) >= 4.5, "blob over {backdrop:?}");
+        }
+        // Flat themes list one fill, glass lists the three stops.
+        assert_eq!(Theme::Classic.palette().fills(), [Rgba(0, 0, 0, 1.0); 3]);
+        assert_eq!(p.fills(), [top, p.body, bottom]);
     }
 
     #[test]
