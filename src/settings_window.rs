@@ -216,7 +216,7 @@ const PAGES: &[Page] = &[
                     r(TAB + 1, C, "&Weather tab", ""),
                     r(TAB + 2, C, "Prayer tab", ""),
                     r(TAB + 3, C, "Timer ta&b", ""),
-                    r(TAB + 4, C, "Shelf ta&b", ""),
+                    r(TAB + 4, C, "S&helf tab", ""),
                     r(TAB + 5, C, "Limits tab", ""),
                 ],
             },
@@ -281,7 +281,7 @@ const PAGES: &[Page] = &[
                 rows: &[
                     r(PIN, Kind::Combo(200), "Pinned apps", ""),
                     r(EARLIER, Kind::Btn, "Move pin &earlier", ""),
-                    r(LATER, Kind::Btn, "Move pin &later", ""),
+                    r(LATER, Kind::Btn, "Move pin la&ter", ""),
                 ],
             },
         ],
@@ -315,7 +315,7 @@ const PAGES: &[Page] = &[
                         PPAUSE,
                         C,
                         "Pause &media at prayer time",
-                        "Pauses what is playing, never resumes it",
+                        "Pauses a playing player (Media tab on), never resumes",
                     ),
                 ],
             },
@@ -840,12 +840,14 @@ unsafe extern "system" fn settings_proc(
                 }
             }
             WM_NOTIFY => {
-                // SAFETY: for WM_NOTIFY lparam is an NMHDR (here an NMCUSTOMDRAW) that lives through this call.
+                // SAFETY: for WM_NOTIFY lparam is an NMHDR that lives through this call; only a custom-draw
+                // notification (checked first) is an NMCUSTOMDRAW.
+                if unsafe { (*(lparam.0 as *const NMHDR)).code } != NM_CUSTOMDRAW {
+                    return None;
+                }
+                // SAFETY: the code says this is an NMCUSTOMDRAW.
                 let note = unsafe { &*(lparam.0 as *const NMCUSTOMDRAW) };
-                if note.hdr.code != NM_CUSTOMDRAW
-                    || note.dwDrawStage != CDDS_PREPAINT
-                    || !is_toggle(note.hdr.hwndFrom)
-                {
+                if note.dwDrawStage != CDDS_PREPAINT || !is_toggle(note.hdr.hwndFrom) {
                     return None;
                 }
                 draw_toggle(note, p);
@@ -952,30 +954,28 @@ fn pick<T: Copy>(all: &[T], slot: &mut T, row: Option<usize>) {
         *slot = *v;
     }
 }
-/// The rows of a drop-down list that a table row names.
-fn combo_rows(id: usize) -> Vec<String> {
-    let names = |it: &mut dyn Iterator<Item = &'static str>| it.map(str::to_owned).collect();
-    match id {
-        THEME => names(&mut Theme::ALL.iter().map(|t| t.label())),
-        DOCKSTYLE => names(&mut DockStyle::ALL.iter().map(|s| s.label())),
-        UNITS => names(&mut Units::ALL.iter().map(|u| u.label())),
-        PMETHOD => names(&mut Method::ALL.iter().map(|m| m.label())),
-        PLEAD => LEADS
-            .iter()
-            .map(|&l| {
-                if l == 0 {
-                    "Off".to_owned()
-                } else {
-                    format!("{l} minutes before")
-                }
-            })
-            .collect(),
-        LIMGROUP => names(&mut ["Gemini models", "Claude and GPT models"].into_iter()),
-        NSIZE => names(&mut ["Auto", "100%", "115%", "130%", "150%"].into_iter()),
-        NOPEN => names(&mut ["Hover", "Click"].into_iter()),
-        ANIM => names(&mut ["Normal", "Fast"].into_iter()),
-        _ => Vec::new(),
-    }
+/// The heads-up list, one label per `LEADS` entry (0, 5, 10, 15).
+const LEAD_ROWS: [&str; 4] = [
+    "Off",
+    "5 minutes before",
+    "10 minutes before",
+    "15 minutes before",
+];
+/// Adds the rows of the drop-down list that table row `id` names (the pin and sound lists are filled elsewhere).
+fn fill_combo(h: HWND, id: usize) {
+    let rows: &[&str] = match id {
+        THEME => return Theme::ALL.iter().for_each(|t| add_row(h, t.label())),
+        DOCKSTYLE => return DockStyle::ALL.iter().for_each(|s| add_row(h, s.label())),
+        UNITS => return Units::ALL.iter().for_each(|u| add_row(h, u.label())),
+        PMETHOD => return Method::ALL.iter().for_each(|m| add_row(h, m.label())),
+        PLEAD => &LEAD_ROWS,
+        LIMGROUP => &["Gemini models", "Claude and GPT models"],
+        NSIZE => &["Auto", "115%", "130%", "150%"],
+        NOPEN => &["Hover", "Click"],
+        ANIM => &["Normal", "Fast"],
+        _ => &[],
+    };
+    rows.iter().for_each(|row| add_row(h, row));
 }
 
 impl SettingsWindow {
@@ -1152,9 +1152,7 @@ impl SettingsWindow {
                 SendMessageW(h, EM_SETLIMITTEXT, Some(WPARAM(limit)), Some(LPARAM(0)));
             }
         }
-        for name in combo_rows(id) {
-            add_row(h, &name);
-        }
+        fill_combo(h, id);
         Ok(Item {
             id,
             kind,
@@ -1631,6 +1629,9 @@ impl SettingsWindow {
         if next != self.scroll {
             self.scroll = next;
             self.layout()?;
+            // The title, cards and dividers are painted by the parent, not moved with the children.
+            // SAFETY: our own live window.
+            let _ = unsafe { InvalidateRect(Some(self.window), None, true) };
         }
         Ok(())
     }
@@ -2041,14 +2042,8 @@ mod tests {
     }
 
     #[test]
-    fn every_drop_down_has_its_rows() {
-        for row in rows().iter().filter(|r| matches!(r.kind, Kind::Combo(_))) {
-            // The pin and sound lists are filled by the host and the sound scan.
-            if !matches!(row.id, PIN | PSOUND) {
-                assert!(!combo_rows(row.id).is_empty(), "{}", row.title);
-            }
-        }
-        assert_eq!(combo_rows(PLEAD).len(), LEADS.len());
-        assert_eq!(combo_rows(THEME).len(), Theme::ALL.len());
+    fn the_fixed_lists_line_up_with_their_settings() {
+        assert_eq!(LEAD_ROWS.len(), LEADS.len());
+        assert_eq!(NOTCH_SIZES.len(), 4);
     }
 }

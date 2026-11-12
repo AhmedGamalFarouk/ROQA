@@ -1080,3 +1080,4 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 ## S1 fixes (2026-11-12 Africa/Cairo)
 
 - Prayer shift rolls across midnight (timeline of 3 days: next prayer, page, countdown, reminders, heads-up, grace without double fire); shift entry validated with a status message; Test button caption says it plays with Reminder sounds off, real reminders gated by `reminder_plays`/`timer_beeps` (tests). Packet updated. No native run.
+- Review fixes: scroll repaints the cards/title; click mode never shrinks an open notch and cancels a pending hover intent; `ppause` only at the prayer (not the heads-up), needs the Media tab; `pshift` rejects a line with any bad entry; mnemonic and notch-size (Auto only, no 100%) cleanups. Size baseline raised to 1,243,648 B, approved by Ahmed 2026-11-12 (S1/G1b/A1). No native run.

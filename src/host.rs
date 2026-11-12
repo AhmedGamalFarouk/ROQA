@@ -812,9 +812,11 @@ impl Surface {
                 self.motion.retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
             }
         } else if motion::click_to_open() {
-            // Click mode: the pill only swells; a click opens it (`click_control`).
-            self.motion
-                .retarget(NOTCH_SWELL, motion::INTENT_TIME, motion::EASE_OUT);
+            // Click mode: the pill only swells (and never shrinks an open panel); a click opens it.
+            if swells(self.motion.target()) {
+                self.motion
+                    .retarget(NOTCH_SWELL, motion::INTENT_TIME, motion::EASE_OUT);
+            }
         } else if self.motion.value(Instant::now()) > NOTCH_SWELL {
             // Re-entered while still closing: reopen directly.
             open_notch(intent, &mut self.motion);
@@ -1048,6 +1050,10 @@ impl Surface {
 /// Hover-intent swell: the pill grows ~11 x 3 DIP (the media pill ~7 x 6) to acknowledge the
 /// pointer before opening.
 const NOTCH_SWELL: f32 = 0.07;
+/// In click mode the pointer entering swells the pill only when it is closed (its target is below the swell).
+fn swells(target: f32) -> bool {
+    target < NOTCH_SWELL
+}
 /// Opens the notch fully, ending any pending hover intent.
 fn open_notch(intent: &mut Option<Instant>, tween: &mut Tween) {
     *intent = None;
@@ -1922,19 +1928,19 @@ impl Desktop {
         }
         sound_wait.min(wait.saturating_mul(1000))
     }
-    /// A reminder is due: the sound always plays. The notch expands with the prayer's name; on a monitor a
+    /// A reminder is due: the sound plays unless Reminder sounds is off. The notch expands with the prayer's name; on a monitor a
     /// full-screen app covers it appears over the app (topmost, never activated) and hides again once retracted.
     fn fire_prayer(&mut self, event: prayer_tab::Event, now: Instant) {
         if self.settings.reminder_plays() {
             self.play_prayer_sound(now);
         }
-        // Pausing is one request, never undone; nothing happens when nothing plays or the Media tab is off.
-        if self.settings.prayer_pause
-            && self
-                .pages
-                .track(&self.media)
-                .is_some_and(|track| track.playing)
-        {
+        // Pausing is one request at the prayer time (not the heads-up), never undone; nothing happens when
+        // nothing plays or the Media tab is off (no session is read then).
+        let playing = self
+            .pages
+            .track(&self.media)
+            .is_some_and(|track| track.playing);
+        if prayer_tab::pauses_media(self.settings.prayer_pause, event, playing) {
             self.media.command(crate::media::PLAY_PAUSE);
         }
         self.prayer.adhan_until = Some(now + PRAYER_NOTICE);
@@ -2366,6 +2372,14 @@ impl Desktop {
         // A new theme or pill size is fixed when a surface is created, so both rebuild the surfaces.
         let restyle =
             old.theme != self.settings.theme || old.notch_size != self.settings.notch_size;
+        if self.settings.open_click && !old.open_click {
+            // A hover intent still pending must not open the notch after the switch to click mode.
+            for surface in &mut self.surfaces {
+                if let Role::Notch { intent, .. } = &mut surface.role {
+                    *intent = None;
+                }
+            }
+        }
         if old.hide_fullscreen != self.settings.hide_fullscreen {
             self.fullscreen_generation = None; // the next pass hides or shows again
         }
@@ -4327,6 +4341,12 @@ fn remember_fullscreen(
 mod clock_wait_tests {
     use super::*;
     use crate::window_model::Identity;
+
+    #[test]
+    fn click_mode_swells_a_closed_pill_and_never_shrinks_an_open_one() {
+        assert!(swells(0.0));
+        assert!(!swells(NOTCH_SWELL) && !swells(1.0));
+    }
 
     #[test]
     fn a_pin_edit_marks_the_store_dirty_once_and_only_when_it_changed() {

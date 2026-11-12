@@ -187,11 +187,13 @@ pub fn times(p: &Params, ymd: Ymd) -> Option<Times> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg(test)] // only the tests ask for one prayer; the page and reminders read `timeline`
 pub struct Next {
     pub prayer: Prayer,
     pub secs_left: u32,
 }
 
+#[cfg(test)]
 impl Next {
     /// Countdown as (hours, minutes), rounded up so it never shows 0:00 before the time.
     #[cfg(test)] // the page words it with `prayer_tab::countdown`

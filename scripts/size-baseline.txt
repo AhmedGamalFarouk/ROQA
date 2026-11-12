@@ -1,3 +1,3 @@
-1218048
-raise-reason: U1 Limits tab (Claude/Codex/Antigravity plan limits, Job-object process runner, Settings scroll)
-approved-by: Ahmed 2026-11-12
+1243648
+raise-reason: Settings shell, baked Liquid glass, dock slide-up and review fixes (S1/G1b/A1)
+approved-by: Ahmed (S1/G1b/A1 raise) 2026-11-12

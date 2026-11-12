@@ -98,6 +98,12 @@ pub fn step(
     (fire, wait as u32)
 }
 
+/// Whether a due reminder pauses the media: the switch is on, it is the prayer itself (not the heads-up) and
+/// something is playing.
+pub fn pauses_media(on: bool, e: Event, playing: bool) -> bool {
+    on && e.lead == 0 && playing
+}
+
 /// The notice text: "Asr" at the time, "Asr in 10 min" for a heads-up.
 pub fn notice(e: Event) -> String {
     if e.lead == 0 {
@@ -491,6 +497,18 @@ mod tests {
         assert_eq!(countdown(59, false), "in 1 min");
         assert_eq!(countdown(3 * 3600, false), "in 3 h");
         assert_eq!(countdown(61, true), "in 2 minutes");
+    }
+
+    #[test]
+    fn only_the_prayer_itself_pauses_media() {
+        let e = Event {
+            at: 0,
+            prayer: Prayer::Asr,
+            lead: 0,
+        };
+        assert!(pauses_media(true, e, true));
+        assert!(!pauses_media(true, Event { lead: 10, ..e }, true));
+        assert!(!pauses_media(false, e, true) && !pauses_media(true, e, false));
     }
 
     #[test]

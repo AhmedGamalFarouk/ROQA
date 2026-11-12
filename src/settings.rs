@@ -18,8 +18,8 @@ const KINDS: [SurfaceKind; 2] = [SurfaceKind::Notch, SurfaceKind::Dock];
 pub const MAX_OFF: usize = 8;
 const MAX_DEVICE: usize = 64;
 pub const MAX_PATH: usize = 512;
-/// The notch sizes in percent of the designed pill (0 is auto, the designed size).
-pub const NOTCH_SIZES: [u16; 5] = [0, 100, 115, 130, 150];
+/// The notch sizes in percent of the designed pill (0 is auto, the designed size; 100 would be the same).
+pub const NOTCH_SIZES: [u16; 4] = [0, 115, 130, 150];
 /// The fine-tune of each daily prayer, in minutes either way.
 pub const MAX_SHIFT: i8 = 30;
 
@@ -248,10 +248,13 @@ impl Settings {
                 .is_some(),
             "notchsize" => value.parse().map(|v| self.notch_size = v).is_ok(),
             "pshift" => {
-                let minutes: Vec<i8> = value.split(',').filter_map(|v| v.parse().ok()).collect();
-                <[i8; 5]>::try_from(minutes)
+                // Every entry must parse: one bad number rejects the whole line.
+                let minutes: Result<Vec<i8>, _> = value.split(',').map(str::parse).collect();
+                minutes
+                    .ok()
+                    .and_then(|v| <[i8; 5]>::try_from(v).ok())
                     .map(|v| self.prayer_shift = v)
-                    .is_ok()
+                    .is_some()
             }
             "limgroup" => value.parse().map(|v| self.limits_group = v).is_ok(),
             "plead" => value.parse().map(|v| self.prayer_lead = v).is_ok(),
@@ -581,6 +584,8 @@ mod tests {
             ("notchopen", "x"),
             ("animspeed", ""),
             ("pshift", "1,2,3"),
+            ("pshift", "1,x,3,4,5"),
+            ("pshift", "1,2,3,4,5,6"),
             ("pshift", "a,b,c,d,e"),
             ("notchsize", "big"),
             ("fshide", "2"),
