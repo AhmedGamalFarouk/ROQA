@@ -1051,3 +1051,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Done:** one `RegNotifyChangeKeyValue` handle in the existing wait set (no thread, no timer, closed when the "Privacy indicator" switch is off); pure `in_use`, UIA "Microphone in use" / "Camera in use", no app names. Moods Adhan, Rain with selection tests. No new crates, no profile change.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 339 tests, locked release); 1,224,192 B, ratchet within 2% (baseline 1,218,048 unchanged); SHA `63CFF527C8D30B069DF9C116809E4BACCA05EEA4CDF7C8EE2007B8415EA83E7C`.
 - **NOT RUN:** drawing, real mic/camera session, UIA read, Settings fit, dot vs media visualizer; moods are unseen when they begin under an open panel; reviews paused (REVIEW NOT RUN).
+
+## M5 native run 4 (2026-11-12 Africa/Cairo)
+
+- **Scope:** main 16d5785, release 1,223,680 B, SHA `39743F402B49B3769FC5CE6A3E1F7DF6802A5A75596A6D92A2717E1806E063EB`; [results](m5-results-4.md). Docs only.
+- **Suites:** catalog 67 PASS, packaged-hung 16 PASS, topology none 25 / both 29 PASS; picker-smoke FAIL as shipped (stale slot-0 vs default Start button), 226 PASS with dock buttons off; smoke.ps1 NOT RUN.
+- **Idle:** all three 15-min runs (off, sliders on, Weather+Prayer+Limits) ABORTED by the input guard (user active); no numbers, `--diagnostics` counters NOT RUN. Reviews paused (REVIEW NOT RUN).
