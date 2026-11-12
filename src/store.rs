@@ -370,6 +370,8 @@ mod tests {
                 diagnostics: Some(r"C:\d.json".into()),
                 theme: Default::default(),
                 desktop_only: false,
+                edge_volume: true,
+                edge_brightness: true,
             }
         );
         // No settings lines in a v2 file means the defaults too.

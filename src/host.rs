@@ -4,6 +4,7 @@ use crate::{
     clock,
     dock::{self, DockItem},
     dock_uia::{self, Accessibility},
+    edge::Edges,
     graphics::{COVER_DIPS, Canvas, DockScene, DockSlot, Graphics, NotchScene, ShelfSlot},
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
@@ -964,6 +965,10 @@ struct Desktop {
     /// Dock hover thumbnails: the pointer's rest on a slot, and the popup while one shows.
     preview: preview::Intent,
     popup: Option<preview::Popup>,
+    /// The volume and brightness sliders on every monitor's edges, rebuilt to match the monitors and
+    /// settings whenever either changes (`edges_dirty`).
+    edges: Edges,
+    edges_dirty: bool,
 }
 impl Desktop {
     fn create(_probe: &Probe) -> Result<Self> {
@@ -1036,6 +1041,8 @@ impl Desktop {
             power: Power::new(power::Raw::read()),
             preview: preview::Intent::default(),
             popup: None,
+            edges: Edges::default(),
+            edges_dirty: true,
         };
         if desktop.settings.notch {
             desktop.show(SurfaceKind::Notch)?;
@@ -1331,6 +1338,26 @@ impl Desktop {
             .deadline()
             .map_or(INFINITE, |due| milliseconds_until(due, now))
     }
+    /// The edge sliders' pass: rebuilds them when the monitors or settings changed, then applies their
+    /// hover deadlines, brightness readings and paints. Returns the wait until the next deadline.
+    #[inline(never)]
+    fn refresh_edges(&mut self) -> u32 {
+        let now = Instant::now();
+        if std::mem::take(&mut self.edges_dirty) {
+            self.edges.reconcile(&self.monitors, &self.settings);
+        }
+        let fullscreen = &self.fullscreen;
+        let due = self
+            .edges
+            .refresh(now, &self.audio, &self.graphics, self.palette, |device| {
+                fullscreen.iter().any(|(_, covered)| covered == device)
+            });
+        due.map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+    /// A mouse or UIA message for an edge slider's window.
+    fn edge_message(&mut self, message: &MSG) -> bool {
+        self.edges.message(message, &self.audio, Instant::now())
+    }
     /// A click on the dock ends the preview; it stays away until the pointer moves to another slot.
     fn dismiss_preview(&mut self) {
         self.popup = None;
@@ -1467,6 +1494,7 @@ impl Desktop {
         }
         let old = std::mem::replace(&mut self.settings, next);
         let restyle = old.theme != self.settings.theme;
+        self.edges_dirty = true;
         if old.desktop_only != self.settings.desktop_only {
             self.dock_generation = None; // the dock is rebuilt on the next pass
         }
@@ -1482,6 +1510,7 @@ impl Desktop {
             .retain(|s| !destroy.contains(&(s.kind(), s.monitor.clone())));
         if restyle {
             self.palette = crate::theme::system_palette(self.settings.theme, self.text.accent());
+            self.edges.release();
             // Colours are fixed when a surface is created, so a new theme rebuilds the survivors (as a text-scale
             // change does); the diff's creations below then find nothing left to skip and place themselves.
             self.surfaces.clear();
@@ -2271,6 +2300,7 @@ impl Desktop {
         self.surfaces
             .retain(|surface| !release.contains(&surface.monitor));
         self.monitors = next;
+        self.edges_dirty = true;
         let mut failure = None;
         for monitor in place {
             for kind in self.shown.clone() {
@@ -2325,6 +2355,7 @@ impl Desktop {
             let palette = crate::theme::system_palette(self.settings.theme, self.text.accent());
             if palette != self.palette {
                 self.palette = palette;
+                self.edges.release(); // an open pill takes the new colours when it next shows
                 self.surfaces.clear();
                 for kind in self.shown.clone() {
                     self.show(kind)?;
@@ -2343,8 +2374,8 @@ impl Desktop {
         let redraw =
             self.media.refresh(self.cover_pixels()) || status != self.media.view().status();
         let shown = self.media.view().shown().is_some();
-        if shown {
-            // Core Audio loads only once a media panel can show the volume row.
+        if shown || self.edges.wants_audio() {
+            // Core Audio loads only once a media panel or the volume slider can show the level.
             self.audio.start();
         }
         let volume = self.audio.refresh();
@@ -2368,7 +2399,8 @@ impl Desktop {
             .min(self.refresh_meter()?)
             .min(self.refresh_timers())
             .min(self.refresh_power())
-            .min(self.refresh_preview());
+            .min(self.refresh_preview())
+            .min(self.refresh_edges());
         self.paint_requested()?;
         if let Some(picker) = &mut self.picker {
             picker.synchronize(model)?;
@@ -2399,6 +2431,7 @@ impl Desktop {
     /// Releases every old-device surface now and schedules the rebuild.
     fn lose_graphics(&mut self) {
         self.surfaces.clear();
+        self.edges.release();
         self.rebuild.lose(Instant::now());
     }
     /// Applies a due rebuild: a new device, then every shown kind placed and painted on it. Failures
@@ -2409,6 +2442,7 @@ impl Desktop {
         }
         // Includes any surface a topology change placed on the lost device meanwhile.
         self.surfaces.clear();
+        self.edges.release();
         // The old device is released by this assignment, after its surfaces and before any new one.
         let rebuilt = Graphics::create().and_then(|graphics| {
             self.graphics = graphics;
@@ -2659,6 +2693,9 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             if message.message == dock_uia::INVOKE && desktop.dock_at(message.hwnd).is_some() {
                 let (slot, version) = (message.wParam.0, message.lParam.0 as u32);
                 desktop.invoke_dock(message.hwnd, slot, version, catalog)?;
+                continue;
+            }
+            if desktop.edge_message(&message) {
                 continue;
             }
             if desktop.notch_input(&message) {

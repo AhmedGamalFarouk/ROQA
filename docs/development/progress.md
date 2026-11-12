@@ -929,3 +929,12 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Filter:** setting "Show only windows on this desktop" (default off) via `IVirtualDesktopManager`, created once on the catalog worker; pins stay. Behaviour change: with it off, other desktops' windows are now listed (cloaked ones were dropped before).
 - **Checks:** verify.ps1 PASS (fmt/clippy, 197 tests, locked release); 821,248 B, ratchet tripped (+2.16%), baseline raised to 821248; SHA `ED47ABD72B9E2AC79C8C5A47277F3CFA3EAF95424D57B6014BD37B144314C20A`.
 - **NOT RUN:** real hover/DWM drawing, UIA read, DPI placement, desktop switch; reviews paused (REVIEW NOT RUN).
+
+## Features B2.5: edge sliders (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/edge-sliders`; [packet](features-edge-sliders.md), [queue](features-queue.md). No native/GUI run.
+- **Sliders:** volume on the right edge, brightness on the left, per monitor: 2 DIP hot strip over the middle third, pill after 250 ms hover (hides 800 ms after leave), drag/wheel to set, painted on change only, hidden under fullscreen, settings toggles (default on), UIA RangeValue.
+- **Volume:** `audio.rs` set/unmute; icon lists active outputs and switches via undocumented `IPolicyConfig` (`policy_config.rs`, user decision; falls back to `ms-settings:sound`).
+- **Brightness:** DDC/CI on one lazy worker, writes about 5/s coalesced; unsupported monitors show a disabled pill. Laptop panels (WMI) and arrow keys deferred.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 210 tests, locked release); 902,144 B, ratchet tripped (+9.85%), baseline raised to 902144; SHA `77D2E35BDB294030E3B3B03E37113B9753BE1BA4A4BB554D93F527D130232DA3`.
+- **NOT RUN:** real hover/hit-testing, DDC, device switch, DPI placement, UIA read; reviews paused (REVIEW NOT RUN).

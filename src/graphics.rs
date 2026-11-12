@@ -1,6 +1,7 @@
 use crate::{
     audio::{BARS, Level},
     dock,
+    edge::{Layout, ListRow},
     icons::IconPixels,
     layout::{self, Bounds},
     media::{PLAY_PAUSE, Progress, Track},
@@ -186,6 +187,26 @@ const DISPLAY_FONT: PCWSTR = w!("Segoe UI Variable Display");
 /// The time's digits lead; "pm" and similar designators sit smaller beside them.
 const TIME_DESIGNATOR: f32 = 0.72;
 
+/// What an edge slider's pill shows; `layout` is in surface pixels.
+pub struct SliderScene<'a> {
+    pub dpi: u32,
+    pub layout: &'a Layout,
+    pub percent: u8,
+    pub glyph: Glyph,
+    /// Muted or unsupported: the fill and icon are dimmed (the system grey text in high contrast).
+    pub dim: bool,
+    pub caption: &'a str,
+    /// `None`: the caption is centred in the pill. `Some(right)`: a note beside it, trailing-aligned
+    /// when the pill is on the right.
+    pub note: Option<bool>,
+}
+pub struct ListScene<'a> {
+    pub dpi: u32,
+    pub panel: Bounds,
+    pub rows: &'a [ListRow<'a>],
+    pub hover: Option<usize>,
+}
+
 pub struct Canvas {
     target: IDCompositionTarget,
     visual: IDCompositionVisual2,
@@ -335,6 +356,104 @@ impl Canvas {
                         context.FillRoundedRectangle(bar, &brush);
                     }
                 }
+            }
+            Ok(())
+        })
+    }
+    /// An edge slider's pill (`edge.rs`): the level fill in the accent, the icon at the bottom and the
+    /// caption (the percent while dragging, or why it does nothing).
+    pub fn paint_slider(&self, scene: &SliderScene) -> Result<()> {
+        let p = self.palette;
+        let scale = scene.dpi as f32 / 96.0;
+        self.draw(|context, rect| {
+            let at = |b: Bounds| surface_rect(rect, b);
+            let layout = scene.layout;
+            panel(context, &p, at(layout.pill), layout.pill.width as f32 / 2.0)?;
+            let track = at(layout.track);
+            let thickness = track.right - track.left;
+            draw_track(context, &p, &rounded(track, thickness / 2.0), 0.40)?;
+            let filled = (track.bottom - track.top) * f32::from(scene.percent.min(100)) / 100.0;
+            if filled >= 1.0 {
+                let fill = D2D_RECT_F {
+                    top: track.bottom - filled,
+                    ..track
+                };
+                let shape = rounded(fill, (thickness / 2.0).min(filled / 2.0));
+                // SAFETY: live draw context between BeginDraw/EndDraw; the brush is scoped to this draw.
+                unsafe {
+                    let brush =
+                        context.CreateSolidColorBrush(&tint(p.accent_dim(scene.dim, 1.0)), None)?;
+                    context.FillRoundedRectangle(&shape, &brush);
+                }
+            }
+            let icon = at(layout.icon);
+            let square = pixel_square(icon.left, icon.top, icon.right - icon.left);
+            fill_glyph(
+                context,
+                square,
+                scene.glyph,
+                tint(p.ink_dim(scene.dim, 0.90)),
+            )?;
+            if !scene.caption.is_empty() {
+                let font = Font {
+                    family: TEXT_FONT,
+                    size: 12.0 * scale,
+                    weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                    designator: 1.0,
+                    align: match scene.note {
+                        None => DWRITE_TEXT_ALIGNMENT_CENTER,
+                        Some(false) => DWRITE_TEXT_ALIGNMENT_LEADING,
+                        Some(true) => DWRITE_TEXT_ALIGNMENT_TRAILING,
+                    },
+                };
+                let ink = tint(p.ink_dim(false, 0.90));
+                draw_text(context, scene.caption, &font, at(layout.caption), ink)?;
+            }
+            Ok(())
+        })
+    }
+    /// The volume slider's device list: a panel of rows, the current device marked with an accent dot
+    /// and the hovered row lifted.
+    pub fn paint_list(&self, scene: &ListScene) -> Result<()> {
+        let p = self.palette;
+        let scale = scene.dpi as f32 / 96.0;
+        self.draw(|context, rect| {
+            panel(context, &p, surface_rect(rect, scene.panel), 12.0 * scale)?;
+            let font = Font {
+                family: TEXT_FONT,
+                size: 13.0 * scale,
+                weight: DWRITE_FONT_WEIGHT_NORMAL,
+                designator: 1.0,
+                align: DWRITE_TEXT_ALIGNMENT_LEADING,
+            };
+            let dot = 6.0 * scale;
+            for (index, row) in scene.rows.iter().enumerate() {
+                let cell = surface_rect(rect, row.rect);
+                let (left, middle) = (cell.left + 10.0 * scale, (cell.top + cell.bottom) / 2.0);
+                // SAFETY: live draw context between BeginDraw/EndDraw; brushes are scoped to this draw.
+                unsafe {
+                    if scene.hover == Some(index) {
+                        let brush = context.CreateSolidColorBrush(&tint(p.track(0.16)), None)?;
+                        context.FillRoundedRectangle(&rounded(cell, 8.0 * scale), &brush);
+                    }
+                    if row.current {
+                        let brush =
+                            context.CreateSolidColorBrush(&tint(p.accent_dim(false, 1.0)), None)?;
+                        let shape = D2D_RECT_F {
+                            left,
+                            top: middle - dot / 2.0,
+                            right: left + dot,
+                            bottom: middle + dot / 2.0,
+                        };
+                        context.FillRoundedRectangle(&rounded(shape, dot / 2.0), &brush);
+                    }
+                }
+                let text = D2D_RECT_F {
+                    left: left + dot + 8.0 * scale,
+                    right: cell.right - 8.0 * scale,
+                    ..cell
+                };
+                draw_text(context, row.name, &font, text, tint(p.ink_dim(false, 0.90)))?;
             }
             Ok(())
         })
@@ -930,8 +1049,8 @@ const DISABLED: f32 = 0.30;
 const FOCUS_STROKE: f32 = 2.0;
 const FOCUS_GAP: f32 = 2.0;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Glyph {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glyph {
     Play,
     Pause,
     Previous,
@@ -939,6 +1058,8 @@ enum Glyph {
     /// The mute toggle: a speaker with sound waves, or without them while muted.
     Speaker,
     Muted,
+    /// The brightness slider's icon: a core with four rays.
+    Sun,
 }
 /// Glyph parts on a 10-unit grid: a triangle's x, y corners, and a bar's left, top, right, bottom.
 type Triangle = [(f32, f32); 3];
@@ -967,6 +1088,16 @@ impl Glyph {
             Glyph::Muted => (
                 Some([(0.5, 5.0), (6.5, 1.0), (6.5, 9.0)]),
                 &[(1.0, 3.5, 3.5, 6.5)],
+            ),
+            Glyph::Sun => (
+                None,
+                &[
+                    (3.0, 3.0, 7.0, 7.0),
+                    (4.5, 0.0, 5.5, 2.0),
+                    (4.5, 8.0, 5.5, 10.0),
+                    (0.0, 4.5, 2.0, 5.5),
+                    (8.0, 4.5, 10.0, 5.5),
+                ],
             ),
         }
     }
@@ -1798,6 +1929,39 @@ fn rim_brush(
             &stops,
         )
     }
+}
+
+/// `bounds` (surface pixels) in the draw context's coordinates, where `origin` is the surface's rectangle.
+fn surface_rect(origin: D2D_RECT_F, bounds: Bounds) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: origin.left + bounds.x as f32,
+        top: origin.top + bounds.y as f32,
+        right: origin.left + (bounds.x + bounds.width) as f32,
+        bottom: origin.top + (bounds.y + bounds.height) as f32,
+    }
+}
+
+/// A rounded body in the theme's fill with the hairline (or Glass rim) the dock bar has.
+fn panel(context: &ID2D1DeviceContext, p: &Palette, rect: D2D_RECT_F, radius: f32) -> Result<()> {
+    let edge = D2D_RECT_F {
+        left: rect.left + 0.5,
+        top: rect.top + 0.5,
+        right: rect.right - 0.5,
+        bottom: rect.bottom - 0.5,
+    };
+    // SAFETY: live draw context between BeginDraw/EndDraw; brushes are scoped to this call.
+    unsafe {
+        let body = context.CreateSolidColorBrush(&color(p.body), None)?;
+        context.FillRoundedRectangle(&rounded(rect, radius), &body);
+        let hairline: ID2D1Brush = match p.rim {
+            Some(rim) => rim_brush(context, p.ink, rim, (rect.top, rect.bottom))?.into(),
+            None => context
+                .CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(0.10)), None)?
+                .into(),
+        };
+        context.DrawRoundedRectangle(&rounded(edge, radius - 0.5), &hairline, 1.0, None);
+    }
+    Ok(())
 }
 
 /// A bar's track: a faint fill, the system track colour in high contrast, or a 1 px ink outline when

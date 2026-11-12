@@ -13,16 +13,19 @@ use windows::{
     Win32::{
         Foundation::{LPARAM, PROPERTYKEY, WPARAM},
         Media::Audio::{
-            AUDIO_VOLUME_NOTIFICATION_DATA, DEVICE_STATE, EDataFlow, ERole,
+            AUDIO_VOLUME_NOTIFICATION_DATA, DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole,
             Endpoints::{
                 IAudioEndpointVolume, IAudioEndpointVolumeCallback,
                 IAudioEndpointVolumeCallback_Impl, IAudioMeterInformation,
             },
-            IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
+            IMMDevice, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
             MMDeviceEnumerator, eConsole, eRender,
         },
         System::{
-            Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree},
+            Com::{
+                CLSCTX_ALL, CoCreateInstance, CoTaskMemFree, STGM_READ,
+                StructuredStorage::PropVariantToStringAlloc,
+            },
             Threading::GetCurrentThreadId,
         },
         UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP},
@@ -50,6 +53,35 @@ const ECHO: GUID = GUID::from_u128(0x9d8f3897_b1df_4a66_add8_1c91eefc0f51);
 pub struct Level {
     pub percent: u8,
     pub muted: bool,
+}
+
+/// The most render endpoints the slider's device list shows.
+pub const MAX_DEVICES: usize = 8;
+/// `PKEY_Device_FriendlyName`, as a constant of our own rather than the whole function-discovery feature.
+const FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
+    fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
+    pid: 14,
+};
+
+/// An active render endpoint: its ID, its name, and whether it is the default now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    pub current: bool,
+}
+
+/// `(id, name)` pairs as enumerated, bounded, with the one equal to `default` marked current.
+fn mark_current(found: Vec<(String, String)>, default: Option<&str>) -> Vec<Device> {
+    found
+        .into_iter()
+        .take(MAX_DEVICES)
+        .map(|(id, name)| Device {
+            current: default == Some(id.as_str()),
+            id,
+            name,
+        })
+        .collect()
 }
 
 /// Shifts the oldest sample out and `peak`, clamped to 0..=1, in as the newest.
@@ -212,6 +244,37 @@ fn bind(devices: &IMMDeviceEnumerator, wake: &Arc<Wake>) -> Result<Endpoint> {
     }
 }
 
+/// # Safety
+/// Host thread, on a live device.
+unsafe fn endpoint_id(device: &IMMDevice) -> Result<String> {
+    // SAFETY: per the contract; the ID is copied and freed once.
+    unsafe {
+        let id = device.GetId()?;
+        let text = id.to_string();
+        CoTaskMemFree(Some(id.0.cast_const().cast()));
+        text.map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
+    }
+}
+
+/// The endpoint's friendly name, such as "Speakers (Realtek Audio)"; `None` when unreadable.
+///
+/// # Safety
+/// Host thread, on a live device.
+unsafe fn endpoint_name(device: &IMMDevice) -> Option<String> {
+    // SAFETY: per the contract; the property value owns its string and the copy is freed once.
+    unsafe {
+        let value = device
+            .OpenPropertyStore(STGM_READ)
+            .ok()?
+            .GetValue(&FRIENDLY_NAME)
+            .ok()?;
+        let text = PropVariantToStringAlloc(&value).ok()?;
+        let name = text.to_string().ok();
+        CoTaskMemFree(Some(text.0.cast_const().cast()));
+        name.filter(|name| !name.is_empty())
+    }
+}
+
 fn read(volume: &IAudioEndpointVolume) -> Result<Level> {
     // SAFETY: host-thread reads on the bound endpoint.
     unsafe {
@@ -274,6 +337,10 @@ impl Audio {
             }
             Err(error) => eprintln!("Audio: device events: {error}"),
         }
+    }
+    /// Core Audio has been started (a level may still be missing without a device).
+    pub fn active(&self) -> bool {
+        self.started
     }
     pub fn level(&self) -> Option<Level> {
         self.level
@@ -368,6 +435,50 @@ impl Audio {
                     })
             };
             self.changed(set);
+        }
+    }
+    /// The default render endpoint's friendly name, for the volume slider's accessible name.
+    pub fn default_name(&self) -> Option<String> {
+        let devices = self.devices.as_ref()?;
+        // SAFETY: host-thread calls on the live enumerator.
+        unsafe {
+            let device = devices
+                .enumerator
+                .GetDefaultAudioEndpoint(eRender, eConsole)
+                .ok()?;
+            endpoint_name(&device)
+        }
+    }
+    /// The active render endpoints and the default one (host thread). Empty before `start`, or when the
+    /// enumerator fails, in which case the caller falls back to the Sound settings page.
+    pub fn devices(&self) -> Vec<Device> {
+        let Some(devices) = &self.devices else {
+            return Vec::new();
+        };
+        // SAFETY: host-thread calls on the live enumerator; every string is freed once.
+        unsafe {
+            let default = devices
+                .enumerator
+                .GetDefaultAudioEndpoint(eRender, eConsole)
+                .and_then(|device| endpoint_id(&device))
+                .ok();
+            let found = devices
+                .enumerator
+                .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+                .and_then(|list| {
+                    (0..list.GetCount()?.min(MAX_DEVICES as u32))
+                        .map(|index| {
+                            let device = list.Item(index)?;
+                            let id = endpoint_id(&device)?;
+                            let name = endpoint_name(&device).unwrap_or_else(|| id.clone());
+                            Ok((id, name))
+                        })
+                        .collect()
+                });
+            found
+                .map(|found| mark_current(found, default.as_deref()))
+                .inspect_err(|error| eprintln!("Audio: device list: {error}"))
+                .unwrap_or_default()
         }
     }
     pub fn toggle_mute(&self) {
@@ -524,6 +635,32 @@ mod tests {
         audio.wake.raise(REBIND);
         assert!(audio.refresh()); // A lost endpoint hides the level.
         assert_eq!(audio.level(), None);
+    }
+
+    #[test]
+    fn the_device_list_marks_the_default_and_stays_bounded() {
+        let found = |n: usize| -> Vec<(String, String)> {
+            (0..n)
+                .map(|i| (format!("{{id{i}}}"), format!("Device {i}")))
+                .collect()
+        };
+        let list = mark_current(found(3), Some("{id1}"));
+        assert_eq!(
+            list.iter().map(|d| d.current).collect::<Vec<_>>(),
+            [false, true, false]
+        );
+        assert_eq!(list[1].name, "Device 1");
+        // An unknown or missing default marks nothing; the list never exceeds the bound.
+        assert!(
+            mark_current(found(3), Some("{gone}"))
+                .iter()
+                .all(|d| !d.current)
+        );
+        assert!(mark_current(found(3), None).iter().all(|d| !d.current));
+        assert_eq!(mark_current(found(20), None).len(), MAX_DEVICES);
+        assert!(mark_current(Vec::new(), None).is_empty());
+        // Without a started enumerator there is nothing to list.
+        assert!(Audio::create().devices().is_empty());
     }
 
     #[test]

@@ -25,6 +25,9 @@ pub struct Settings {
     pub theme: Theme,
     /// The dock lists only windows on the current virtual desktop (pins stay).
     pub desktop_only: bool,
+    /// The hover sliders on each monitor's right (volume) and left (brightness) edge (`edge.rs`).
+    pub edge_volume: bool,
+    pub edge_brightness: bool,
 }
 
 impl Default for Settings {
@@ -38,6 +41,8 @@ impl Default for Settings {
             diagnostics: None,
             theme: Theme::Classic,
             desktop_only: false,
+            edge_volume: true,
+            edge_brightness: true,
         }
     }
 }
@@ -99,6 +104,8 @@ impl Settings {
             "notch" => flag(value).map(|v| self.notch = v).is_some(),
             "sound" => flag(value).map(|v| self.timer_sound = v).is_some(),
             "desktop" => flag(value).map(|v| self.desktop_only = v).is_some(),
+            "edgevol" => flag(value).map(|v| self.edge_volume = v).is_some(),
+            "edgebri" => flag(value).map(|v| self.edge_brightness = v).is_some(),
             "shelfcap" => value.parse().map(|v| self.shelf_cap = v).is_ok(),
             "theme" => Theme::from_key(value).map(|v| self.theme = v).is_some(),
             "diag" if !value.is_empty() => {
@@ -117,13 +124,15 @@ impl Settings {
     pub fn write_lines(&self, out: &mut String) {
         let one_line = |v: &&String| !v.contains(['\n', '\r']);
         out.push_str(&format!(
-            "dock={}\nnotch={}\nsound={}\nshelfcap={}\ntheme={}\ndesktop={}\n",
+            "dock={}\nnotch={}\nsound={}\nshelfcap={}\ntheme={}\ndesktop={}\nedgevol={}\nedgebri={}\n",
             u8::from(self.dock),
             u8::from(self.notch),
             u8::from(self.timer_sound),
             self.shelf_cap,
             self.theme.key(),
-            u8::from(self.desktop_only)
+            u8::from(self.desktop_only),
+            u8::from(self.edge_volume),
+            u8::from(self.edge_brightness)
         ));
         for device in self.off_monitors.iter().filter(one_line) {
             out.push_str(&format!("off={device}\n"));
@@ -188,6 +197,7 @@ mod tests {
     fn defaults_are_the_pre_settings_behaviour_and_already_clamped() {
         let defaults = Settings::default();
         assert!(defaults.dock && defaults.notch && defaults.timer_sound && !defaults.desktop_only);
+        assert!(defaults.edge_volume && defaults.edge_brightness);
         assert_eq!(defaults.shelf_cap, shelf::MAX);
         assert_eq!(defaults.diagnostics, None);
         assert_eq!(defaults.clone().clamped(), defaults);
@@ -204,13 +214,15 @@ mod tests {
             diagnostics: Some("  \"C:\\logs\\roqa.json\"  ".into()),
             theme: Theme::Glass,
             desktop_only: true,
+            edge_volume: false,
+            edge_brightness: false,
         }
         .clamped();
         assert!(!wild.dock && wild.notch, "one surface kind always stays on");
         assert_eq!(wild.off_monitors, ["a", "b"]);
         assert_eq!(wild.shelf_cap, shelf::MAX);
         assert_eq!(wild.theme, Theme::Glass);
-        assert!(wild.desktop_only);
+        assert!(wild.desktop_only && !wild.edge_volume && !wild.edge_brightness);
         assert_eq!(wild.diagnostics.as_deref(), Some(r"C:\logs\roqa.json"));
         let low = Settings {
             shelf_cap: 0,
@@ -356,6 +368,7 @@ mod tests {
             diagnostics: Some("C:\\a=b\\r.json".into()),
             theme: Theme::Midnight,
             desktop_only: true,
+            edge_volume: false,
             ..Settings::default()
         };
         let mut text = String::new();

@@ -35,6 +35,8 @@ const DOCK: usize = 100;
 const NOTCH: usize = 101;
 const SOUND: usize = 102;
 const DESKTOP: usize = 111;
+const EDGE_VOLUME: usize = 112;
+const EDGE_BRIGHTNESS: usize = 113;
 const SHELF: usize = 103;
 const THEME: usize = 110;
 const DIAGNOSTICS: usize = 104;
@@ -60,6 +62,9 @@ pub struct SettingsWindow {
     sound: HWND,
     /// "Show only windows on this desktop".
     desktop: HWND,
+    /// The volume (right) and brightness (left) edge sliders.
+    edge_volume: HWND,
+    edge_brightness: HWND,
     /// Drop-down list of `Theme::ALL`, in that order.
     theme: HWND,
     /// One checkbox per connected monitor (at most `MAX_OFF`), named by its GDI device.
@@ -123,6 +128,8 @@ impl SettingsWindow {
             notch: HWND::default(),
             sound: HWND::default(),
             desktop: HWND::default(),
+            edge_volume: HWND::default(),
+            edge_brightness: HWND::default(),
             theme: HWND::default(),
             monitors: Vec::new(),
             shelf: HWND::default(),
@@ -286,6 +293,22 @@ impl SettingsWindow {
             check,
             flat,
         )?;
+        self.edge_volume = control(
+            window,
+            w!("Button"),
+            "&Volume slider on the right screen edge",
+            EDGE_VOLUME,
+            check,
+            flat,
+        )?;
+        self.edge_brightness = control(
+            window,
+            w!("Button"),
+            "&Brightness slider on the left screen edge",
+            EDGE_BRIGHTNESS,
+            check,
+            flat,
+        )?;
         let theme_label = label("T&heme")?;
         self.theme = control(
             window,
@@ -384,6 +407,8 @@ impl SettingsWindow {
             self.notch,
             self.sound,
             self.desktop,
+            self.edge_volume,
+            self.edge_brightness,
             self.theme,
             self.shelf,
         ];
@@ -400,6 +425,8 @@ impl SettingsWindow {
         set_checked(self.notch, settings.notch);
         set_checked(self.sound, settings.timer_sound);
         set_checked(self.desktop, settings.desktop_only);
+        set_checked(self.edge_volume, settings.edge_volume);
+        set_checked(self.edge_brightness, settings.edge_brightness);
         let index = Theme::ALL
             .iter()
             .position(|t| *t == settings.theme)
@@ -426,6 +453,8 @@ impl SettingsWindow {
         next.notch = checked(self.notch);
         next.timer_sound = checked(self.sound);
         next.desktop_only = checked(self.desktop);
+        next.edge_volume = checked(self.edge_volume);
+        next.edge_brightness = checked(self.edge_brightness);
         // SAFETY: scalar query of our own combo box; -1 (nothing chosen) keeps the current theme.
         let chosen = unsafe { SendMessageW(self.theme, CB_GETCURSEL, None, None) }.0;
         next.theme = usize::try_from(chosen)
@@ -484,7 +513,9 @@ impl SettingsWindow {
                 let notification = (message.wParam.0 >> 16) as u32;
                 let monitor = (MONITOR..MONITOR + self.monitors.len()).contains(&id);
                 match id {
-                    DOCK | NOTCH | SOUND | DESKTOP if notification == BN_CLICKED => {
+                    DOCK | NOTCH | SOUND | DESKTOP | EDGE_VOLUME | EDGE_BRIGHTNESS
+                        if notification == BN_CLICKED =>
+                    {
                         self.commit()?
                     }
                     EARLIER | LATER if notification == BN_CLICKED => {
@@ -561,7 +592,7 @@ impl SettingsWindow {
     fn position(&self, scale: f64, dpi: u32, work: Bounds) -> Result<()> {
         let px = |value: f64| (value * scale).round() as i32;
         // Row heights in DIPs, top to bottom: one list gives both the window height and every control's top.
-        let mut heights = vec![24.0; 4 + self.monitors.len()]; // dock, notch, monitors, sound, desktop
+        let mut heights = vec![24.0; 6 + self.monitors.len()]; // dock, notch, monitors, sound, desktop, two edge sliders
         // theme, shelf, diagnostics label and edit, timer label and row, status, pins, buttons
         heights.extend([28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0, 28.0]);
         let tops: Vec<i32> = heights
@@ -603,12 +634,21 @@ impl SettingsWindow {
             let margin = px(16.0);
             let inner = (client.right - margin * 2).max(1);
             let half = |units: f64| px(units).min(inner);
-            let after = 3 + self.monitors.len(); // the desktop checkbox
+            let after = 3 + self.monitors.len(); // the desktop checkbox, then two more
+            let end = after + 2;
             let mut places = vec![
                 (self.dock, margin, tops[0], inner, px(24.0)),
                 (self.notch, margin, tops[1], inner, px(24.0)),
                 (self.sound, margin, tops[after - 1], inner, px(24.0)),
                 (self.desktop, margin, tops[after], inner, px(24.0)),
+                (self.edge_volume, margin, tops[after + 1], inner, px(24.0)),
+                (
+                    self.edge_brightness,
+                    margin,
+                    tops[after + 2],
+                    inner,
+                    px(24.0),
+                ),
             ];
             for (index, (handle, _)) in self.monitors.iter().enumerate() {
                 places.push((*handle, margin, tops[2 + index], inner, px(24.0)));
@@ -657,7 +697,7 @@ impl SettingsWindow {
                 (
                     theme_label,
                     margin,
-                    tops[after + 1] + px(5.0),
+                    tops[end + 1] + px(5.0),
                     inner - half(180.0),
                     px(20.0),
                 ),
@@ -665,41 +705,41 @@ impl SettingsWindow {
                 (
                     self.theme,
                     margin + inner - half(170.0),
-                    tops[after + 1],
+                    tops[end + 1],
                     half(170.0),
                     px(160.0),
                 ),
                 (
                     shelf_label,
                     margin,
-                    tops[after + 2] + px(5.0),
+                    tops[end + 2] + px(5.0),
                     inner - half(80.0),
                     px(20.0),
                 ),
                 (
                     self.shelf,
                     margin + inner - half(70.0),
-                    tops[after + 2],
+                    tops[end + 2],
                     half(70.0),
                     px(28.0),
                 ),
-                (diagnostics_label, margin, tops[after + 3], inner, px(20.0)),
-                (self.diagnostics, margin, tops[after + 4], inner, px(28.0)),
-                (timer_label, margin, tops[after + 5], inner, px(20.0)),
-                (self.timer, margin, tops[after + 6], half(120.0), px(28.0)),
+                (diagnostics_label, margin, tops[end + 3], inner, px(20.0)),
+                (self.diagnostics, margin, tops[end + 4], inner, px(28.0)),
+                (timer_label, margin, tops[end + 5], inner, px(20.0)),
+                (self.timer, margin, tops[end + 6], half(120.0), px(28.0)),
                 (
                     start,
                     margin + half(128.0),
-                    tops[after + 6],
+                    tops[end + 6],
                     half(150.0),
                     px(28.0),
                 ),
-                (self.status, margin, tops[after + 7], inner, px(42.0)),
-                (reset, margin, tops[after + 9], half(180.0), px(28.0)),
+                (self.status, margin, tops[end + 7], inner, px(42.0)),
+                (reset, margin, tops[end + 9], half(180.0), px(28.0)),
                 (
                     close,
                     client.right - margin - half(100.0),
-                    tops[after + 9],
+                    tops[end + 9],
                     half(100.0),
                     px(28.0),
                 ),

@@ -8,11 +8,14 @@ macro_rules! eprintln {
     }};
 }
 mod audio;
+mod brightness;
 mod catalog_timing;
 mod clock;
 mod diagnostics;
 mod dock;
 mod dock_uia;
+mod edge;
+mod edge_uia;
 mod error_log;
 mod graphics;
 mod host;
@@ -26,6 +29,7 @@ mod notch_uia;
 mod picker;
 mod picker_font;
 mod pins;
+mod policy_config;
 mod power;
 mod preview;
 mod settings;

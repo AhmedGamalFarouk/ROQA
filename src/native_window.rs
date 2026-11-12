@@ -84,7 +84,7 @@ impl NativeWindow {
         };
         Self::create_hidden(bounds, title)
     }
-    fn create_hidden(bounds: Bounds, title: windows::core::PCWSTR) -> Result<Self> {
+    pub fn create_hidden(bounds: Bounds, title: windows::core::PCWSTR) -> Result<Self> {
         // SAFETY: registered class; no retained user pointers; validated geometry and current module.
         unsafe {
             let hwnd = CreateWindowExW(
