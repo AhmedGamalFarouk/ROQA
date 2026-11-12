@@ -3,6 +3,7 @@ use crate::{
     catalog_timing::milliseconds_until,
     clock,
     dock::{self, DockItem},
+    dock_menu::{self, Event, Item},
     dock_uia::{self, Accessibility},
     edge::Edges,
     graphics::{COVER_DIPS, Canvas, DockScene, DockSlot, Graphics, NotchScene, ShelfSlot},
@@ -965,6 +966,8 @@ struct Desktop {
     /// Dock hover thumbnails: the pointer's rest on a slot, and the popup while one shows.
     preview: preview::Intent,
     popup: Option<preview::Popup>,
+    /// The dock's right-click menu while open; nothing exists, and nothing is polled, otherwise.
+    menu: Option<dock_menu::Menu>,
     /// The volume and brightness sliders on every monitor's edges, rebuilt to match the monitors and
     /// settings whenever either changes (`edges_dirty`).
     edges: Edges,
@@ -1041,6 +1044,7 @@ impl Desktop {
             power: Power::new(power::Raw::read()),
             preview: preview::Intent::default(),
             popup: None,
+            menu: None,
             edges: Edges::default(),
             edges_dirty: true,
         };
@@ -1305,6 +1309,8 @@ impl Desktop {
                     .map(|item| (index, slot, item)),
                 _ => None,
             });
+        // A thumbnail would float over the open menu.
+        let hovered = hovered.filter(|_| self.menu.is_none());
         let spot = hovered.map(|(index, slot, _)| (self.surfaces[index].window.0.0 as usize, slot));
         let ended = self.preview.point(spot, now);
         let stale = self.popup.as_ref().is_some_and(|popup| {
@@ -1510,6 +1516,7 @@ impl Desktop {
             .retain(|s| !destroy.contains(&(s.kind(), s.monitor.clone())));
         if restyle {
             self.palette = crate::theme::system_palette(self.settings.theme, self.text.accent());
+            self.menu = None;
             self.edges.release();
             // Colours are fixed when a surface is created, so a new theme rebuilds the survivors (as a text-scale
             // change does); the diff's creations below then find nothing left to skip and place themselves.
@@ -1704,7 +1711,8 @@ impl Desktop {
             None => Ok(()),
         }
     }
-    /// Right-click on a dock slot toggles its pin. The dock is rebuilt on the next pass.
+    /// Pins the slot's app, or unpins it if pinned (the menu's Pin and Unpin). The dock is rebuilt on the
+    /// next pass.
     fn toggle_pin(&mut self, slot: Option<usize>) {
         let Some(item) = slot
             .and_then(|slot| slot.checked_sub(1))
@@ -1717,6 +1725,115 @@ impl Desktop {
             Some(pin) => pins.remove(pin),
             None => pins.add(identity).is_ok(),
         });
+    }
+    /// Right-click on a dock slot opens its menu above it (the picker slot has none). It needs the
+    /// foreground for the keyboard and dismissal; if Windows refuses, no menu opens rather than one that
+    /// a click elsewhere could never dismiss.
+    fn open_menu(&mut self, hwnd: HWND, slot: Option<usize>) {
+        self.dismiss_preview();
+        self.close_menu();
+        let Some((dock, slot)) = self
+            .dock_at(hwnd)
+            .zip(slot.filter(|&slot| slot >= 1))
+            .filter(|(dock, _)| dock.visible)
+        else {
+            return;
+        };
+        let Some(item) = self.dock_items.get(slot - 1) else {
+            return;
+        };
+        let Some(work) = self
+            .monitors
+            .iter()
+            .find(|m| m.device == dock.monitor)
+            .map(|m| m.work)
+        else {
+            return;
+        };
+        let spec = dock_menu::Spec {
+            dock: hwnd,
+            slot,
+            identity: item.identity.clone(),
+            items: dock_menu::items(item, &self.pins),
+            dock_bounds: dock.bounds,
+            work,
+            dpi: dock.dpi,
+            app: crate::pins::display_name(&item.identity),
+            return_to: dock::foreground_key(),
+        };
+        match dock_menu::Menu::open(&self.graphics, self.palette, spec) {
+            Ok(menu) if take_foreground(menu.hwnd()) => self.menu = Some(menu),
+            Ok(_) => eprintln!("Dock menu: Windows kept another app in front; not opened"),
+            Err(error) => eprintln!("Dock menu: {error}"),
+        }
+    }
+    /// Ends the open menu, giving the foreground back to the window it came from if the menu still holds it.
+    fn close_menu(&mut self) {
+        if let Some(menu) = self.menu.take() {
+            dock::restore_foreground(menu.hwnd(), menu.return_to);
+        }
+    }
+    /// Input for the open menu. Returns true when the message is consumed.
+    fn menu_message(&mut self, message: &MSG) -> bool {
+        let Some(menu) = &mut self.menu else {
+            return false;
+        };
+        let own = message.hwnd == menu.hwnd();
+        match menu.message(message) {
+            Event::Ignored => false,
+            Event::Consumed => true,
+            Event::Dismiss => {
+                self.close_menu();
+                own // a press on another ROQA window still reaches it
+            }
+            Event::Choose(item) => {
+                self.run_menu(item);
+                true
+            }
+        }
+    }
+    /// Does the chosen action on the slot's app, if the slot still holds it. A new instance leaves the
+    /// foreground to the app it starts; the rest return it to the window the menu came from.
+    fn run_menu(&mut self, item: Item) {
+        let Some(menu) = self.menu.take() else {
+            return;
+        };
+        if item != Item::NewInstance {
+            dock::restore_foreground(menu.hwnd(), menu.return_to);
+        }
+        let target = self
+            .dock_items
+            .get(menu.slot - 1)
+            .filter(|target| target.identity == menu.identity)
+            .cloned();
+        let Some(target) = target else {
+            return;
+        };
+        match item {
+            Item::Close => dock::close(&target.windows),
+            Item::NewInstance => {
+                if let Some(launch) = crate::pins::launch_target(&target.identity) {
+                    dock::launch(&launch);
+                }
+            }
+            Item::Pin | Item::Unpin => self.toggle_pin(Some(menu.slot)),
+        }
+    }
+    /// Ends the open menu once it no longer describes the dock (its slot changed, or a full-screen app hid
+    /// the dock), and repaints it when its highlight moved. Nothing open costs one check.
+    fn refresh_menu(&mut self) {
+        let Some(menu) = &mut self.menu else {
+            return;
+        };
+        let shown = self
+            .surfaces
+            .iter()
+            .any(|s| s.window.0 == menu.dock() && s.visible);
+        let now = self.dock_items.get(menu.slot - 1);
+        let current = shown && dock_menu::describes(&menu.identity, menu.items(), now, &self.pins);
+        if !current || menu.paint().is_err() {
+            self.close_menu();
+        }
     }
     fn change_pins(&mut self, edit: impl FnOnce(&mut Pins) -> bool) {
         let now = Instant::now();
@@ -2355,6 +2472,7 @@ impl Desktop {
             let palette = crate::theme::system_palette(self.settings.theme, self.text.accent());
             if palette != self.palette {
                 self.palette = palette;
+                self.menu = None;
                 self.edges.release(); // an open pill takes the new colours when it next shows
                 self.surfaces.clear();
                 for kind in self.shown.clone() {
@@ -2401,6 +2519,7 @@ impl Desktop {
             .min(self.refresh_power())
             .min(self.refresh_preview())
             .min(self.refresh_edges());
+        self.refresh_menu();
         self.paint_requested()?;
         if let Some(picker) = &mut self.picker {
             picker.synchronize(model)?;
@@ -2431,6 +2550,7 @@ impl Desktop {
     /// Releases every old-device surface now and schedules the rebuild.
     fn lose_graphics(&mut self) {
         self.surfaces.clear();
+        self.menu = None;
         self.edges.release();
         self.rebuild.lose(Instant::now());
     }
@@ -2442,6 +2562,7 @@ impl Desktop {
         }
         // Includes any surface a topology change placed on the lost device meanwhile.
         self.surfaces.clear();
+        self.menu = None;
         self.edges.release();
         // The old device is released by this assignment, after its surfaces and before any new one.
         let rebuilt = Graphics::create().and_then(|graphics| {
@@ -2662,6 +2783,9 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             if catalog.message(&message)? {
                 continue;
             }
+            if desktop.menu_message(&message) {
+                continue;
+            }
             if matches!(
                 message.message,
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | dock_uia::INVOKE
@@ -2682,7 +2806,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 && let Some(dock) = desktop.dock_at(message.hwnd)
             {
                 let slot = dock.dock_slot(message.lParam, desktop.dock_slots());
-                desktop.toggle_pin(slot);
+                desktop.open_menu(message.hwnd, slot);
                 continue;
             }
             if message.message == WM_RBUTTONUP

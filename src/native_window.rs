@@ -85,10 +85,30 @@ impl NativeWindow {
         Self::create_hidden(bounds, title)
     }
     pub fn create_hidden(bounds: Bounds, title: windows::core::PCWSTR) -> Result<Self> {
+        Self::create_styled(
+            WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
+            bounds,
+            title,
+        )
+    }
+    /// A hidden composited popup that can take the foreground (for the dock menu's keyboard).
+    pub fn create_menu(bounds: Bounds, title: &str) -> Result<Self> {
+        let title = HSTRING::from(title);
+        Self::create_styled(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
+            bounds,
+            windows::core::PCWSTR(title.as_ptr()),
+        )
+    }
+    fn create_styled(
+        style: WINDOW_EX_STYLE,
+        bounds: Bounds,
+        title: windows::core::PCWSTR,
+    ) -> Result<Self> {
         // SAFETY: registered class; no retained user pointers; validated geometry and current module.
         unsafe {
             let hwnd = CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
+                style,
                 CLASS,
                 title,
                 WS_POPUP,

@@ -10,7 +10,7 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
 - [x] B2: DWM hover thumbnails on dock slots, plus a virtual-desktop filter ([packet](features-b2.md)).
       (`IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop`).
 - [x] B2.5: volume (right edge) and brightness (left edge) hover sliders per monitor; the volume icon switches output device ([packet](features-edge-sliders.md)).
-- [ ] B3: a non-modal dock context menu (close window, new instance, pin/unpin).
+- [x] B3: a non-modal dock context menu (close window, new instance, pin/unpin) ([packet](features-b3.md)).
 - [ ] B4: picker as command palette (installed apps from Start menu shortcuts, inline math).
 - [ ] B5: privacy mic/camera indicator.
 - [ ] B6: audio output device list (switching opens Sound settings).

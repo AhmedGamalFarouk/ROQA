@@ -938,3 +938,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Brightness:** DDC/CI on one lazy worker, writes about 5/s coalesced; unsupported monitors show a disabled pill. Laptop panels (WMI) and arrow keys deferred.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 210 tests, locked release); 902,144 B, ratchet tripped (+9.85%), baseline raised to 902144; SHA `77D2E35BDB294030E3B3B03E37113B9753BE1BA4A4BB554D93F527D130232DA3`.
 - **NOT RUN:** real hover/hit-testing, DDC, device switch, DPI placement, UIA read; reviews paused (REVIEW NOT RUN).
+
+## Features B3: dock context menu (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/features-b3`; [packet](features-b3.md), [queue](features-queue.md). No native/GUI run.
+- **Menu:** right-click on a dock slot opens a non-modal owned popup (no `TrackPopupMenu`): New instance (`launch_target`), Close window (`WM_CLOSE` to the group; none for a pinned-only slot), Pin/Unpin (replaces the S4 right-click toggle). Escape, outside press, focus loss, slot change and fullscreen dismiss it; Up/Down/Tab/Enter/Space work; UIA Menu with invokable MenuItems. Closed: `None`, one check per pass.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 214 tests, locked release); 921,600 B, ratchet tripped (+2.16%), baseline raised to 921600; SHA `87A0F72197569EF17299C24CDA54C56FF0B070CF90FD5E7524662E8A8B3B68F7`.
+- **NOT RUN:** real drawing, foreground take/restore, keyboard, dismissal, `WM_CLOSE`, launch, UIA read; reviews paused (REVIEW NOT RUN).

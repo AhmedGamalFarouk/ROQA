@@ -160,10 +160,7 @@ impl Popup {
         };
         // SAFETY: the id was just registered and is released only by `Drop`.
         let size = unsafe { DwmQueryThumbnailSourceSize(thumbnail) }?;
-        let slot_x = dock.x
-            + dock::px(dock::PAD_DIPS, dpi)
-            + dock::px(dock::SLOT_DIPS, dpi) * slot as i32
-            + dock::px(dock::SLOT_DIPS, dpi) / 2;
+        let slot_x = dock::slot_center_x(dock.x, slot, dpi);
         let bounds = popup_bounds((size.cx, size.cy), slot_x, dock, work, dpi)
             .ok_or_else(|| Error::new(E_FAIL, "No room for a preview."))?;
         popup.window.resize(bounds)?;

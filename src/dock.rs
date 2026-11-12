@@ -1,13 +1,14 @@
 use crate::pins::{self, Pins};
 use crate::window_model::{Identity, WindowKey, WindowModel};
 use windows::Win32::{
-    Foundation::HWND,
+    Foundation::{HWND, LPARAM, WPARAM},
     System::Threading::GetCurrentProcessId,
     UI::{
         Shell::{SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, ShellExecuteExW},
         WindowsAndMessaging::{
             GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-            SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindowAsync,
+            PostMessageW, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow,
+            ShowWindowAsync, WM_CLOSE,
         },
     },
 };
@@ -131,6 +132,11 @@ pub fn px(dips: i32, dpi: u32) -> i32 {
 }
 
 /// Slots that fit inside the realized window width; the rest stay reachable through the picker.
+/// The centre of dock slot `slot` (slot 0 is the picker) for a dock whose left edge is `dock_x`.
+pub fn slot_center_x(dock_x: i32, slot: usize, dpi: u32) -> i32 {
+    dock_x + px(PAD_DIPS, dpi) + px(SLOT_DIPS, dpi) * slot as i32 + px(SLOT_DIPS, dpi) / 2
+}
+
 pub fn visible_slots(width_px: i32, dpi: u32, slots: usize) -> usize {
     let fit = (width_px - px(PAD_DIPS, dpi) * 2) / px(SLOT_DIPS, dpi).max(1);
     slots.min(fit.max(0) as usize)
@@ -261,6 +267,21 @@ pub fn launch_with(target: &str, parameters: Option<&str>) -> bool {
     };
     // SAFETY: `info`, `file` and `parameters` outlive the call; no process handle is requested, so nothing is left to close.
     unsafe { ShellExecuteExW(&mut info).is_ok() }
+}
+
+/// Asks each window to close (`WM_CLOSE`, posted: an app may refuse or prompt, and ROQA never waits).
+pub fn close(windows: &[WindowKey]) {
+    for key in windows.iter().filter(|&&key| valid_target(key)) {
+        // SAFETY: a scalar post to a revalidated foreign HWND.
+        let _ = unsafe {
+            PostMessageW(
+                Some(HWND(key.handle as *mut _)),
+                WM_CLOSE,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        };
+    }
 }
 
 /// Returns false when the target is gone or Windows refused foreground; never forces focus.
