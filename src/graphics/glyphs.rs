@@ -106,6 +106,7 @@ impl Glyph {
             Tab::Prayer => Glyph::Prayer,
             Tab::Timer => Glyph::Timer,
             Tab::Shelf => Glyph::Shelf,
+            Tab::Limits => Glyph::Limits,
         }
     }
     pub(super) fn weather(icon: Icon) -> Glyph {

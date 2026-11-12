@@ -1030,10 +1030,17 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Done:** cell layout and hit-testing in `dock.rs`, `SendInput` only on click, minimized popup via `dock_menu` from the catalog (no new EnumWindows, no timers), UIA names. Tray overflow impossible (no public API).
 - **Size:** first candidate 1,157,120 B tripped the ratchet; trimmed (shared `sort::by` insertion sort replaces extra `sort_by` instantiations, layout fns not inlined). Baseline NOT raised.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 309 tests, locked release); 1,134,080 B, ratchet within 2% (limit 1,145,272); SHA `9096BC7BEC7A8A62EA2558C104F72521A0B4F4D72C97E9855CEDE86181BBC59A`.
-- **NOT RUN:** drawing, real clicks/key injection, tooltips, focus ring, Narrator/keyboard, RTL on Arabic UI, multi-monitor, Settings fit; reviews paused (REVIEW NOT RUN). Not landed.
+- **NOT RUN:** drawing, real clicks/key injection, tooltips, focus ring, Narrator/keyboard, RTL on Arabic UI, multi-monitor, Settings fit; reviews paused (REVIEW NOT RUN). Landed on main a9dd70a.
 
 ## I1 shared line icons (2026-11-12 Africa/Cairo)
 
 - **Scope:** branch `feat/i1-glass`; [packet](features-icons-glass.md). Direction B cached D2D registry, active wash, pixel snapping; old glyph art removed. Limits gauge ready for U1.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 314 tests, locked release); 1,135,616 B, unchanged size ratchet; SHA `DA4D8F913DE461410844CCDC25853A073C344EFC5BADEFFACC2ECE7E575123FA`.
 - **NOT RUN:** native visual/DPI/input checks (no desktop authorization); G1 implementation follows separately.
+
+## U1 Limits tab (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/u1-limits` on main 097f805; [packet](features-limits.md). Claude/Codex/Antigravity percentages and reset times; tab and command permissions OFF by default; no timers or watchers. No native/GUI run.
+- **Done:** I1 glyph; child start is CreateProcessW suspended, kill-on-close Job assigned, then resumed, fail closed; no `std::process`; bounded polled pipe reads, no reader thread; Settings scrolls. No `opt-level` change.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 334 tests, locked release); 1,218,048 B, ratchet tripped (+7.2% over the 1,135,616 on main), baseline raised to 1218048, approved by Ahmed 2026-11-12; SHA `1ADF53E8DDE62F4D091E6AECF35CC5D170E43818593278C5847AD6B0A7C24AE8`.
+- **NOT RUN:** drawing, input, UIA read, real agy/codex/Claude files, Settings scroll, Settings fit; reviews paused (REVIEW NOT RUN).

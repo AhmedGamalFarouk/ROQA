@@ -301,6 +301,7 @@ pub(super) fn page(
         }
         Tab::Weather => weather_page(context, scene, body, scale, reveal, p),
         Tab::Prayer => prayer_page(context, scene, body, scale, reveal, p),
+        Tab::Limits => limits_page(context, scene, body, scale, reveal, p),
         _ => Ok(()),
     }
 }
@@ -522,6 +523,161 @@ fn prayer_page(
         at(16.0, row, width, 12.0),
         ink(0.5),
     )
+}
+
+/// The Limits page: a Refresh button beside the title and one line per tool: name, then for each window a thin
+/// bar, `NN%` and its reset time, then "as of" (or the age when stale). A window that has reset says so, a
+/// hidden one draws nothing, and a tool without a reading says why. Stale rows are dimmed and say so in text.
+fn limits_page(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    scale: f32,
+    reveal: f32,
+    p: &Palette,
+) -> Result<()> {
+    use crate::limits::Line;
+    let Some(view) = scene.limits else {
+        return Ok(());
+    };
+    let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha * reveal));
+    let at = |x: f32, y: f32, w: f32, h: f32| D2D_RECT_F {
+        left: body.left + x * scale,
+        top: body.top + y * scale,
+        right: body.left + (x + w) * scale,
+        bottom: body.top + (y + h) * scale,
+    };
+    let font = |size: f32, weight, align| Font {
+        family: TEXT_FONT,
+        size: size * scale,
+        weight,
+        designator: 1.0,
+        align,
+    };
+    let (lead, trail) = (
+        DWRITE_TEXT_ALIGNMENT_LEADING,
+        DWRITE_TEXT_ALIGNMENT_TRAILING,
+    );
+    let normal = DWRITE_FONT_WEIGHT_NORMAL;
+    // The Refresh button: an outlined label, with the focus ring when the keyboard is on it.
+    let button = layout::refresh(scene.dpi);
+    let square = D2D_RECT_F {
+        left: body.left + button.x as f32,
+        top: body.top + button.y as f32,
+        right: body.left + (button.x + button.width) as f32,
+        bottom: body.top + (button.y + button.height) as f32,
+    };
+    let focused = scene.focus == Some(crate::notch_uia::REFRESH);
+    // SAFETY: a brush and an outline on the frame's own device context.
+    unsafe {
+        let brush = context.CreateSolidColorBrush(
+            &if focused {
+                with_alpha(p.accent, p.ink_alpha(reveal))
+            } else {
+                ink(0.3)
+            },
+            None,
+        )?;
+        context.DrawRoundedRectangle(
+            &rounded(square, 6.0 * scale),
+            &brush,
+            (if focused { FOCUS_STROKE } else { 1.0 }) * scale,
+            None,
+        );
+    }
+    draw_text(
+        context,
+        if view.refreshing {
+            "Refreshing..."
+        } else {
+            "Refresh"
+        },
+        &font(10.0, normal, DWRITE_TEXT_ALIGNMENT_CENTER),
+        square,
+        ink(0.8),
+    )?;
+    let accent = |alpha: f32| with_alpha(p.accent, p.ink_alpha(alpha * reveal));
+    for (label, x) in [("5h used", 70.0), ("Weekly used", 152.0)] {
+        draw_text(
+            context,
+            label,
+            &font(7.5, normal, lead),
+            at(x, 28.0, 76.0, 10.0),
+            ink(0.6),
+        )?;
+    }
+    for (index, row) in view.rows.iter().enumerate() {
+        let y = 38.0 + 13.0 * index as f32;
+        let dim = if row.stale { 0.5 } else { 1.0 };
+        draw_text(
+            context,
+            row.name,
+            &font(9.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, lead),
+            at(16.0, y, 52.0, 14.0),
+            ink(dim),
+        )?;
+        if let Some(why) = row.why {
+            draw_text(
+                context,
+                why,
+                &font(10.0, normal, lead),
+                at(70.0, y, 216.0, 14.0),
+                ink(0.6),
+            )?;
+            continue;
+        }
+        // Each window: bar (20), percent (24), reset time; the weekly one has the day too.
+        for (line, x, reset_width) in [(&row.h5, 70.0, 30.0), (&row.wk, 152.0, 42.0)] {
+            let (Line::Used { reset, .. } | Line::Reset { reset }) = line else {
+                continue;
+            };
+            let after = x + 49.0;
+            match line {
+                Line::Used { pct, .. } => {
+                    // SAFETY: brushes and fills on the frame's own device context.
+                    unsafe {
+                        let track = context.CreateSolidColorBrush(&ink(0.18 * dim), None)?;
+                        let fill = context.CreateSolidColorBrush(&accent(dim), None)?;
+                        let bar = at(x, y + 5.0, 20.0, 4.0);
+                        context.FillRoundedRectangle(&rounded(bar, 2.0 * scale), &track);
+                        let mut part = bar;
+                        part.right = bar.left + (bar.right - bar.left) * f32::from(*pct) / 100.0;
+                        context.FillRoundedRectangle(&rounded(part, 2.0 * scale), &fill);
+                    }
+                    draw_text(
+                        context,
+                        &format!("{pct}%"),
+                        &font(9.0, normal, trail),
+                        at(x + 21.0, y, 26.0, 14.0),
+                        ink(0.9 * dim),
+                    )?;
+                }
+                Line::Reset { .. } => draw_text(
+                    context,
+                    "reset",
+                    &font(9.0, normal, lead),
+                    at(x, y, 46.0, 14.0),
+                    ink(0.7 * dim),
+                )?,
+                Line::Hidden => {}
+            }
+            draw_text(
+                context,
+                reset,
+                &font(9.0, normal, lead),
+                at(after, y, reset_width, 14.0),
+                ink(0.55 * dim),
+            )?;
+        }
+        draw_text(
+            context,
+            &row.as_of,
+            &font(7.0, normal, trail),
+            at(244.0, y, 42.0, 14.0),
+            ink(0.45),
+        )?;
+    }
+    Ok(())
 }
 
 /// Where the eye pair is centred in the pill, in DIPs from the body's left: the middle of the media pill's

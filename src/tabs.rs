@@ -12,19 +12,24 @@ pub enum Tab {
     Prayer,
     Timer,
     Shelf,
+    /// Plan-limit percentages for Claude, Codex and Antigravity; off until the user switches it on.
+    Limits,
 }
 
 /// One user switch per tab, in `Tab::ALL` order.
-pub type Flags = [bool; 5];
+pub type Flags = [bool; 6];
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Tab::Media,
         Tab::Weather,
         Tab::Prayer,
         Tab::Timer,
         Tab::Shelf,
+        Tab::Limits,
     ];
+    /// Every tab is on by default except Limits, which reads other tools' files and runs nothing until asked.
+    pub const DEFAULT: Flags = [true, true, true, true, true, false];
 
     /// Every tab ships; a tab is hidden only by its Settings switch.
     pub fn available(self) -> bool {
@@ -34,11 +39,11 @@ impl Tab {
         self as usize
     }
     pub fn name(self) -> &'static str {
-        ["Media", "Weather", "Prayer", "Timer", "Shelf"][self.index()]
+        ["Media", "Weather", "Prayer", "Timer", "Shelf", "Limits"][self.index()]
     }
     /// The store key suffix: `tab<key>=0|1`.
     pub fn key(self) -> &'static str {
-        ["media", "weather", "prayer", "timer", "shelf"][self.index()]
+        ["media", "weather", "prayer", "timer", "shelf", "limits"][self.index()]
     }
     pub fn from_key(key: &str) -> Option<Tab> {
         Tab::ALL.into_iter().find(|tab| tab.key() == key)
@@ -48,7 +53,7 @@ impl Tab {
 /// The tabs the bar shows, in order: available and switched on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Visible {
-    tabs: [Tab; 5],
+    tabs: [Tab; 6],
     len: usize,
 }
 
@@ -187,11 +192,11 @@ mod tests {
 
     #[test]
     fn weather_and_prayer_switch_independently() {
-        let mut flags = [true; 5];
+        let mut flags = [true; 6];
         flags[Tab::Prayer.index()] = false;
         let tabs = Tabs::new(flags, Tab::Media);
         assert!(tabs.on(Tab::Weather) && !tabs.on(Tab::Prayer));
-        flags = [true; 5];
+        flags = [true; 6];
         flags[Tab::Weather.index()] = false;
         let tabs = Tabs::new(flags, Tab::Media);
         assert!(tabs.on(Tab::Prayer) && !tabs.on(Tab::Weather));
@@ -199,7 +204,7 @@ mod tests {
 
     #[test]
     fn tabs_keep_their_order_and_every_tab_ships() {
-        let all = Visible::new([true; 5]);
+        let all = Visible::new([true; 6]);
         assert_eq!(
             all.as_slice(),
             [
@@ -207,12 +212,13 @@ mod tests {
                 Tab::Weather,
                 Tab::Prayer,
                 Tab::Timer,
-                Tab::Shelf
+                Tab::Shelf,
+                Tab::Limits
             ]
         );
         assert!(Tab::Weather.available() && Tab::Prayer.available());
         assert_eq!(
-            Visible::new([false, true, true, true, true]).as_slice(),
+            Visible::new([false, true, true, true, true, false]).as_slice(),
             [Tab::Weather, Tab::Prayer, Tab::Timer, Tab::Shelf]
         );
         assert_eq!(all.position(Tab::Shelf), Some(4));
@@ -225,16 +231,16 @@ mod tests {
 
     #[test]
     fn the_handle_needs_two_tabs() {
-        assert!(Visible::new([true; 5]).handle());
-        assert!(Visible::new([true, true, false, false, false]).handle());
-        assert!(!Visible::new([false; 5]).handle());
+        assert!(Visible::new([true; 6]).handle());
+        assert!(Visible::new([true, true, false, false, false, false]).handle());
+        assert!(!Visible::new([false; 6]).handle());
         // Prayer counts like any other tab.
-        assert!(Visible::new([true, false, true, false, false]).handle());
+        assert!(Visible::new([true, false, true, false, false, false]).handle());
     }
 
     #[test]
     fn the_live_tab_wins_then_the_last_used_one() {
-        let visible = Visible::new([true; 5]);
+        let visible = Visible::new([true; 6]);
         assert_eq!(pick(&visible, None, true, Tab::Shelf), Some(Tab::Media));
         assert_eq!(pick(&visible, None, false, Tab::Shelf), Some(Tab::Shelf));
         // An explicit pick during this open beats both.
@@ -243,9 +249,9 @@ mod tests {
             Some(Tab::Timer)
         );
         // A hidden tab is never shown: fall back.
-        let no_media = Visible::new([false, true, true, true, true]);
+        let no_media = Visible::new([false, true, true, true, true, false]);
         assert_eq!(pick(&no_media, None, true, Tab::Timer), Some(Tab::Timer));
-        let no_prayer = Visible::new([false, true, false, true, true]);
+        let no_prayer = Visible::new([false, true, false, true, true, false]);
         assert_eq!(
             pick(&no_prayer, None, false, Tab::Prayer),
             Some(Tab::Weather)
@@ -255,14 +261,14 @@ mod tests {
             Some(Tab::Shelf)
         );
         assert_eq!(
-            pick(&Visible::new([false; 5]), None, true, Tab::Media),
+            pick(&Visible::new([false; 6]), None, true, Tab::Media),
             None
         );
     }
 
     #[test]
     fn selecting_remembers_the_tab_and_reports_a_change() {
-        let mut tabs = Tabs::new([true; 5], Tab::Media);
+        let mut tabs = Tabs::new([true; 6], Tab::Media);
         assert_eq!(tabs.active(false), Some(Tab::Media));
         assert!(tabs.select(Tab::Shelf, false));
         assert_eq!(
@@ -286,25 +292,29 @@ mod tests {
 
     #[test]
     fn stepping_wraps_over_the_shown_tabs_only() {
-        let visible = Visible::new([true; 5]);
+        // Limits is off by default: the wrap closes at Shelf. With it on, Limits is last.
+        let on = Visible::new([true; 6]);
+        assert_eq!(on.step(Tab::Shelf, true), Tab::Limits);
+        assert_eq!(on.step(Tab::Limits, true), Tab::Media);
+        let visible = Visible::new(Tab::DEFAULT);
         assert_eq!(visible.step(Tab::Media, true), Tab::Weather);
         assert_eq!(visible.step(Tab::Weather, true), Tab::Prayer);
         assert_eq!(visible.step(Tab::Prayer, true), Tab::Timer);
         assert_eq!(visible.step(Tab::Shelf, true), Tab::Media);
         assert_eq!(visible.step(Tab::Media, false), Tab::Shelf);
-        let one = Visible::new([true, false, false, false, false]);
+        let one = Visible::new([true, false, false, false, false, false]);
         assert_eq!(one.step(Tab::Media, true), Tab::Media);
-        let no_prayer = Visible::new([true, true, false, true, true]);
+        let no_prayer = Visible::new([true, true, false, true, true, false]);
         assert_eq!(no_prayer.step(Tab::Prayer, true), Tab::Prayer, "not shown");
     }
 
     #[test]
     fn a_file_dropped_on_the_notch_selects_shelf_unless_the_tab_is_off() {
-        let mut tabs = Tabs::new([true; 5], Tab::Media);
+        let mut tabs = Tabs::new([true; 6], Tab::Media);
         assert!(tabs.select(Tab::Shelf, true), "was Media, now Shelf");
         assert_eq!(tabs.active(true), Some(Tab::Shelf));
         assert!(!tabs.select(Tab::Shelf, true), "already there");
-        let mut flags: Flags = [true; 5];
+        let mut flags: Flags = [true; 6];
         flags[Tab::ALL.iter().position(|&t| t == Tab::Shelf).unwrap()] = false;
         let mut off = Tabs::new(flags, Tab::Media);
         assert!(

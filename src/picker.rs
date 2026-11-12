@@ -21,6 +21,7 @@ use windows::{
 
 pub(crate) const ACTION: u32 = WM_APP + 40;
 pub(crate) const RELAYOUT: u32 = WM_APP + 41;
+pub(crate) const SCROLL: u32 = WM_APP + 64;
 const FILTER: usize = 100;
 const LIST: usize = 101;
 const STATUS: usize = 102;
@@ -494,6 +495,15 @@ unsafe extern "system" fn dialog_proc(
         WM_COMMAND => (ACTION, wparam),
         WM_CLOSE => (ACTION, WPARAM(CLOSE)),
         WM_DPICHANGED | WM_SETTINGCHANGE => (RELAYOUT, WPARAM(0)),
+        WM_VSCROLL => (SCROLL, wparam),
+        WM_MOUSEWHEEL => (
+            SCROLL,
+            WPARAM(if (wparam.0 >> 16) as i16 > 0 {
+                SB_LINEUP.0 as usize
+            } else {
+                SB_LINEDOWN.0 as usize
+            }),
+        ),
         _ => return 0,
     };
     // SAFETY: no Rust pointers/callback state. All mutation happens later in the outer loop, never reentrantly.

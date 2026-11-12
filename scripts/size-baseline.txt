@@ -1,3 +1,3 @@
-1122816
-raise-reason: Prayer tab: engine wiring, page, MCI sound, Settings controls (P1 batch)
-approved-by: Chief (asked in this session) 2026-11-12
+1218048
+raise-reason: U1 Limits tab (Claude/Codex/Antigravity plan limits, Job-object process runner, Settings scroll)
+approved-by: Ahmed 2026-11-12

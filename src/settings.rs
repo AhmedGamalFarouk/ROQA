@@ -57,6 +57,11 @@ pub struct Settings {
     pub prayer_method: Method,
     pub prayer_lead: u32,
     pub prayer_sound: String,
+    /// Limits tab: may ROQA run `codex app-server` on Refresh and `agy` for Antigravity (both off until the
+    /// user says so), and which Antigravity group shows (0 Gemini, 1 Claude and GPT).
+    pub limits_codex: bool,
+    pub limits_agy: bool,
+    pub limits_group: u8,
 }
 
 impl Default for Settings {
@@ -75,7 +80,7 @@ impl Default for Settings {
             // Off until a native run proves the 2 px strips leave edge scrollbars alone; a stored value wins.
             edge_volume: false,
             edge_brightness: false,
-            tabs: [true; 5],
+            tabs: Tab::DEFAULT,
             eyes: true,
             city: String::new(),
             detect: false,
@@ -84,6 +89,9 @@ impl Default for Settings {
             prayer_method: Method::Egyptian,
             prayer_lead: 0,
             prayer_sound: String::new(),
+            limits_codex: false,
+            limits_agy: false,
+            limits_group: 0,
         }
     }
 }
@@ -121,6 +129,7 @@ impl Settings {
         if !LEADS.contains(&self.prayer_lead) {
             self.prayer_lead = 0;
         }
+        self.limits_group = self.limits_group.min(1);
         self.prayer_sound = self.prayer_sound.trim().trim_matches('"').trim().to_owned();
         if self.prayer_sound.chars().count() > MAX_PATH
             || self.prayer_sound.contains(char::is_control)
@@ -170,6 +179,9 @@ impl Settings {
             "pmethod" => Method::from_key(value)
                 .map(|v| self.prayer_method = v)
                 .is_some(),
+            "limcodex" => flag(value).map(|v| self.limits_codex = v).is_some(),
+            "limagy" => flag(value).map(|v| self.limits_agy = v).is_some(),
+            "limgroup" => value.parse().map(|v| self.limits_group = v).is_ok(),
             "plead" => value.parse().map(|v| self.prayer_lead = v).is_ok(),
             "psound" if !value.is_empty() => {
                 self.prayer_sound = value.to_owned();
@@ -238,6 +250,15 @@ plead={}
             u8::from(self.prayer_remind),
             self.prayer_method.key(),
             self.prayer_lead
+        ));
+        out.push_str(&format!(
+            "limcodex={}
+limagy={}
+limgroup={}
+",
+            u8::from(self.limits_codex),
+            u8::from(self.limits_agy),
+            self.limits_group
         ));
         if !self.prayer_sound.is_empty() && one_line(&&self.prayer_sound) {
             out.push_str(&format!(
@@ -347,7 +368,7 @@ mod tests {
             desktop_only: true,
             edge_volume: false,
             edge_brightness: false,
-            tabs: [true; 5],
+            tabs: Tab::DEFAULT,
             eyes: true,
             city: "  Ca\niro \u{7}".into(),
             detect: true,
@@ -356,6 +377,9 @@ mod tests {
             prayer_method: Method::Isna,
             prayer_lead: 7,
             prayer_sound: r#"  "C:\a\takbeer.mp3"  "#.into(),
+            limits_codex: true,
+            limits_agy: true,
+            limits_group: 9,
         }
         .clamped();
         assert_eq!(
@@ -366,6 +390,7 @@ mod tests {
             ),
             (0, Method::Isna, r"C:\a\takbeer.mp3")
         );
+        assert_eq!(wild.limits_group, 1);
         assert!(!wild.dock && wild.notch, "one surface kind always stays on");
         assert_eq!(wild.off_monitors, ["a", "b"]);
         assert_eq!(wild.shelf_cap, shelf::MAX);
@@ -528,7 +553,10 @@ mod tests {
             dock_buttons: Buttons::of([false, true, true, false, true]),
             desktop_only: true,
             edge_volume: true,
-            tabs: [false, true, false, true, false],
+            tabs: [false, true, false, true, false, true],
+            limits_codex: true,
+            limits_agy: true,
+            limits_group: 1,
             eyes: false,
             city: "Washington, D.C.".into(),
             detect: true,
@@ -595,11 +623,17 @@ mod tests {
     #[test]
     fn tabs_and_eyes_default_on_round_trip_and_ignore_unknown_tabs() {
         let defaults = Settings::default();
-        assert!(defaults.tabs.iter().all(|&on| on) && defaults.eyes);
+        // Limits is the one tab that starts off; permission to run other tools starts off too.
+        assert!(
+            defaults.tabs[..5].iter().all(|&on| on)
+                && !defaults.tabs[Tab::Limits.index()]
+                && defaults.eyes
+        );
+        assert!(!defaults.limits_codex && !defaults.limits_agy);
         // Each switch is its own line, so one tab can be off without touching the others.
         let mut off = Settings::default();
         assert!(off.set("tabtimer", "0") && off.set("tabweather", "0"));
-        assert_eq!(off.tabs, [true, false, true, false, true]);
+        assert_eq!(off.tabs, [true, false, true, false, true, false]);
         let mut text = String::new();
         off.write_lines(&mut text);
         for line in [
@@ -608,6 +642,7 @@ mod tests {
             "tabprayer=1",
             "tabtimer=0",
             "tabshelf=1",
+            "tablimits=0",
             "eyes=1",
         ] {
             assert!(text.lines().any(|l| l == line), "{line}");

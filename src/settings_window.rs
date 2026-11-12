@@ -9,7 +9,7 @@ use crate::{
     layout::Bounds,
     layout::DockStyle,
     native_window,
-    picker::{ACTION, CLOSE, DIALOG_STYLE, RELAYOUT, control, empty_dialog, wide},
+    picker::{ACTION, CLOSE, DIALOG_STYLE, RELAYOUT, SCROLL, control, empty_dialog, wide},
     picker_font::PickerFont,
     prayer::Method,
     prayer_os,
@@ -23,11 +23,12 @@ use crate::{
 };
 use windows::{
     Win32::{
-        Foundation::{E_FAIL, HWND, LPARAM, RECT, WPARAM},
+        Foundation::{E_FAIL, HWND, LPARAM, POINT, RECT, WPARAM},
+        Graphics::Gdi::ClientToScreen,
         UI::{
             Controls::*,
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow},
-            Input::KeyboardAndMouse::SetFocus,
+            Input::KeyboardAndMouse::{GetFocus, SetFocus},
             WindowsAndMessaging::*,
         },
     },
@@ -45,7 +46,7 @@ const EDGE_VOLUME: usize = 112;
 const EDGE_BRIGHTNESS: usize = 113;
 /// One checkbox per notch tab (`Tab::ALL` order), then the mascot eyes.
 const TAB: usize = 150;
-const EYES: usize = TAB + 5;
+const EYES: usize = TAB + 6;
 /// The weather city, the device-location checkbox and the units list.
 const CITY: usize = 114;
 const DETECT: usize = 115;
@@ -60,6 +61,11 @@ const PSOUND: usize = 162;
 const PBROWSE: usize = 163;
 const PTEST: usize = 164;
 const PLEAD: usize = 165;
+/// The Limits tab: may ROQA run codex and agy, the Antigravity group list and the statusline snippet.
+const LIMCODEX: usize = 166;
+const LIMAGY: usize = 167;
+const LIMGROUP: usize = 168;
+const LIMSNIP: usize = 169;
 const SHELF: usize = 103;
 const THEME: usize = 110;
 const DIAGNOSTICS: usize = 104;
@@ -96,7 +102,7 @@ pub struct SettingsWindow {
     edge_volume: HWND,
     edge_brightness: HWND,
     /// "Media tab" and so on, in `Tab::ALL` order, and "Mascot eyes".
-    tabs: [HWND; 5],
+    tabs: [HWND; 6],
     eyes: HWND,
     city: HWND,
     detect: HWND,
@@ -114,6 +120,12 @@ pub struct SettingsWindow {
     ptest: HWND,
     /// Drop-down list of `LEADS`.
     plead: HWND,
+    limcodex: HWND,
+    limagy: HWND,
+    /// Drop-down list: the Antigravity group to show.
+    limgroup: HWND,
+    /// Read-only, selectable: the statusline command to paste into Claude Code's settings.
+    limsnip: HWND,
     /// The audio files found (and the chosen one if it is elsewhere), full paths.
     sounds: Vec<String>,
     sound_action: Option<SoundAction>,
@@ -129,6 +141,8 @@ pub struct SettingsWindow {
     others: Vec<HWND>,
     font: Option<PickerFont>,
     factor: f64,
+    scroll: i32,
+    scroll_max: i32,
     /// What the host last got; a change is a difference from this.
     current: Settings,
     change: Option<Settings>,
@@ -205,7 +219,7 @@ impl SettingsWindow {
             desktop: HWND::default(),
             edge_volume: HWND::default(),
             edge_brightness: HWND::default(),
-            tabs: [HWND::default(); 5],
+            tabs: [HWND::default(); 6],
             eyes: HWND::default(),
             city: HWND::default(),
             detect: HWND::default(),
@@ -218,6 +232,10 @@ impl SettingsWindow {
             pbrowse: HWND::default(),
             ptest: HWND::default(),
             plead: HWND::default(),
+            limcodex: HWND::default(),
+            limagy: HWND::default(),
+            limgroup: HWND::default(),
+            limsnip: HWND::default(),
             sounds: prayer_os::discover(),
             sound_action: None,
             theme: HWND::default(),
@@ -229,6 +247,8 @@ impl SettingsWindow {
             others: Vec::new(),
             font: None,
             factor,
+            scroll: 0,
+            scroll_max: 0,
             current: current.clone(),
             change: None,
             start: None,
@@ -408,6 +428,7 @@ impl SettingsWindow {
                 Tab::Prayer => "Prayer tab",
                 Tab::Timer => "Timer ta&b",
                 Tab::Shelf => "Shelf ta&b",
+                Tab::Limits => "Limits tab",
             };
             self.tabs[tab.index()] =
                 control(window, w!("Button"), name, TAB + tab.index(), check, flat)?;
@@ -554,6 +575,45 @@ impl SettingsWindow {
                 },
             );
         }
+        self.limcodex = control(
+            window,
+            w!("Button"),
+            "Run codex on Refresh",
+            LIMCODEX,
+            check,
+            flat,
+        )?;
+        self.limagy = control(
+            window,
+            w!("Button"),
+            "Run agy on Refresh",
+            LIMAGY,
+            check,
+            flat,
+        )?;
+        let group_label = label("Antigravity limits to show")?;
+        self.limgroup = control(
+            window,
+            w!("ComboBox"),
+            "Antigravity limits to show",
+            LIMGROUP,
+            combo,
+            flat,
+        )?;
+        for name in ["Gemini models", "Claude and GPT models"] {
+            add_row(self.limgroup, name);
+        }
+        let snippet_label =
+            label("Claude Code statusline command (optional, copy into settings.json)")?;
+        self.limsnip = control(
+            window,
+            w!("Edit"),
+            "",
+            LIMSNIP,
+            edit | ES_READONLY as u32,
+            WS_EX_CLIENTEDGE,
+        )?;
+        set_text(self.limsnip, crate::limits::SNIPPET)?;
         let diagnostics_label = label("Dia&gnostics report file (empty is off)")?;
         self.diagnostics = control(window, w!("Edit"), "", DIAGNOSTICS, edit, WS_EX_CLIENTEDGE)?;
         let timer_label = label("&Timer length (minutes, m:ss or h:mm:ss)")?;
@@ -606,6 +666,8 @@ impl SettingsWindow {
             lead_label,
             dock_label,
             buttons_label,
+            group_label,
+            snippet_label,
         ];
         // SAFETY: scalar limits on our own edits; Windows bounds what a user can type or paste.
         unsafe {
@@ -641,6 +703,10 @@ impl SettingsWindow {
             self.pbrowse,
             self.ptest,
             self.plead,
+            self.limcodex,
+            self.limagy,
+            self.limgroup,
+            self.limsnip,
         ];
         all.extend(self.tabs);
         all.extend(self.dock_buttons);
@@ -705,6 +771,9 @@ impl SettingsWindow {
             settings.diagnostics.as_deref().unwrap_or(""),
         );
         set_checked(self.prayer, settings.prayer_remind);
+        set_checked(self.limcodex, settings.limits_codex);
+        set_checked(self.limagy, settings.limits_agy);
+        select(self.limgroup, Some(usize::from(settings.limits_group)));
         select(
             self.pmethod,
             Method::ALL
@@ -802,6 +871,10 @@ impl SettingsWindow {
             .unwrap_or(next.dock_style);
         next.diagnostics = Some(text(self.diagnostics, MAX_PATH));
         next.prayer_remind = checked(self.prayer);
+        next.limits_codex = checked(self.limcodex);
+        next.limits_agy = checked(self.limagy);
+        next.limits_group =
+            chosen_row(self.limgroup).map_or(next.limits_group, |row| row.min(1) as u8);
         next.prayer_method = chosen_row(self.pmethod)
             .and_then(|i| Method::ALL.get(i).copied())
             .unwrap_or(next.prayer_method);
@@ -866,9 +939,11 @@ impl SettingsWindow {
                             SoundAction::Browse
                         });
                     }
-                    PMETHOD | PSOUND | PLEAD if notification == CBN_SELCHANGE => self.commit()?,
+                    PMETHOD | PSOUND | PLEAD | LIMGROUP if notification == CBN_SELCHANGE => {
+                        self.commit()?
+                    }
                     DOCK | NOTCH | SOUND | DESKTOP | EDGE_VOLUME | EDGE_BRIGHTNESS | DETECT
-                    | PRAYER
+                    | PRAYER | LIMCODEX | LIMAGY
                         if notification == BN_CLICKED =>
                     {
                         self.commit()?
@@ -904,6 +979,7 @@ impl SettingsWindow {
                 }
             }
             RELAYOUT => self.relayout()?,
+            SCROLL => self.scroll_message(message.wParam.0 & 0xffff)?,
             _ => return Ok(false),
         }
         Ok(true)
@@ -915,7 +991,71 @@ impl SettingsWindow {
 
     pub fn keyboard(&self, message: &MSG) -> bool {
         // SAFETY: no Rust state is exposed to the reentrant dialog procedure; it posts scalar actions only.
-        unsafe { IsDialogMessageW(self.window, message).as_bool() }
+        unsafe {
+            let handled = IsDialogMessageW(self.window, message).as_bool();
+            if handled {
+                let _ = PostMessageW(Some(self.window), SCROLL, WPARAM(9), LPARAM(0));
+            }
+            handled
+        }
+    }
+
+    fn scroll_message(&mut self, action: usize) -> Result<()> {
+        let mut scroll = SCROLLINFO {
+            cbSize: size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_ALL,
+            ..Default::default()
+        };
+        // SAFETY: queries and moves only this dialog's scroll bar and child windows, without callbacks into Rust state.
+        unsafe {
+            GetScrollInfo(self.window, SB_VERT, &mut scroll)?;
+            let next = match action as i32 {
+                0 => self.scroll - 48,
+                1 => self.scroll + 48,
+                2 => self.scroll - scroll.nPage as i32,
+                3 => self.scroll + scroll.nPage as i32,
+                4 | 5 => scroll.nTrackPos,
+                6 => 0,
+                7 => self.scroll_max,
+                9 => {
+                    let focus = GetFocus();
+                    if !IsChild(self.window, focus).as_bool() {
+                        return Ok(());
+                    }
+                    let mut origin = POINT::default();
+                    let mut rect = RECT::default();
+                    if !ClientToScreen(self.window, &mut origin).as_bool() {
+                        return Ok(());
+                    }
+                    GetWindowRect(focus, &mut rect)?;
+                    focus_scroll(
+                        self.scroll,
+                        rect.top - origin.y,
+                        rect.bottom - origin.y,
+                        scroll.nPage as i32,
+                    )
+                }
+                _ => return Ok(()),
+            }
+            .clamp(0, self.scroll_max);
+            if next != self.scroll {
+                ScrollWindowEx(
+                    self.window,
+                    0,
+                    self.scroll - next,
+                    None,
+                    None,
+                    None,
+                    None,
+                    SW_SCROLLCHILDREN | SW_INVALIDATE,
+                );
+                self.scroll = next;
+                scroll.fMask = SIF_POS;
+                scroll.nPos = next;
+                SetScrollInfo(self.window, SB_VERT, &scroll, true);
+            }
+        }
+        Ok(())
     }
 
     /// The Windows text size changed.
@@ -945,20 +1085,18 @@ impl SettingsWindow {
         self.position(scale, dpi, work)
     }
 
-    fn position(&self, scale: f64, dpi: u32, work: Bounds) -> Result<()> {
+    fn position(&mut self, scale: f64, dpi: u32, work: Bounds) -> Result<()> {
         let px = |value: f64| (value * scale).round() as i32;
         // Row heights in DIPs, top to bottom: one list gives both the window height and every control's top.
-        // dock, notch, monitors, sound, desktop, two edge sliders, then the tabs and mascot in two columns
-        let mut heights = vec![24.0; 6 + self.monitors.len() + 3];
-        let grid_rows = heights.len();
-        // theme, dock style, shelf, weather city, detect and units, diagnostics label and edit, timer label and row,
+        // dock, notch, monitors, sound, desktop, two edge sliders, then the tabs and mascot in two columns (four rows)
+        let mut heights = vec![24.0; 6 + self.monitors.len() + 4];
+        // theme, dock style, dock buttons (label, three rows), shelf, weather city, detect and units, prayer, sound,
+        // lead, limits (run boxes, group, snippet label and box), diagnostics label and edit, timer label and row,
         // status, pins, buttons
         heights.extend([
-            28.0, 28.0, 28.0, 28.0, 28.0, 28.0, 28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0,
-            28.0,
+            28.0, 28.0, 20.0, 24.0, 24.0, 24.0, 28.0, 28.0, 28.0, 28.0, 28.0, 28.0, 24.0, 28.0,
+            20.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0, 28.0,
         ]);
-        // the dock buttons: a label row, then three rows of two checkboxes, after the dock style row
-        heights.splice(grid_rows + 2..grid_rows + 2, [20.0, 24.0, 24.0, 24.0]);
         let tops: Vec<i32> = heights
             .iter()
             .scan(16.0, |y, height| {
@@ -977,13 +1115,15 @@ impl SettingsWindow {
         unsafe {
             AdjustWindowRectExForDpi(
                 &mut frame,
-                WINDOW_STYLE(DIALOG_STYLE),
+                WINDOW_STYLE(DIALOG_STYLE | WS_VSCROLL.0),
                 false,
                 WINDOW_EX_STYLE(0),
                 dpi,
             )?;
             let width = (frame.right - frame.left).min(work.width);
             let height = (frame.bottom - frame.top).min(work.height);
+            let style = GetWindowLongPtrW(self.window, GWL_STYLE);
+            SetWindowLongPtrW(self.window, GWL_STYLE, style | WS_VSCROLL.0 as isize);
             SetWindowPos(
                 self.window,
                 None,
@@ -991,16 +1131,30 @@ impl SettingsWindow {
                 work.y + (work.height - height) / 2,
                 width,
                 height,
-                SWP_NOZORDER | SWP_NOACTIVATE,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             )?;
             let mut client = RECT::default();
+            GetClientRect(self.window, &mut client)?;
+            let content = tops[last] + px(heights[last] + 16.0);
+            self.scroll_max = (content - client.bottom).max(0);
+            self.scroll = self.scroll.clamp(0, self.scroll_max);
+            let scroll = SCROLLINFO {
+                cbSize: size_of::<SCROLLINFO>() as u32,
+                fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+                nMin: 0,
+                nMax: content - 1,
+                nPage: client.bottom.max(0) as u32,
+                nPos: self.scroll,
+                ..Default::default()
+            };
+            SetScrollInfo(self.window, SB_VERT, &scroll, true);
             GetClientRect(self.window, &mut client)?;
             let margin = px(16.0);
             let inner = (client.right - margin * 2).max(1);
             let half = |units: f64| px(units).min(inner);
             let after = 3 + self.monitors.len(); // the desktop checkbox, then two more
-            let grid = after + 3; // three rows of two checkboxes: the five tabs, then the mascot
-            let end = grid + 2;
+            let grid = after + 3; // four rows of two checkboxes: the six tabs, then the mascot
+            let end = grid + 3;
             let mut places = vec![
                 (self.dock, margin, tops[0], inner, px(24.0)),
                 (self.notch, margin, tops[1], inner, px(24.0)),
@@ -1040,6 +1194,8 @@ impl SettingsWindow {
                 lead_label,
                 dock_label,
                 buttons_label,
+                group_label,
+                snippet_label,
             ] = self.others[..]
             else {
                 return Err(Error::new(E_FAIL, "Settings controls missing."));
@@ -1203,18 +1359,42 @@ impl SettingsWindow {
                     half(180.0),
                     px(160.0),
                 ),
-                (diagnostics_label, margin, tops[end + 13], inner, px(20.0)),
-                (self.diagnostics, margin, tops[end + 14], inner, px(28.0)),
-                (timer_label, margin, tops[end + 15], inner, px(20.0)),
-                (self.timer, margin, tops[end + 16], half(120.0), px(28.0)),
+                (self.limcodex, margin, tops[end + 13], column, px(24.0)),
+                (
+                    self.limagy,
+                    margin + column,
+                    tops[end + 13],
+                    column,
+                    px(24.0),
+                ),
+                (
+                    group_label,
+                    margin,
+                    tops[end + 14] + px(5.0),
+                    inner - half(250.0),
+                    px(20.0),
+                ),
+                (
+                    self.limgroup,
+                    margin + inner - half(240.0),
+                    tops[end + 14],
+                    half(240.0),
+                    px(120.0),
+                ),
+                (snippet_label, margin, tops[end + 15], inner, px(20.0)),
+                (self.limsnip, margin, tops[end + 16], inner, px(28.0)),
+                (diagnostics_label, margin, tops[end + 17], inner, px(20.0)),
+                (self.diagnostics, margin, tops[end + 18], inner, px(28.0)),
+                (timer_label, margin, tops[end + 19], inner, px(20.0)),
+                (self.timer, margin, tops[end + 20], half(120.0), px(28.0)),
                 (
                     start,
                     margin + half(128.0),
-                    tops[end + 16],
+                    tops[end + 20],
                     half(150.0),
                     px(28.0),
                 ),
-                (self.status, margin, tops[end + 17], inner, px(42.0)),
+                (self.status, margin, tops[end + 21], inner, px(42.0)),
                 (reset, margin, tops[last], half(180.0), px(28.0)),
                 (
                     close,
@@ -1225,7 +1405,15 @@ impl SettingsWindow {
                 ),
             ]);
             for (child, x, y, w, h) in places {
-                SetWindowPos(child, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)?;
+                SetWindowPos(
+                    child,
+                    None,
+                    x,
+                    y - self.scroll,
+                    w,
+                    h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )?;
             }
         }
         Ok(())
@@ -1243,9 +1431,28 @@ impl Drop for SettingsWindow {
     }
 }
 
+fn focus_scroll(scroll: i32, top: i32, bottom: i32, viewport: i32) -> i32 {
+    if top < 0 {
+        scroll + top
+    } else if bottom > viewport {
+        scroll + bottom - viewport
+    } else {
+        scroll
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::clamp_selection;
+    use super::focus_scroll;
+
+    #[test]
+    fn keyboard_focus_scrolls_both_ends_into_the_viewport() {
+        assert_eq!(focus_scroll(100, -20, 4, 600), 80);
+        assert_eq!(focus_scroll(100, 590, 618, 600), 118);
+        assert_eq!(focus_scroll(100, 12, 40, 600), 100);
+        assert_eq!(focus_scroll(0, 1190, 1218, 600), 618);
+    }
 
     #[test]
     fn pin_row_stays_inside_a_refreshed_list() {

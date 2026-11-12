@@ -58,6 +58,9 @@ windows = { version = "=0.62.2", features = [
     "Win32_Devices_Display",
     # WinHTTP: the Open-Meteo requests, through the OS TLS stack (features W1).
     "Win32_Networking_WinHttp",
+    # Job object and PeekNamedPipe: the opt-in `agy` and `codex app-server` runs of the Limits tab (features U1).
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
     # Session unlock notification: the mascot wakes (F2); MCI plays the prayer sound (P1).
     "Win32_System_RemoteDesktop",
     "Win32_Media_Multimedia",

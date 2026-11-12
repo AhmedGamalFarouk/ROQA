@@ -37,8 +37,10 @@ pub const SHELF_BASE: usize = 4;
 /// Element ids of the tab items start here, after the shelf's `shelf::VISIBLE` entries; id `TAB_BASE + n` is
 /// the n-th shown tab.
 pub const TAB_BASE: usize = SHELF_BASE + crate::shelf::VISIBLE;
-/// The settings cog's element id, after the (at most five) tabs: a Button named "Settings".
-pub const GEAR: usize = TAB_BASE + 5;
+/// The settings cog's element id, after the (at most six) tabs: a Button named "Settings".
+pub const GEAR: usize = TAB_BASE + 6;
+/// The Limits page's Refresh button, after the cog; it exists only on that page.
+pub const REFRESH: usize = GEAR + 1;
 
 #[derive(Default)]
 pub struct State {
@@ -62,6 +64,8 @@ pub struct State {
     pub timer: String,
     /// The Weather page's text, such as "Cairo, 24 degrees, clear"; empty off that page.
     pub weather: String,
+    /// The Limits page is open: the Refresh button exists (its text is in `weather`).
+    pub refresh: bool,
     /// A just-announced power notice (`power::Power::text`); empty without one. A polite live region.
     pub notice: String,
     /// The visible shelf entries' names (`Shelf::label`); element id `SHELF_BASE + n` is entry n. Empty off the
@@ -89,6 +93,7 @@ pub fn invalidate(state: &Shared) {
         state.tabs.clear();
         state.timer.clear();
         state.weather.clear();
+        state.refresh = false;
         state.notice.clear();
         state.focus = None;
         state.open = false;
@@ -111,6 +116,7 @@ fn ids(state: &State) -> Vec<usize> {
         .chain(SHELF_BASE..SHELF_BASE + state.shelf.len())
         .chain(TAB_BASE..TAB_BASE + state.tabs.len())
         .chain(std::iter::once(GEAR))
+        .chain(state.refresh.then_some(REFRESH))
         .collect()
 }
 
@@ -118,6 +124,9 @@ fn ids(state: &State) -> Vec<usize> {
 fn entry(state: &State, id: usize) -> Option<(String, bool)> {
     if id == GEAR {
         return Some(("Settings".to_owned(), true));
+    }
+    if id == REFRESH {
+        return state.refresh.then(|| ("Refresh limits".to_owned(), true));
     }
     if let Some(n) = id.checked_sub(TAB_BASE) {
         return state.tabs.get(n).map(|name| (name.clone(), true));
@@ -341,18 +350,20 @@ impl IRawElementProviderFragment_Impl for Root_Impl {
 
 impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
     fn ElementProviderFromPoint(&self, x: f64, y: f64) -> Result<IRawElementProviderFragment> {
-        let (hwnd, dpi, open, track, controls, shelf, tabs, active) = read(&self.state, |s| {
-            (
-                s.hwnd,
-                s.dpi,
-                s.open,
-                s.track,
-                !s.controls.is_empty(),
-                !s.shelf.is_empty(),
-                s.tabs.len(),
-                s.active_tab,
-            )
-        })?;
+        let (hwnd, dpi, open, track, controls, shelf, tabs, active, refresh) =
+            read(&self.state, |s| {
+                (
+                    s.hwnd,
+                    s.dpi,
+                    s.open,
+                    s.track,
+                    !s.controls.is_empty(),
+                    !s.shelf.is_empty(),
+                    s.tabs.len(),
+                    s.active_tab,
+                    s.refresh,
+                )
+            })?;
         let rect = window_rect(hwnd)?;
         let (x, y) = (x as i32 - rect.left, y as i32 - rect.top);
         let width = rect.right - rect.left;
@@ -375,7 +386,10 @@ impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
                 layout::rail_tab_at(width, dpi, 1.0, track, handle, (x, y))
                     .map(|tab| TAB_BASE + tab)
             })
-            .or_else(|| layout::gear_at(width, dpi, 1.0, track, x, y).then_some(GEAR));
+            .or_else(|| layout::gear_at(width, dpi, 1.0, track, x, y).then_some(GEAR))
+            .or_else(|| {
+                (refresh && layout::refresh_at(width, dpi, 1.0, track, x, y)).then_some(REFRESH)
+            });
         match control {
             Some(id) if open => self.item(id),
             _ => Ok(self.to_interface()),
@@ -471,7 +485,9 @@ impl IRawElementProviderSimple_Impl for Item_Impl {
             "RoqaTab2",
             "RoqaTab3",
             "RoqaTab4",
+            "RoqaTab5",
             "RoqaSettings",
+            "RoqaRefresh",
         ];
         let tab = self
             .index
@@ -544,6 +560,20 @@ impl IRawElementProviderFragment_Impl for Item_Impl {
                 state.active_tab,
             )
         })?;
+        if self.index == REFRESH {
+            if !open {
+                return Ok(UiaRect::default());
+            }
+            let (rect, button) = (window_rect(hwnd)?, layout::refresh(dpi));
+            let body =
+                layout::notch_body(rect.right - rect.left, dpi, layout::notch_shape(1.0, media));
+            return Ok(UiaRect {
+                left: f64::from(rect.left + body.left + button.x),
+                top: f64::from(rect.top + button.y),
+                width: f64::from(button.width),
+                height: f64::from(button.height),
+            });
+        }
         if self.index == GEAR {
             if !open {
                 return Ok(UiaRect::default());

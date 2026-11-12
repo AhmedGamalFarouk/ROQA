@@ -25,6 +25,8 @@ mod host;
 mod icons;
 mod ipc;
 mod layout;
+mod limits;
+mod limits_os;
 mod media;
 mod menu_uia;
 mod motion;

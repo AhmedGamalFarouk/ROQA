@@ -195,6 +195,8 @@ pub struct NotchScene<'a> {
     pub weather: Option<&'a crate::weather::View>,
     /// The Prayer page's text; `Some` only while that page shows.
     pub prayer: Option<&'a crate::prayer_tab::View>,
+    /// The Limits page's rows; `Some` only while that page shows.
+    pub limits: Option<&'a crate::limits::View>,
 }
 
 /// The tab handle: its geometry, the shown tabs in order and the one position with keyboard focus.
@@ -2382,6 +2384,7 @@ mod media_tests {
             volume_fill: volume.map_or(0.0, |level| f32::from(level.percent)),
             weather: None,
             prayer: None,
+            limits: None,
         };
         let clock = clock_width(time, progress, dpi);
         media_plan(&scene, scene.track.unwrap(), &body(dpi, progress), clock)
@@ -2417,6 +2420,7 @@ mod media_tests {
                 volume_fill: 0.0,
                 weather: None,
                 prayer: None,
+                limits: None,
             };
             let clock = clock_width("9:50 pm", progress, 96);
             let plan = media_plan(&scene, scene.track.unwrap(), &body(96, progress), clock);
@@ -2682,6 +2686,7 @@ mod media_tests {
                 volume_fill: 0.0,
                 weather: None,
                 prayer: None,
+                limits: None,
             };
             meter_bars(&scene, &body(96, progress))
         };
@@ -2739,6 +2744,7 @@ mod media_tests {
                     volume_fill: 0.0,
                     weather: None,
                     prayer: None,
+                    limits: None,
                 };
                 let (bars, _) = meter_bars(&scene, &body(dpi, 1.0)).unwrap();
                 for bar in bars {
@@ -2784,6 +2790,7 @@ mod media_tests {
             volume_fill: 0.0,
             weather: None,
             prayer: None,
+            limits: None,
         };
         let radius = |scene: &NotchScene| volume_bar(scene, &body(96, 1.0)).unwrap().thumb.2;
         let rest = radius(&scene);

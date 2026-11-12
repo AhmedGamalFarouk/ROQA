@@ -19,6 +19,7 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
 - [x] D1: dock style Floating or Attached to the bottom edge ([packet](features-dock-styles.md)).
 - [x] D2: taskbar buttons on the dock: Start, Search, Task View, minimized-apps list, show-desktop strip ([packet](features-dock-system.md)).
 - [x] F3: prayer alert over full screen, Weather independent of Prayer ([packet](features-f3.md)).
+- [x] U1: Limits tab: Claude, Codex and Antigravity plan-limit percentages ([packet](features-limits.md)).
 - [ ] M1: mascot states that wait on content: adhan (half-lidded, stepped glow) and rain (droopy), plus the per-tab mood pairing.
 - [ ] T2: tab polish after a native run: SelectionItem UIA pattern, handle hover timing, RTL order, text-scale fit.
 - [ ] B4: picker as command palette (installed apps from Start menu shortcuts, inline math).

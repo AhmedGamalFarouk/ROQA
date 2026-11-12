@@ -14,6 +14,8 @@ use crate::{
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
     layout::{self, Bounds, DockStyle, SurfaceKind, placement_styled},
+    limits::{self, Limits},
+    limits_os,
     media::{self, Media, Progress, Track},
     motion::{self, Tween},
     native_window::{self, NativeWindow, WindowClass},
@@ -45,7 +47,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::Win32::{
-    Foundation::{E_FAIL, HANDLE, HWND, LPARAM, WAIT_EVENT, WAIT_FAILED, WAIT_OBJECT_0, WPARAM},
+    Foundation::{E_FAIL, HANDLE, HWND, LPARAM, WAIT_EVENT, WAIT_FAILED, WAIT_OBJECT_0},
     System::Diagnostics::Debug::MessageBeep,
     System::LibraryLoader::{GetModuleHandleW, GetProcAddress},
     System::Ole::{OleInitialize, OleUninitialize},
@@ -168,6 +170,9 @@ struct Pages {
     /// The Prayer page's text, rebuilt by `refresh_prayer` only while that page shows, and what it was built for.
     prayer: prayer_tab::View,
     prayer_key: Option<(String, u32, crate::prayer::Method)>,
+    /// The Limits page, rebuilt by `refresh_limits` only while that page shows, and what it was built for.
+    limits: limits::View,
+    limits_key: Option<(u32, bool, String)>,
 }
 impl Pages {
     fn new(settings: &Settings, last: Tab) -> Self {
@@ -186,6 +191,8 @@ impl Pages {
             weather_key: None,
             prayer: prayer_tab::View::default(),
             prayer_key: None,
+            limits: limits::View::default(),
+            limits_key: None,
         }
     }
     /// The track the notch shows: none with the Media tab off, so a session costs nothing then.
@@ -560,7 +567,9 @@ impl Surface {
                 state.timer.clear();
                 state.timer.push_str(timer_name);
             }
+            state.refresh = page == Tab::Limits;
             let weather = match page {
+                Tab::Limits => pages.limits.name.as_str(),
                 Tab::Weather => pages.weather.name.as_str(),
                 Tab::Prayer => pages.prayer.name.as_str(),
                 _ => "",
@@ -736,6 +745,7 @@ impl Surface {
             volume_fill,
             weather: (page == Tab::Weather).then_some(&pages.weather),
             prayer: (page == Tab::Prayer).then_some(&pages.prayer),
+            limits: (page == Tab::Limits).then_some(&pages.limits),
         };
         shadow.paint(&scene, self.window.0)?;
         let status = track.is_none().then(|| media.view().status()).flatten();
@@ -1281,6 +1291,10 @@ struct Desktop {
     weather: Feed,
     weather_io: weather_os::Io,
     region: String,
+    /// The plan limits, their worker channel and whether the page was open at the last pass (features U1).
+    limits: Limits,
+    limits_io: limits_os::Io,
+    limits_open: bool,
     /// The prayer reminders' schedule and sound (features P1).
     prayer: PrayerRun,
 }
@@ -1379,6 +1393,9 @@ impl Desktop {
             weather,
             weather_io: weather_os::Io::new(),
             region: weather_os::region(),
+            limits: Limits::default(),
+            limits_io: limits_os::Io::new(),
+            limits_open: false,
             prayer: PrayerRun::default(),
         };
         if desktop.settings.notch {
@@ -1696,6 +1713,63 @@ impl Desktop {
             );
             self.pages.weather_key = Some((self.weather.rev, self.clock.clone()));
             self.request_notches(Repaint::Full, |s| motion::reveal(s.motion.value(now)) > 0.0);
+        }
+    }
+    /// Limits (features U1): takes a finished worker's answer, starts one job when the Limits page newly opens
+    /// (the worker reads only what changed or aged out), and keeps the page text current while it shows. No
+    /// timer and no watcher: a hidden or switched-off tab costs nothing but this early return.
+    #[inline(never)]
+    fn refresh_limits(&mut self) {
+        self.limits.configure(
+            (self.settings.limits_codex, self.settings.limits_agy),
+            self.settings.limits_group,
+        );
+        let now = limits_os::now();
+        while let Some(outcome) = self.limits_io.poll() {
+            self.limits.finish(outcome, now);
+        }
+        let open = self.pages.tabs.on(Tab::Limits)
+            && self.page() == Tab::Limits
+            && self.surfaces.iter().any(Surface::expanded);
+        if !open {
+            self.limits_io.cancel();
+        }
+        if open && !self.limits_open {
+            self.start_limits(now, false);
+        }
+        self.limits_open = open;
+        if !open {
+            self.pages.limits_key = None;
+            return;
+        }
+        let key = (self.limits.rev, self.limits.busy(), self.clock.clone());
+        if self.pages.limits_key.as_ref() != Some(&key) {
+            self.pages.limits = limits::view(
+                &self.limits.rows,
+                now,
+                &limits::clock(prayer_os::local_now().offset_min),
+                key.1,
+            );
+            self.pages.limits_key = Some(key);
+            self.request_notches(Repaint::Full, |s| s.expanded());
+        }
+    }
+    /// A job for the Limits worker (`Limits::start` says no inside the cooldown or while one runs).
+    fn start_limits(&mut self, now: i64, manual: bool) {
+        let allow = (self.settings.limits_codex, self.settings.limits_agy);
+        if let Some(job) = self
+            .limits
+            .start(now, manual, allow, self.settings.limits_group)
+            && !self.limits_io.spawn(job)
+        {
+            // No thread: release the claim so a later open can try again.
+            self.limits.finish(
+                limits::Outcome {
+                    id: job.id,
+                    ..Default::default()
+                },
+                now,
+            );
         }
     }
     /// Prayer (features P1): builds the page while it shows, then runs the reminders: one pass computes the day's
@@ -3130,6 +3204,10 @@ impl Desktop {
             return true;
         }
         let page = self.page();
+        if page == Tab::Limits && layout::refresh_at(width, dpi, progress, live, x, y) {
+            self.start_limits(limits_os::now(), true);
+            return true;
+        }
         if page == Tab::Shelf {
             if let Some(index) = self.shelf_slot_at(notch, lparam) {
                 // SAFETY: reads this thread's keyboard state as of the message being handled.
@@ -3159,6 +3237,8 @@ impl Desktop {
             if let Err(error) = self.open_settings() {
                 eprintln!("Settings: {error}");
             }
+        } else if control == notch_uia::REFRESH {
+            self.start_limits(limits_os::now(), true);
         } else if let Some(position) = control.checked_sub(notch_uia::TAB_BASE) {
             if let Some(&tab) = self.pages.tabs.visible().as_slice().get(position) {
                 self.select_tab(tab);
@@ -3173,10 +3253,10 @@ impl Desktop {
     }
     /// The notch controls that take focus and presses: on the Media page the player's three, then mute while
     /// a default render endpoint is bound; on the Shelf page its entries; and the tabs, when there is a handle.
-    fn enabled(&self) -> [bool; notch_uia::GEAR + 1] {
+    fn enabled(&self) -> [bool; notch_uia::REFRESH + 1] {
         let track = self.pages.track(&self.media);
         let page = self.pages.page(track.is_some());
-        let mut enabled = [false; notch_uia::GEAR + 1];
+        let mut enabled = [false; notch_uia::REFRESH + 1];
         if let Some(track) = track.filter(|_| page == Tab::Media) {
             let [previous, play_pause, next] = track.controls;
             let mute = self.audio.level().is_some();
@@ -3194,6 +3274,7 @@ impl Desktop {
             }
         }
         enabled[notch_uia::GEAR] = true;
+        enabled[notch_uia::REFRESH] = page == Tab::Limits;
         enabled
     }
     /// A UIA client focused a media control, or the notch itself (`notch_uia::FIRST`): the notch
@@ -3728,6 +3809,7 @@ impl Desktop {
         self.refresh_dock(model)?;
         self.refresh_shelf();
         self.refresh_weather();
+        self.refresh_limits();
         self.refresh_fullscreen(model.generation)?;
         let wait = self
             .refresh_clock()?
@@ -3851,7 +3933,7 @@ pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> 
             SendMessageW(
                 desktop.surfaces[0].window.0,
                 native_window::PANIC_PROBE,
-                Some(WPARAM(0)),
+                Some(windows::Win32::Foundation::WPARAM(0)),
                 Some(LPARAM(0)),
             );
         }
@@ -4387,9 +4469,9 @@ mod clock_wait_tests {
         assert!(pages.tabs.select(Tab::Shelf, true));
         assert_eq!(rail(&pages, true), Some((3, 2)));
         // One tab: no handle. None: the plain clock panel is the Media page.
-        settings.tabs = [true, false, false, false, false];
+        settings.tabs = [true, false, false, false, false, false];
         assert_eq!(rail(&Pages::new(&settings, Tab::Media), true), None);
-        settings.tabs = [false; 5];
+        settings.tabs = [false; 6];
         let none = Pages::new(&settings, Tab::Shelf);
         assert_eq!((rail(&none, true), none.page(true)), (None, Tab::Media));
     }

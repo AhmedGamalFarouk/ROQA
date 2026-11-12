@@ -273,6 +273,24 @@ pub fn gear_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, 
         && (g.y - slack..g.y + g.height + slack).contains(&y)
 }
 
+/// The Limits page's Refresh button beside its title, in DIPs from the body's left and top edges.
+const REFRESH: (f32, f32, f32, f32) = (80.0, 8.0, 76.0, 20.0);
+pub fn refresh(dpi: u32) -> Bounds {
+    scaled_bounds(REFRESH, dpi)
+}
+
+/// Whether a window point is on the Refresh button; false while the panel is closed.
+pub fn refresh_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, y: i32) -> bool {
+    if motion::reveal(progress) < 1.0 {
+        return false;
+    }
+    let button = refresh(dpi);
+    let body = notch_body(window_width, dpi, notch_shape(progress, media));
+    let x = x - body.left;
+    (button.x..button.x + button.width).contains(&x)
+        && (button.y..button.y + button.height).contains(&y)
+}
+
 /// The visualizer slot right of the controls row (slice 7, provisional), in DIPs from the body's
 /// left and top edges: `BARS` bars `METER_BAR` wide, spread across it and bottom-aligned, ending 16
 /// before the body's right edge and centred on the controls row.
