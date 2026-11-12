@@ -2260,10 +2260,9 @@ impl Desktop {
     /// Opens the settings window (or replaces an open one) on the connected monitors.
     fn open_settings(&mut self) -> Result<()> {
         self.settings_window.take();
-        let devices: Vec<String> = self.monitors.iter().map(|m| m.device.clone()).collect();
         self.settings_window = Some(SettingsWindow::create(
             &self.settings,
-            &devices,
+            &self.monitors,
             self.text_factor,
         )?);
         self.sync_settings_pins(0);
@@ -3856,10 +3855,9 @@ impl Desktop {
             }
         }
         // After placement, and contained: a settings failure closes that window and never ends the host.
-        let devices: Vec<String> = self.monitors.iter().map(|m| m.device.clone()).collect();
         let broken = self.settings_window.as_mut().is_some_and(|window| {
             window
-                .refresh_monitors(&devices)
+                .refresh_monitors(&self.monitors)
                 .map_err(|error| eprintln!("Settings monitors: {error}"))
                 .is_err()
         });
@@ -4515,6 +4513,12 @@ mod clock_wait_tests {
             .map(|device| Monitor {
                 device: device.into(),
                 work: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                rect: Bounds {
                     x: 0,
                     y: 0,
                     width: 1920,

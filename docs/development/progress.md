@@ -1088,3 +1088,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Done:** `chan.rs` small bounded queue replaces every std `mpsc` channel (std instantiates three flavors per message type, 46 KB); timer sorts use `sort::by`. Capacities unchanged.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 360 tests, locked release); 1,243,648 -> 1,121,280 B (-122,368); baseline LOWERED to 1121280 (approved by Ahmed 2026-11-12).
 - **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN).
+
+## F5-P1 monitor map (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/f5-features`; [packet](features-f5.md). Settings Displays card: monitors to scale, native checkbox tiles (same `off_monitors` key), primary and size/DPI in the UIA name.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 362 tests, locked release); 1,125,376 B, ratchet within 2% (baseline 1,121,280 unchanged); SHA `1B4439966ABAFC13AB986FDEF910C85A9BBA565B0E73EE484854A000988A9451`.
+- **NOT RUN:** native/GUI (drawing, input, Narrator, multi-monitor); reviews paused (REVIEW NOT RUN).

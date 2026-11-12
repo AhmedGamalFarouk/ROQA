@@ -18,6 +18,7 @@ use crate::{
     prayer_tab::{self, LEADS, SILENT},
     settings::{MAX_OFF, MAX_PATH, MAX_SHIFT, NOTCH_SIZES, Settings, parse_timer},
     theme::Theme,
+    topology::{self, Monitor},
     weather::{MAX_CITY, Units},
     window_model::WindowKey,
 };
@@ -64,6 +65,10 @@ const UNITS: usize = 116;
 const DOCKSTYLE: usize = 117;
 const CAPTION: usize = 119;
 const MONITOR: usize = 120;
+/// The "Displays" card (index in page 0): the monitor tiles are drawn on a map instead of in rows.
+const MAP_CARD: usize = 1;
+/// DIPs: the map's height.
+const MAP_H: i32 = 120;
 /// One checkbox per dock button (`dock::Button::ALL` order).
 const DBTN: usize = 130;
 /// One checkbox per notch tab (`Tab::ALL` order), then the mascot eyes and the privacy dots.
@@ -154,6 +159,10 @@ const PAGES: &[Page] = &[
                     r(DOCK, C, "Show the &dock", ""),
                     r(NOTCH, C, "Show the &notch", ""),
                 ],
+            },
+            Card {
+                label: "Displays",
+                rows: &[],
             },
             Card {
                 label: "Behaviour",
@@ -453,6 +462,8 @@ pub struct SettingsWindow {
     move_pin: Option<(usize, bool)>,
     /// The connected monitors' GDI devices (at most `MAX_OFF`); monitor `n` is the checkbox `MONITOR + n`.
     devices: Vec<String>,
+    /// The same monitors with their size and place, for the map.
+    monitors: Vec<Monitor>,
     /// The audio files found (and the chosen one if it is elsewhere), full paths.
     sounds: Vec<String>,
     sound_action: Option<SoundAction>,
@@ -808,6 +819,68 @@ fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
     }
 }
 
+fn is_tile(h: HWND) -> bool {
+    // SAFETY: scalar query of a live child.
+    (MONITOR..MONITOR + MAX_OFF).contains(&(unsafe { GetDlgCtrlID(h) } as usize))
+}
+
+/// A monitor tile (a native checkbox underneath): lit with an accent ring when ROQA is on there, dim when off.
+/// It reads its lines from the checkbox text, "Display 1, primary, 1920 by 1080 at 125%, ROQA on".
+fn draw_tile(note: &NMCUSTOMDRAW, p: &Paint) {
+    let px = |v: i32| (v as f64 * p.scale).round() as i32;
+    let (dc, r, h) = (note.hdc, note.rc, note.hdr.hwndFrom);
+    let on = checked(h);
+    let label = text(h, 256);
+    let parts: Vec<&str> = label.split(", ").collect();
+    let (line, rest) = parts.split_at(parts.len().saturating_sub(2));
+    let head = if line.len() > 1 {
+        format!("{} ({})", line[0], line[1])
+    } else {
+        line.join(" ")
+    };
+    let (fill_colour, ink) = if on {
+        (p.pal.sel, p.pal.seltext)
+    } else {
+        (p.pal.side, p.pal.dim)
+    };
+    // SAFETY: the DC and rectangle come from this custom-draw notification.
+    unsafe {
+        fill(dc, r, p.pal.card);
+        round(
+            dc,
+            r,
+            px(8),
+            fill_colour,
+            if on { p.pal.accent } else { p.pal.line },
+        );
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, p.font.into());
+        let lines = [head.as_str(), rest[0], rest[1]];
+        for (n, line) in lines.into_iter().enumerate() {
+            let top = r.top + px(6) + n as i32 * px(17);
+            if top + px(17) <= r.bottom {
+                let at = RECT {
+                    left: r.left + px(8),
+                    top,
+                    right: r.right - px(6),
+                    bottom: top + px(17),
+                };
+                write(dc, line, at, ink, DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
+            }
+        }
+        if note.uItemState.0 & CDIS_FOCUS.0 != 0 {
+            let inner = RECT {
+                left: r.left + 2,
+                top: r.top + 2,
+                right: r.right - 2,
+                bottom: r.bottom - 2,
+            };
+            round(dc, r, px(8), HOLLOW, p.pal.accent);
+            round(dc, inner, px(7), HOLLOW, p.pal.accent);
+        }
+    }
+}
+
 /// Dialog procedure: the settings colours, background and sidebar rows; everything else is the shared one.
 unsafe extern "system" fn settings_proc(
     hwnd: HWND,
@@ -850,7 +923,11 @@ unsafe extern "system" fn settings_proc(
                 if note.dwDrawStage != CDDS_PREPAINT || !is_toggle(note.hdr.hwndFrom) {
                     return None;
                 }
-                draw_toggle(note, p);
+                if is_tile(note.hdr.hwndFrom) {
+                    draw_tile(note, p);
+                } else {
+                    draw_toggle(note, p);
+                }
                 // SAFETY: the result of this notification (DWLP_MSGRESULT, offset 0), on our own dialog.
                 unsafe {
                     SetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(0), CDRF_SKIPDEFAULT as isize)
@@ -979,7 +1056,7 @@ fn fill_combo(h: HWND, id: usize) {
 }
 
 impl SettingsWindow {
-    pub fn create(current: &Settings, devices: &[String], factor: f64) -> Result<Self> {
+    pub fn create(current: &Settings, monitors: &[Monitor], factor: f64) -> Result<Self> {
         let window = empty_dialog(480, 300, Some(settings_proc))?;
         if crate::dock::system_rtl() {
             // Children created after this inherit the mirrored layout.
@@ -997,7 +1074,8 @@ impl SettingsWindow {
             items: Vec::new(),
             page: 0,
             move_pin: None,
-            devices: devices.iter().take(MAX_OFF).cloned().collect(),
+            devices: Vec::new(),
+            monitors: Vec::new(),
             sounds: prayer_os::discover(),
             sound_action: None,
             font: None,
@@ -1011,6 +1089,7 @@ impl SettingsWindow {
             return_to: foreground_key(),
             closed: false,
         };
+        this.set_monitors(monitors);
         this.build()?;
         this.fill_sounds(&current.prayer_sound);
         this.show(current);
@@ -1024,6 +1103,11 @@ impl SettingsWindow {
             }
         }
         Ok(this)
+    }
+
+    fn set_monitors(&mut self, monitors: &[Monitor]) {
+        self.monitors = monitors.iter().take(MAX_OFF).cloned().collect();
+        self.devices = self.monitors.iter().map(|m| m.device.clone()).collect();
     }
 
     fn h(&self, id: usize) -> HWND {
@@ -1089,7 +1173,12 @@ impl SettingsWindow {
                 w!("Button"),
                 title,
                 id,
-                BS_AUTOCHECKBOX as u32 | tab | clip | if tall { BS_TOP as u32 } else { 0 },
+                BS_AUTOCHECKBOX as u32
+                    | tab
+                    | clip
+                    | if tall { BS_TOP as u32 } else { 0 }
+                    // Arrow keys move among the monitor tiles only.
+                    | if matches!(id, MONITOR | DESKTOP) { WS_GROUP.0 } else { 0 },
                 flat,
             )?,
             Kind::Combo(_) => {
@@ -1164,21 +1253,44 @@ impl SettingsWindow {
         })
     }
 
-    fn monitor_item(&self, index: usize) -> Result<Item> {
-        let name = format!(
-            "Show on monitor {} ({})",
+    /// The tile's accessible name (and what it draws): "Display 1, primary, 1920 by 1080 at 125%, ROQA on".
+    fn tile_name(&self, index: usize, on: bool) -> String {
+        let m = &self.monitors[index];
+        format!(
+            "Display {}{}, {} by {} at {}%, ROQA {}",
             index + 1,
-            self.devices[index].trim_start_matches(r"\\.\")
-        );
-        self.add(MONITOR + index, Kind::Check, &name, "", 0, 0)
+            if m.rect.x == 0 && m.rect.y == 0 {
+                ", primary"
+            } else {
+                ""
+            },
+            m.rect.width,
+            m.rect.height,
+            m.dpi * 100 / 96,
+            if on { "on" } else { "off" }
+        )
+    }
+
+    fn monitor_item(&self, index: usize) -> Result<Item> {
+        let on = !self.current.off_monitors.contains(&self.devices[index]);
+        let item = self.add(
+            MONITOR + index,
+            Kind::Check,
+            &self.tile_name(index, on),
+            "",
+            0,
+            MAP_CARD,
+        )?;
+        set_checked(item.h, on);
+        Ok(item)
     }
 
     /// Replaces the monitor checkboxes after the monitor list changed; focus stays in a live control.
-    pub fn refresh_monitors(&mut self, devices: &[String]) -> Result<()> {
-        if self.devices.iter().eq(devices.iter().take(MAX_OFF)) {
+    pub fn refresh_monitors(&mut self, monitors: &[Monitor]) -> Result<()> {
+        if self.monitors.iter().eq(monitors.iter().take(MAX_OFF)) {
             return Ok(());
         }
-        self.devices = devices.iter().take(MAX_OFF).cloned().collect();
+        self.set_monitors(monitors);
         // SAFETY: own controls and current thread focus; no foreground activation.
         let focus = unsafe { GetFocus() };
         let is_monitor = |i: &Item| (MONITOR..MONITOR + MAX_OFF).contains(&i.id);
@@ -1218,10 +1330,6 @@ impl SettingsWindow {
                     let _ = ShowWindow(item.h, SW_HIDE);
                 }
             }
-            set_checked(
-                item.h,
-                !self.current.off_monitors.contains(&self.devices[index]),
-            );
             previous = item.h;
             self.items.insert(at + index, item);
         }
@@ -1344,7 +1452,9 @@ impl SettingsWindow {
                     if let Some(on) = flag(&mut copy, item.id) {
                         set_checked(h, *on);
                     } else if let Some(device) = self.devices.get(item.id.wrapping_sub(MONITOR)) {
-                        set_checked(h, !settings.off_monitors.contains(device));
+                        let on = !settings.off_monitors.contains(device);
+                        set_checked(h, on);
+                        let _ = set_text(h, &self.tile_name(item.id - MONITOR, on));
                     }
                 }
                 Kind::Combo(_) => {
@@ -1577,6 +1687,18 @@ impl SettingsWindow {
     }
 
     pub fn keyboard(&self, message: &MSG) -> bool {
+        // Enter toggles a focused monitor tile like Space does (it would otherwise press the default button).
+        // SAFETY: scalar queries and a click on our own live tile.
+        unsafe {
+            if message.message == WM_KEYDOWN
+                && message.wParam.0 == 0x0d
+                && IsChild(self.window, message.hwnd).as_bool()
+                && is_tile(message.hwnd)
+            {
+                SendMessageW(message.hwnd, BM_CLICK, None, None);
+                return true;
+            }
+        }
         // SAFETY: no Rust state is exposed to the reentrant dialog procedure; it posts scalar actions only.
         unsafe {
             let handled = IsDialogMessageW(self.window, message).as_bool();
@@ -1859,7 +1981,8 @@ impl SettingsWindow {
             let rows = self
                 .items
                 .iter()
-                .filter(|i| i.page as usize == self.page && i.card as usize == index);
+                .filter(|i| i.page as usize == self.page && i.card as usize == index)
+                .filter(|i| !(MONITOR..MONITOR + MAX_OFF).contains(&i.id));
             for (n, item) in rows.enumerate() {
                 if n > 0 {
                     lines.push(y);
@@ -1868,6 +1991,9 @@ impl SettingsWindow {
                 let height = px(if tall { 52 } else { 40 });
                 self.row(item, scale, (left + px(14), right - px(14)), y, height)?;
                 y += height;
+            }
+            if self.page == 0 && index == MAP_CARD {
+                y += self.map(scale, (left + px(14), right - px(14)), y)?;
             }
             geometry.cards.push((
                 RECT {
@@ -1881,6 +2007,28 @@ impl SettingsWindow {
             y += px(14);
         }
         Ok((geometry, y + self.scroll + px(8)))
+    }
+
+    /// Places the monitor tiles to scale from `y` down and returns the map's height.
+    fn map(&self, scale: f64, (a, b): (i32, i32), y: i32) -> Result<i32> {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let rects: Vec<_> = self.monitors.iter().map(|m| m.rect).collect();
+        let tiles = topology::fit(&rects, b - a, px(MAP_H), px(3));
+        for (index, tile) in tiles.iter().enumerate() {
+            // SAFETY: our own live tile.
+            unsafe {
+                SetWindowPos(
+                    self.h(MONITOR + index),
+                    None,
+                    a + tile.x,
+                    y + px(10) + tile.y,
+                    tile.width,
+                    tile.height,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )?;
+            }
+        }
+        Ok(px(MAP_H + 20))
     }
 
     fn row(&self, item: &Item, scale: f64, (a, b): (i32, i32), y: i32, height: i32) -> Result<()> {

@@ -28,6 +28,7 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
 - [x] B5: privacy mic/camera indicator ([packet](features-privacy-moods.md)).
 - [x] B6: dropped: covered by the edge slider device switch; no code.
 - [x] S1: sidebar Settings shell (8 pages, card pane, switches, dark/high contrast/RTL) and seven new settings ([packet](features-settings-shell.md)). Not built: stepper/segmented/tile controls, monitor map, About pinned to the bottom.
+- [ ] F5 ([packet](features-f5.md)): P1 monitor map [x]; P2 dock slide-down on hide; P3 water reminder; P4 pomodoro; P5 settings controls (segmented/stepper/tiles).
 
 ## Research pending
 - AI usage meter.

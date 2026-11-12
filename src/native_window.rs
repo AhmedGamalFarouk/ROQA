@@ -358,6 +358,7 @@ pub fn monitors() -> Result<Vec<Monitor>> {
             Ok(Monitor {
                 device: device_name(&info),
                 work,
+                rect: bounds(info.monitorInfo.rcMonitor),
                 dpi: dpi_at(work)?,
             })
         })

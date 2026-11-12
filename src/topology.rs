@@ -7,6 +7,8 @@ pub struct Monitor {
     /// HMONITOR survives a topology change, so neither is used to key surfaces.
     pub device: String,
     pub work: Bounds,
+    /// The whole monitor, taskbar included: its size and place in the desktop, for the Settings map.
+    pub rect: Bounds,
     pub dpi: u32,
 }
 
@@ -39,6 +41,42 @@ pub fn diff(current: &[Monitor], next: &[Monitor]) -> (Vec<String>, Vec<Monitor>
     (release, place)
 }
 
+/// Scales monitor rectangles into a `width` x `height` box (pixels), keeping their arrangement and
+/// centring it; each tile is pulled in by `gap` on every side so neighbours never touch.
+pub fn fit(rects: &[Bounds], width: i32, height: i32, gap: i32) -> Vec<Bounds> {
+    let edge = |f: fn(&Bounds) -> i32, pick: fn(i32, i32) -> i32| rects.iter().map(f).reduce(pick);
+    let (left, top) = (edge(|r| r.x, i32::min), edge(|r| r.y, i32::min));
+    let (right, bottom) = (
+        edge(|r| r.x + r.width, i32::max),
+        edge(|r| r.y + r.height, i32::max),
+    );
+    let (left, top) = (left.unwrap_or(0), top.unwrap_or(0));
+    let (span_w, span_h) = (
+        (right.unwrap_or(0) - left).max(1) as f64,
+        (bottom.unwrap_or(0) - top).max(1) as f64,
+    );
+    let scale = (width as f64 / span_w).min(height as f64 / span_h);
+    let (off_x, off_y) = (
+        (width as f64 - span_w * scale) / 2.0,
+        (height as f64 - span_h * scale) / 2.0,
+    );
+    rects
+        .iter()
+        .map(|r| {
+            let at = |origin: i32, from: i32, off: f64| {
+                (off + (origin - from) as f64 * scale).round() as i32
+            };
+            let size = |v: i32| ((v as f64 * scale).round() as i32 - 2 * gap).max(1);
+            Bounds {
+                x: at(r.x, left, off_x) + gap,
+                y: at(r.y, top, off_y) + gap,
+                width: size(r.width),
+                height: size(r.height),
+            }
+        })
+        .collect()
+}
+
 /// A window that spans a whole monitor, borders included, hides the shell UI on it when Windows
 /// also reports a full-screen app.
 pub fn covers(window: Bounds, monitor: Bounds) -> bool {
@@ -62,8 +100,47 @@ mod tests {
                 width: 1920,
                 height: 1040,
             },
+            rect: Bounds {
+                x,
+                y,
+                width: 1920,
+                height: 1080,
+            },
             dpi,
         }
+    }
+
+    fn b(x: i32, y: i32, width: i32, height: i32) -> Bounds {
+        Bounds {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn map_keeps_the_arrangement_inside_the_box() {
+        // Secondary left of and higher than the primary, mixed sizes.
+        let rects = [b(0, 0, 1920, 1080), b(-2560, -360, 2560, 1440)];
+        let tiles = fit(&rects, 480, 120, 2);
+        let scale = 120.0 / 1440.0;
+        assert_eq!(tiles[1].height, (1440.0 * scale) as i32 - 4);
+        assert!(tiles[1].x < tiles[0].x && tiles[1].y < tiles[0].y);
+        for t in &tiles {
+            assert!(t.x >= 0 && t.y >= 0 && t.x + t.width <= 480 && t.y + t.height <= 120);
+        }
+        // The gap keeps abutting monitors apart.
+        assert!(tiles[1].x + tiles[1].width < tiles[0].x);
+    }
+
+    #[test]
+    fn map_one_monitor_fills_the_limiting_side_and_centres() {
+        let one = fit(&[b(100, 50, 1920, 1080)], 400, 100, 0);
+        assert_eq!(one, [b(111, 0, 178, 100)]);
+        assert!(fit(&[], 10, 10, 0).is_empty());
+        // A box smaller than the gap still gives a drawable tile.
+        assert_eq!(fit(&[b(0, 0, 100, 100)], 4, 4, 5)[0].width, 1);
     }
 
     #[test]
