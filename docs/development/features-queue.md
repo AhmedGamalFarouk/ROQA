@@ -22,9 +22,9 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
 - [x] U1: Limits tab: Claude, Codex and Antigravity plan-limit percentages ([packet](features-limits.md)).
 - [x] M1: mascot states that wait on content: adhan (half-lidded, stepped glow) and rain (droopy), plus the per-tab mood pairing ([packet](features-privacy-moods.md)).
 - [ ] T2: tab polish after a native run: SelectionItem UIA pattern, handle hover timing, RTL order, text-scale fit.
-- [ ] B4: picker as command palette (installed apps from Start menu shortcuts, inline math).
+- [x] B4: skipped by the user 2026-11-12 (picker as command palette); no code.
 - [x] B5: privacy mic/camera indicator ([packet](features-privacy-moods.md)).
-- [ ] B6: audio output device list (switching opens Sound settings).
+- [x] B6: dropped: covered by the edge slider device switch; no code.
 
 ## Research pending
 - AI usage meter.
