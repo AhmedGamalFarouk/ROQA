@@ -90,6 +90,8 @@ pub struct Params {
     pub method: Method,
     /// Asr shadow factor 2 instead of 1.
     pub hanafi: bool,
+    /// Minutes added to each time, by `Prayer as usize` (the Settings fine-tune; zeros change nothing).
+    pub shift: [i8; 6],
 }
 
 pub type Ymd = (i32, u32, u32);
@@ -171,10 +173,12 @@ fn day(p: &Params, jd0: f64) -> Option<Times> {
             }
         }
     };
-    Some(
-        [fajr, sunrise, dhuhr, event(asr_alt, 1.0), sunset, isha]
-            .map(|h| (h * 3600.0).round() as i32),
-    )
+    let mut times = [fajr, sunrise, dhuhr, event(asr_alt, 1.0), sunset, isha]
+        .map(|h| (h * 3600.0).round() as i32);
+    for (time, minutes) in times.iter_mut().zip(p.shift) {
+        *time += i32::from(minutes) * 60;
+    }
+    Some(times)
 }
 
 pub fn times(p: &Params, ymd: Ymd) -> Option<Times> {
@@ -226,6 +230,7 @@ mod tests {
         utc_offset_min: 120,
         method: Method::Egyptian,
         hanafi: false,
+        shift: [0; 6],
     };
 
     const fn hm(h: i32, m: i32) -> i32 {
@@ -252,6 +257,26 @@ mod tests {
     // against them; official tables sometimes add a few minutes of caution).
 
     #[test]
+    fn a_shift_adds_its_minutes_to_that_prayer_only_and_moves_the_next_prayer() {
+        let plain = times(&CAIRO, NOV12).unwrap();
+        let shifted = Params {
+            shift: [-30, 0, 5, 0, 0, 30],
+            ..CAIRO
+        };
+        let t = times(&shifted, NOV12).unwrap();
+        let want = [-1800, 0, 300, 0, 0, 1800];
+        assert!((0..6).all(|i| t[i] - plain[i] == want[i]));
+        // Ten minutes before the plain Fajr, the shifted Fajr (30 earlier) has passed: Sunrise is next.
+        let now = plain[0] - 600;
+        assert_eq!(next_prayer(&CAIRO, NOV12, now).unwrap().secs_left, 600);
+        let next = next_prayer(&shifted, NOV12, now).unwrap();
+        assert_eq!(
+            (next.prayer, next.secs_left as i32),
+            (Prayer::Sunrise, plain[1] - now)
+        );
+    }
+
+    #[test]
     fn cairo_egyptian_shafii() {
         // method=5 school=0 lat=30.0444 lon=31.2357 tz=Africa/Cairo (UTC+2 on this date).
         let t = times(&CAIRO, NOV12).unwrap();
@@ -264,6 +289,7 @@ mod tests {
         let t = times(
             &Params {
                 hanafi: true,
+                shift: [0; 6],
                 ..CAIRO
             },
             NOV12,
@@ -302,6 +328,7 @@ mod tests {
             utc_offset_min: 180,
             method: Method::UmmAlQura,
             hanafi: false,
+            shift: [0; 6],
         };
         let t = times(&mecca, NOV12).unwrap();
         matches(t, [(5, 11), (6, 30), (12, 5), (15, 17), (17, 40), (19, 10)]);
@@ -317,6 +344,7 @@ mod tests {
             utc_offset_min: 0,
             method: Method::Mwl,
             hanafi: false,
+            shift: [0; 6],
         };
         let t = times(&london, NOV12).unwrap();
         // Asr is 13:51:44 here against the reference's 13:54 (136 s): at a 15 degree sun, 0.1 degree of
@@ -338,6 +366,7 @@ mod tests {
             utc_offset_min: -300,
             method: Method::Isna,
             hanafi: false,
+            shift: [0; 6],
         };
         matches(
             times(&ny, NOV12).unwrap(),
@@ -355,6 +384,7 @@ mod tests {
             utc_offset_min: 60,
             method: Method::Mwl,
             hanafi: false,
+            shift: [0; 6],
         };
         let t = times(&london, (2026, 6, 21)).unwrap();
         matches(t, [(2, 31), (4, 43), (13, 2), (17, 25), (21, 22), (23, 27)]);

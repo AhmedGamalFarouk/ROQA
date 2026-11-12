@@ -18,6 +18,10 @@ const KINDS: [SurfaceKind; 2] = [SurfaceKind::Notch, SurfaceKind::Dock];
 pub const MAX_OFF: usize = 8;
 const MAX_DEVICE: usize = 64;
 pub const MAX_PATH: usize = 512;
+/// The notch sizes in percent of the designed pill (0 is auto, the designed size).
+pub const NOTCH_SIZES: [u16; 5] = [0, 100, 115, 130, 150];
+/// The fine-tune of each daily prayer, in minutes either way.
+pub const MAX_SHIFT: i8 = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -64,6 +68,20 @@ pub struct Settings {
     pub limits_codex: bool,
     pub limits_agy: bool,
     pub limits_group: u8,
+    /// Hide the dock and notch over a full-screen app (the F3 prayer alert still shows).
+    pub hide_fullscreen: bool,
+    /// Open the notch on a click instead of hovering over it.
+    pub open_click: bool,
+    /// Closed pill size, one of `NOTCH_SIZES` percent.
+    pub notch_size: u16,
+    /// Quicker animations.
+    pub anim_fast: bool,
+    /// Master gate over the timer and prayer sounds; their own settings stay as they are.
+    pub reminder_sounds: bool,
+    /// Pause a playing media session when a prayer reminder fires (never resumed).
+    pub prayer_pause: bool,
+    /// Minutes added to Fajr, Dhuhr, Asr, Maghrib and Isha.
+    pub prayer_shift: [i8; 5],
 }
 
 impl Default for Settings {
@@ -95,6 +113,13 @@ impl Default for Settings {
             limits_codex: false,
             limits_agy: false,
             limits_group: 0,
+            hide_fullscreen: true,
+            open_click: false,
+            notch_size: 0,
+            anim_fast: false,
+            reminder_sounds: true,
+            prayer_pause: false,
+            prayer_shift: [0; 5],
         }
     }
 }
@@ -133,6 +158,12 @@ impl Settings {
             self.prayer_lead = 0;
         }
         self.limits_group = self.limits_group.min(1);
+        if !NOTCH_SIZES.contains(&self.notch_size) {
+            self.notch_size = 0;
+        }
+        for minutes in &mut self.prayer_shift {
+            *minutes = (*minutes).clamp(-MAX_SHIFT, MAX_SHIFT);
+        }
         self.prayer_sound = self.prayer_sound.trim().trim_matches('"').trim().to_owned();
         if self.prayer_sound.chars().count() > MAX_PATH
             || self.prayer_sound.contains(char::is_control)
@@ -154,6 +185,18 @@ impl Settings {
             self.off_monitors.retain(|d| d != &devices[0]);
         }
         self
+    }
+
+    /// The shift as `prayer::Params` wants it: by `Prayer as usize`, Sunrise (index 1) unshifted.
+    pub fn shift6(&self) -> [i8; 6] {
+        let [fajr, dhuhr, asr, maghrib, isha] = self.prayer_shift;
+        [fajr, 0, dhuhr, asr, maghrib, isha]
+    }
+
+    /// Pushes the settings that live outside the host's own state: animation pace, click-to-open, pill size.
+    pub fn apply_globals(&self) {
+        crate::motion::configure(self.anim_fast, self.open_click);
+        crate::layout::set_pill_percent(self.notch_size);
     }
 
     pub fn kind_on(&self, kind: SurfaceKind) -> bool {
@@ -185,6 +228,22 @@ impl Settings {
                 .is_some(),
             "limcodex" => flag(value).map(|v| self.limits_codex = v).is_some(),
             "limagy" => flag(value).map(|v| self.limits_agy = v).is_some(),
+            "fshide" => flag(value).map(|v| self.hide_fullscreen = v).is_some(),
+            "rsounds" => flag(value).map(|v| self.reminder_sounds = v).is_some(),
+            "ppause" => flag(value).map(|v| self.prayer_pause = v).is_some(),
+            "notchopen" => matches!(value, "hover" | "click")
+                .then(|| self.open_click = value == "click")
+                .is_some(),
+            "animspeed" => matches!(value, "normal" | "fast")
+                .then(|| self.anim_fast = value == "fast")
+                .is_some(),
+            "notchsize" => value.parse().map(|v| self.notch_size = v).is_ok(),
+            "pshift" => {
+                let minutes: Vec<i8> = value.split(',').filter_map(|v| v.parse().ok()).collect();
+                <[i8; 5]>::try_from(minutes)
+                    .map(|v| self.prayer_shift = v)
+                    .is_ok()
+            }
             "limgroup" => value.parse().map(|v| self.limits_group = v).is_ok(),
             "plead" => value.parse().map(|v| self.prayer_lead = v).is_ok(),
             "psound" if !value.is_empty() => {
@@ -264,6 +323,23 @@ limgroup={}
             u8::from(self.limits_codex),
             u8::from(self.limits_agy),
             self.limits_group
+        ));
+        let [a, b, c, d, e] = self.prayer_shift;
+        out.push_str(&format!(
+            "fshide={}
+rsounds={}
+ppause={}
+notchopen={}
+animspeed={}
+notchsize={}
+pshift={a},{b},{c},{d},{e}
+",
+            u8::from(self.hide_fullscreen),
+            u8::from(self.reminder_sounds),
+            u8::from(self.prayer_pause),
+            ["hover", "click"][usize::from(self.open_click)],
+            ["normal", "fast"][usize::from(self.anim_fast)],
+            self.notch_size,
         ));
         if !self.prayer_sound.is_empty() && one_line(&&self.prayer_sound) {
             out.push_str(&format!(
@@ -386,8 +462,15 @@ mod tests {
             limits_codex: true,
             limits_agy: true,
             limits_group: 9,
+            notch_size: 120,
+            prayer_shift: [-99, 0, 99, 5, -5],
+            ..Settings::default()
         }
         .clamped();
+        assert_eq!(
+            (wild.notch_size, wild.prayer_shift),
+            (0, [-30, 0, 30, 5, -5])
+        );
         assert_eq!(
             (
                 wild.prayer_lead,
@@ -432,6 +515,69 @@ mod tests {
         }
         .clamped();
         assert_eq!(s.off_monitors.len(), MAX_OFF);
+    }
+
+    #[test]
+    fn the_new_settings_default_to_todays_behaviour_and_round_trip() {
+        let d = Settings::default();
+        assert!(d.hide_fullscreen && d.reminder_sounds && !d.open_click && !d.anim_fast);
+        assert!(!d.prayer_pause && d.notch_size == 0 && d.prayer_shift == [0; 5]);
+        assert_eq!(d.shift6(), [0; 6]);
+        // An old store holds none of the new keys: loading it leaves every default.
+        let mut old = Settings::default();
+        for (key, value) in [
+            ("dock", "1"),
+            ("theme", "glass"),
+            ("sound", "0"),
+            ("pmethod", "mwl"),
+        ] {
+            assert!(old.set(key, value), "{key}");
+        }
+        assert_eq!(
+            (old.hide_fullscreen, old.notch_size, old.prayer_shift),
+            (true, 0, [0; 5])
+        );
+        let custom = Settings {
+            hide_fullscreen: false,
+            open_click: true,
+            notch_size: 130,
+            anim_fast: true,
+            reminder_sounds: false,
+            prayer_pause: true,
+            prayer_shift: [-5, 0, 7, 30, -30],
+            ..Settings::default()
+        };
+        let mut text = String::new();
+        custom.write_lines(&mut text);
+        for line in [
+            "fshide=0",
+            "notchopen=click",
+            "notchsize=130",
+            "animspeed=fast",
+            "rsounds=0",
+            "ppause=1",
+            "pshift=-5,0,7,30,-30",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line}");
+        }
+        let mut read = Settings::default();
+        for line in text.lines() {
+            let (key, value) = line.split_once('=').unwrap();
+            assert!(read.set(key, value), "{line}");
+        }
+        assert_eq!(read.clone().clamped(), custom);
+        assert_eq!(custom.shift6(), [-5, 0, 0, 7, 30, -30]);
+        // Bad values are ignored, leaving the stored default.
+        for (key, value) in [
+            ("notchopen", "x"),
+            ("animspeed", ""),
+            ("pshift", "1,2,3"),
+            ("pshift", "a,b,c,d,e"),
+            ("notchsize", "big"),
+            ("fshide", "2"),
+        ] {
+            assert!(!read.clone().set(key, value), "{key}={value}");
+        }
     }
 
     #[test]

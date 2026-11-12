@@ -173,7 +173,7 @@ struct Pages {
     weather_key: Option<(u32, String)>,
     /// The Prayer page's text, rebuilt by `refresh_prayer` only while that page shows, and what it was built for.
     prayer: prayer_tab::View,
-    prayer_key: Option<(String, u32, crate::prayer::Method)>,
+    prayer_key: Option<(String, u32, crate::prayer::Method, [i8; 6])>,
     /// The Limits page, rebuilt by `refresh_limits` only while that page shows, and what it was built for.
     limits: limits::View,
     limits_key: Option<(u32, bool, String)>,
@@ -802,11 +802,15 @@ impl Surface {
             if focus.is_none() {
                 self.motion.retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
             }
+        } else if motion::click_to_open() {
+            // Click mode: the pill only swells; a click opens it (`click_control`).
+            self.motion
+                .retarget(NOTCH_SWELL, motion::INTENT_TIME, motion::EASE_OUT);
         } else if self.motion.value(Instant::now()) > NOTCH_SWELL {
             // Re-entered while still closing: reopen directly.
             open_notch(intent, &mut self.motion);
         } else {
-            *intent = Some(Instant::now() + motion::INTENT_TIME);
+            *intent = Some(Instant::now() + motion::time(motion::INTENT_TIME));
             self.motion
                 .retarget(NOTCH_SWELL, motion::INTENT_TIME, motion::EASE_OUT);
         }
@@ -1324,7 +1328,14 @@ struct Desktop {
 #[derive(Default)]
 struct PrayerRun {
     /// The facts `events` were computed for: date, UTC offset, place, method and heads-up minutes.
-    key: Option<(prayer_tab::Local, i32, i32, crate::prayer::Method, u32)>,
+    key: Option<(
+        prayer_tab::Local,
+        i32,
+        i32,
+        crate::prayer::Method,
+        u32,
+        [i8; 6],
+    )>,
     events: Vec<prayer_tab::Event>,
     last: Option<((i32, u32, u32), i32)>,
     player: prayer_os::Player,
@@ -1347,6 +1358,7 @@ impl Desktop {
         let now = Instant::now();
         let devices: Vec<String> = monitors.iter().map(|m| m.device.clone()).collect();
         let settings = store.settings.clone().keep_one_monitor(&devices);
+        settings.apply_globals();
         let mut shelf = Shelf::from_store(&store);
         if shelf.set_cap(settings.shelf_cap) {
             shelf.write_to(&mut store); // the cut list leaves the file with its next write
@@ -1363,7 +1375,7 @@ impl Desktop {
             topology_due: None,
             topology_retries: 0,
             fullscreen: native_window::fullscreen_candidate()
-                .filter(|_| native_window::shell_fullscreen())
+                .filter(|_| settings.hide_fullscreen && native_window::shell_fullscreen())
                 .into_iter()
                 .collect(),
             fullscreen_generation: None,
@@ -1821,6 +1833,7 @@ impl Desktop {
         }
         let local = prayer_os::local_now();
         let method = self.settings.prayer_method;
+        let shift = self.settings.shift6();
         let params = self
             .weather
             .place
@@ -1832,9 +1845,10 @@ impl Desktop {
                 utc_offset_min: local.offset_min,
                 method,
                 hanafi: false,
+                shift,
             });
         if shown {
-            let key = (self.clock.clone(), self.weather.rev, method);
+            let key = (self.clock.clone(), self.weather.rev, method, shift);
             if self.pages.prayer_key.as_ref() != Some(&key) {
                 let message = if !weather::configured(self.settings.detect, &self.settings.city) {
                     "Set your city in Settings"
@@ -1865,6 +1879,7 @@ impl Desktop {
             (params.lon * 1e4) as i32,
             method,
             lead,
+            shift,
         );
         if self.prayer.key != Some(key) {
             self.prayer.key = Some(key);
@@ -1885,7 +1900,18 @@ impl Desktop {
     /// A reminder is due: the sound always plays. The notch expands with the prayer's name; on a monitor a
     /// full-screen app covers it appears over the app (topmost, never activated) and hides again once retracted.
     fn fire_prayer(&mut self, event: prayer_tab::Event, now: Instant) {
-        self.play_prayer_sound(now);
+        if self.settings.reminder_sounds {
+            self.play_prayer_sound(now);
+        }
+        // Pausing is one request, never undone; nothing happens when nothing plays or the Media tab is off.
+        if self.settings.prayer_pause
+            && self
+                .pages
+                .track(&self.media)
+                .is_some_and(|track| track.playing)
+        {
+            self.media.command(crate::media::PLAY_PAUSE);
+        }
         self.prayer.adhan_until = Some(now + PRAYER_NOTICE);
         self.power
             .announce(prayer_tab::notice(event), now, PRAYER_NOTICE);
@@ -2129,7 +2155,7 @@ impl Desktop {
             }
         }
         self.open_notches();
-        if self.settings.timer_sound {
+        if self.settings.timer_sound && self.settings.reminder_sounds {
             // SAFETY: plays the user's own default sound asynchronously; no pointers.
             unsafe {
                 let _ = MessageBeep(MB_ICONASTERISK);
@@ -2310,7 +2336,13 @@ impl Desktop {
             return Ok(());
         }
         let old = std::mem::replace(&mut self.settings, next);
-        let restyle = old.theme != self.settings.theme;
+        self.settings.apply_globals();
+        // A new theme or pill size is fixed when a surface is created, so both rebuild the surfaces.
+        let restyle =
+            old.theme != self.settings.theme || old.notch_size != self.settings.notch_size;
+        if old.hide_fullscreen != self.settings.hide_fullscreen {
+            self.fullscreen_generation = None; // the next pass hides or shows again
+        }
         self.edges_dirty = true;
         let tabs_changed = old.tabs != self.settings.tabs;
         if tabs_changed {
@@ -3244,6 +3276,16 @@ impl Desktop {
     /// A click on a drawn media control sends its command, one on the progress bar seeks, and one
     /// on the volume bar sets the volume; the notch stays nonactivating.
     fn click_control(&mut self, notch: usize, lparam: LPARAM) -> bool {
+        // Click mode: a click on the closed pill opens it.
+        let closed = &mut self.surfaces[notch];
+        if motion::click_to_open()
+            && closed.motion.target() < 1.0
+            && let Role::Notch { intent, .. } = &mut closed.role
+        {
+            open_notch(intent, &mut closed.motion);
+            closed.live = true;
+            return true;
+        }
         let surface = &self.surfaces[notch];
         let (x, y) = point(lparam);
         let now = Instant::now();
@@ -3676,10 +3718,12 @@ impl Desktop {
         }
         self.fullscreen_generation = Some(generation);
         let before = self.fullscreen.clone();
+        // With "Hide in full screen" off nothing is ever remembered, so every surface stays shown.
+        let hide = self.settings.hide_fullscreen;
         self.fullscreen.retain(|(key, device)| {
-            native_window::fullscreen_monitor(*key).as_ref() == Some(device)
+            hide && native_window::fullscreen_monitor(*key).as_ref() == Some(device)
         });
-        let foreground = dock::foreground_key();
+        let foreground = dock::foreground_key().filter(|_| hide);
         let candidate = foreground
             .and_then(|key| native_window::fullscreen_monitor(key).map(|device| (key, device)));
         let admitted = candidate

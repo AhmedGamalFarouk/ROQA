@@ -3,6 +3,7 @@ use crate::{
     dock::{self, Buttons},
     motion,
 };
+use std::sync::atomic::{AtomicU16, Ordering::Relaxed};
 
 /// Notch outline in DIPs: body size, bottom corner radius and the concave "ear" fillets that
 /// blend the top corners into the screen edge.
@@ -44,6 +45,22 @@ pub const NOTCH_WINDOW: (i32, i32) = (440, 164);
 /// Pointer slop around the drawn body that still counts as hovering it.
 const NOTCH_HOVER_SLOP: f32 = 4.0;
 
+/// The closed pill's size in percent (the Settings "Notch size"; 0 or 100 is the designed size).
+static PILL_PERCENT: AtomicU16 = AtomicU16::new(100);
+pub fn set_pill_percent(percent: u16) {
+    PILL_PERCENT.store(percent, Relaxed);
+}
+/// The closed pill `from` at `percent`, never wider or taller than the open panel `to`.
+fn pill(from: NotchShape, to: NotchShape, percent: u16) -> NotchShape {
+    let k = f32::from(percent.max(100)) / 100.0;
+    NotchShape {
+        width: (from.width * k).min(to.width),
+        height: (from.height * k).min(to.height),
+        radius: from.radius * k,
+        ears: from.ears * k,
+    }
+}
+
 /// Shape at an animation progress, for the media or the plain clock notch: size follows the
 /// spring's overshoot; corners and ears never overshoot.
 pub fn notch_shape(progress: f32, media: bool) -> NotchShape {
@@ -54,6 +71,7 @@ pub fn notch_shape(progress: f32, media: bool) -> NotchShape {
     } else {
         (NOTCH, NOTCH_EXPANDED)
     };
+    let from = pill(from, to, PILL_PERCENT.load(Relaxed));
     NotchShape {
         width: lerp(from.width, to.width, progress),
         height: lerp(from.height, to.height, progress),
@@ -661,6 +679,22 @@ pub fn placement_styled(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_pill_grows_with_the_notch_size_and_stays_inside_the_panel() {
+        // Auto (0) and 100 are the designed size, exactly.
+        assert_eq!(pill(NOTCH, NOTCH_EXPANDED, 0), NOTCH);
+        assert_eq!(pill(NOTCH, NOTCH_EXPANDED, 100), NOTCH);
+        let big = pill(NOTCH, NOTCH_EXPANDED, 150);
+        assert_eq!(
+            (big.width, big.height, big.radius, big.ears),
+            (225.0, 45.0, 21.0, 15.0)
+        );
+        // The media pill would pass its panel's width, so it stops there.
+        assert_eq!(
+            pill(MEDIA_NOTCH, MEDIA_EXPANDED, 150).width,
+            MEDIA_EXPANDED.width
+        );
+    }
     #[test]
     fn buttons_widen_both_dock_styles_around_the_same_centre() {
         let work = Bounds {

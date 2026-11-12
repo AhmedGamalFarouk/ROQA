@@ -16,7 +16,7 @@ use crate::{
     prayer::Method,
     prayer_os,
     prayer_tab::{self, LEADS, SILENT},
-    settings::{MAX_OFF, MAX_PATH, Settings, parse_timer},
+    settings::{MAX_OFF, MAX_PATH, NOTCH_SIZES, Settings, parse_timer},
     theme::Theme,
     weather::{MAX_CITY, Units},
     window_model::WindowKey,
@@ -25,8 +25,13 @@ use std::cell::RefCell;
 use windows::{
     Win32::{
         Foundation::{COLORREF, HWND, LPARAM, POINT, RECT, WPARAM},
-        Graphics::{Dwm::DwmGetColorizationColor, Gdi::*},
+        Graphics::{
+            Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmGetColorizationColor, DwmSetWindowAttribute},
+            Gdi::*,
+        },
+        System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
         UI::{
+            Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
             Controls::*,
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow},
             Input::KeyboardAndMouse::{GetFocus, SetFocus},
@@ -75,6 +80,15 @@ const LIMCODEX: usize = 166;
 const LIMAGY: usize = 167;
 const LIMGROUP: usize = 168;
 const LIMSNIP: usize = 169;
+/// The five prayer fine-tune edits (Fajr, Dhuhr, Asr, Maghrib, Isha), then the notch size, open and animation
+/// lists, and the full-screen, reminder-sound and prayer-pause switches.
+const PSHIFT: usize = 170;
+const NSIZE: usize = 175;
+const NOPEN: usize = 176;
+const ANIM: usize = 177;
+const FSHIDE: usize = 178;
+const RSOUNDS: usize = 179;
+const PPAUSE: usize = 180;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_CENTERIMAGE | SS_NOTIFY`: the footer strip centres its text and takes clicks, so scrolled rows cannot be hit under it.
@@ -142,8 +156,22 @@ const PAGES: &[Page] = &[
                 ],
             },
             Card {
-                label: "Windows",
-                rows: &[r(DESKTOP, C, "Show only windows on this des&ktop", "")],
+                label: "Behaviour",
+                rows: &[
+                    r(DESKTOP, C, "Show only windows on this des&ktop", ""),
+                    r(
+                        FSHIDE,
+                        C,
+                        "Hide in &full screen",
+                        "Hide the dock and notch over a full-screen app",
+                    ),
+                    r(
+                        RSOUNDS,
+                        C,
+                        "Reminder s&ounds",
+                        "Master switch for the timer and prayer sounds",
+                    ),
+                ],
             },
         ],
     },
@@ -153,6 +181,24 @@ const PAGES: &[Page] = &[
             Card {
                 label: "Colours",
                 rows: &[r(THEME, Kind::Combo(170), "T&heme", "")],
+            },
+            Card {
+                label: "Notch",
+                rows: &[
+                    r(
+                        NSIZE,
+                        Kind::Combo(120),
+                        "Notch si&ze",
+                        "Auto is the designed size",
+                    ),
+                    r(
+                        NOPEN,
+                        Kind::Combo(120),
+                        "&Open the notch",
+                        "By hovering or by a click",
+                    ),
+                    r(ANIM, Kind::Combo(120), "A&nimation speed", ""),
+                ],
             },
             Card {
                 label: "Dock",
@@ -265,6 +311,42 @@ const PAGES: &[Page] = &[
                     r(PRAYER, C, "Prayer &reminders", ""),
                     r(PMETHOD, Kind::Combo(230), "Prayer method", ""),
                     r(PLEAD, Kind::Combo(170), "Heads-up before the prayer", ""),
+                    r(
+                        PPAUSE,
+                        C,
+                        "Pause &media at prayer time",
+                        "Pauses what is playing, never resumes it",
+                    ),
+                ],
+            },
+            Card {
+                label: "Fine-tune",
+                rows: &[
+                    r(PSHIFT, Kind::Edit(70), "Fajr shift", "Minutes, -30 to 30"),
+                    r(
+                        PSHIFT + 1,
+                        Kind::Edit(70),
+                        "Dhuhr shift",
+                        "Minutes, -30 to 30",
+                    ),
+                    r(
+                        PSHIFT + 2,
+                        Kind::Edit(70),
+                        "Asr shift",
+                        "Minutes, -30 to 30",
+                    ),
+                    r(
+                        PSHIFT + 3,
+                        Kind::Edit(70),
+                        "Maghrib shift",
+                        "Minutes, -30 to 30",
+                    ),
+                    r(
+                        PSHIFT + 4,
+                        Kind::Edit(70),
+                        "Isha shift",
+                        "Minutes, -30 to 30",
+                    ),
                 ],
             },
             Card {
@@ -370,6 +452,7 @@ pub struct SettingsWindow {
     sounds: Vec<String>,
     sound_action: Option<SoundAction>,
     font: Option<PickerFont>,
+    pal: Pal,
     factor: f64,
     scroll: i32,
     scroll_max: i32,
@@ -392,6 +475,11 @@ struct Pal {
     text: u32,
     dim: u32,
     accent: u32,
+    /// Toggle track when off, toggle thumb, the selected sidebar row's text.
+    off: u32,
+    thumb: u32,
+    seltext: u32,
+    dark: bool,
 }
 
 /// What `WM_ERASEBKGND` draws: the page title, section labels and cards, in client coordinates.
@@ -409,8 +497,49 @@ thread_local! {
     static PAINT: RefCell<Option<Paint>> = const { RefCell::new(None) };
 }
 
+/// RGB and COLORREF (BGR) swap into each other.
+fn swap(value: u32) -> u32 {
+    (value & 0xff) << 16 | value & 0xff00 | value >> 16 & 0xff
+}
 fn rgb(value: u32) -> COLORREF {
-    COLORREF((value & 0xff) << 16 | value & 0xff00 | value >> 16 & 0xff)
+    COLORREF(swap(value))
+}
+fn system(index: SYS_COLOR_INDEX) -> u32 {
+    // SAFETY: scalar query.
+    swap(unsafe { GetSysColor(index) })
+}
+/// Windows app mode is dark (read when the window opens and on a settings change, never polled).
+fn dark() -> bool {
+    let (mut light, mut size) = (1u32, 4u32);
+    // SAFETY: reads one DWORD into a local.
+    let read = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut light as *mut u32).cast()),
+            Some(&mut size),
+        )
+    };
+    read.is_ok() && light == 0
+}
+fn high_contrast() -> bool {
+    let mut hc = HIGHCONTRASTW {
+        cbSize: size_of::<HIGHCONTRASTW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: fills a local struct of the size it declares.
+    let read = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            hc.cbSize,
+            Some((&mut hc as *mut HIGHCONTRASTW).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    read.is_ok() && hc.dwFlags & HCF_HIGHCONTRASTON == HCF_HIGHCONTRASTON
 }
 
 /// The system accent, or the reference green when it cannot be read.
@@ -423,26 +552,61 @@ fn accent() -> u32 {
     }
 }
 
+/// The tokens of `design-language.md`: dark or light with the system accent, or the system colours in
+/// high contrast.
 fn palette() -> Pal {
+    if high_contrast() {
+        let (window, text, select) = (
+            system(COLOR_WINDOW),
+            system(COLOR_WINDOWTEXT),
+            system(COLOR_HIGHLIGHT),
+        );
+        return Pal {
+            side: window,
+            content: window,
+            card: window,
+            line: text,
+            sel: select,
+            text,
+            dim: system(COLOR_GRAYTEXT),
+            accent: select,
+            off: system(COLOR_GRAYTEXT),
+            thumb: window,
+            seltext: system(COLOR_HIGHLIGHTTEXT),
+            dark: false,
+        };
+    }
+    let dark = dark();
+    let pick = |dark_value: u32, light_value: u32| if dark { dark_value } else { light_value };
+    let text = pick(0xf2f2f4, 0x16171a);
     Pal {
-        side: 0xececef,
-        content: 0xf6f6f8,
-        card: 0xffffff,
-        line: 0xe4e4e8,
-        sel: 0xffffff,
-        text: 0x16171a,
-        dim: 0x6a6b72,
+        side: pick(0x19191b, 0xececef),
+        content: pick(0x1d1d1f, 0xf6f6f8),
+        card: pick(0x28282a, 0xffffff),
+        line: pick(0x333336, 0xe4e4e8),
+        sel: pick(0x2d2d30, 0xffffff),
+        text,
+        dim: pick(0x8e8e93, 0x6a6b72),
         accent: accent(),
+        off: pick(0x48484c, 0xc9c9ce),
+        thumb: 0xffffff,
+        seltext: text,
+        dark,
     }
 }
 
 /// A fill in one colour: the stock DC brush and pen carry it, so nothing is created or leaked.
+/// `HOLLOW` as the fill draws only the outline.
+const HOLLOW: u32 = u32::MAX;
 unsafe fn round(dc: HDC, r: RECT, radius: i32, fill: u32, line: u32) {
     // SAFETY: stock objects on the caller's live DC.
     unsafe {
         SetDCBrushColor(dc, rgb(fill));
         SetDCPenColor(dc, rgb(line));
-        SelectObject(dc, GetStockObject(DC_BRUSH));
+        SelectObject(
+            dc,
+            GetStockObject(if fill == HOLLOW { NULL_BRUSH } else { DC_BRUSH }),
+        );
         SelectObject(dc, GetStockObject(DC_PEN));
         let _ = RoundRect(dc, r.left, r.top, r.right, r.bottom, radius * 2, radius * 2);
     }
@@ -461,11 +625,17 @@ unsafe fn write(dc: HDC, text: &str, mut r: RECT, colour: u32, flags: DRAW_TEXT_
     // SAFETY: draws a local buffer into the caller's live DC.
     unsafe {
         SetTextColor(dc, rgb(colour));
+        // A mirrored window (right-to-left UI) reads its text right to left too.
+        let reading = if GetLayout(dc) & LAYOUT_RTL.0 != 0 {
+            DT_RTLREADING
+        } else {
+            DRAW_TEXT_FORMAT(0)
+        };
         DrawTextW(
             dc,
             &mut text,
             &mut r,
-            flags | DT_NOPREFIX | DT_SINGLELINE | DT_VCENTER,
+            flags | reading | DT_SINGLELINE | DT_VCENTER,
         );
     }
 }
@@ -487,10 +657,10 @@ fn paint(dc: HDC, window: HWND, p: &Paint) {
         );
         SetBkMode(dc, TRANSPARENT);
         SelectObject(dc, p.title_font.into());
-        write(dc, p.title.1, p.title.0, p.pal.text, DT_LEFT);
+        write(dc, p.title.1, p.title.0, p.pal.text, DT_LEFT | DT_NOPREFIX);
         SelectObject(dc, p.font.into());
         for (rect, text) in &p.labels {
-            write(dc, text, *rect, p.pal.dim, DT_LEFT);
+            write(dc, text, *rect, p.pal.dim, DT_LEFT | DT_NOPREFIX);
         }
         for (rect, lines) in &p.cards {
             round(dc, *rect, px(10), p.pal.card, p.pal.line);
@@ -555,13 +725,81 @@ fn draw_side(item: &DRAWITEMSTRUCT, p: &Paint) {
         SetBkMode(dc, TRANSPARENT);
         SelectObject(dc, p.font.into());
         let initial = &page.name[..1];
-        write(dc, initial, tile, 0xffffff, DT_CENTER);
+        write(dc, initial, tile, 0xffffff, DT_CENTER | DT_NOPREFIX);
         let name = RECT {
             left: tile.right + px(12),
             right: cell.right,
             ..cell
         };
-        write(dc, page.name, name, p.pal.text, DT_LEFT);
+        let colour = if item.itemState.0 & ODS_SELECTED.0 != 0 {
+            p.pal.seltext
+        } else {
+            p.pal.text
+        };
+        write(dc, page.name, name, colour, DT_LEFT | DT_NOPREFIX);
+    }
+}
+
+fn is_toggle(h: HWND) -> bool {
+    // SAFETY: scalar query of a live child.
+    (unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32) & 0xf == BS_AUTOCHECKBOX as u32
+}
+
+/// A checkbox drawn as a switch (the control stays a native checkbox: state, tab stop, mnemonic, UIA role):
+/// the title on the left, a pill with a thumb on the right, a two-line accent ring while it has focus.
+fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
+    let px = |v: i32| (v as f64 * p.scale).round() as i32;
+    let (dc, r, h) = (note.hdc, note.rc, note.hdr.hwndFrom);
+    // SAFETY: scalar query of a live child.
+    let style = unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32;
+    let tall = style & 0xc00 == BS_TOP as u32;
+    let on = checked(h);
+    let mid = if tall {
+        r.top + px(14)
+    } else {
+        (r.top + r.bottom) / 2
+    };
+    let pill = RECT {
+        left: r.right - px(38),
+        top: mid - px(11),
+        right: r.right,
+        bottom: mid + px(11),
+    };
+    let thumb = if on {
+        pill.right - px(20)
+    } else {
+        pill.left + px(2)
+    };
+    let title = RECT {
+        right: pill.left - px(8),
+        bottom: if tall { r.top + px(28) } else { r.bottom },
+        ..r
+    };
+    // SAFETY: the DC and rectangle come from this custom-draw notification.
+    unsafe {
+        fill(dc, r, p.pal.card);
+        let track = if on { p.pal.accent } else { p.pal.off };
+        round(dc, pill, px(11), track, track);
+        let knob = RECT {
+            left: thumb,
+            top: mid - px(9),
+            right: thumb + px(18),
+            bottom: mid + px(9),
+        };
+        round(dc, knob, px(9), p.pal.thumb, p.pal.thumb);
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, p.font.into());
+        write(dc, &text(h, 256), title, p.pal.text, DT_LEFT);
+        if note.uItemState.0 & CDIS_FOCUS.0 != 0 {
+            round(dc, r, px(8), HOLLOW, p.pal.accent);
+            let inner = RECT {
+                left: r.left + 1,
+                top: r.top + 1,
+                right: r.right - 1,
+                bottom: r.bottom - 1,
+            };
+            round(dc, inner, px(8), HOLLOW, p.pal.accent);
+        }
     }
 }
 
@@ -595,6 +833,22 @@ unsafe extern "system" fn settings_proc(
                     SetDCBrushColor(dc, rgb(back));
                     Some(GetStockObject(DC_BRUSH).0 as isize)
                 }
+            }
+            WM_NOTIFY => {
+                // SAFETY: for WM_NOTIFY lparam is an NMHDR (here an NMCUSTOMDRAW) that lives through this call.
+                let note = unsafe { &*(lparam.0 as *const NMCUSTOMDRAW) };
+                if note.hdr.code != NM_CUSTOMDRAW
+                    || note.dwDrawStage != CDDS_PREPAINT
+                    || !is_toggle(note.hdr.hwndFrom)
+                {
+                    return None;
+                }
+                draw_toggle(note, p);
+                // SAFETY: the result of this notification (DWLP_MSGRESULT, offset 0), on our own dialog.
+                unsafe {
+                    SetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(0), CDRF_SKIPDEFAULT as isize)
+                };
+                Some(1)
             }
             WM_DRAWITEM => {
                 // SAFETY: for WM_DRAWITEM lparam is a DRAWITEMSTRUCT that lives through this call.
@@ -675,6 +929,9 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         PRAYER => &mut s.prayer_remind,
         LIMCODEX => &mut s.limits_codex,
         LIMAGY => &mut s.limits_agy,
+        FSHIDE => &mut s.hide_fullscreen,
+        RSOUNDS => &mut s.reminder_sounds,
+        PPAUSE => &mut s.prayer_pause,
         TAB..=159 if id - TAB < 6 => &mut s.tabs[id - TAB],
         DBTN..=134 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,
@@ -709,6 +966,9 @@ fn combo_rows(id: usize) -> Vec<String> {
             })
             .collect(),
         LIMGROUP => names(&mut ["Gemini models", "Claude and GPT models"].into_iter()),
+        NSIZE => names(&mut ["Auto", "100%", "115%", "130%", "150%"].into_iter()),
+        NOPEN => names(&mut ["Hover", "Click"].into_iter()),
+        ANIM => names(&mut ["Normal", "Fast"].into_iter()),
         _ => Vec::new(),
     }
 }
@@ -716,6 +976,14 @@ fn combo_rows(id: usize) -> Vec<String> {
 impl SettingsWindow {
     pub fn create(current: &Settings, devices: &[String], factor: f64) -> Result<Self> {
         let window = empty_dialog(480, 300, Some(settings_proc))?;
+        if crate::dock::system_rtl() {
+            // Children created after this inherit the mirrored layout.
+            // SAFETY: our own dialog, before any child exists.
+            unsafe {
+                let ex = GetWindowLongPtrW(window, GWL_EXSTYLE);
+                SetWindowLongPtrW(window, GWL_EXSTYLE, ex | WS_EX_LAYOUTRTL.0 as isize);
+            }
+        }
         let mut this = Self {
             window,
             side: HWND::default(),
@@ -728,6 +996,7 @@ impl SettingsWindow {
             sounds: prayer_os::discover(),
             sound_action: None,
             font: None,
+            pal: palette(),
             factor,
             scroll: 0,
             scroll_max: 0,
@@ -867,6 +1136,7 @@ impl SettingsWindow {
         let limit = match id {
             SHELF => 3,
             CITY => MAX_CITY,
+            PSHIFT..=174 => 4,
             DIAGNOSTICS => MAX_PATH,
             TIMER => 8,
             _ => 0,
@@ -1082,6 +1352,9 @@ impl SettingsWindow {
                         PMETHOD => row_of(&Method::ALL, &settings.prayer_method),
                         PLEAD => row_of(&LEADS, &settings.prayer_lead),
                         LIMGROUP => usize::from(settings.limits_group),
+                        NSIZE => row_of(&NOTCH_SIZES, &settings.notch_size),
+                        NOPEN => usize::from(settings.open_click),
+                        ANIM => usize::from(settings.anim_fast),
                         PSOUND => self.sound_row(&settings.prayer_sound),
                         _ => continue,
                     };
@@ -1090,6 +1363,9 @@ impl SettingsWindow {
                 Kind::Edit(_) => {
                     let _ = match item.id {
                         SHELF => set_text(h, &settings.shelf_cap.to_string()),
+                        PSHIFT..=174 => {
+                            set_text(h, &settings.prayer_shift[item.id - PSHIFT].to_string())
+                        }
                         CITY => set_text(h, &settings.city),
                         DIAGNOSTICS => set_text(h, settings.diagnostics.as_deref().unwrap_or("")),
                         _ => Ok(()),
@@ -1162,6 +1438,9 @@ impl SettingsWindow {
                         UNITS => pick(&Units::ALL, &mut next.units, row),
                         PMETHOD => pick(&Method::ALL, &mut next.prayer_method, row),
                         PLEAD => pick(&LEADS, &mut next.prayer_lead, row),
+                        NSIZE => pick(&NOTCH_SIZES, &mut next.notch_size, row),
+                        NOPEN => next.open_click = row.map_or(next.open_click, |r| r == 1),
+                        ANIM => next.anim_fast = row.map_or(next.anim_fast, |r| r == 1),
                         LIMGROUP => {
                             next.limits_group = row.map_or(next.limits_group, |r| r.min(1) as u8)
                         }
@@ -1182,6 +1461,10 @@ impl SettingsWindow {
                 Kind::Edit(_) => match item.id {
                     SHELF => next.shelf_cap = text(h, 3).trim().parse().unwrap_or(next.shelf_cap),
                     CITY => next.city = text(h, MAX_CITY),
+                    PSHIFT..=174 => {
+                        let slot = &mut next.prayer_shift[item.id - PSHIFT];
+                        *slot = text(h, 4).trim().parse().unwrap_or(*slot);
+                    }
                     DIAGNOSTICS => next.diagnostics = Some(text(h, MAX_PATH)),
                     _ => {}
                 },
@@ -1354,6 +1637,17 @@ impl SettingsWindow {
         // SAFETY: owned dialog is live.
         let dpi = unsafe { GetDpiForWindow(self.window) }.max(96);
         let font = PickerFont::create(dpi, self.factor)?;
+        self.pal = palette();
+        let dark = BOOL::from(self.pal.dark);
+        // SAFETY: a scalar attribute on our own window; older Windows ignores it.
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                self.window,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                (&dark as *const BOOL).cast(),
+                size_of::<BOOL>() as u32,
+            );
+        }
         let handles = self
             .items
             .iter()
@@ -1361,6 +1655,19 @@ impl SettingsWindow {
             .chain([self.side, self.status, self.close])
             .filter(|h| !h.0.is_null());
         for child in handles {
+            // The native look of lists, edits and buttons follows the app mode too.
+            // SAFETY: our own live child.
+            unsafe {
+                let _ = SetWindowTheme(
+                    child,
+                    if self.pal.dark {
+                        w!("DarkMode_Explorer")
+                    } else {
+                        PCWSTR::null()
+                    },
+                    PCWSTR::null(),
+                );
+            }
             // SAFETY: child controls are live and borrow this font until replaced or destroyed.
             unsafe {
                 SendMessageW(
@@ -1493,7 +1800,7 @@ impl SettingsWindow {
             };
             PAINT.with(|p| {
                 p.replace(Some(Paint {
-                    pal: palette(),
+                    pal: self.pal,
                     scale,
                     font: handle,
                     title_font,

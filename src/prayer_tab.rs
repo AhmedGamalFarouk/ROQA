@@ -364,6 +364,7 @@ mod tests {
             utc_offset_min: offset_min,
             method: Method::Egyptian,
             hanafi: false,
+            shift: [0; 6],
         };
         let winter = prayer::times(&cairo(120), DAY).unwrap();
         let summer = prayer::times(&cairo(180), DAY).unwrap();
@@ -400,6 +401,7 @@ mod tests {
             utc_offset_min: 120,
             method: Method::Egyptian,
             hanafi: false,
+            shift: [0; 6],
         };
         let times = prayer::times(&p, DAY).unwrap();
         let local = Local {

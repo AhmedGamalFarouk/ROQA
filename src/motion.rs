@@ -1,4 +1,42 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::{AtomicBool, Ordering::Relaxed},
+    time::{Duration, Instant},
+};
+
+/// The Settings choices that shape every animation and the way the notch opens (set by the host, one
+/// writer, read on the UI thread).
+static FAST: AtomicBool = AtomicBool::new(false);
+static CLICK: AtomicBool = AtomicBool::new(false);
+/// Fast animations take this share of the normal time.
+const FAST_SCALE: f32 = 0.6;
+pub fn configure(fast: bool, click: bool) {
+    FAST.store(fast, Relaxed);
+    CLICK.store(click, Relaxed);
+}
+/// True when the notch opens on a click instead of after hovering.
+pub fn click_to_open() -> bool {
+    CLICK.load(Relaxed)
+}
+/// `duration` and `curve` at the chosen speed: a spring's frequency rises as its time shrinks, so the shape
+/// is the same, only quicker.
+#[inline(never)]
+fn paced(fast: bool, duration: Duration, curve: Curve) -> (Duration, Curve) {
+    if !fast {
+        return (duration, curve);
+    }
+    let curve = match curve {
+        Curve::Spring { damping, frequency } => Curve::Spring {
+            damping,
+            frequency: frequency / FAST_SCALE,
+        },
+        bezier => bezier,
+    };
+    (duration.mul_f32(FAST_SCALE), curve)
+}
+/// A deadline length at the chosen speed (the hover intent).
+pub fn time(duration: Duration) -> Duration {
+    paced(FAST.load(Relaxed), duration, EASE_OUT).0
+}
 
 /// Easing from 0 to 1. Values may leave 0..1 to overshoot; a tween always lands exactly on its target.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -96,11 +134,13 @@ impl Tween {
     }
     /// Always animates, like Nusa: by user decision (2026-11-09) the Windows "Animation effects"
     /// setting is not consulted, so there is no reduced-motion path.
+    #[inline(never)]
     pub fn retarget(&mut self, to: f32, duration: Duration, curve: Curve) {
         if to == self.to {
             return;
         }
         let now = Instant::now();
+        let (duration, curve) = paced(FAST.load(Relaxed), duration, curve);
         *self = Self {
             from: self.value(now),
             to,
@@ -129,6 +169,17 @@ impl Tween {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_shortens_time_and_keeps_the_spring_shape() {
+        let (d, c) = paced(true, OPEN_TIME, OPEN);
+        assert_eq!(d, OPEN_TIME.mul_f32(0.6));
+        // The same fraction of the run gives the same value: frequency x seconds is unchanged.
+        let normal = OPEN.ease(0.5, OPEN_TIME);
+        assert!((c.ease(0.5, d) - normal).abs() < 1e-4);
+        assert_eq!(paced(false, OPEN_TIME, OPEN), (OPEN_TIME, OPEN));
+        assert_eq!(paced(true, HOVER_IN_TIME, EASE_OUT).1, EASE_OUT);
+    }
 
     fn samples(curve: Curve, duration: Duration) -> Vec<f32> {
         (0..=200)
