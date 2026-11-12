@@ -26,6 +26,8 @@ windows = { version = "=0.62.2", features = [
     # MODIFIERKEYS_FLAGS in IDropTarget (the shelf drop target, slice S6).
     "Win32_System_SystemServices",
     "Win32_System_Variant",
+    # GetSystemPowerStatus: the power pill (features B1).
+    "Win32_System_Power",
     # SHELLEXECUTEINFOW / ShellExecuteExW (no-UI launch of a not-running pin, slice S4) are gated on it.
     "Win32_System_Registry",
     # GetDriveTypeW: a mapped network drive is not stat'ed on the host thread (slice S7).

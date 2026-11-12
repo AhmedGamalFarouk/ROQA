@@ -26,6 +26,7 @@ mod notch_uia;
 mod picker;
 mod picker_font;
 mod pins;
+mod power;
 mod settings;
 mod settings_window;
 mod shelf;

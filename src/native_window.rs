@@ -32,6 +32,8 @@ pub const CLOSE_SURFACE: u32 = WM_APP + 2;
 pub const PANIC_PROBE: u32 = WM_APP + 3;
 /// Posted when a surface loses the foreground; only a keyboard-focused notch ever has it.
 pub const DEACTIVATED: u32 = WM_APP + 6;
+/// Posted on a power-status change (plugged in, unplugged, low battery); the host reads the status.
+pub const POWER_STATUS: u32 = WM_APP + 7;
 pub const CLASS: windows::core::PCWSTR = w!("ROQA.NativeSurface.1");
 /// Explorer broadcasts this registered message to every top-level window when it (re)creates the
 /// taskbar. 0 until registered, and stays 0 if registration fails.
@@ -392,6 +394,10 @@ unsafe extern "system" fn window_proc(
 fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // SAFETY: callback HWND/parameters come from Windows; no pointer parameters are dereferenced here.
     unsafe {
+        if message == WM_POWERBROADCAST && wparam.0 == PBT_APMPOWERSTATUSCHANGE as usize {
+            let _ = PostMessageW(Some(hwnd), POWER_STATUS, WPARAM(0), LPARAM(0));
+            return LRESULT(1); // TRUE grants the broadcast
+        }
         if let Some(reconnect) =
             repositions(message, wparam, TASKBAR_CREATED.load(Ordering::Relaxed))
         {

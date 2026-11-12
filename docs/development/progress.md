@@ -912,3 +912,12 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Ratchet:** `verify.ps1` fails above `scripts/size-baseline.txt` (803840) + 2%. Now 804,864 B, SHA `9098A4F446E85559B6E0175A6609B4F8D735E574A5F73191A5F40A4D586EDD0D`.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 186 tests, locked release); script parse/compile/`-DryRun` PASS.
 - **NOT RUN:** ROQA launch, idle sample, refresh/min re-measure; reviews paused.
+
+## Features B1: power pill and accent (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/features-b1`; [packet](features-b1.md), [queue](features-queue.md). No native/GUI run.
+- **Power pill:** `PBT_APMPOWERSTATUSCHANGE` -> `GetSystemPowerStatus` -> 4 s notch notice ("Charging 54%", "On battery 54%", "Battery low 10%") on a state change only; one host deadline, fullscreen-safe, UIA live region.
+- **Accent:** `UISettings` accent (+ `ColorValuesChanged` wake) on progress/volume fills and focus rings in Classic/Midnight/Glass; 3:1 contrast else ink; high contrast keeps system colours.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 192 tests, locked release); 815,616 B (+1.46% vs baseline, ratchet PASS, baseline unchanged), SHA `8AEF5ABA335AFC3E523D0788E61CA6C2898532FD219F6B5F706ED327DE47C1A9`.
+- **Also:** AGENTS.md "Feature pipeline" section and `features-queue.md`.
+- **NOT RUN:** real plug/unplug, low/critical, UIA announcement, runtime accent change, text fit; reviews paused (REVIEW NOT RUN).

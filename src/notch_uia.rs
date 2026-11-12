@@ -54,6 +54,8 @@ pub struct State {
     pub status: Option<&'static str>,
     /// The running timers and a just-finished one, as `timer::View::name`; empty without any.
     pub timer: String,
+    /// A just-announced power notice (`power::Power::text`); empty without one. A polite live region.
+    pub notice: String,
     /// The visible shelf entries' names (`Shelf::label`); element id `SHELF_BASE + n` is entry n.
     pub shelf: Vec<String>,
 }
@@ -66,15 +68,16 @@ pub fn invalidate(state: &Shared) {
         state.controls.clear();
         state.shelf.clear();
         state.timer.clear();
+        state.notice.clear();
         state.focus = None;
         state.open = false;
     }
 }
 
-/// The root's name: the status line and the timers (`timer::View::name`, such as "Timer, 4:32
-/// remaining"), when there are any, are part of it, as they are part of the panel.
-fn root_name(status: Option<&str>, timer: &str) -> String {
-    ["ROQA Notch", status.unwrap_or(""), timer]
+/// The root's name: the status line, a power notice and the timers (`timer::View::name`, such as "Timer,
+/// 4:32 remaining"), when there are any, are part of it, as they are part of the panel.
+fn root_name(status: Option<&str>, notice: &str, timer: &str) -> String {
+    ["ROQA Notch", status.unwrap_or(""), notice, timer]
         .into_iter()
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
@@ -141,6 +144,17 @@ pub fn accessibility(hwnd: HWND, state: &Shared) -> Result<Accessibility> {
         }
         .into(),
     )
+}
+
+/// Tells listening UIA clients that the root's live name changed (a power notice appeared). Call without
+/// holding the state lock.
+pub fn announce(accessibility: &Accessibility) {
+    // SAFETY: the provider of this live notch, raised on the UI thread that owns it.
+    unsafe {
+        if UiaClientsAreListening().as_bool() {
+            let _ = UiaRaiseAutomationEvent(accessibility.root(), UIA_LiveRegionChangedEventId);
+        }
+    }
 }
 
 /// Tells listening UIA clients that keyboard focus moved to `control`. Call without holding the
@@ -231,10 +245,13 @@ impl IRawElementProviderSimple_Impl for Root_Impl {
         none()
     }
     fn GetPropertyValue(&self, property: UIA_PROPERTY_ID) -> Result<VARIANT> {
-        let (status, timer) = read(&self.state, |state| (state.status, state.timer.clone()))?;
+        let (status, notice, timer) = read(&self.state, |state| {
+            (state.status, state.notice.clone(), state.timer.clone())
+        })?;
         Ok(match property {
             UIA_ControlTypePropertyId => variant_i32(UIA_ToolBarControlTypeId.0),
-            UIA_NamePropertyId => variant_text(&root_name(status, &timer)),
+            UIA_NamePropertyId => variant_text(&root_name(status, &notice, &timer)),
+            UIA_LiveSettingPropertyId => variant_i32(Polite.0),
             UIA_AutomationIdPropertyId => variant_text("RoqaNotch"),
             _ => VARIANT::default(),
         })
@@ -494,22 +511,26 @@ mod tests {
     #[test]
     fn the_root_name_carries_the_status_line_only_when_there_is_one() {
         use crate::media::View;
-        assert_eq!(root_name(View::NoPlayer.status(), ""), "ROQA Notch");
+        assert_eq!(root_name(View::NoPlayer.status(), "", ""), "ROQA Notch");
         for view in [View::Permission, View::Error] {
             let line = view.status().unwrap();
-            assert_eq!(root_name(Some(line), ""), format!("ROQA Notch, {line}"));
+            assert_eq!(root_name(Some(line), "", ""), format!("ROQA Notch, {line}"));
         }
     }
 
     #[test]
     fn the_root_name_says_each_timer_and_its_state() {
         assert_eq!(
-            root_name(None, "Timer, 4:32 remaining"),
+            root_name(None, "", "Timer, 4:32 remaining"),
             "ROQA Notch, Timer, 4:32 remaining"
         );
         assert_eq!(
-            root_name(Some("No player"), "Timer finished"),
+            root_name(Some("No player"), "", "Timer finished"),
             "ROQA Notch, No player, Timer finished"
+        );
+        assert_eq!(
+            root_name(None, "Charging 54%", "Timer, 0:09 remaining"),
+            "ROQA Notch, Charging 54%, Timer, 0:09 remaining"
         );
     }
 

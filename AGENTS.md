@@ -53,3 +53,10 @@ Briefs point here instead of repeating these.
 ## Parallel work
 
 One slice at a time, or parallel slices only when their files are disjoint. If they overlap, land one first, then start the next from the new `main`. This avoids the double rebase-and-re-review paid for on slices 4-6.
+
+## Feature pipeline
+
+- One batch per worker, from `docs/development/features-queue.md`. Sonnet implements; Gemini 3.8 Flash does research, triage and mechanical landing.
+- Briefs are 20 lines or fewer and point to the queue doc.
+- Serialize batches that touch `host.rs`, `graphics.rs` or `layout.rs`.
+- `verify.ps1` is the gate; reviews only at milestone gates. Reports are 10 lines or fewer.

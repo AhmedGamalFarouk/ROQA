@@ -212,6 +212,17 @@ pub fn timer_pill(dpi: u32) -> Bounds {
     scaled_bounds(TIMER_PILL, dpi)
 }
 
+/// The power pill's text slot (features B1, PROVISIONAL, no design review), in DIPs from the body's left and
+/// top edges: x, y, width, height. Plain panel: the status row under the date (centred). Media panel: the
+/// timer's pocket under the 72 DIP cover and left of the controls (from x 100), leading-aligned.
+const POWER_NOTICE: [(f32, f32, f32, f32); 2] =
+    [(12.0, 66.0, 296.0, 12.0), (16.0, 92.0, 84.0, 16.0)];
+
+/// The power pill's text slot in pixels from the body's left and top edges.
+pub fn power_notice(media: bool, dpi: u32) -> Bounds {
+    scaled_bounds(POWER_NOTICE[usize::from(media)], dpi)
+}
+
 /// The file shelf's `shelf::VISIBLE` square slots (slice S6, PROVISIONAL, no design review), each
 /// `SHELF_SLOT` DIPs with the slot origin of the panel kind's first one, in DIPs from the body's left and
 /// top edges, then one slot further right per entry. Plain panel: right of the centred clock (it ends about
@@ -730,6 +741,35 @@ mod tests {
             let pill = timer_pill(dpi);
             assert!(fits(pill, NOTCH), "{dpi}");
             assert!(pill.x >= scaled(105.0, dpi), "{dpi}");
+        }
+    }
+
+    #[test]
+    fn the_power_notice_fits_its_panel_and_overlaps_no_media_element() {
+        let hit = |a: Bounds, b: Bounds| {
+            a.x < b.x + b.width
+                && b.x < a.x + a.width
+                && a.y < b.y + b.height
+                && b.y < a.y + a.height
+        };
+        for dpi in [96, 144, 192, 240] {
+            let fits = |slot: Bounds, shape: NotchShape| {
+                slot.x >= 0
+                    && slot.y >= 0
+                    && slot.x + slot.width <= scaled(shape.width, dpi)
+                    && slot.y + slot.height <= scaled(shape.height, dpi)
+            };
+            assert!(fits(power_notice(false, dpi), NOTCH_EXPANDED), "{dpi}");
+            let media = power_notice(true, dpi);
+            assert!(fits(media, MEDIA_EXPANDED), "{dpi}");
+            let cover = scaled_bounds((16.0, 14.0, 72.0, 72.0), dpi);
+            let others = media_controls(dpi).into_iter().chain([
+                cover,
+                media_progress(dpi),
+                volume_bar(dpi),
+                meter(dpi).0,
+            ]);
+            assert!(!others.into_iter().any(|other| hit(media, other)), "{dpi}");
         }
     }
 

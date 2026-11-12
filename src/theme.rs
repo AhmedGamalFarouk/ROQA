@@ -17,6 +17,8 @@ pub struct Palette {
     pub dock_hover: Rgba,
     /// Text, glyphs, bars and rings; each element applies its own alpha.
     pub ink: Rgb,
+    /// The progress and volume fills and the focus rings: the system accent where it reads, else `ink`.
+    pub accent: Rgb,
     /// A glyph on an ink-filled circle, and the badge circle.
     pub on_ink: Rgb,
     /// The dock's picker tiles.
@@ -66,6 +68,25 @@ impl Theme {
         }
     }
 
+    /// The palette with the system `accent` on its fills and rings. Light keeps ink, and so does any
+    /// accent under `ACCENT_CONTRAST` against the body over a white or a black backdrop (a Glass body
+    /// is translucent), like the text rule in the tests.
+    pub fn palette_with(self, accent: Rgb) -> Palette {
+        let palette = self.palette();
+        let Rgba(r, g, b, alpha) = palette.body;
+        let reads = [(255, 255, 255), (0, 0, 0)]
+            .into_iter()
+            .all(|backdrop| contrast(accent, over((r, g, b), alpha, backdrop)) >= ACCENT_CONTRAST);
+        Palette {
+            accent: if self != Self::Light && reads {
+                accent
+            } else {
+                palette.ink
+            },
+            ..palette
+        }
+    }
+
     pub fn palette(self) -> Palette {
         match self {
             Self::Classic => Palette {
@@ -73,6 +94,7 @@ impl Theme {
                 body: Rgba(0, 0, 0, 1.0),
                 dock_hover: Rgba(20, 20, 22, 1.0),
                 ink: (255, 255, 255),
+                accent: (255, 255, 255),
                 on_ink: (0, 0, 0),
                 glyph: (220, 225, 232),
                 tile: Rgba(58, 58, 64, 1.0),
@@ -84,6 +106,7 @@ impl Theme {
                 body: Rgba(244, 245, 247, 1.0),
                 dock_hover: Rgba(232, 234, 238, 1.0),
                 ink: (20, 22, 26),
+                accent: (20, 22, 26),
                 on_ink: (255, 255, 255),
                 glyph: (52, 56, 64),
                 tile: Rgba(205, 208, 214, 1.0),
@@ -95,6 +118,7 @@ impl Theme {
                 body: Rgba(11, 16, 32, 1.0),
                 dock_hover: Rgba(22, 30, 56, 1.0),
                 ink: (232, 238, 255),
+                accent: (232, 238, 255),
                 on_ink: (11, 16, 32),
                 glyph: (190, 205, 255),
                 tile: Rgba(40, 50, 84, 1.0),
@@ -106,6 +130,7 @@ impl Theme {
                 body: Rgba(22, 28, 40, 0.82),
                 dock_hover: Rgba(22, 28, 40, 0.90),
                 ink: (255, 255, 255),
+                accent: (255, 255, 255),
                 on_ink: (10, 14, 22),
                 glyph: (235, 240, 250),
                 tile: Rgba(255, 255, 255, 0.16),
@@ -117,7 +142,7 @@ impl Theme {
 }
 
 /// Read only at construction or a system notification; never polls or changes Windows settings.
-pub fn system_palette(theme: Theme) -> Palette {
+pub fn system_palette(theme: Theme, accent: Rgb) -> Palette {
     use windows::Win32::{
         Graphics::Gdi::{
             COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor,
@@ -158,7 +183,7 @@ pub fn system_palette(theme: Theme) -> Palette {
             );
         }
     }
-    theme.palette()
+    theme.palette_with(accent)
 }
 
 impl Palette {
@@ -170,6 +195,7 @@ impl Palette {
             body: opaque(body),
             dock_hover: opaque(body),
             ink,
+            accent: ink, // high contrast keeps the system colours
             on_ink: body,
             glyph: ink,
             tile: opaque(tile),
@@ -185,6 +211,19 @@ impl Palette {
         } else {
             alpha
         }
+    }
+    /// A fill: the accent, or when `dim` (muted) the system grey-text colour in high contrast, where the
+    /// accent is ink anyway.
+    pub fn accent_dim(&self, dim: bool, alpha: f32) -> (Rgb, f32) {
+        let (color, alpha) = self.ink_dim(dim, alpha);
+        (
+            if color == self.ink {
+                self.accent
+            } else {
+                color
+            },
+            alpha,
+        )
     }
     /// A bar track: the system track colour in high contrast (never the fill's ink), else faint ink.
     pub fn track(&self, alpha: f32) -> (Rgb, f32) {
@@ -220,37 +259,39 @@ impl Palette {
     }
 }
 
+/// WCAG 1.4.11 non-text contrast, for the accent against the body.
+const ACCENT_CONTRAST: f32 = 3.0;
+
+fn luminance((r, g, b): Rgb) -> f32 {
+    let channel = |c: f32| {
+        let c = c / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(r as f32) + 0.7152 * channel(g as f32) + 0.0722 * channel(b as f32)
+}
+
+/// `top` at `alpha` over `bottom`.
+fn over(top: Rgb, alpha: f32, bottom: Rgb) -> Rgb {
+    let mix = |t: u8, b: u8| (f32::from(t) * alpha + f32::from(b) * (1.0 - alpha)).round() as u8;
+    (
+        mix(top.0, bottom.0),
+        mix(top.1, bottom.1),
+        mix(top.2, bottom.2),
+    )
+}
+
+fn contrast(a: Rgb, b: Rgb) -> f32 {
+    let (x, y) = (luminance(a), luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn luminance((r, g, b): Rgb) -> f32 {
-        let channel = |c: f32| {
-            let c = c / 255.0;
-            if c <= 0.03928 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * channel(r as f32) + 0.7152 * channel(g as f32) + 0.0722 * channel(b as f32)
-    }
-
-    /// `top` at `alpha` over `bottom`.
-    fn over(top: Rgb, alpha: f32, bottom: Rgb) -> Rgb {
-        let mix =
-            |t: u8, b: u8| (f32::from(t) * alpha + f32::from(b) * (1.0 - alpha)).round() as u8;
-        (
-            mix(top.0, bottom.0),
-            mix(top.1, bottom.1),
-            mix(top.2, bottom.2),
-        )
-    }
-
-    fn contrast(a: Rgb, b: Rgb) -> f32 {
-        let (x, y) = (luminance(a), luminance(b));
-        (x.max(y) + 0.05) / (x.min(y) + 0.05)
-    }
 
     #[test]
     fn high_contrast_is_opaque_and_uses_only_supplied_system_colours() {
@@ -333,6 +374,55 @@ mod tests {
                 assert!(contrast(p.on_ink, p.ink) >= 7.0, "{theme:?} on_ink");
             }
         }
+    }
+
+    #[test]
+    fn the_accent_colours_fills_and_rings_only_where_it_reads() {
+        let blue = (0, 120, 215);
+        // Light, high contrast and the plain themes' own palettes keep ink.
+        assert_eq!(Theme::Light.palette_with(blue).accent, (20, 22, 26));
+        assert_eq!(Theme::Classic.palette().accent, (255, 255, 255));
+        let high = Palette::contrast((1, 2, 3), (250, 251, 252), (4, 5, 6), (7, 8, 9));
+        assert_eq!(high.accent, high.ink);
+        assert_eq!(high.accent_dim(true, 0.3), ((7, 8, 9), 1.0));
+        assert_eq!(high.accent_dim(false, 0.3), (high.ink, 1.0));
+        // A bright accent shows on the dark bodies; a dark one falls back to ink.
+        let bright = (255, 196, 0);
+        assert_eq!(Theme::Classic.palette_with(bright).accent, bright);
+        assert_eq!(Theme::Midnight.palette_with(bright).accent, bright);
+        for dark in [(0, 0, 0), (10, 10, 30)] {
+            let (classic, midnight) = (Theme::Classic.palette(), Theme::Midnight.palette());
+            assert_eq!(Theme::Classic.palette_with(dark).accent, classic.ink);
+            assert_eq!(Theme::Midnight.palette_with(dark).accent, midnight.ink);
+        }
+        // The chosen accent always reads over the worst backdrop, whatever the system gives.
+        for theme in Theme::ALL {
+            let p = theme.palette();
+            let Rgba(r, g, b, alpha) = p.body;
+            for accent in [
+                blue,
+                bright,
+                (0, 0, 0),
+                (255, 255, 255),
+                (128, 128, 128),
+                (200, 30, 30),
+            ] {
+                let chosen = theme.palette_with(accent).accent;
+                assert!(chosen == p.ink || chosen == accent, "{theme:?}");
+                if chosen != p.ink {
+                    for backdrop in [(255, 255, 255), (0, 0, 0)] {
+                        let body = over((r, g, b), alpha, backdrop);
+                        assert!(
+                            contrast(chosen, body) >= ACCENT_CONTRAST,
+                            "{theme:?} {chosen:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // Muted still dims the accent, by alpha.
+        let classic = Theme::Classic.palette_with(bright);
+        assert_eq!(classic.accent_dim(false, 0.5), (bright, 0.5));
     }
 
     #[test]

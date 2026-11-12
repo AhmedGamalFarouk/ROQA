@@ -14,6 +14,7 @@ use crate::{
     notch_uia,
     picker::Picker,
     pins::Pins,
+    power::{self, Power},
     settings::{self, Settings},
     settings_window::SettingsWindow,
     shelf::{self, Check, Shelf},
@@ -373,13 +374,22 @@ impl Surface {
         media: &Media,
         audio: &Audio,
         timer: Option<&timer::View>,
+        notice: Option<&str>,
         shelf: &ShelfView,
     ) {
+        let mut announce = false;
         if let Role::Notch { uia, focus, .. } = &self.role
             && let Ok(mut state) = uia.lock()
         {
             state.dpi = self.dpi;
             let timer_name = timer.map_or("", |view| view.name.as_str());
+            // A notice newly shown is announced once, after the lock is released.
+            let notice = notice.unwrap_or("");
+            if state.notice != notice {
+                announce = !notice.is_empty();
+                state.notice.clear();
+                state.notice.push_str(notice);
+            }
             if state.timer != timer_name {
                 state.timer.clear();
                 state.timer.push_str(timer_name);
@@ -415,20 +425,24 @@ impl Surface {
                     .unwrap_or_default();
             }
         }
+        if announce && let Role::Notch { accessible, .. } = &self.role {
+            notch_uia::announce(accessible);
+        }
     }
     /// Draws one frame, publishing it to UI Automation first.
     fn paint_notch(
         &mut self,
-        time: &str,
-        date: &str,
+        (time, date): (&str, &str),
         media: &Media,
         audio: &Audio,
         timers: &Timers,
+        power: &Power,
         shelf: &ShelfView,
     ) -> Result<()> {
         let track = media.view().shown();
         let progress = self.motion.value(Instant::now());
         let timer = timers.view(Instant::now());
+        let notice = power.text();
         // Only a revealed panel row reads the time; a collapsed notch draws no progress.
         self.played = track
             .filter(|_| motion::reveal(progress) > 0.0)
@@ -441,7 +455,7 @@ impl Surface {
             _ => [0.0; audio::BARS],
         };
         self.bars = layout::meter_heights(peaks, self.dpi);
-        self.publish_notch(media, audio, timer.as_ref(), shelf);
+        self.publish_notch(media, audio, timer.as_ref(), notice, shelf);
         let Role::Notch {
             shadow,
             area,
@@ -489,7 +503,9 @@ impl Surface {
             played: self.played,
             volume: audio.level(),
             bars: self.bars,
-            timer: timer.as_ref(),
+            // A notice owns the panel text slots while it shows.
+            timer: timer.as_ref().filter(|_| notice.is_none()),
+            notice,
             shelf: &slots,
         };
         shadow.paint(&scene, self.window.0)?;
@@ -942,6 +958,8 @@ struct Desktop {
     timers: Timers,
     /// The soonest timer's last requested panel text, so an expanded notch repaints only when it changes.
     timer_shown: String,
+    /// The power pill: set by `message` on a status change, ended by `refresh_power`'s deadline.
+    power: Power,
 }
 impl Desktop {
     fn create(_probe: &Probe) -> Result<Self> {
@@ -978,7 +996,7 @@ impl Desktop {
             graphics: Graphics::create()?,
             rebuild: Rebuild::new(Instant::now()),
             picker: None,
-            palette: crate::theme::system_palette(settings.theme),
+            palette: crate::theme::system_palette(settings.theme, text.accent()),
             palette_dirty: false,
             settings_window: None,
             file_picker: Default::default(),
@@ -1011,6 +1029,7 @@ impl Desktop {
             sampled: None,
             timers,
             timer_shown: String::new(),
+            power: Power::new(power::Raw::read()),
         };
         if desktop.settings.notch {
             desktop.show(SurfaceKind::Notch)?;
@@ -1072,11 +1091,11 @@ impl Desktop {
             // Advances every existing notch first, so all monitors show the same minute.
             self.refresh_clock()?;
             surface.paint_notch(
-                &self.clock,
-                &self.date,
+                (&self.clock, &self.date),
                 &self.media,
                 &self.audio,
                 &self.timers,
+                &self.power,
                 &self.shelf,
             )?;
             self.surfaces.push(surface);
@@ -1129,11 +1148,11 @@ impl Desktop {
                 Repaint::Nothing => {}
                 Repaint::Meter => notch.paint_meter(peaks)?,
                 Repaint::Full => notch.paint_notch(
-                    &self.clock,
-                    &self.date,
+                    (&self.clock, &self.date),
                     &self.media,
                     &self.audio,
                     &self.timers,
+                    &self.power,
                     &self.shelf,
                 )?,
             }
@@ -1226,9 +1245,8 @@ impl Desktop {
             .next_wake(expanded, now)
             .map_or(INFINITE, |due| milliseconds_until(due, now))
     }
-    /// A timer finished: every visible notch opens (once, however many finished together) and the
-    /// system sound plays if enabled. No toast: notification packaging is M6.
-    fn complete_timer(&mut self) {
+    /// Opens every visible notch; a notch hidden by a full-screen app stays hidden.
+    fn open_notches(&mut self) {
         for surface in &mut self.surfaces {
             if surface.visible
                 && let Role::Notch { intent, .. } = &mut surface.role
@@ -1237,6 +1255,24 @@ impl Desktop {
                 surface.live = true;
             }
         }
+    }
+    /// Ends a finished power notice and returns the wait until its deadline; with none showing it does
+    /// nothing and returns `INFINITE`.
+    #[inline(never)]
+    fn refresh_power(&mut self) -> u32 {
+        let now = Instant::now();
+        if self.power.over(now) {
+            self.surfaces.iter_mut().for_each(Surface::close_alert);
+            self.request_notches(Repaint::Full, |_| true);
+        }
+        self.power
+            .deadline()
+            .map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+    /// A timer finished: every visible notch opens (once, however many finished together) and the
+    /// system sound plays if enabled. No toast: notification packaging is M6.
+    fn complete_timer(&mut self) {
+        self.open_notches();
         if self.settings.timer_sound {
             // SAFETY: plays the user's own default sound asynchronously; no pointers.
             unsafe {
@@ -1267,11 +1303,11 @@ impl Desktop {
             if surface.live {
                 match surface.kind() {
                     SurfaceKind::Notch => surface.paint_notch(
-                        &self.clock,
-                        &self.date,
+                        (&self.clock, &self.date),
                         &self.media,
                         &self.audio,
                         &self.timers,
+                        &self.power,
                         &self.shelf,
                     )?,
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
@@ -1375,7 +1411,7 @@ impl Desktop {
         self.surfaces
             .retain(|s| !destroy.contains(&(s.kind(), s.monitor.clone())));
         if restyle {
-            self.palette = crate::theme::system_palette(self.settings.theme);
+            self.palette = crate::theme::system_palette(self.settings.theme, self.text.accent());
             // Colours are fixed when a surface is created, so a new theme rebuilds the survivors (as a text-scale
             // change does); the diff's creations below then find nothing left to skip and place themselves.
             self.surfaces.clear();
@@ -1950,7 +1986,13 @@ impl Desktop {
         let enabled = self.enabled();
         let timer = self.timers.view(Instant::now());
         for notch in &mut self.surfaces {
-            notch.publish_notch(&self.media, &self.audio, timer.as_ref(), &self.shelf);
+            notch.publish_notch(
+                &self.media,
+                &self.audio,
+                timer.as_ref(),
+                self.power.text(),
+                &self.shelf,
+            );
             let Some(control) = notch.focused().map(|focus| focus.control) else {
                 continue;
             };
@@ -1970,6 +2012,14 @@ impl Desktop {
         if message.message == shelf_os::PICKED && message.hwnd.is_invalid() {
             if let Some(paths) = self.file_picker.take() {
                 self.change_shelf(|shelf| shelf.add_all(&paths) > 0);
+            }
+            return Ok(());
+        }
+        if message.message == native_window::POWER_STATUS {
+            // Every surface posts one; the second finds the state unchanged and starts nothing.
+            if self.power.update(power::Raw::read(), Instant::now()) {
+                self.open_notches();
+                self.request_notches(Repaint::Full, |_| true);
             }
             return Ok(());
         }
@@ -2104,11 +2154,11 @@ impl Desktop {
             if visible && !surface.visible {
                 match surface.kind() {
                     SurfaceKind::Notch => surface.paint_notch(
-                        &self.clock,
-                        &self.date,
+                        (&self.clock, &self.date),
                         &self.media,
                         &self.audio,
                         &self.timers,
+                        &self.power,
                         &self.shelf,
                     )?,
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
@@ -2199,8 +2249,10 @@ impl Desktop {
     /// whether animation runs.
     fn update(&mut self, model: &WindowModel) -> Result<(u32, bool)> {
         self.refresh_topology()?;
-        if std::mem::take(&mut self.palette_dirty) {
-            let palette = crate::theme::system_palette(self.settings.theme);
+        // The accent changed (the event only flagged it): rebuild like any palette change.
+        let accent = self.text.take_colors_changed();
+        if std::mem::take(&mut self.palette_dirty) || accent {
+            let palette = crate::theme::system_palette(self.settings.theme, self.text.accent());
             if palette != self.palette {
                 self.palette = palette;
                 self.surfaces.clear();
@@ -2244,7 +2296,8 @@ impl Desktop {
             .refresh_clock()?
             .min(self.refresh_progress()?)
             .min(self.refresh_meter()?)
-            .min(self.refresh_timers());
+            .min(self.refresh_timers())
+            .min(self.refresh_power());
         self.paint_requested()?;
         if let Some(picker) = &mut self.picker {
             picker.synchronize(model)?;

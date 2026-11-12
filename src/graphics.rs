@@ -163,6 +163,8 @@ pub struct NotchScene<'a> {
     pub bars: [i32; BARS],
     /// The soonest countdown timer (S5, PROVISIONAL); `None` draws nothing.
     pub timer: Option<&'a timer::View>,
+    /// The power pill's text (features B1), drawn in the open panel; `None` draws nothing.
+    pub notice: Option<&'a str>,
     /// The file shelf's visible entries (S6, PROVISIONAL); empty draws nothing.
     pub shelf: &'a [ShelfSlot<'a>],
 }
@@ -566,6 +568,8 @@ fn notch_text(
     p: &Palette,
 ) -> Result<()> {
     timer_text(context, scene, body, scale, p)?;
+    notice_text(context, scene, body, scale, p)?;
+    let status = status.filter(|_| scene.notice.is_none());
     shelf_row(context, scene, body, scale, p)?;
     if let Some(track) = scene.track {
         let font = media_clock(motion::smooth(scene.progress), scale);
@@ -683,6 +687,50 @@ fn timer_text(
     Ok(())
 }
 
+/// PROVISIONAL (B1): the power pill's text in 11 DIP white 85 %, fading in with the panel; it replaces the
+/// plain panel's status line and, while it shows, the media panel's timer text (`host` leaves that out).
+/// Slot: `layout::power_notice`.
+fn notice_text(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    scale: f32,
+    p: &Palette,
+) -> Result<()> {
+    let reveal = motion::reveal(scene.progress);
+    let Some(text) = scene.notice.filter(|_| reveal > 0.0) else {
+        return Ok(());
+    };
+    let media = scene.track.is_some();
+    let slot = layout::power_notice(media, scene.dpi);
+    let left = body.left + slot.x as f32;
+    let top = body.top + slot.y as f32;
+    let font = Font {
+        family: TEXT_FONT,
+        size: 11.0 * scale,
+        weight: DWRITE_FONT_WEIGHT_NORMAL,
+        designator: 1.0,
+        align: if media {
+            DWRITE_TEXT_ALIGNMENT_LEADING
+        } else {
+            DWRITE_TEXT_ALIGNMENT_CENTER
+        },
+    };
+    let rect = D2D_RECT_F {
+        left,
+        top,
+        right: left + slot.width as f32,
+        bottom: top + slot.height as f32,
+    };
+    draw_text(
+        context,
+        text,
+        &font,
+        rect,
+        with_alpha(p.ink, p.ink_alpha(0.85 * reveal)),
+    )
+}
+
 /// Side of a shelf icon inside its slot, in DIPs.
 const SHELF_ICON: f32 = 16.0;
 
@@ -717,8 +765,8 @@ fn shelf_row(
         if scene.focus == Some(crate::notch_uia::SHELF_BASE + index) {
             // SAFETY: live draw context and local brush.
             unsafe {
-                let brush =
-                    context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(reveal)), None)?;
+                let brush = context
+                    .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(reveal)), None)?;
                 context.DrawRoundedRectangle(
                     &rounded(
                         pixel_square(
@@ -1304,8 +1352,8 @@ fn media_text(
         unsafe {
             draw_track(context, p, track, COVER_FILL * alpha)?;
             if fill.rect.right > fill.rect.left {
-                let brush =
-                    context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(*alpha)), None)?;
+                let brush = context
+                    .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(*alpha)), None)?;
                 context.FillRoundedRectangle(fill, &brush);
             }
         }
@@ -1338,8 +1386,8 @@ fn media_text(
         // SAFETY: as above.
         unsafe {
             draw_track(context, p, &bar.track, bar.track_alpha)?;
-            let fill =
-                context.CreateSolidColorBrush(&tint(p.ink_dim(bar.dim, bar.fill_alpha)), None)?;
+            let fill = context
+                .CreateSolidColorBrush(&tint(p.accent_dim(bar.dim, bar.fill_alpha)), None)?;
             context.FillRoundedRectangle(&bar.fill, &fill);
         }
     }
@@ -1356,8 +1404,8 @@ fn media_text(
     if let Some(ring) = &plan.ring {
         // SAFETY: as above.
         unsafe {
-            let brush =
-                context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(ring.alpha)), None)?;
+            let brush = context
+                .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(ring.alpha)), None)?;
             context.DrawRoundedRectangle(&ring.shape, &brush, ring.stroke, None);
         }
     }
@@ -1920,6 +1968,7 @@ mod media_tests {
             volume,
             bars: [0; BARS],
             timer: None,
+            notice: None,
             shelf: &[],
         };
         let clock = clock_width(time, progress, dpi);
@@ -1947,6 +1996,7 @@ mod media_tests {
                 volume: None,
                 bars: [0; BARS],
                 timer: None,
+                notice: None,
                 shelf: &[],
             };
             let clock = clock_width("9:50 pm", progress, 96);
@@ -2204,6 +2254,7 @@ mod media_tests {
                 volume: None,
                 bars: [4, 20, 12, 8, 4],
                 timer: None,
+                notice: None,
                 shelf: &[],
             };
             meter_bars(&scene, &body(96, progress))
@@ -2253,6 +2304,7 @@ mod media_tests {
                     volume: None,
                     bars: heights,
                     timer: None,
+                    notice: None,
                     shelf: &[],
                 };
                 let (bars, _) = meter_bars(&scene, &body(dpi, 1.0)).unwrap();
