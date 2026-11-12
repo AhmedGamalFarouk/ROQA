@@ -14,6 +14,8 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
 - [x] T1: notch tabs (hanging handle: Media, Weather, Prayer, Timer, Shelf), a Settings switch per tab and the squash-capsule mascot eyes ([packet](features-tabs-eyes.md)).
 - [x] W1: Weather tab content: city (geocoded) plus WinRT Geolocator auto-detect; refresh on open if older than ~1 h, ~3 h in the background only while a notch is visible; `Tab::Weather` available ([packet](features-weather.md)).
 - [x] P1: Prayer tab ([packet](features-prayer.md)): wire `prayer.rs`, location, a reminder that expands the notch with the user's chosen sound (MCI, lazy). Then `Tab::Prayer.available()` goes true.
+- [x] D1: dock style Floating or Attached to the bottom edge ([packet](features-dock-styles.md)).
+- [x] F3: prayer alert over full screen, Weather independent of Prayer ([packet](features-f3.md)).
 - [ ] M1: mascot states that wait on content: adhan (half-lidded, stepped glow) and rain (droopy), plus the per-tab mood pairing.
 - [ ] T2: tab polish after a native run: SelectionItem UIA pattern, handle hover timing, RTL order, text-scale fit.
 - [ ] B4: picker as command palette (installed apps from Start menu shortcuts, inline math).

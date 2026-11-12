@@ -1016,3 +1016,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Done:** prayer sound always plays; a full-screen-hidden notch shows the alert non-activating, then retracts and hides; other notices still suppressed. `weather::feed_wanted`: Weather alone works, Prayer alone does one place lookup; tab flags independent (tests).
 - **Checks:** verify.ps1 PASS (fmt/clippy, 292 tests, locked release); 1,123,840 B, ratchet within 2% (baseline unchanged); SHA `D53A8B3E2BC1105AFD3C41F98A6F86C214DA442C64AE0D5F05566D374A911BE8`.
 - **NOT RUN:** real full-screen overlay, focus/input check, audio; reviews paused (REVIEW NOT RUN).
+
+## D1 dock style (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/f3-dock`; [packet](features-dock-styles.md). Part 2. No native/GUI run.
+- **Done:** Settings "Dock style" Floating (default) / Attached; attached dock flush on the work area's bottom edge, notch material, flat bottom, rounded top corners; live apply; slots, UIA, menu, previews unchanged. Slide-up animation skipped.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 295 tests, locked release); 1,126,912 B, ratchet within 2% (baseline unchanged); SHA `FE7D76ACD9168869D047B6DD822CB9A0749DAFD1749DABA96B712D5ED8F74E80`.
+- **NOT RUN:** drawing, hit-testing, taskbar placement, multi-monitor, Settings fit on small screens; reviews paused (REVIEW NOT RUN).

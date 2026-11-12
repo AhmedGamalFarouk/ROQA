@@ -7,6 +7,7 @@
 use crate::{
     dock::{foreground_key, restore_foreground},
     layout::Bounds,
+    layout::DockStyle,
     native_window,
     picker::{ACTION, CLOSE, DIALOG_STYLE, RELAYOUT, control, empty_dialog, wide},
     picker_font::PickerFont,
@@ -49,6 +50,7 @@ const EYES: usize = TAB + 5;
 const CITY: usize = 114;
 const DETECT: usize = 115;
 const UNITS: usize = 116;
+const DOCKSTYLE: usize = 117;
 /// The prayer reminder checkbox, method list, sound list with Browse and Test, and the heads-up list.
 const PRAYER: usize = 160;
 const PMETHOD: usize = 161;
@@ -98,6 +100,8 @@ pub struct SettingsWindow {
     detect: HWND,
     /// Drop-down list of `Units::ALL`, in that order.
     units: HWND,
+    /// Drop-down list of `DockStyle::ALL`.
+    dock_style: HWND,
     prayer: HWND,
     /// Drop-down list of `Method::ALL`.
     pmethod: HWND,
@@ -203,6 +207,7 @@ impl SettingsWindow {
             city: HWND::default(),
             detect: HWND::default(),
             units: HWND::default(),
+            dock_style: HWND::default(),
             prayer: HWND::default(),
             pmethod: HWND::default(),
             psound: HWND::default(),
@@ -425,6 +430,27 @@ impl SettingsWindow {
                 );
             }
         }
+        let dock_label = label("Dock st&yle")?;
+        self.dock_style = control(
+            window,
+            w!("ComboBox"),
+            "",
+            DOCKSTYLE,
+            CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | tab,
+            flat,
+        )?;
+        for style in DockStyle::ALL {
+            let name = wide(style.label());
+            // SAFETY: the combo box copies the terminated string synchronously.
+            unsafe {
+                SendMessageW(
+                    self.dock_style,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(name.as_ptr() as isize)),
+                );
+            }
+        }
         let shelf_label = label(&format!("Shel&f size (1 to {})", shelf::MAX))?;
         self.shelf = control(
             window,
@@ -556,6 +582,7 @@ impl SettingsWindow {
             reset,
             close,
             lead_label,
+            dock_label,
         ];
         // SAFETY: scalar limits on our own edits; Windows bounds what a user can type or paste.
         unsafe {
@@ -580,6 +607,7 @@ impl SettingsWindow {
             self.edge_volume,
             self.edge_brightness,
             self.theme,
+            self.dock_style,
             self.shelf,
             self.city,
             self.detect,
@@ -619,6 +647,14 @@ impl SettingsWindow {
         // SAFETY: scalar selection index on our own combo box.
         unsafe {
             SendMessageW(self.theme, CB_SETCURSEL, Some(WPARAM(index)), None);
+        }
+        let style = DockStyle::ALL
+            .iter()
+            .position(|s| *s == settings.dock_style)
+            .unwrap_or(0);
+        // SAFETY: scalar selection index on our own combo box.
+        unsafe {
+            SendMessageW(self.dock_style, CB_SETCURSEL, Some(WPARAM(style)), None);
         }
         for (handle, device) in &self.monitors {
             set_checked(*handle, !settings.off_monitors.contains(device));
@@ -728,6 +764,9 @@ impl SettingsWindow {
             .ok()
             .and_then(|index| Units::ALL.get(index).copied())
             .unwrap_or(next.units);
+        next.dock_style = chosen_row(self.dock_style)
+            .and_then(|i| DockStyle::ALL.get(i).copied())
+            .unwrap_or(next.dock_style);
         next.diagnostics = Some(text(self.diagnostics, MAX_PATH));
         next.prayer_remind = checked(self.prayer);
         next.prayer_method = chosen_row(self.pmethod)
@@ -809,7 +848,7 @@ impl SettingsWindow {
                         }
                     }
                     TAB..=EYES if notification == BN_CLICKED => self.commit()?,
-                    THEME | UNITS if notification == CBN_SELCHANGE => self.commit()?,
+                    THEME | UNITS | DOCKSTYLE if notification == CBN_SELCHANGE => self.commit()?,
                     _ if monitor && notification == BN_CLICKED => self.commit()?,
                     SHELF | CITY | DIAGNOSTICS if notification == EN_KILLFOCUS => self.commit()?,
                     OK => self.commit()?,
@@ -878,10 +917,11 @@ impl SettingsWindow {
         // Row heights in DIPs, top to bottom: one list gives both the window height and every control's top.
         // dock, notch, monitors, sound, desktop, two edge sliders, then the tabs and mascot in two columns
         let mut heights = vec![24.0; 6 + self.monitors.len() + 3];
-        // theme, shelf, weather city, detect and units, diagnostics label and edit, timer label and row,
+        // theme, dock style, shelf, weather city, detect and units, diagnostics label and edit, timer label and row,
         // status, pins, buttons
         heights.extend([
-            28.0, 28.0, 28.0, 28.0, 28.0, 28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0, 28.0,
+            28.0, 28.0, 28.0, 28.0, 28.0, 28.0, 28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0,
+            28.0,
         ]);
         let tops: Vec<i32> = heights
             .iter()
@@ -962,6 +1002,7 @@ impl SettingsWindow {
                 reset,
                 close,
                 lead_label,
+                dock_label,
             ] = self.others[..]
             else {
                 return Err(Error::new(E_FAIL, "Settings controls missing."));
@@ -1011,108 +1052,122 @@ impl SettingsWindow {
                     px(160.0),
                 ),
                 (
-                    shelf_label,
+                    dock_label,
                     margin,
                     tops[end + 2] + px(5.0),
+                    inner - half(260.0),
+                    px(20.0),
+                ),
+                (
+                    self.dock_style,
+                    margin + inner - half(250.0),
+                    tops[end + 2],
+                    half(250.0),
+                    px(120.0),
+                ),
+                (
+                    shelf_label,
+                    margin,
+                    tops[end + 3] + px(5.0),
                     inner - half(80.0),
                     px(20.0),
                 ),
                 (
                     self.shelf,
                     margin + inner - half(70.0),
-                    tops[end + 2],
+                    tops[end + 3],
                     half(70.0),
                     px(28.0),
                 ),
                 (
                     city_label,
                     margin,
-                    tops[end + 3] + px(5.0),
+                    tops[end + 4] + px(5.0),
                     inner - half(230.0),
                     px(20.0),
                 ),
                 (
                     self.city,
                     margin + inner - half(220.0),
-                    tops[end + 3],
+                    tops[end + 4],
                     half(220.0),
                     px(28.0),
                 ),
                 (
                     self.detect,
                     margin,
-                    tops[end + 4] + px(2.0),
+                    tops[end + 5] + px(2.0),
                     inner - half(190.0),
                     px(24.0),
                 ),
                 (
                     self.units,
                     margin + inner - half(180.0),
-                    tops[end + 4],
+                    tops[end + 5],
                     half(180.0),
                     px(160.0),
                 ),
                 (
                     self.prayer,
                     margin,
-                    tops[end + 5] + px(2.0),
+                    tops[end + 6] + px(2.0),
                     inner - half(240.0),
                     px(24.0),
                 ),
                 (
                     self.pmethod,
                     margin + inner - half(230.0),
-                    tops[end + 5],
+                    tops[end + 6],
                     half(230.0),
                     px(160.0),
                 ),
                 (
                     self.psound,
                     margin,
-                    tops[end + 6],
+                    tops[end + 7],
                     (inner - half(200.0)).max(1),
                     px(160.0),
                 ),
                 (
                     self.pbrowse,
                     margin + (inner - half(190.0)).max(0),
-                    tops[end + 6],
+                    tops[end + 7],
                     half(90.0),
                     px(28.0),
                 ),
                 (
                     self.ptest,
                     margin + (inner - half(94.0)).max(0),
-                    tops[end + 6],
+                    tops[end + 7],
                     half(94.0),
                     px(28.0),
                 ),
                 (
                     lead_label,
                     margin,
-                    tops[end + 7] + px(5.0),
+                    tops[end + 8] + px(5.0),
                     inner - half(190.0),
                     px(20.0),
                 ),
                 (
                     self.plead,
                     margin + inner - half(180.0),
-                    tops[end + 7],
+                    tops[end + 8],
                     half(180.0),
                     px(160.0),
                 ),
-                (diagnostics_label, margin, tops[end + 8], inner, px(20.0)),
-                (self.diagnostics, margin, tops[end + 9], inner, px(28.0)),
-                (timer_label, margin, tops[end + 10], inner, px(20.0)),
-                (self.timer, margin, tops[end + 11], half(120.0), px(28.0)),
+                (diagnostics_label, margin, tops[end + 9], inner, px(20.0)),
+                (self.diagnostics, margin, tops[end + 10], inner, px(28.0)),
+                (timer_label, margin, tops[end + 11], inner, px(20.0)),
+                (self.timer, margin, tops[end + 12], half(120.0), px(28.0)),
                 (
                     start,
                     margin + half(128.0),
-                    tops[end + 11],
+                    tops[end + 12],
                     half(150.0),
                     px(28.0),
                 ),
-                (self.status, margin, tops[end + 12], inner, px(42.0)),
+                (self.status, margin, tops[end + 13], inner, px(42.0)),
                 (reset, margin, tops[last], half(180.0), px(28.0)),
                 (
                     close,

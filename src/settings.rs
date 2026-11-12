@@ -2,7 +2,7 @@
 //! the host applies a change live through `surface_diff`. No launch-at-login: PLAN forbids startup registration.
 
 use crate::{
-    layout::SurfaceKind,
+    layout::{DockStyle, SurfaceKind},
     prayer::Method,
     prayer_tab::LEADS,
     shelf,
@@ -32,6 +32,8 @@ pub struct Settings {
     pub diagnostics: Option<String>,
     /// Colours of both surfaces (`theme.rs`).
     pub theme: Theme,
+    /// Floating (default) or attached to the bottom edge.
+    pub dock_style: DockStyle,
     /// The dock lists only windows on the current virtual desktop (pins stay).
     pub desktop_only: bool,
     /// The hover sliders on each monitor's right (volume) and left (brightness) edge (`edge.rs`).
@@ -64,6 +66,7 @@ impl Default for Settings {
             shelf_cap: shelf::MAX,
             diagnostics: None,
             theme: Theme::Classic,
+            dock_style: DockStyle::Floating,
             desktop_only: false,
             // Off until a native run proves the 2 px strips leave edge scrollbars alone; a stored value wins.
             edge_volume: false,
@@ -181,6 +184,9 @@ impl Settings {
                 .is_some(),
             "shelfcap" => value.parse().map(|v| self.shelf_cap = v).is_ok(),
             "theme" => Theme::from_key(value).map(|v| self.theme = v).is_some(),
+            "dockstyle" => DockStyle::from_key(value)
+                .map(|v| self.dock_style = v)
+                .is_some(),
             "diag" if !value.is_empty() => {
                 self.diagnostics = Some(value.to_owned());
                 true
@@ -208,10 +214,11 @@ impl Settings {
             u8::from(self.edge_brightness)
         ));
         out.push_str(&format!(
-            "eyes={}\ndetect={}\nunits={}\n",
+            "eyes={}\ndetect={}\nunits={}\ndockstyle={}\n",
             u8::from(self.eyes),
             u8::from(self.detect),
-            self.units.key()
+            self.units.key(),
+            self.dock_style.key()
         ));
         out.push_str(&format!(
             "premind={}
@@ -318,6 +325,7 @@ mod tests {
             shelf_cap: 999,
             diagnostics: Some("  \"C:\\logs\\roqa.json\"  ".into()),
             theme: Theme::Glass,
+            dock_style: DockStyle::Attached,
             desktop_only: true,
             edge_volume: false,
             edge_brightness: false,
@@ -498,6 +506,7 @@ mod tests {
             shelf_cap: 5,
             diagnostics: Some("C:\\a=b\\r.json".into()),
             theme: Theme::Midnight,
+            dock_style: DockStyle::Attached,
             desktop_only: true,
             edge_volume: true,
             tabs: [false, true, false, true, false],

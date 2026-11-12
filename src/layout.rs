@@ -556,8 +556,48 @@ pub struct Bounds {
     pub height: i32,
 }
 
-/// `dock_slots` sizes the dock (picker slot plus app groups); the notch ignores it.
+/// How the dock sits: floating above the bottom edge (the original look), or attached to it like the notch
+/// hangs from the top: flat bottom, rounded top corners, flush with the work area's bottom edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DockStyle {
+    #[default]
+    Floating,
+    Attached,
+}
+impl DockStyle {
+    pub const ALL: [Self; 2] = [Self::Floating, Self::Attached];
+    pub fn key(self) -> &'static str {
+        ["floating", "attached"][self as usize]
+    }
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|style| style.key() == key)
+    }
+    pub fn label(self) -> &'static str {
+        ["Floating", "Attached to the bottom edge"][self as usize]
+    }
+}
+
+/// The attached dock's top corner radius in pixels: the notch's rounding, never more than the body allows.
+pub fn attached_radius(bounds: Bounds, dpi: u32) -> f32 {
+    (dock::px(dock::RADIUS_DIPS, dpi) as f32)
+        .min(bounds.height as f32)
+        .min(bounds.width as f32 / 2.0)
+}
+
+/// The floating placement, as the tests across modules use it.
+#[cfg(test)]
 pub fn placement(work: Bounds, dpi: u32, kind: SurfaceKind, dock_slots: usize) -> Bounds {
+    placement_styled(work, dpi, kind, dock_slots, DockStyle::Floating)
+}
+
+/// `dock_slots` sizes the dock (picker slot plus app groups); the notch ignores it and `style`.
+pub fn placement_styled(
+    work: Bounds,
+    dpi: u32,
+    kind: SurfaceKind,
+    dock_slots: usize,
+    style: DockStyle,
+) -> Bounds {
     let scale = |dips: i32| dock::px(dips, dpi);
     let (width, height) = match kind {
         SurfaceKind::Notch => (scale(NOTCH_WINDOW.0), scale(NOTCH_WINDOW.1)),
@@ -566,7 +606,14 @@ pub fn placement(work: Bounds, dpi: u32, kind: SurfaceKind, dock_slots: usize) -
             scale(dock::HEIGHT_DIPS),
         ),
     };
-    let margin = scale(12).min(work.height.max(1) / 4);
+    let attached = kind == SurfaceKind::Dock && style == DockStyle::Attached;
+    // Attached has no margin: it sits on the work area's bottom edge (above a bottom taskbar, at the screen
+    // edge when the taskbar is elsewhere or hides).
+    let margin = if attached {
+        0
+    } else {
+        scale(12).min(work.height.max(1) / 4)
+    };
     let width = width.clamp(1, work.width.max(1));
     let height = height.clamp(1, (work.height - margin * 2).max(1));
     Bounds {
@@ -584,6 +631,69 @@ pub fn placement(work: Bounds, dpi: u32, kind: SurfaceKind, dock_slots: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_attached_dock_sits_flush_on_the_bottom_edge_and_floating_does_not_move() {
+        let work = Bounds {
+            x: -1920,
+            y: -200,
+            width: 1920,
+            height: 1040,
+        };
+        let floating = placement(work, 144, SurfaceKind::Dock, 5);
+        let styled = |style| placement_styled(work, 144, SurfaceKind::Dock, 5, style);
+        assert_eq!(styled(DockStyle::Floating), floating);
+        let attached = styled(DockStyle::Attached);
+        assert_eq!(
+            (attached.x, attached.width, attached.height),
+            (floating.x, floating.width, floating.height)
+        );
+        assert_eq!(attached.y + attached.height, work.y + work.height);
+        assert!(floating.y + floating.height < work.y + work.height);
+        // The notch ignores the style.
+        assert_eq!(
+            placement_styled(work, 144, SurfaceKind::Notch, 0, DockStyle::Attached),
+            placement(work, 144, SurfaceKind::Notch, 0)
+        );
+    }
+
+    #[test]
+    fn the_attached_dock_stays_inside_tiny_work_areas_and_rounds_within_its_body() {
+        for dpi in [0, 96, 144, 384] {
+            let work = Bounds {
+                x: 10,
+                y: 20,
+                width: 30,
+                height: 10,
+            };
+            let at = placement_styled(work, dpi, SurfaceKind::Dock, 40, DockStyle::Attached);
+            assert!(at.x >= 10 && at.y >= 20);
+            assert!(at.x + at.width <= 40 && at.y + at.height <= 30);
+            let radius = attached_radius(at, dpi);
+            assert!(radius <= at.height as f32 && radius <= at.width as f32 / 2.0);
+        }
+        let at = placement_styled(
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1040,
+            },
+            96,
+            SurfaceKind::Dock,
+            5,
+            DockStyle::Attached,
+        );
+        assert_eq!(attached_radius(at, 96), 20.0);
+    }
+
+    #[test]
+    fn dock_style_keys_round_trip() {
+        for style in DockStyle::ALL {
+            assert_eq!(DockStyle::from_key(style.key()), Some(style));
+        }
+        assert_eq!(DockStyle::from_key("x"), None);
+    }
+
     #[test]
     fn centers_with_negative_coordinates_and_reserved_taskbar_space() {
         let work = Bounds {

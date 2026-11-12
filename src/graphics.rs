@@ -146,6 +146,8 @@ pub struct DockScene<'a> {
     /// Pointer-inside animation progress for the bar fill; keeps the M1 hover background semantic.
     pub inside: f32,
     pub dpi: u32,
+    /// Attached style: notch material, flat bottom, rounded top corners.
+    pub attached: bool,
 }
 
 pub struct NotchScene<'a> {
@@ -205,7 +207,6 @@ pub struct ShelfSlot<'a> {
 }
 
 /// Dock material (docs/design/roqa-visual-spec.md, colours from the theme): bar, ink-alpha hover fill, whole-pixel icon lift.
-const DOCK_RADIUS_DIPS: i32 = 20;
 const ICON_LIFT_DIPS: f32 = 3.0;
 const TEXT_FONT: PCWSTR = w!("Segoe UI Variable Text");
 const DISPLAY_FONT: PCWSTR = w!("Segoe UI Variable Display");
@@ -511,7 +512,27 @@ impl Canvas {
         let p = self.palette;
         self.draw(|context, rect| {
             let px = |dips: i32| dock::px(dips, scene.dpi) as f32;
-            let radius = px(DOCK_RADIUS_DIPS);
+            let radius = px(dock::RADIUS_DIPS);
+            if scene.attached {
+                let bounds = layout::Bounds {
+                    x: 0,
+                    y: 0,
+                    width: self.width as i32,
+                    height: self.height as i32,
+                };
+                let corner = layout::attached_radius(bounds, scene.dpi);
+                let outline = attached_outline(context, &rect, corner)?;
+                // SAFETY: context is live between surface BeginDraw/EndDraw.
+                unsafe {
+                    let fill = context.CreateSolidColorBrush(&color(p.body), None)?;
+                    context.FillGeometry(&outline, &fill, None);
+                    if let Some(rim) = p.rim {
+                        let rim = rim_brush(context, p.ink, rim, (rect.top, rect.bottom))?;
+                        context.DrawGeometry(&outline, &rim, 1.0, None);
+                    }
+                }
+                return paint_slots(context, &rect, self.width as i32, scene, &px, &p);
+            }
             // A one-physical-pixel inner hairline separates the black bar from dark wallpapers.
             let edge = D2D_RECT_F {
                 left: rect.left + 0.5,
@@ -531,18 +552,7 @@ impl Canvas {
                 };
                 context.DrawRoundedRectangle(&rounded(edge, radius - 0.5), &hairline, 1.0, None);
             }
-            let visible = dock::visible_slots(self.width as i32, scene.dpi, scene.slots.len());
-            for (index, slot) in scene.slots.iter().take(visible).enumerate() {
-                let left = rect.left + px(dock::PAD_DIPS) + px(dock::SLOT_DIPS) * index as f32;
-                let cell = D2D_RECT_F {
-                    left,
-                    top: rect.top,
-                    right: left + px(dock::SLOT_DIPS),
-                    bottom: rect.bottom,
-                };
-                draw_slot(context, &cell, slot, scene.dpi, &px, &p)?;
-            }
-            Ok(())
+            paint_slots(context, &rect, self.width as i32, scene, &px, &p)
         })
     }
     fn draw(
@@ -2007,6 +2017,63 @@ fn rounded(rect: D2D_RECT_F, radius: f32) -> D2D1_ROUNDED_RECT {
         rect,
         radiusX: radius,
         radiusY: radius,
+    }
+}
+
+/// The dock's slots, left to right inside `rect` (either style).
+fn paint_slots(
+    context: &ID2D1DeviceContext,
+    rect: &D2D_RECT_F,
+    width: i32,
+    scene: &DockScene,
+    px: &dyn Fn(i32) -> f32,
+    p: &Palette,
+) -> Result<()> {
+    let visible = dock::visible_slots(width, scene.dpi, scene.slots.len());
+    for (index, slot) in scene.slots.iter().take(visible).enumerate() {
+        let left = rect.left + px(dock::PAD_DIPS) + px(dock::SLOT_DIPS) * index as f32;
+        let cell = D2D_RECT_F {
+            left,
+            top: rect.top,
+            right: left + px(dock::SLOT_DIPS),
+            bottom: rect.bottom,
+        };
+        draw_slot(context, &cell, slot, scene.dpi, px, p)?;
+    }
+    Ok(())
+}
+
+/// The notch outline turned over: rounded top corners, flat bottom flush with the surface's bottom edge.
+fn attached_outline(
+    context: &ID2D1DeviceContext,
+    body: &D2D_RECT_F,
+    radius: f32,
+) -> Result<ID2D1PathGeometry> {
+    let (left, top, right, bottom) = (body.left, body.top, body.right, body.bottom);
+    let point = |x: f32, y: f32| Vector2 { X: x, Y: y };
+    let arc = |x: f32, y: f32| D2D1_ARC_SEGMENT {
+        point: point(x, y),
+        size: D2D_SIZE_F {
+            width: radius,
+            height: radius,
+        },
+        rotationAngle: 0.0,
+        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+        arcSize: D2D1_ARC_SIZE_SMALL,
+    };
+    // SAFETY: the factory, geometry and sink are local COM objects; the sink is closed before use.
+    unsafe {
+        let path = context.GetFactory()?.CreatePathGeometry()?;
+        let sink = path.Open()?;
+        sink.BeginFigure(point(left, bottom), D2D1_FIGURE_BEGIN_FILLED);
+        sink.AddLine(point(left, top + radius));
+        sink.AddArc(&arc(left + radius, top));
+        sink.AddLine(point(right - radius, top));
+        sink.AddArc(&arc(right, top + radius));
+        sink.AddLine(point(right, bottom));
+        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink.Close()?;
+        Ok(path)
     }
 }
 

@@ -12,7 +12,7 @@ use crate::{
     },
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
-    layout::{self, Bounds, SurfaceKind, placement},
+    layout::{self, Bounds, DockStyle, SurfaceKind, placement_styled},
     media::{self, Media, Progress, Track},
     motion::{self, Tween},
     native_window::{self, NativeWindow, WindowClass},
@@ -255,6 +255,8 @@ struct Surface {
     grip: Grip,
     /// Notch: the volume bar's drawn fill (percent), easing toward the real level; a drag sets it at once.
     volume_fill: Tween,
+    /// Dock: floating or attached to the bottom edge.
+    dock_style: DockStyle,
     /// Notch: shown over a full-screen app for a prayer alert only; hidden again once it has retracted.
     overlay: bool,
 }
@@ -305,6 +307,7 @@ enum Role {
     },
 }
 impl Surface {
+    #[allow(clippy::too_many_arguments)]
     fn create(
         graphics: &Graphics,
         kind: SurfaceKind,
@@ -313,8 +316,9 @@ impl Surface {
         slots: usize,
         drops: &Drops,
         palette: Palette,
+        dock_style: DockStyle,
     ) -> Result<Self> {
-        let bounds = placement(monitor.work, dpi, kind, slots);
+        let bounds = placement_styled(monitor.work, dpi, kind, slots, dock_style);
         let shadow = if kind == SurfaceKind::Notch {
             Some(NotchShadow::create(graphics, bounds, palette)?)
         } else {
@@ -371,6 +375,7 @@ impl Surface {
             grip: Grip::default(),
             volume_fill: Tween::rest(0.0),
             overlay: false,
+            dock_style,
         })
     }
     /// The handle opens at once for the pointer or a focused tab and closes `tabs::COLLAPSE_DELAY` after
@@ -899,6 +904,7 @@ impl Surface {
             slots,
             inside: self.motion.value(now),
             dpi: self.dpi,
+            attached: self.dock_style == DockStyle::Attached,
         })
     }
     fn dock_slot(&self, lparam: LPARAM, slots: usize) -> Option<usize> {
@@ -1353,6 +1359,7 @@ impl Desktop {
             self.dock_slots(),
             &self.drops,
             self.palette,
+            self.settings.dock_style,
         )?;
         if kind == SurfaceKind::Notch {
             // Advances every existing notch first, so all monitors show the same minute.
@@ -2099,6 +2106,29 @@ impl Desktop {
         if eyes_changed {
             self.pages.eyes = self.settings.eyes.then(Eyes::default);
         }
+        if old.dock_style != self.settings.dock_style {
+            // Same slots, new place and shape: move and repaint each dock (the window keeps its size).
+            let (style, slots, icons) = (
+                self.settings.dock_style,
+                self.dock_slots(),
+                self.dock_icons(),
+            );
+            for dock in &mut self.surfaces {
+                let Some(monitor) = self.monitors.iter().find(|m| m.device == dock.monitor) else {
+                    continue;
+                };
+                if dock.kind() != SurfaceKind::Dock {
+                    continue;
+                }
+                dock.dock_style = style;
+                dock.bounds =
+                    placement_styled(monitor.work, dock.dpi, SurfaceKind::Dock, slots, style);
+                dock.window.resize(dock.bounds)?;
+                dock.canvas.resize(dock.bounds)?;
+                dock.publish_accessibility(&self.dock_names, true);
+                dock.paint_dock(&self.dock_items, &icons)?;
+            }
+        }
         if old.desktop_only != self.settings.desktop_only {
             self.dock_generation = None; // the dock is rebuilt on the next pass
         }
@@ -2219,7 +2249,13 @@ impl Desktop {
                         continue;
                     };
                     (*hover, *tweens) = (None, vec![Tween::rest(0.0); slots]);
-                    dock.bounds = placement(monitor.work, dock.dpi, SurfaceKind::Dock, slots);
+                    dock.bounds = placement_styled(
+                        monitor.work,
+                        dock.dpi,
+                        SurfaceKind::Dock,
+                        slots,
+                        dock.dock_style,
+                    );
                     dock.window.resize(dock.bounds)?;
                     dock.canvas.resize(dock.bounds)?;
                 }
