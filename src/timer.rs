@@ -10,6 +10,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// At most this many timers run at once (UNVERIFIED default from m5-preparation.md section 4).
 pub const MAX: usize = 3;
+/// The notch's idle Timer page buttons, in minutes.
+pub const PRESETS: [u64; 4] = [5, 10, 15, 25];
 /// Longest countdown; also rejects a corrupt or clock-skewed stored expiry.
 pub const MAX_SECONDS: u64 = 24 * 60 * 60;
 /// How long a completion keeps the notch open before it closes by itself.

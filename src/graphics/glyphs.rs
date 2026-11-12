@@ -39,6 +39,8 @@ pub enum Glyph {
     Shelf,
     Limits,
     Start,
+    /// The dock picker: a grid of nine dots, not the Start panes.
+    Apps,
     Search,
     TaskView,
     Chevron,
@@ -48,7 +50,7 @@ pub enum Glyph {
     /// A shelf entry whose system icon did not load.
     File,
 }
-const ALL: [Glyph; 29] = [
+const ALL: [Glyph; 30] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -71,6 +73,7 @@ const ALL: [Glyph; 29] = [
     Glyph::Shelf,
     Glyph::Limits,
     Glyph::Start,
+    Glyph::Apps,
     Glyph::Search,
     Glyph::TaskView,
     Glyph::Chevron,
@@ -187,6 +190,9 @@ impl Glyph {
             }
             Glyph::Start => {
                 "M5 5h5.5v5.5H5zM13.5 5H19v5.5h-5.5zM5 13.5h5.5V19H5zM13.5 13.5H19V19h-5.5z"
+            }
+            Glyph::Apps => {
+                "M5.25 5.25h1.5v1.5h-1.5zM11.25 5.25h1.5v1.5h-1.5zM17.25 5.25h1.5v1.5h-1.5zM5.25 11.25h1.5v1.5h-1.5zM11.25 11.25h1.5v1.5h-1.5zM17.25 11.25h1.5v1.5h-1.5zM5.25 17.25h1.5v1.5h-1.5zM11.25 17.25h1.5v1.5h-1.5zM17.25 17.25h1.5v1.5h-1.5z"
             }
             Glyph::Limits => "M4 18a9 9 0 1 1 16 0M12 13l4-5M6 14H4M18 14h2M7 7l1.4 1.4M12 4v2",
             Glyph::Search => "M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13zM15.4 15.4L20.5 20.5",

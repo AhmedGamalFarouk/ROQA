@@ -696,6 +696,11 @@ impl Surface {
     ) -> Result<()> {
         let track = pages.track(media);
         let page = pages.page(track.is_some());
+        layout::set_page_height(if page == Tab::Limits {
+            layout::limits_height(pages.limits.rows.len())
+        } else {
+            0
+        });
         let now = Instant::now();
         let progress = self.motion.value(now);
         // A switched-off Timer tab draws and ticks nothing.
@@ -3518,15 +3523,18 @@ impl Desktop {
             self.start_limits(limits_os::now(), true);
             return true;
         }
-        if matches!(page, Tab::Timer | Tab::Weather | Tab::Prayer)
-            && layout::page_value_at(width, dpi, progress, live, x, y)
-        {
-            // Timer: start (or, once one finished, restart) the default 5 minutes when none runs. Weather and Prayer: the "Set your city"
-            // line opens Settings.
+        // Timer: a preset button starts that many minutes when none runs (or the last one finished). Weather and
+        // Prayer: the "Set city" button opens Settings.
+        let buttons = match page {
+            Tab::Timer => timer::PRESETS.len(),
+            Tab::Weather | Tab::Prayer => 1,
+            _ => 0,
+        };
+        if let Some(button) = layout::page_button_at(width, dpi, progress, live, buttons, (x, y)) {
             if page != Tab::Timer {
                 let _ = self.open_settings();
             } else if self.timers.view(now).is_none_or(|view| view.done) {
-                self.start_timer(300);
+                self.start_timer(timer::PRESETS[button] * 60);
             }
             return true;
         }

@@ -152,7 +152,11 @@ fn items(
             // 16 DIP glyphs grown from 40 % of that, centred in the button.
             let side = (16.0 * scale * (0.4 + 0.6 * open)).round();
             let (cx, cy) = (
-                (cell.left + cell.right) / 2.0,
+                if active {
+                    cell.left + (cell.bottom - cell.top) / 2.0
+                } else {
+                    (cell.left + cell.right) / 2.0
+                },
                 (cell.top + cell.bottom) / 2.0,
             );
             let square = D2D_RECT_F {
@@ -167,6 +171,28 @@ fn items(
                 with_alpha(p.ink, p.ink_alpha(0.7 * shown))
             };
             glyphs::draw(context, square, Glyph::tab(tab), color)?;
+            if active {
+                // The active tab names its page beside its icon.
+                let name = Font {
+                    family: TEXT_FONT,
+                    size: 10.0 * scale,
+                    weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                    designator: 1.0,
+                    align: DWRITE_TEXT_ALIGNMENT_LEADING,
+                };
+                let text = D2D_RECT_F {
+                    left: cell.left + 28.0 * scale,
+                    ..cell
+                };
+                let alpha = (open * 3.0 - 2.0).clamp(0.0, 1.0) * reveal;
+                draw_text(
+                    context,
+                    tab.name(),
+                    &name,
+                    text,
+                    with_alpha(glyphs::active_ink(p), p.ink_alpha(alpha)),
+                )?;
+            }
         }
         if handle.focus == Some(position) {
             // SAFETY: as above.
@@ -252,7 +278,7 @@ pub(super) fn page(
         ink(0.6),
     )?;
     match scene.tab {
-        Tab::Timer => match scene.timer {
+        Tab::Timer => match scene.timer.filter(|view| !view.done) {
             Some(view) => draw_text(
                 context,
                 &view.panel,
@@ -270,19 +296,39 @@ pub(super) fn page(
                     ink(1.0)
                 },
             ),
-            None => draw_text(
-                context,
-                "Start a 5 min timer",
-                &font(
-                    TEXT_FONT,
-                    12.0,
-                    DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                    1.0,
-                    DWRITE_TEXT_ALIGNMENT_LEADING,
-                ),
-                rect(layout::page_value(scene.dpi)),
-                with_alpha(p.accent, p.ink_alpha(reveal)),
-            ),
+            None => {
+                // Idle, or the last one just finished: the preset buttons start the next.
+                let line = scene
+                    .timer
+                    .map_or("Start a timer", |view| view.panel.as_str());
+                let mut slot = layout::page_value(scene.dpi);
+                slot.height /= 2;
+                draw_text(
+                    context,
+                    line,
+                    &font(
+                        TEXT_FONT,
+                        12.0,
+                        DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                        1.0,
+                        DWRITE_TEXT_ALIGNMENT_LEADING,
+                    ),
+                    rect(slot),
+                    with_alpha(p.accent, p.ink_alpha(reveal)),
+                )?;
+                for (index, minutes) in crate::timer::PRESETS.into_iter().enumerate() {
+                    pill(
+                        context,
+                        scene,
+                        body,
+                        index,
+                        &format!("{minutes} min"),
+                        reveal,
+                        p,
+                    )?;
+                }
+                Ok(())
+            }
         },
         Tab::Shelf => {
             shelf_row(context, scene, body, scale, p)?;
@@ -308,6 +354,46 @@ pub(super) fn page(
         Tab::Limits => limits_page(context, scene, body, scale, reveal, p),
         _ => Ok(()),
     }
+}
+
+/// A page button (`layout::page_button`): an outlined pill with its label in the accent colour.
+fn pill(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    index: usize,
+    label: &str,
+    reveal: f32,
+    p: &Palette,
+) -> Result<()> {
+    let scale = scene.dpi as f32 / 96.0;
+    let slot = layout::page_button(index, scene.dpi);
+    let square = D2D_RECT_F {
+        left: body.left + slot.x as f32,
+        top: body.top + slot.y as f32,
+        right: body.left + (slot.x + slot.width) as f32,
+        bottom: body.top + (slot.y + slot.height) as f32,
+    };
+    // SAFETY: a brush and an outline on the frame's own device context.
+    unsafe {
+        let brush = context
+            .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(0.6 * reveal)), None)?;
+        context.DrawRoundedRectangle(&rounded(square, 6.0 * scale), &brush, scale, None);
+    }
+    let font = Font {
+        family: TEXT_FONT,
+        size: 11.0 * scale,
+        weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        designator: 1.0,
+        align: DWRITE_TEXT_ALIGNMENT_CENTER,
+    };
+    draw_text(
+        context,
+        label,
+        &font,
+        square,
+        with_alpha(p.accent, p.ink_alpha(reveal)),
+    )
 }
 
 /// The Weather page (design J "Hero"): a condition picture and the big temperature at the left with the day's
@@ -345,13 +431,14 @@ fn weather_page(
     let normal = DWRITE_FONT_WEIGHT_NORMAL;
     if let Some(message) = view.message {
         let font = font(TEXT_FONT, 12.0, normal, lead);
-        return draw_text(
+        draw_text(
             context,
             message,
             &font,
             at(16.0, 32.0, width, 16.0),
             ink(0.6),
-        );
+        )?;
+        return pill(context, scene, body, 0, "Set city", reveal, p);
     }
     glyphs::draw(
         context,
@@ -454,13 +541,14 @@ fn prayer_page(
     let (lead, middle) = (DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_CENTER);
     let normal = DWRITE_FONT_WEIGHT_NORMAL;
     if let Some(message) = view.message {
-        return draw_text(
+        draw_text(
             context,
             message,
             &font(TEXT_FONT, 12.0, normal, lead),
             at(16.0, 32.0, width, 16.0),
             ink(0.6),
-        );
+        )?;
+        return pill(context, scene, body, 0, "Set city", reveal, p);
     }
     // Wide enough for "Maghrib" at the name size, so no name is cut.
     let column = if media { 44.0 } else { 40.0 };
@@ -603,48 +691,48 @@ fn limits_page(
         ink(0.8),
     )?;
     let accent = |alpha: f32| with_alpha(p.accent, p.ink_alpha(alpha * reveal));
-    for (label, x) in [("5h used", 70.0), ("Weekly used", 152.0)] {
+    for (label, x) in [("5h used", 72.0), ("Weekly used", 162.0)] {
         draw_text(
             context,
             label,
-            &font(8.5, normal, lead),
-            at(x, 27.0, 76.0, 11.0),
+            &font(9.5, normal, lead),
+            at(x, 26.0, 86.0, 12.0),
             ink(0.6),
         )?;
     }
     for (index, row) in view.rows.iter().enumerate() {
-        let y = 38.0 + 13.0 * index as f32;
+        let y = 38.0 + 17.0 * index as f32;
         let dim = if row.stale { 0.5 } else { 1.0 };
         draw_text(
             context,
             row.name,
-            &font(9.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, lead),
-            at(16.0, y, 52.0, 14.0),
+            &font(10.5, DWRITE_FONT_WEIGHT_SEMI_BOLD, lead),
+            at(16.0, y, 54.0, 16.0),
             ink(dim),
         )?;
         if let Some(why) = row.why {
             draw_text(
                 context,
                 why,
-                &font(10.0, normal, lead),
-                at(70.0, y, 216.0, 14.0),
+                &font(10.5, normal, lead),
+                at(72.0, y, 230.0, 16.0),
                 ink(0.6),
             )?;
             continue;
         }
         // Each window: bar (20), percent (24), reset time; the weekly one has the day too.
-        for (line, x, reset_width) in [(&row.h5, 70.0, 30.0), (&row.wk, 152.0, 42.0)] {
+        for (line, x, reset_width) in [(&row.h5, 72.0, 36.0), (&row.wk, 162.0, 52.0)] {
             let (Line::Used { reset, .. } | Line::Reset { reset }) = line else {
                 continue;
             };
-            let after = x + 49.0;
+            let after = x + 51.0;
             match line {
                 Line::Used { pct, .. } => {
                     // SAFETY: brushes and fills on the frame's own device context.
                     unsafe {
                         let track = context.CreateSolidColorBrush(&ink(0.18 * dim), None)?;
                         let fill = context.CreateSolidColorBrush(&accent(dim), None)?;
-                        let bar = at(x, y + 5.0, 20.0, 4.0);
+                        let bar = at(x, y + 6.0, 22.0, 4.0);
                         context.FillRoundedRectangle(&rounded(bar, 2.0 * scale), &track);
                         let mut part = bar;
                         part.right = bar.left + (bar.right - bar.left) * f32::from(*pct) / 100.0;
@@ -653,16 +741,16 @@ fn limits_page(
                     draw_text(
                         context,
                         &format!("{pct}%"),
-                        &font(9.0, normal, trail),
-                        at(x + 21.0, y, 26.0, 14.0),
+                        &font(10.5, normal, trail),
+                        at(x + 23.0, y, 28.0, 16.0),
                         ink(0.9 * dim),
                     )?;
                 }
                 Line::Reset { .. } => draw_text(
                     context,
                     "reset",
-                    &font(9.0, normal, lead),
-                    at(x, y, 46.0, 14.0),
+                    &font(10.5, normal, lead),
+                    at(x, y, 50.0, 16.0),
                     ink(0.7 * dim),
                 )?,
                 Line::Hidden => {}
@@ -670,16 +758,16 @@ fn limits_page(
             draw_text(
                 context,
                 reset,
-                &font(9.0, normal, lead),
-                at(after, y, reset_width, 14.0),
+                &font(10.0, normal, lead),
+                at(after, y, reset_width, 16.0),
                 ink(0.55 * dim),
             )?;
         }
         draw_text(
             context,
             &row.as_of,
-            &font(7.0, normal, trail),
-            at(244.0, y, 42.0, 14.0),
+            &font(8.5, normal, trail),
+            at(256.0, y, 52.0, 16.0),
             ink(0.45),
         )?;
     }

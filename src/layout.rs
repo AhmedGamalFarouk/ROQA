@@ -45,6 +45,24 @@ pub const NOTCH_WINDOW: (i32, i32) = (440, 164);
 /// Pointer slop around the drawn body that still counts as hovering it.
 const NOTCH_HOVER_SLOP: f32 = 4.0;
 
+/// A page that needs a taller panel than the plain 80 DIP (Limits): its height in DIPs, 0 for none. Set by
+/// the host before each paint, like the pill size, so drawing and hit tests agree.
+static PAGE_HEIGHT: AtomicU16 = AtomicU16::new(0);
+pub fn set_page_height(dips: u16) {
+    PAGE_HEIGHT.store(dips, Relaxed);
+}
+/// The Limits page's panel height for `rows` tool rows: the rows' 17 DIP pitch from y 38 and room for the gear.
+pub fn limits_height(rows: usize) -> u16 {
+    38 + 17 * rows as u16 + 22
+}
+/// `shape` with at least the page's height.
+fn tall(shape: NotchShape) -> NotchShape {
+    NotchShape {
+        height: shape.height.max(f32::from(PAGE_HEIGHT.load(Relaxed))),
+        ..shape
+    }
+}
+
 /// The closed pill's size in percent (the Settings "Notch size"; 0 or 100 is the designed size).
 static PILL_PERCENT: AtomicU16 = AtomicU16::new(100);
 pub fn set_pill_percent(percent: u16) {
@@ -67,9 +85,9 @@ pub fn notch_shape(progress: f32, media: bool) -> NotchShape {
     let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let settled = progress.clamp(0.0, 1.0);
     let (from, to) = if media {
-        (MEDIA_NOTCH, MEDIA_EXPANDED)
+        (MEDIA_NOTCH, tall(MEDIA_EXPANDED))
     } else {
-        (NOTCH, NOTCH_EXPANDED)
+        (NOTCH, tall(NOTCH_EXPANDED))
     };
     let from = pill(from, to, PILL_PERCENT.load(Relaxed));
     NotchShape {
@@ -263,11 +281,11 @@ pub fn volume_fraction(window_width: i32, dpi: u32, progress: f32, x: i32) -> Op
 /// edges (media panel, plain panel): 16 square, 12 from the right edge and 6 from the bottom.
 const GEAR_SIZE: f32 = 16.0;
 pub fn gear(dpi: u32, media: bool) -> Bounds {
-    let shape = if media {
+    let shape = tall(if media {
         MEDIA_EXPANDED
     } else {
         NOTCH_EXPANDED
-    };
+    });
     scaled_bounds(
         (
             shape.width - 12.0 - GEAR_SIZE,
@@ -301,17 +319,31 @@ pub fn refresh(dpi: u32) -> Bounds {
 pub fn refresh_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, y: i32) -> bool {
     on_slot(refresh(dpi), window_width, dpi, progress, media, x, y)
 }
-/// Whether a window point is on the page's value line (the timer's start, the empty Weather and Prayer
-/// message); false while the panel is closed.
-pub fn page_value_at(
+/// The page buttons (the timer's presets, the empty Weather and Prayer "Set city"): 52 x 22 DIP pills 58
+/// apart from x 16, y 48, in DIPs from the body's left and top edges.
+pub fn page_button(index: usize, dpi: u32) -> Bounds {
+    scaled_bounds((16.0 + 58.0 * index as f32, 48.0, 52.0, 22.0), dpi)
+}
+/// The page button under a window point among the first `count`; none while the panel is closed.
+pub fn page_button_at(
     window_width: i32,
     dpi: u32,
     progress: f32,
     media: bool,
-    x: i32,
-    y: i32,
-) -> bool {
-    on_slot(page_value(dpi), window_width, dpi, progress, media, x, y)
+    count: usize,
+    (x, y): (i32, i32),
+) -> Option<usize> {
+    (0..count).find(|&i| {
+        on_slot(
+            page_button(i, dpi),
+            window_width,
+            dpi,
+            progress,
+            media,
+            x,
+            y,
+        )
+    })
 }
 fn on_slot(
     button: Bounds,
@@ -502,18 +534,19 @@ pub struct Rail {
 pub const RAIL_EARS: f32 = 6.0;
 const RAIL_PAD_X: f32 = 8.0;
 
-/// Dot or button side, the active one's width, the gap between items and the vertical padding, in DIPs.
+/// Dot or button side, the active one's width (it also shows its name when open), the gap between items and
+/// the vertical padding, in DIPs.
 fn rail_metrics(p: f32) -> (f32, f32, f32, f32) {
     let lerp = |a: f32, b: f32| a + (b - a) * p.clamp(0.0, 1.0);
     (
-        lerp(5.0, 24.0),
-        lerp(14.0, 24.0),
+        lerp(5.0, 26.0),
+        lerp(14.0, 76.0),
         lerp(5.0, 4.0),
         lerp(3.0, 4.0),
     )
 }
 
-/// The handle's full size in DIPs: 70 x 11 at rest and 152 x 32 open for five tabs.
+/// The handle's full size in DIPs: 70 x 11 at rest and 212 x 34 open for five tabs.
 pub fn rail_size(rail: Rail) -> (f32, f32) {
     let (side, active, gap, pad) = rail_metrics(rail.p);
     let others = rail.count.saturating_sub(1) as f32;
@@ -594,8 +627,8 @@ pub fn rail_tab_at(
     (x, y): (i32, i32),
 ) -> Option<usize> {
     let hang = rail_bounds(window_width, dpi, progress, media, rail)?;
-    let first = rail_item(hang, dpi, rail, 0);
-    if !(first.y..first.y + first.height).contains(&y) {
+    // The whole handle height is a target, not only the 26 DIP buttons.
+    if !(hang.y..hang.y + hang.height).contains(&y) {
         return None;
     }
     let half_gap = scaled(rail_metrics(rail.p).2, dpi) / 2;
@@ -689,7 +722,8 @@ pub fn placement_styled(
     } else {
         scale(12).min(work.height.max(1) / 4)
     };
-    let width = width.clamp(1, work.width.max(1));
+    // The attached dock is a full-width bar (slots left, buttons right), the floating one a centred pill.
+    let width = if attached { work.width } else { width }.clamp(1, work.width.max(1));
     let height = height.clamp(1, (work.height - margin * 2).max(1));
     Bounds {
         x: work.x + (work.width - width) / 2,
@@ -723,7 +757,8 @@ mod tests {
         );
     }
     #[test]
-    fn buttons_widen_both_dock_styles_around_the_same_centre() {
+    fn buttons_widen_the_floating_dock_around_its_centre_and_the_attached_bar_spans_the_work_area()
+    {
         let work = Bounds {
             x: 100,
             y: 50,
@@ -735,9 +770,14 @@ mod tests {
             for mask in 1..32u32 {
                 let buttons = Buttons::of(std::array::from_fn(|i| mask >> i & 1 == 1));
                 let at = placement_styled(work, 144, SurfaceKind::Dock, 5, style, buttons);
+                assert_eq!((at.y, at.height), (plain.y, plain.height));
+                if style == DockStyle::Attached {
+                    // The attached bar spans the work area whatever the buttons.
+                    assert_eq!((at.x, at.width), (work.x, work.width));
+                    continue;
+                }
                 assert_eq!(at.width, dock::width_px(buttons, 5, 144));
                 assert!(at.width > plain.width, "{style:?} {mask}");
-                assert_eq!((at.y, at.height), (plain.y, plain.height));
                 // Centred on the work area, to the pixel.
                 assert_eq!(at.x, work.x + (work.width - at.width) / 2);
             }
@@ -781,7 +821,7 @@ mod tests {
         let attached = styled(DockStyle::Attached);
         assert_eq!(
             (attached.x, attached.width, attached.height),
-            (floating.x, floating.width, floating.height)
+            (work.x, work.width, floating.height)
         );
         assert_eq!(attached.y + attached.height, work.y + work.height);
         assert!(floating.y + floating.height < work.y + work.height);
@@ -1394,11 +1434,11 @@ mod tests {
 
     #[test]
     fn the_handle_matches_the_design_sizes_and_grows_from_dots_to_buttons() {
-        // Design T3: 70 x 11 at rest and 152 x 32 open for five tabs; fewer tabs are narrower.
+        // Design T3: 70 x 11 at rest and 212 x 34 open for five tabs; fewer tabs are narrower.
         let (rest_w, rest_h) = rail_size(rail(5, 0, 0.0));
         assert_eq!((rest_w, rest_h), (70.0, 11.0));
         let (open_w, open_h) = rail_size(rail(5, 0, 1.0));
-        assert_eq!((open_w, open_h), (152.0, 32.0));
+        assert_eq!((open_w, open_h), (212.0, 34.0));
         assert!(rail_size(rail(3, 0, 1.0)).0 < open_w);
         let mut last = rail_size(rail(3, 1, 0.0));
         for step in 1..=10 {

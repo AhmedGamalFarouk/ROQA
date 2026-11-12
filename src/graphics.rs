@@ -350,9 +350,15 @@ impl Canvas {
                 layout::notch_radius(pixels, shape, scene.dpi),
                 pixels.ears as f32,
             )?;
+            // The glass layers span the ears too, so the flared corners get the body's sheen, not a clamped edge.
+            let ears = pixels.ears as f32;
             self.body(
                 context,
-                &body,
+                &D2D_RECT_F {
+                    left: body.left - ears,
+                    right: body.right + ears,
+                    ..body
+                },
                 p.body,
                 // A faint edge so the panel does not merge into a dark backdrop.
                 Some(0.14),
@@ -2202,7 +2208,7 @@ fn draw_slot(
             context.FillRoundedRectangle(&rounded(highlight, px(12)), &brush);
         }
         if slot.picker {
-            glyphs::draw(context, frame, Glyph::Start, with_alpha(p.glyph, 1.0))?;
+            glyphs::draw(context, frame, Glyph::Apps, with_alpha(p.glyph, 1.0))?;
         } else if let Some(pixels) = slot.icon {
             // shortcut: bitmaps are rebuilt per paint (catalog/icon/hover changes and the frames of a ~0.2 s hover animation); cache per device if profiling shows cost.
             context.DrawBitmap(
