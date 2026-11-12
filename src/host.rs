@@ -255,6 +255,8 @@ struct Surface {
     grip: Grip,
     /// Notch: the volume bar's drawn fill (percent), easing toward the real level; a drag sets it at once.
     volume_fill: Tween,
+    /// Notch: shown over a full-screen app for a prayer alert only; hidden again once it has retracted.
+    overlay: bool,
 }
 impl Surface {
     /// Ends a volume-bar drag: the thumb shrinks and the capture goes.
@@ -368,6 +370,7 @@ impl Surface {
             hang: Hang::rest(),
             grip: Grip::default(),
             volume_fill: Tween::rest(0.0),
+            overlay: false,
         })
     }
     /// The handle opens at once for the pointer or a focused tab and closes `tabs::COLLAPSE_DELAY` after
@@ -1558,8 +1561,11 @@ impl Desktop {
                 self.pending.mark(now);
             }
         }
-        // The Prayer tab takes the place (not the report) from the same lookup.
-        if !self.pages.tabs.on(Tab::Weather) && !self.pages.tabs.on(Tab::Prayer) {
+        let (on, prayer) = (
+            self.pages.tabs.on(Tab::Weather),
+            self.pages.tabs.on(Tab::Prayer),
+        );
+        if !weather::feed_wanted(on, prayer, self.weather.place.is_some()) {
             return; // no fetch, no worker, no page
         }
         let shown = self.page() == Tab::Weather;
@@ -1686,21 +1692,32 @@ impl Desktop {
         }
         sound_wait.min(wait.saturating_mul(1000))
     }
-    /// A reminder is due: the notch expands with the prayer's name and the sound plays, unless a full-screen app
-    /// hides the notches (like any other notice).
+    /// A reminder is due: the sound always plays. The notch expands with the prayer's name; on a monitor a
+    /// full-screen app covers it appears over the app (topmost, never activated) and hides again once retracted.
     fn fire_prayer(&mut self, event: prayer_tab::Event, now: Instant) {
-        if !self
-            .surfaces
-            .iter()
-            .any(|s| s.kind() == SurfaceKind::Notch && s.visible)
-        {
-            return;
-        }
+        self.play_prayer_sound(now);
         self.power
             .announce(prayer_tab::notice(event), now, PRAYER_NOTICE);
+        for surface in &mut self.surfaces {
+            if surface.kind() == SurfaceKind::Notch && !surface.visible {
+                // Painted before it shows, as when a full-screen app ends.
+                let shown = surface.paint_notch(
+                    (&self.clock, &self.date),
+                    &self.media,
+                    &self.audio,
+                    &self.timers,
+                    &self.power,
+                    &self.shelf,
+                    &self.pages,
+                );
+                if shown.is_ok() {
+                    surface.set_visible(true);
+                    surface.overlay = true;
+                }
+            }
+        }
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
-        self.play_prayer_sound(now);
     }
     /// Plays the chosen sound (none when silent or no default exists); false when nothing played.
     fn play_prayer_sound(&mut self, now: Instant) -> bool {
@@ -1925,6 +1942,10 @@ impl Desktop {
                         Role::Notch { intent, .. } => intent.is_some(),
                         Role::Dock { slots, .. } => slots.iter().any(|tween| tween.running(now)),
                     };
+            }
+            if surface.overlay && !surface.live && surface.motion.value(now) <= 0.0 {
+                surface.overlay = false;
+                surface.set_visible(false);
             }
             running |= surface.live;
         }
@@ -3216,6 +3237,7 @@ impl Desktop {
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
             }
+            surface.overlay = false;
             surface.set_visible(visible);
         }
         Ok(())

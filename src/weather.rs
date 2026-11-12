@@ -447,6 +447,12 @@ pub struct Outcome {
     pub result: Result<Report, Fail>,
 }
 
+/// Does the feed run? The Weather tab alone decides it; the Prayer tab only needs the place, so with Weather
+/// off it takes one lookup (none once a place is held) and never refreshes the report.
+pub fn feed_wanted(weather_on: bool, prayer_on: bool, has_place: bool) -> bool {
+    weather_on || (prayer_on && !has_place)
+}
+
 /// Facts the host reads for one decision.
 pub struct Ctx {
     pub enabled: bool,
@@ -660,6 +666,15 @@ pub fn view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_feed_follows_the_weather_tab_and_prayer_only_needs_a_place() {
+        assert!(feed_wanted(true, false, true)); // Weather alone, Prayer off
+        assert!(feed_wanted(true, true, true));
+        assert!(feed_wanted(false, true, false)); // Prayer alone looks the place up once
+        assert!(!feed_wanted(false, true, true)); // then never refreshes the report
+        assert!(!feed_wanted(false, false, false));
+    }
 
     const FORECAST: &str = r#"{"latitude":30.0625,"longitude":31.25,"timezone":"Africa/Cairo",
       "current_units":{"time":"iso8601","temperature_2m":"°C","weather_code":"wmo code"},

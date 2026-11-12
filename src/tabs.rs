@@ -186,6 +186,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn weather_and_prayer_switch_independently() {
+        let mut flags = [true; 5];
+        flags[Tab::Prayer.index()] = false;
+        let tabs = Tabs::new(flags, Tab::Media);
+        assert!(tabs.on(Tab::Weather) && !tabs.on(Tab::Prayer));
+        flags = [true; 5];
+        flags[Tab::Weather.index()] = false;
+        let tabs = Tabs::new(flags, Tab::Media);
+        assert!(tabs.on(Tab::Prayer) && !tabs.on(Tab::Weather));
+    }
+
+    #[test]
     fn tabs_keep_their_order_and_every_tab_ships() {
         let all = Visible::new([true; 5]);
         assert_eq!(

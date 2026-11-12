@@ -1009,3 +1009,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/f2-prayer`; [packet](features-prayer.md), [queue](features-queue.md). Wires `prayer.rs`: page, one-deadline reminder, MCI sound picker (assets/, Browse, Test, silent), Hijri date, Settings. No native/GUI run, no audio run.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 290 tests, locked release); 1,122,816 B, ratchet tripped (+3.98% over F2), baseline raised, approved in-session by Chief; SHA `7CCC73C9BFB7B5CD19F1F7617361568893120D4C489E7E99DE5BDC93A8550DBC`.
 - **NOT RUN:** drawing, playback, real reminder, Narrator read, Settings layout fit; reviews paused (REVIEW NOT RUN).
+
+## F3 prayer over full screen, independent Weather (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/f3-dock`; [packet](features-f3.md). Part 1. No native/GUI run.
+- **Done:** prayer sound always plays; a full-screen-hidden notch shows the alert non-activating, then retracts and hides; other notices still suppressed. `weather::feed_wanted`: Weather alone works, Prayer alone does one place lookup; tab flags independent (tests).
+- **Checks:** verify.ps1 PASS (fmt/clippy, 292 tests, locked release); 1,123,840 B, ratchet within 2% (baseline unchanged); SHA `D53A8B3E2BC1105AFD3C41F98A6F86C214DA442C64AE0D5F05566D374A911BE8`.
+- **NOT RUN:** real full-screen overlay, focus/input check, audio; reviews paused (REVIEW NOT RUN).

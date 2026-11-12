@@ -396,7 +396,7 @@ impl SettingsWindow {
             let name = match tab {
                 Tab::Media => "&Media tab",
                 Tab::Weather => "&Weather tab",
-                Tab::Prayer => "Prayer tab (coming soon)",
+                Tab::Prayer => "Prayer tab",
                 Tab::Timer => "Timer ta&b",
                 Tab::Shelf => "Shelf ta&b",
             };
