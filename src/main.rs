@@ -33,6 +33,9 @@ mod picker_font;
 mod pins;
 mod policy_config;
 mod power;
+// shortcut: unused until the prayer tab wires it; drop this allow then.
+#[allow(dead_code)]
+mod prayer;
 mod preview;
 mod settings;
 mod settings_window;

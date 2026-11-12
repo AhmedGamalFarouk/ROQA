@@ -945,3 +945,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Menu:** right-click on a dock slot opens a non-modal owned popup (no `TrackPopupMenu`): New instance (`launch_target`), Close window (`WM_CLOSE` to the group; none for a pinned-only slot), Pin/Unpin (replaces the S4 right-click toggle). Escape, outside press, focus loss, slot change and fullscreen dismiss it; Up/Down/Tab/Enter/Space work; UIA Menu with invokable MenuItems. Closed: `None`, one check per pass.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 214 tests, locked release); 921,600 B, ratchet tripped (+2.16%), baseline raised to 921600; SHA `87A0F72197569EF17299C24CDA54C56FF0B070CF90FD5E7524662E8A8B3B68F7`.
 - **NOT RUN:** real drawing, foreground take/restore, keyboard, dismissal, `WM_CLOSE`, launch, UIA read; reviews paused (REVIEW NOT RUN).
+
+## Prayer engine (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/prayer-engine`; [packet](prayer-engine.md). Pure `src/prayer.rs`: six times, four methods, Asr 1/2, angle-based high latitudes, `next_prayer` and countdown; no UI, network or wiring. No native/GUI run.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 224 tests, locked release); 921,600 B, delta 0 B (dead code stripped); SHA `2A1C87D2D64BCD3140D3AA1CC32F53D7A458E7DD87152B44FBB8B5A4EBC7B7D9`.
+- **Reference:** Aladhan API, 2026-11-12, within 2 min (Cairo, Mecca, London, New York, London high latitude); London Asr 136 s off, bounded at 3 min.
+- **NOT RUN:** official timetables (UNVERIFIED), wiring; reviews paused (REVIEW NOT RUN).
