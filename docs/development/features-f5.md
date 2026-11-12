@@ -1,5 +1,7 @@
 # F5 features (2026-11-12)
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/f5-features` from main 4a93cad. Size budget: baseline 1,121,280 B, limit +2% = 1,143,705 B; never raised.
 
 ## P1 Monitor map (Settings > General > Displays)

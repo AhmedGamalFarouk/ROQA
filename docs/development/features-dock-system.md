@@ -1,5 +1,7 @@
 # D2: taskbar buttons on the dock (2026-11-12)
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/d2-dock-system`. No native/GUI run; nothing drawn, clicked or injected on a real screen (NOT RUN).
 
 - **Settings:** a "Dock buttons" group, one switch each, live: Start, Search, Task View (default off), Minimized apps list, Show desktop strip (the rest default on). Keys `dbstart|dbsearch|dbtask|dbmin|dbdesk`. Applies through `relayout_docks`: each dock resizes, moves and repaints; no new surface, timer or thread. Both dock styles.

@@ -30,7 +30,8 @@ foreach ($line in $entries) {
 $paths = @($paths + $PacketPaths | ForEach-Object { $_ -replace '\\', '/' } | Select-Object -Unique)
 $banned = $paths | Where-Object { $_ -match '^(\./)?(\.gitignore$|artifacts(/|$)|target(/|$)|\.tools(/|$))' -or $_ -in @('.', '*') }
 if ($banned) { Stop-Land "Refusing to stage: $($banned -join ', ')" }
-foreach ($p in $paths) { if (!(Test-Path -LiteralPath $p)) { Stop-Land "Path not found: $p" } }
+# A tracked file deleted in the working tree is a valid path (its deletion is staged); anything else must exist.
+foreach ($p in $paths) { if (!(Test-Path -LiteralPath $p) -and !(git ls-files -- $p)) { Stop-Land "Path not found: $p" } }
 
 & "$PSScriptRoot/verify.ps1"
 $bin = Join-Path $root 'target/release/roqa.exe'

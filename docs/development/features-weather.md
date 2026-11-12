@@ -1,5 +1,7 @@
 # Features: Weather tab (W1)
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/weather` from `59bd345`. No native/GUI run, no real network call. Design: `artifacts/design-mascot/variants.html` (git-ignored).
 
 ## Layout used

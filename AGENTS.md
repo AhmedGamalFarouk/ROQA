@@ -27,7 +27,7 @@ To maximize development velocity and prevent rate-limit exhaustion, ROQA follows
 - Use verified Windows/Rust APIs, explicit COM ownership, bounded background work and resource cleanup. Do not unwind through FFI callbacks.
 - No copied Nectar/Nusa code or assets. Do not invent product data or performance results.
 - Use project-local tooling when possible, leave global PATH alone, pin dependency/toolchain versions and keep generated binaries/caches out of version control.
-- Native UI should preserve keyboard, accessibility, text scaling, RTL/IME and reduced-motion needs as scoped by the milestone.
+- Keyboard navigation, hotkeys and screen-reader (UIA/Narrator) support were deliberately removed by user decision (2026-11-13, K1: "Remove all of it"). Add none, and treat reviewer findings about them as out of scope. Native UI still preserves text scaling, RTL/IME in text fields and reduced-motion needs as scoped by the milestone.
 
 ## Standing worker rules
 

@@ -1,5 +1,7 @@
 # B5 privacy indicator and M1 mascot moods (2026-11-12)
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/f4-privacy-moods` on main b55fb90. No native/GUI run (NOT RUN: drawing, a real mic/camera session, UIA read, Settings fit).
 
 ## B5 privacy indicator

@@ -1,5 +1,7 @@
 # S1 sidebar Settings shell (2026-11-12)
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/s1-settings`; landed f982f94 (W1 shell) and 9879fa6 (W2 controls + W3 settings). No native/GUI run (NOT RUN: drawing, switch hit and focus ring, dark mode, high contrast, RTL, DPI/150% text, keyboard walk, Narrator).
 
 ## Shape

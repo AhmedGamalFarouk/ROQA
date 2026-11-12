@@ -1,5 +1,7 @@
 # Features: notch tabs and mascot eyes
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/tabs-eyes` from `a0d78f0`. No native/GUI run. Design: `artifacts/design-mascot/round2.html` (git-ignored).
 
 ## Design variants used

@@ -1,5 +1,7 @@
 # F1: user feedback fixes (2026-11-12)
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/f1-user-feedback`. No native/GUI run; every item below is NOT RUN visually.
 
 1. **Eyes are occasional.** The pill shows the time. `eyes.rs` runs shows (blink, look around, smile) 40-100 s apart from one deadline (`Eyes::due`), plus a one-off for happy/surprised moods. A show is about a dozen stepped-opacity paints; between shows nothing paints. The time (plain pill) or title (media pill) fades while the eyes are up. Settings toggle unchanged.

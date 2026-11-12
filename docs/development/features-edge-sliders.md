@@ -1,5 +1,7 @@
 # Features B2.5: edge sliders (volume right, brightness left)
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/edge-sliders` from `61ce1f6`. No native/GUI run (NOT RUN). Queue: [features-queue.md](features-queue.md).
 
 ## Behaviour (`edge.rs`, `edge_uia.rs`)

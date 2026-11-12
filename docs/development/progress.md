@@ -1160,3 +1160,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u3-motion`; [packet](ui-motion-m2.md). Retuned open/close springs; tab-switch slide + fade with stagger; notice enter; dock hover lift + magnify on a pop curve; blink/look squash polish; Settings toggle thumb slide. One clock (`motion.rs`), frames only while a tween runs, no timers or threads added.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 370 tests incl. `an_idle_notch_starts_no_frames`, locked release); 1,150,976 B (+3,584 vs 1,147,392); baseline 1,152,000 B, limit 1,175,040.
 - **NOT RUN:** native/GUI (feel unverified; Chief to request a desktop-free look); reviews paused (REVIEW NOT RUN). Not done: leaving-page fade, notice exit, Settings page transition, focus-ring fade (K1 scope).
+
+## K1 Keyboard and UIA removal (2026-11-13 Africa/Cairo)
+
+- **Scope:** [packet](k1-no-keyboard.md); landed 10721c4. Keyboard handling, focus rings, access keys, "Focus the notch/dock" and the whole UIA/Narrator layer removed by user decision; mouse unchanged.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 355 tests, locked release); 1,035,264 B (-115,712 B vs 1,150,976); baseline still 1,152,000 B (not changed; user may lower).
+- **Dropped scripts:** picker-smoke.ps1, packaged-hung-check.ps1 (UIA and key injection).
+- **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN).

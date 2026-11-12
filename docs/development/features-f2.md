@@ -1,5 +1,7 @@
 # F2: fixes after F1 (2026-11-12)
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/f2-prayer`. No native/GUI run; every item is NOT RUN visually.
 
 1. **Eased volume bar.** The notch bar's fill is a `Tween` on the surface (`volume_fill`, 120 ms `EASE_OUT`), retargeted on each paint; a drag resets it to the pointer at once. Settled, the surface stops being live: no timer. The edge pill is a separate drawing and is unchanged.

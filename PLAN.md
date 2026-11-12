@@ -1,5 +1,7 @@
 # ROQA implementation plan
 
+> **K1 (2026-11-13), user decision:** keyboard navigation, hotkeys and screen-reader (UIA/Narrator) support were removed. Every keyboard, focus, Narrator and UIA line below is superseded; add none.
+
 Revision: M0 iteration 2. Author: primary implementation agent (`/root`). Date: 2026-11-09. Current independent dispositions and acceptance state are recorded in `docs/development/progress.md`; changing this file requires a new candidate manifest.
 
 ## Objective

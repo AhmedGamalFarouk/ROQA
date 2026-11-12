@@ -22,7 +22,7 @@ Initial prototype candidate from the feasibility council: Rust, Win32 and Window
 - First milestone keeps the native Windows taskbar intact.
 - No application implementation or artwork from Nectar or Nusa is reused.
 - Licensing, distribution, monetization, complete Windows support matrix and the final feature shortlist remain open.
-- Keyboard accessibility, Narrator, DPI/text scaling and RTL/IME are engineering acceptance concerns, not decorative polish.
+- DPI/text scaling and RTL/IME in text fields are engineering acceptance concerns, not decorative polish. Keyboard navigation, hotkeys and Narrator/UIA support were removed by user decision (K1, 2026-11-13).
 
 ## Evidence
 

@@ -1,5 +1,7 @@
 # Features B3: non-modal dock context menu
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/features-b3` from `4809e91`. No native/GUI run (NOT RUN). Queue: [features-queue.md](features-queue.md).
 
 ## Behaviour (`dock_menu.rs`, `menu_uia.rs`)

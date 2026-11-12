@@ -23,7 +23,7 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
 - [x] F3: prayer alert over full screen, Weather independent of Prayer ([packet](features-f3.md)).
 - [x] U1: Limits tab: Claude, Codex and Antigravity plan-limit percentages ([packet](features-limits.md)).
 - [x] M1: mascot states that wait on content: adhan (half-lidded, stepped glow) and rain (droopy), plus the per-tab mood pairing ([packet](features-privacy-moods.md)).
-- [ ] T2: tab polish after a native run: SelectionItem UIA pattern, handle hover timing, RTL order, text-scale fit.
+- [ ] T2: tab polish after a native run: handle hover timing, RTL order, text-scale fit. (SelectionItem UIA dropped in K1.)
 - [x] B4: skipped by the user 2026-11-12 (picker as command palette); no code.
 - [x] B5: privacy mic/camera indicator ([packet](features-privacy-moods.md)).
 - [x] B6: dropped: covered by the edge slider device switch; no code.

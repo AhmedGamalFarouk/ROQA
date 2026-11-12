@@ -1,5 +1,7 @@
 # U1: Limits tab (2026-11-12)
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/u1-limits`. Plan-limit percentages only (5-hour, weekly, reset time) for Claude, Codex and Antigravity. Tab `limits`, default OFF, placeholder gauge icon. No native/GUI run (NOT RUN: drawing, input, UIA read, text fit).
 
 - **Code:** pure `limits.rs` (scanner, parsers, stale/reset rules, refresh policy, page text, tests); `limits_os.rs` (one worker thread, files, hidden processes). Tab list and Settings gain a sixth switch; `notch_uia` gets a Refresh button (`REFRESH`, only on this page).

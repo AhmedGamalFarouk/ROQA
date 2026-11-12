@@ -1,5 +1,7 @@
 # Features B1: power pill and system accent
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/features-b1` from `20cc689`. No native/GUI run (NOT RUN). Queue: [features-queue.md](features-queue.md).
 
 ## Power pill

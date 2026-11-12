@@ -1,5 +1,7 @@
 # P1: Prayer tab (2026-11-12)
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/f2-prayer`. No native/GUI run, no real playback: all of it is NOT RUN visually or audibly.
 
 - **Place:** the Weather feed's stored place (geocoded city or opt-in detection); no second lookup or prompt. The feed now also runs when only the Prayer tab is on. No city set: the page says "Set your city in Settings". Offline maths (`prayer.rs`), default Egyptian General Authority; Settings lists the four methods.

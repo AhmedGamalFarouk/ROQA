@@ -1,5 +1,7 @@
 # D1: dock style, Floating or Attached (2026-11-12)
 
+> K1 (2026-11-13): keyboard and UIA/screen-reader support was removed by user decision. Keyboard, Tab, focus-ring, access-key and UIA lines below are history, not current behaviour.
+
 Branch `feat/f3-dock`. No native/GUI run; nothing drawn or hit-tested on a real screen (NOT RUN).
 
 - **Setting:** Settings "Dock style" list, stored `dockstyle=floating|attached`; default Floating (the current look, unchanged). Applies live: each dock moves, resizes and repaints; no new timer or surface.
