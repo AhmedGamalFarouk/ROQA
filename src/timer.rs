@@ -86,7 +86,7 @@ impl Timers {
             })
             .take(MAX)
             .collect();
-        list.sort_by_key(|timer| timer.deadline);
+        crate::sort::by(&mut list, |a, b| a.deadline.cmp(&b.deadline));
         Self { list, alert: None }
     }
 
@@ -99,7 +99,7 @@ impl Timers {
             deadline: now + Duration::from_secs(seconds),
             expiry: wall.saturating_add(seconds),
         });
-        self.list.sort_by_key(|timer| timer.deadline);
+        crate::sort::by(&mut self.list, |a, b| a.deadline.cmp(&b.deadline));
         true
     }
 

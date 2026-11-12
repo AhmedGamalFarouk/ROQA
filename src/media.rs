@@ -4,11 +4,11 @@
 //! Every GSMTC read and mutation happens on the host (STA) thread. Event handlers and async
 //! completions may run on any thread: they only set dirty bits, fill their request's one-shot slot
 //! and post one scalar wake, so they never block, panic or touch `Desktop`, HWNDs or Direct2D.
+use crate::chan::Sender;
 use crate::icons::{IconPixels, Job};
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicU32, Ordering},
-    mpsc::SyncSender,
 };
 use std::time::{Duration, Instant};
 use windows::{
@@ -566,7 +566,7 @@ impl Drop for Art {
 /// no-art layout. The worker calls `done` with the decoded pixels.
 fn hand_off(
     opened: Result<AgileReference<IRandomAccessStream>>,
-    jobs: &SyncSender<Job>,
+    jobs: &Sender<Job>,
     side: u32,
     done: Box<dyn FnOnce(IconPixels) + Send>,
 ) {
@@ -602,7 +602,7 @@ pub struct Media {
     /// Album art entries started; the current entry's number keys its uploaded bitmap.
     arts: u64,
     /// The icon worker's queue, which decodes album art; none until `start`.
-    jobs: Option<SyncSender<Job>>,
+    jobs: Option<Sender<Job>>,
     state: State,
     wake: Arc<Wake>,
     /// Media wakes handled, for diagnostics.
@@ -642,7 +642,7 @@ impl Media {
     /// Requests the session manager; the caller must be the WinRT-initialized host STA. Never
     /// fails: refused access becomes the permission view, and nothing is retried. Album art is
     /// decoded by `jobs`, or not drawn without it.
-    pub fn start(&mut self, jobs: Option<SyncSender<Job>>) {
+    pub fn start(&mut self, jobs: Option<Sender<Job>>) {
         self.jobs = jobs;
         match Manager::RequestAsync().and_then(|request| Request::start(request, 0, &self.wake)) {
             Ok(request) => self.request = Some(request),
@@ -1055,10 +1055,10 @@ fn received<T: RuntimeType + 'static>(request: &Option<Request<T>>) -> Option<Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chan::{Receiver, channel as sync_channel};
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
-        sync::mpsc::{Receiver, sync_channel},
     };
     use windows::{
         Storage::Streams::{InMemoryRandomAccessStream, RandomAccessStreamReference},

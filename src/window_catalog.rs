@@ -1,3 +1,4 @@
+use crate::chan::{Receiver, Sender, TryRecvError, channel};
 use crate::{
     catalog_timing::CatalogTiming,
     diagnostics,
@@ -10,7 +11,6 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
-        mpsc::{self, Receiver, SyncSender, TryRecvError},
     },
     thread::{self, JoinHandle},
     time::Instant,
@@ -97,7 +97,7 @@ impl Drop for Hook {
 
 pub struct Catalog {
     hooks: Vec<Hook>,
-    requests: Option<SyncSender<Request>>,
+    requests: Option<Sender<Request>>,
     results: Option<Receiver<Snapshot>>,
     worker: Option<JoinHandle<()>>,
     cancel: Arc<AtomicBool>,
@@ -144,8 +144,8 @@ impl Catalog {
             full: true,
             source_stats: SourceStats::default(),
         };
-        let (request_tx, request_rx) = mpsc::sync_channel::<Request>(1);
-        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let (request_tx, request_rx) = channel::<Request>(1);
+        let (result_tx, result_rx) = channel(1);
         let cancel = Arc::clone(&catalog.cancel);
         catalog.worker = Some(
             thread::Builder::new()
@@ -393,8 +393,8 @@ mod tests {
     #[test]
     fn lost_wakes_overflow_followup_repair_and_disconnect_need_no_timer_message() {
         let now = Instant::now();
-        let (request_tx, request_rx) = mpsc::sync_channel(1);
-        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let (request_tx, request_rx) = channel(1);
+        let (result_tx, result_rx) = channel(1);
         let mut catalog = Catalog {
             hooks: Vec::new(),
             requests: Some(request_tx),

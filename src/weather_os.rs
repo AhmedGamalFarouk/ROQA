@@ -3,6 +3,7 @@
 //! and a thread message wakes the host loop, which polls it (`brightness.rs` pattern). Coordinates are never
 //! logged; the only diagnostics are fixed strings. Nothing here has been run against the network.
 
+use crate::chan::{Receiver, Sender, channel};
 use crate::{
     picker::wide,
     weather::{
@@ -10,11 +11,7 @@ use crate::{
         geocode_path, parse_forecast, parse_place, sources,
     },
 };
-use std::{
-    ffi::c_void,
-    mem::size_of,
-    sync::mpsc::{Receiver, Sender, channel},
-};
+use std::{ffi::c_void, mem::size_of};
 use windows::{
     Devices::Geolocation::{GeolocationAccessStatus, Geolocator, PositionAccuracy},
     Foundation::TimeSpan,
@@ -53,7 +50,7 @@ pub struct Io {
 impl Io {
     /// Created on the host thread, whose id the workers wake.
     pub fn new() -> Self {
-        let (done, results) = channel();
+        let (done, results) = channel(usize::MAX);
         // SAFETY: plain query of the calling thread's id.
         let host = unsafe { GetCurrentThreadId() };
         Self {

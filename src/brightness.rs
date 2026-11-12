@@ -4,7 +4,7 @@
 //! lazily started worker thread behind a small bounded queue; the host never waits for them. The worker
 //! opens the monitor's physical handles for each job and destroys them before the next, so none is held.
 //! Laptop panels (WMI `WmiMonitorBrightnessMethods`) are deferred: they report "not supported" here.
-use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
+use crate::chan::{Receiver, Sender, channel};
 use windows::Win32::{
     Devices::Display::{
         DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR,
@@ -37,14 +37,14 @@ pub struct Reading {
 /// The host's end: queues jobs and collects readings. Dropping it lets the worker finish and exit; it is
 /// not joined, so a hung monitor call never delays shutdown (the process exit reaps the thread).
 pub struct Brightness {
-    jobs: SyncSender<Job>,
+    jobs: Sender<Job>,
     readings: Receiver<Reading>,
 }
 impl Brightness {
     /// Starts the worker; `None` if the thread cannot be created.
     pub fn start(host: u32) -> Option<Self> {
-        let (jobs, queue) = sync_channel(QUEUE);
-        let (done, readings) = channel();
+        let (jobs, queue) = channel(QUEUE);
+        let (done, readings) = channel(usize::MAX);
         std::thread::Builder::new()
             .name("roqa-brightness".into())
             .spawn(move || work(&queue, &done, host))

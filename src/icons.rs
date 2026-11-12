@@ -1,11 +1,9 @@
+use crate::chan::{Receiver, Sender, channel};
 use crate::window_model::Identity;
 use std::{
     collections::{HashMap, HashSet},
     mem::size_of,
-    sync::{
-        Arc,
-        mpsc::{self, Receiver, SyncSender},
-    },
+    sync::Arc,
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -81,7 +79,7 @@ pub enum Job {
 }
 
 pub struct IconService {
-    requests: Option<SyncSender<Job>>,
+    requests: Option<Sender<Job>>,
     results: Option<Receiver<Extracted>>,
     worker: Option<JoinHandle<()>>,
     /// `None` records a definitive failure so it is not retried every refresh.
@@ -94,8 +92,8 @@ impl IconService {
     pub fn create() -> Result<Self> {
         // SAFETY: scalar thread ID of the UI thread that owns the message queue for wakes.
         let target = unsafe { GetCurrentThreadId() };
-        let (request_tx, request_rx) = mpsc::sync_channel::<Job>(QUEUE);
-        let (result_tx, result_rx) = mpsc::sync_channel(QUEUE);
+        let (request_tx, request_rx) = channel::<Job>(QUEUE);
+        let (result_tx, result_rx) = channel(QUEUE);
         let worker = thread::Builder::new()
             .name("roqa-icons".into())
             .spawn(move || {
@@ -190,7 +188,7 @@ impl IconService {
     }
 
     /// The worker's queue, for album art. The worker stops only once every clone is dropped.
-    pub fn jobs(&self) -> Option<SyncSender<Job>> {
+    pub fn jobs(&self) -> Option<Sender<Job>> {
         self.requests.clone()
     }
 
@@ -428,9 +426,9 @@ pub fn sources(identity: &Identity, executable: Option<&str>) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn service() -> (IconService, Receiver<Job>, SyncSender<Extracted>) {
-        let (requests, incoming) = mpsc::sync_channel(QUEUE);
-        let (completed, results) = mpsc::sync_channel(QUEUE);
+    fn service() -> (IconService, Receiver<Job>, Sender<Extracted>) {
+        let (requests, incoming) = channel(QUEUE);
+        let (completed, results) = channel(QUEUE);
         (
             IconService {
                 requests: Some(requests),
@@ -545,7 +543,7 @@ mod tests {
     fn the_worker_replies_to_art_only_when_decoding_succeeds() {
         let service = IconService::create().unwrap();
         let jobs = service.jobs().unwrap();
-        let (decoded, replies) = mpsc::channel();
+        let (decoded, replies) = std::sync::mpsc::channel();
         for stream in [
             IRandomAccessStream::from(
                 windows::Storage::Streams::InMemoryRandomAccessStream::new().unwrap(),

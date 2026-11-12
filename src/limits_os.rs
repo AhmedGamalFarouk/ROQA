@@ -4,6 +4,7 @@
 //! `oauth_creds.json`, calls a vendor endpoint, or logs a path or a value. Nothing has been run against the
 //! real tools by the tests.
 
+use crate::chan::{Receiver, Sender, channel};
 use crate::limits::{
     self, Job, NO_AGY, NO_CODEX, Outcome, Reading, Snap, Stamp, agy_text, claude_best,
     claude_cache, claude_file, codex_rpc, codex_tail,
@@ -18,7 +19,6 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Receiver, Sender, channel},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -71,7 +71,7 @@ pub struct Io {
 impl Io {
     /// Created on the host thread, whose id the workers wake.
     pub fn new() -> Self {
-        let (done, results) = channel();
+        let (done, results) = channel(usize::MAX);
         // SAFETY: plain query of the calling thread's id.
         let host = unsafe { GetCurrentThreadId() };
         Self {

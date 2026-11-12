@@ -414,7 +414,7 @@ pub struct FilePicker {
     /// The open or last dialog chooses the prayer sound (one file) instead of shelf files.
     pub for_sound: bool,
     worker: Option<std::thread::JoinHandle<()>>,
-    result: Option<std::sync::mpsc::Receiver<Vec<String>>>,
+    result: Option<crate::chan::Receiver<Vec<String>>>,
     state: std::sync::Arc<std::sync::Mutex<DialogState>>,
 }
 impl FilePicker {
@@ -430,7 +430,7 @@ impl FilePicker {
         self.for_sound = sound;
         self.state = Default::default();
         let state = self.state.clone();
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let (sender, receiver) = crate::chan::channel(1);
         // SAFETY: host thread id; its queue is already created by the native surfaces.
         let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
         match std::thread::Builder::new()
@@ -484,12 +484,12 @@ impl FilePicker {
                 self.worker.take();
                 Some(paths)
             }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Err(crate::chan::TryRecvError::Disconnected) => {
                 self.result = None;
                 self.worker.take();
                 Some(Vec::new())
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(crate::chan::TryRecvError::Empty) => None,
         }
     }
 }

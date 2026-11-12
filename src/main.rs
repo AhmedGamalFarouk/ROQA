@@ -10,6 +10,7 @@ macro_rules! eprintln {
 mod audio;
 mod brightness;
 mod catalog_timing;
+mod chan;
 mod clock;
 mod diagnostics;
 mod dock;

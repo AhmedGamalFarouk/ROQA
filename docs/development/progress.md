@@ -1081,3 +1081,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 
 - Prayer shift rolls across midnight (timeline of 3 days: next prayer, page, countdown, reminders, heads-up, grace without double fire); shift entry validated with a status message; Test button caption says it plays with Reminder sounds off, real reminders gated by `reminder_plays`/`timer_beeps` (tests). Packet updated. No native run.
 - Review fixes: scroll repaints the cards/title; click mode never shrinks an open notch and cancels a pending hover intent; `ppause` only at the prayer (not the heads-up), needs the Media tab; `pshift` rejects a line with any bad entry; mnemonic and notch-size (Auto only, no 100%) cleanups. Size baseline raised to 1,243,648 B, approved by Ahmed 2026-11-12 (S1/G1b/A1). No native run.
+
+## Z1 size trim (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/z1-trim`; [packet](z1-trim.md). Linker-map sizing; no profile, feature or behaviour change.
+- **Done:** `chan.rs` small bounded queue replaces every std `mpsc` channel (std instantiates three flavors per message type, 46 KB); timer sorts use `sort::by`. Capacities unchanged.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 360 tests, locked release); 1,243,648 -> 1,121,280 B (-122,368); baseline LOWERED to 1121280 (approved by Ahmed 2026-11-12).
+- **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN).
