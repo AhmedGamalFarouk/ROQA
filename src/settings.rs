@@ -46,6 +46,8 @@ pub struct Settings {
     pub tabs: Flags,
     /// The mascot eyes in the pill; off removes their state, deadlines and drawing.
     pub eyes: bool,
+    /// The mic and camera dots (features B5); off closes the registry watch.
+    pub privacy: bool,
     /// The weather city as typed (empty is none), the opt-in device location (it wins over the city while
     /// it works) and °C or °F. Nothing is requested until a city is set or detection is on.
     pub city: String,
@@ -82,6 +84,7 @@ impl Default for Settings {
             edge_brightness: false,
             tabs: Tab::DEFAULT,
             eyes: true,
+            privacy: true,
             city: String::new(),
             detect: false,
             units: Units::Auto,
@@ -174,6 +177,7 @@ impl Settings {
             "edgevol" => flag(value).map(|v| self.edge_volume = v).is_some(),
             "edgebri" => flag(value).map(|v| self.edge_brightness = v).is_some(),
             "eyes" => flag(value).map(|v| self.eyes = v).is_some(),
+            "privacy" => flag(value).map(|v| self.privacy = v).is_some(),
             "detect" => flag(value).map(|v| self.detect = v).is_some(),
             "premind" => flag(value).map(|v| self.prayer_remind = v).is_some(),
             "pmethod" => Method::from_key(value)
@@ -236,8 +240,9 @@ impl Settings {
             u8::from(self.edge_brightness)
         ));
         out.push_str(&format!(
-            "eyes={}\ndetect={}\nunits={}\ndockstyle={}\n",
+            "eyes={}\nprivacy={}\ndetect={}\nunits={}\ndockstyle={}\n",
             u8::from(self.eyes),
+            u8::from(self.privacy),
             u8::from(self.detect),
             self.units.key(),
             self.dock_style.key()
@@ -370,6 +375,7 @@ mod tests {
             edge_brightness: false,
             tabs: Tab::DEFAULT,
             eyes: true,
+            privacy: false,
             city: "  Ca\niro \u{7}".into(),
             detect: true,
             units: Units::Fahrenheit,
@@ -644,6 +650,7 @@ mod tests {
             "tabshelf=1",
             "tablimits=0",
             "eyes=1",
+            "privacy=1",
         ] {
             assert!(text.lines().any(|l| l == line), "{line}");
         }

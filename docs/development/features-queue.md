@@ -20,10 +20,10 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
 - [x] D2: taskbar buttons on the dock: Start, Search, Task View, minimized-apps list, show-desktop strip ([packet](features-dock-system.md)).
 - [x] F3: prayer alert over full screen, Weather independent of Prayer ([packet](features-f3.md)).
 - [x] U1: Limits tab: Claude, Codex and Antigravity plan-limit percentages ([packet](features-limits.md)).
-- [ ] M1: mascot states that wait on content: adhan (half-lidded, stepped glow) and rain (droopy), plus the per-tab mood pairing.
+- [x] M1: mascot states that wait on content: adhan (half-lidded, stepped glow) and rain (droopy), plus the per-tab mood pairing ([packet](features-privacy-moods.md)).
 - [ ] T2: tab polish after a native run: SelectionItem UIA pattern, handle hover timing, RTL order, text-scale fit.
 - [ ] B4: picker as command palette (installed apps from Start menu shortcuts, inline math).
-- [ ] B5: privacy mic/camera indicator.
+- [x] B5: privacy mic/camera indicator ([packet](features-privacy-moods.md)).
 - [ ] B6: audio output device list (switching opens Sound settings).
 
 ## Research pending

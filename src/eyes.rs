@@ -15,6 +15,10 @@ pub enum Mood {
     Sleepy,
     /// A timer finished or a power notice shows.
     Surprised,
+    /// A prayer reminder is active: half-lidded, with a stepped glow.
+    Adhan,
+    /// The Weather page is open and it rains or storms: droopy.
+    Rain,
 }
 
 /// Squash and stretch: the shape the eye holds for one step of a show.
@@ -33,6 +37,10 @@ pub struct Facts {
     pub playing: bool,
     pub alert: bool,
     pub idle: bool,
+    /// A prayer reminder is active.
+    pub adhan: bool,
+    /// The Weather page shows a rain or storm condition.
+    pub rain: bool,
     /// Local hour, 0 to 23.
     pub hour: u8,
 }
@@ -42,10 +50,15 @@ pub fn late(hour: u8) -> bool {
     !(5..23).contains(&hour)
 }
 
-/// The mood the facts call for; a fresh alert outranks music, music outranks sleep.
+/// The mood the facts call for: a prayer reminder, then a fresh alert, outrank the rain page, which outranks
+/// music; music outranks sleep.
 pub fn mood(facts: Facts) -> Mood {
-    if facts.alert {
+    if facts.adhan {
+        Mood::Adhan
+    } else if facts.alert {
         Mood::Surprised
+    } else if facts.rain {
+        Mood::Rain
     } else if facts.playing {
         Mood::Happy
     } else if facts.idle || late(facts.hour) {
@@ -78,6 +91,8 @@ pub fn eye(mood: Mood, pose: Pose) -> Eye {
         Mood::Happy => (1.22, 0.78, -0.6, 0.0, 0.35),
         Mood::Sleepy => (1.2, 0.5, 2.0, 0.2, 0.0),
         Mood::Surprised => (0.85, 1.45, -1.0, 0.0, 0.0),
+        Mood::Adhan => (1.2, 0.9, 0.0, 0.25, 0.25),
+        Mood::Rain => (0.9, 1.0, 2.0, 0.4, 0.0),
     };
     let (px, py) = match pose {
         Pose::Rest => (1.0, 1.0),
@@ -139,6 +154,30 @@ const EVENT: [Step; 8] = [
     (0.7, 0.0, false, R, 60),
     (0.4, 0.0, false, R, 60),
     (0.15, 0.0, false, R, 60),
+    (0.0, 0.0, false, R, 0),
+];
+
+/// The adhan: fade in, three slow glow pulses (stepped opacity), fade out; 11 paints in about 4 s.
+const ADHAN: [Step; 11] = [
+    (0.4, 0.0, false, R, 80),
+    (0.7, 0.0, false, R, 80),
+    (1.0, 0.0, false, R, 700),
+    (0.65, 0.0, false, R, 700),
+    (1.0, 0.0, false, R, 700),
+    (0.65, 0.0, false, R, 700),
+    (1.0, 0.0, false, R, 700),
+    (0.65, 0.0, false, R, 300),
+    (0.35, 0.0, false, R, 80),
+    (0.15, 0.0, false, R, 80),
+    (0.0, 0.0, false, R, 0),
+];
+/// Rain: the droopy eyes fade in, hold and fade out.
+const RAIN: [Step; 6] = [
+    (0.4, 0.0, false, R, 80),
+    (0.8, 0.0, false, R, 80),
+    (1.0, 0.0, false, R, 1800),
+    (0.6, 0.0, false, R, 60),
+    (0.3, 0.0, false, R, 60),
     (0.0, 0.0, false, R, 0),
 ];
 
@@ -236,7 +275,7 @@ impl Eyes {
             next: now + Duration::from_millis(steps[0].4),
         });
     }
-    /// A new happy or surprised mood shows the eyes once; any other change is silent. Returns whether a show
+    /// A new happy, surprised, adhan or rain mood shows the eyes once; any other change is silent. Returns whether a show
     /// started (a repaint is needed).
     pub fn set_mood(&mut self, mood: Mood, now: Instant) -> bool {
         if mood == self.mood {
@@ -246,11 +285,14 @@ impl Eyes {
         if was == Mood::Sleepy && mood == Mood::Idle {
             return self.wake(now);
         }
-        if matches!(mood, Mood::Happy | Mood::Surprised) {
-            self.start(&EVENT, now);
-            return true;
-        }
-        false
+        let show: &'static [Step] = match mood {
+            Mood::Happy | Mood::Surprised => &EVENT,
+            Mood::Adhan => &ADHAN,
+            Mood::Rain => &RAIN,
+            _ => return false,
+        };
+        self.start(show, now);
+        true
     }
     /// Plays the wake animation now, replacing any show; true (a repaint is needed).
     pub fn wake(&mut self, now: Instant) -> bool {
@@ -297,7 +339,68 @@ mod tests {
             alert,
             idle,
             hour,
+            ..Facts::default()
         }
+    }
+
+    #[test]
+    fn adhan_outranks_everything_and_rain_outranks_music_and_sleep() {
+        let base = facts(true, true, true, 3);
+        assert_eq!(
+            mood(Facts {
+                adhan: true,
+                rain: true,
+                ..base
+            }),
+            Mood::Adhan
+        );
+        assert_eq!(
+            mood(Facts { rain: true, ..base }),
+            Mood::Surprised,
+            "alerts first"
+        );
+        let calm = facts(true, false, true, 3);
+        assert_eq!(mood(Facts { rain: true, ..calm }), Mood::Rain);
+        assert_eq!(
+            mood(Facts {
+                adhan: true,
+                ..facts(false, false, false, 14)
+            }),
+            Mood::Adhan
+        );
+        assert_eq!(
+            mood(Facts {
+                rain: false,
+                ..calm
+            }),
+            Mood::Happy
+        );
+    }
+
+    #[test]
+    fn adhan_and_rain_show_once_with_their_own_shapes() {
+        let t0 = Instant::now();
+        let mut eyes = Eyes::new(t0, 9);
+        assert!(eyes.set_mood(Mood::Adhan, t0));
+        let (frames, end) = play(&mut eyes, t0);
+        assert!(frames.iter().all(|f| f.mood == Mood::Adhan));
+        // Stepped glow: opacity returns to full more than once, and the show is short.
+        assert!(frames.iter().filter(|f| f.alpha == 1.0).count() >= 3);
+        assert!(frames.len() <= 12 && end - t0 < Duration::from_secs(5));
+        assert!(
+            !eyes.set_mood(Mood::Adhan, t0),
+            "the same mood shows nothing"
+        );
+        assert!(!eyes.set_mood(Mood::Idle, t0), "leaving it is silent");
+        assert!(eyes.set_mood(Mood::Rain, t0));
+        let (frames, _) = play(&mut eyes, t0);
+        assert!(frames.iter().all(|f| f.mood == Mood::Rain) && frames.len() <= 6);
+        let (half, droop) = (eye(Mood::Adhan, Pose::Rest), eye(Mood::Rain, Pose::Rest));
+        assert!(half.top > 0.0 && half.bottom > 0.0, "half-lidded");
+        assert!(
+            droop.top > 0.0 && droop.dy > 0.0,
+            "droopy: lid down, sitting low"
+        );
     }
 
     #[test]
@@ -335,7 +438,14 @@ mod tests {
 
     #[test]
     fn every_eye_fits_the_30_dip_pill_lane() {
-        for mood in [Mood::Idle, Mood::Happy, Mood::Sleepy, Mood::Surprised] {
+        for mood in [
+            Mood::Idle,
+            Mood::Happy,
+            Mood::Sleepy,
+            Mood::Surprised,
+            Mood::Adhan,
+            Mood::Rain,
+        ] {
             for pose in [Pose::Rest, Pose::Squash, Pose::Stretch] {
                 let e = eye(mood, pose);
                 assert!(e.w > 0.0 && e.h > 0.0);

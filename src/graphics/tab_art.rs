@@ -752,3 +752,41 @@ pub(super) fn draw_eyes(
     }
     Ok(())
 }
+
+/// The privacy dots (features B5): 6 DIP circles inset 14 from the body's right edge, on the pill's middle line,
+/// the camera one nearest the edge. Only a dot with some opacity is drawn.
+pub(super) fn draw_privacy(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    scale: f32,
+) -> Result<()> {
+    let middle =
+        (layout::notch_shape(scene.progress, scene.track.is_some()).height / 2.0).min(15.0);
+    let (r, y) = (3.0 * scale, body.top + middle * scale);
+    // Orange for the microphone, green for the camera: fixed signal colours on every theme.
+    for (slot, (alpha, colour)) in [
+        (scene.privacy[1], (34, 197, 94)),
+        (scene.privacy[0], (245, 158, 11)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if alpha <= 0.0 {
+            continue;
+        }
+        let x = body.right - (14.0 + 9.0 * slot as f32) * scale;
+        let dot = D2D_RECT_F {
+            left: x - r,
+            top: y - r,
+            right: x + r,
+            bottom: y + r,
+        };
+        // SAFETY: context is live between surface BeginDraw/EndDraw; the brush lives for this draw.
+        unsafe {
+            let brush = context.CreateSolidColorBrush(&with_alpha(colour, alpha), None)?;
+            context.FillRoundedRectangle(&rounded(dot, r), &brush);
+        }
+    }
+    Ok(())
+}

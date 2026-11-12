@@ -1044,3 +1044,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Done:** I1 glyph; child start is CreateProcessW suspended, kill-on-close Job assigned, then resumed, fail closed; no `std::process`; bounded polled pipe reads, no reader thread; Settings scrolls. No `opt-level` change.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 334 tests, locked release); 1,218,048 B, ratchet tripped (+7.2% over the 1,135,616 on main), baseline raised to 1218048, approved by Ahmed 2026-11-12; SHA `1ADF53E8DDE62F4D091E6AECF35CC5D170E43818593278C5847AD6B0A7C24AE8`.
 - **NOT RUN:** drawing, input, UIA read, real agy/codex/Claude files, Settings scroll, Settings fit; reviews paused (REVIEW NOT RUN).
+
+## B5 privacy indicator + M1 moods (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/f4-privacy-moods` on main b55fb90; [packet](features-privacy-moods.md). Mic (orange) and camera (green) dots in the pill and panel header from the consent store; adhan and rain eyes moods. No native/GUI run.
+- **Done:** one `RegNotifyChangeKeyValue` handle in the existing wait set (no thread, no timer, closed when the "Privacy indicator" switch is off); pure `in_use`, UIA "Microphone in use" / "Camera in use", no app names. Moods Adhan, Rain with selection tests. No new crates, no profile change.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 339 tests, locked release); 1,224,192 B, ratchet within 2% (baseline 1,218,048 unchanged); SHA `63CFF527C8D30B069DF9C116809E4BACCA05EEA4CDF7C8EE2007B8415EA83E7C`.
+- **NOT RUN:** drawing, real mic/camera session, UIA read, Settings fit, dot vs media visualizer; moods are unseen when they begin under an open panel; reviews paused (REVIEW NOT RUN).

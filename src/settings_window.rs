@@ -44,9 +44,10 @@ const SOUND: usize = 102;
 const DESKTOP: usize = 111;
 const EDGE_VOLUME: usize = 112;
 const EDGE_BRIGHTNESS: usize = 113;
-/// One checkbox per notch tab (`Tab::ALL` order), then the mascot eyes.
+/// One checkbox per notch tab (`Tab::ALL` order), then the mascot eyes and the privacy dots.
 const TAB: usize = 150;
 const EYES: usize = TAB + 6;
+const PRIVACY: usize = TAB + 7;
 /// The weather city, the device-location checkbox and the units list.
 const CITY: usize = 114;
 const DETECT: usize = 115;
@@ -104,6 +105,7 @@ pub struct SettingsWindow {
     /// "Media tab" and so on, in `Tab::ALL` order, and "Mascot eyes".
     tabs: [HWND; 6],
     eyes: HWND,
+    privacy: HWND,
     city: HWND,
     detect: HWND,
     /// Drop-down list of `Units::ALL`, in that order.
@@ -221,6 +223,7 @@ impl SettingsWindow {
             edge_brightness: HWND::default(),
             tabs: [HWND::default(); 6],
             eyes: HWND::default(),
+            privacy: HWND::default(),
             city: HWND::default(),
             detect: HWND::default(),
             units: HWND::default(),
@@ -434,6 +437,14 @@ impl SettingsWindow {
                 control(window, w!("Button"), name, TAB + tab.index(), check, flat)?;
         }
         self.eyes = control(window, w!("Button"), "Mascot e&yes", EYES, check, flat)?;
+        self.privacy = control(
+            window,
+            w!("Button"),
+            "Privacy &indicator",
+            PRIVACY,
+            check,
+            flat,
+        )?;
         let theme_label = label("T&heme")?;
         self.theme = control(
             window,
@@ -710,7 +721,7 @@ impl SettingsWindow {
         ];
         all.extend(self.tabs);
         all.extend(self.dock_buttons);
-        all.push(self.eyes);
+        all.extend([self.eyes, self.privacy]);
         all.extend([self.pin_label, self.pins, self.earlier, self.later]);
         all.extend(self.monitors.iter().map(|(handle, _)| *handle));
         all.extend([self.diagnostics, self.timer, self.status]);
@@ -730,6 +741,7 @@ impl SettingsWindow {
             set_checked(self.tabs[tab.index()], settings.tabs[tab.index()]);
         }
         set_checked(self.eyes, settings.eyes);
+        set_checked(self.privacy, settings.privacy);
         for button in Button::ALL {
             set_checked(
                 self.dock_buttons[button.index()],
@@ -840,6 +852,7 @@ impl SettingsWindow {
             next.tabs[tab.index()] = checked(self.tabs[tab.index()]);
         }
         next.eyes = checked(self.eyes);
+        next.privacy = checked(self.privacy);
         for button in Button::ALL {
             next.dock_buttons.shown[button.index()] = checked(self.dock_buttons[button.index()]);
         }
@@ -955,7 +968,7 @@ impl SettingsWindow {
                             self.move_pin = Some((index as usize, id == LATER));
                         }
                     }
-                    TAB..=EYES | DBTN..=134 if notification == BN_CLICKED => self.commit()?,
+                    TAB..=PRIVACY | DBTN..=134 if notification == BN_CLICKED => self.commit()?,
                     THEME | UNITS | DOCKSTYLE if notification == CBN_SELCHANGE => self.commit()?,
                     _ if monitor && notification == BN_CLICKED => self.commit()?,
                     SHELF | CITY | DIAGNOSTICS if notification == EN_KILLFOCUS => self.commit()?,
@@ -1153,7 +1166,7 @@ impl SettingsWindow {
             let inner = (client.right - margin * 2).max(1);
             let half = |units: f64| px(units).min(inner);
             let after = 3 + self.monitors.len(); // the desktop checkbox, then two more
-            let grid = after + 3; // four rows of two checkboxes: the six tabs, then the mascot
+            let grid = after + 3; // four rows of two checkboxes: the six tabs, the mascot, the privacy dots
             let end = grid + 3;
             let mut places = vec![
                 (self.dock, margin, tops[0], inner, px(24.0)),
@@ -1173,7 +1186,12 @@ impl SettingsWindow {
                 places.push((*handle, margin, tops[2 + index], inner, px(24.0)));
             }
             let column = (inner / 2).max(1);
-            for (index, handle) in self.tabs.iter().chain([&self.eyes]).enumerate() {
+            for (index, handle) in self
+                .tabs
+                .iter()
+                .chain([&self.eyes, &self.privacy])
+                .enumerate()
+            {
                 places.push((
                     *handle,
                     margin + column * (index as i32 % 2),

@@ -23,7 +23,7 @@ use crate::{
     picker::Picker,
     pins::Pins,
     power::{self, Power},
-    prayer_os, prayer_tab, preview,
+    prayer_os, prayer_tab, preview, privacy,
     settings::{self, Settings},
     settings_window::{SettingsWindow, SoundAction},
     shelf::{self, Check, Shelf},
@@ -157,6 +157,10 @@ struct Pages {
     tabs: Tabs,
     /// `None` with "Mascot eyes" off: no state, no deadline and no drawing.
     eyes: Option<Eyes>,
+    /// The consent-store watch (features B5): `None` with "Privacy indicator" off, which closes its handle.
+    watch: Option<privacy::Watch>,
+    /// The mic and camera dots: what is in use and their fade.
+    dots: privacy::Dots,
     /// Bumped when the shown tabs or the active page change, retiring older UI Automation elements.
     rev: u32,
     /// The last pointer or key input on a notch, and the local hour at the last clock tick: what the
@@ -176,7 +180,7 @@ struct Pages {
 }
 impl Pages {
     fn new(settings: &Settings, last: Tab) -> Self {
-        Self {
+        let mut pages = Self {
             tabs: Tabs::new(settings.tabs, last),
             eyes: settings.eyes.then(|| {
                 // Start-up is a wake: the eyes open once, then give way to the time.
@@ -184,6 +188,8 @@ impl Pages {
                 eyes.wake(Instant::now());
                 eyes
             }),
+            watch: None,
+            dots: privacy::Dots::default(),
             rev: 0,
             last_input: Instant::now(),
             hour: 12,
@@ -193,7 +199,15 @@ impl Pages {
             prayer_key: None,
             limits: limits::View::default(),
             limits_key: None,
-        }
+        };
+        pages.set_privacy(settings.privacy, Instant::now());
+        pages
+    }
+    /// Starts or stops the registry watch with the setting and reads the devices once; true when the dots changed.
+    fn set_privacy(&mut self, on: bool, now: Instant) -> bool {
+        self.watch = on.then(privacy::Watch::new).flatten();
+        let used = self.watch.as_ref().map(privacy::Watch::read);
+        self.dots.set(used.unwrap_or_default(), now)
     }
     /// The track the notch shows: none with the Media tab off, so a session costs nothing then.
     fn track<'a>(&self, media: &'a Media) -> Option<&'a Track> {
@@ -679,7 +693,14 @@ impl Surface {
             _ => [0.0; audio::BARS],
         };
         self.bars = layout::meter_heights(peaks, self.dpi);
-        self.publish_notch(media, audio, timer.as_ref(), notice, shelf, pages);
+        self.publish_notch(
+            media,
+            audio,
+            timer.as_ref(),
+            notice.or(pages.dots.now().text()),
+            shelf,
+            pages,
+        );
         let Role::Notch {
             shadow,
             area,
@@ -741,6 +762,7 @@ impl Surface {
                 focus: focus.and_then(|control| control.checked_sub(notch_uia::TAB_BASE)),
             }),
             eyes: pages.eyes.and_then(|eyes| eyes.frame()),
+            privacy: pages.dots.alpha(),
             grip: self.grip,
             volume_fill,
             weather: (page == Tab::Weather).then_some(&pages.weather),
@@ -1307,6 +1329,8 @@ struct PrayerRun {
     last: Option<((i32, u32, u32), i32)>,
     player: prayer_os::Player,
     sound_end: Option<Instant>,
+    /// The reminder's notice ends here: the mascot's adhan mood lasts as long.
+    adhan_until: Option<Instant>,
 }
 /// How long a prayer reminder holds the notch open.
 const PRAYER_NOTICE: Duration = Duration::from_secs(8);
@@ -1862,6 +1886,7 @@ impl Desktop {
     /// full-screen app covers it appears over the app (topmost, never activated) and hides again once retracted.
     fn fire_prayer(&mut self, event: prayer_tab::Event, now: Instant) {
         self.play_prayer_sound(now);
+        self.prayer.adhan_until = Some(now + PRAYER_NOTICE);
         self.power
             .announce(prayer_tab::notice(event), now, PRAYER_NOTICE);
         for surface in &mut self.surfaces {
@@ -1920,6 +1945,14 @@ impl Desktop {
             alert: self.power.text().is_some()
                 || (self.pages.tabs.on(Tab::Timer) && self.timers.finished()),
             idle: now.saturating_duration_since(self.pages.last_input) >= eyes::IDLE_AFTER,
+            adhan: self.prayer.adhan_until.is_some_and(|end| now < end),
+            rain: self.pages.page(self.pages.track(&self.media).is_some()) == Tab::Weather
+                && self.weather.report.as_ref().is_some_and(|report| {
+                    matches!(
+                        weather::Icon::from_wmo(report.code),
+                        weather::Icon::Rain | weather::Icon::Storm
+                    )
+                }),
             hour: self.pages.hour,
         };
         let Some(eyes) = &mut self.pages.eyes else {
@@ -1932,6 +1965,28 @@ impl Desktop {
             self.request_notches(Repaint::Full, |s| !s.live && s.motion.value(now) < 0.1);
         }
         milliseconds_until(due, now)
+    }
+    /// Steps the dots' fade; returns the wait until its next step (`INFINITE` at rest, the common case).
+    #[inline(never)]
+    fn refresh_privacy(&mut self) -> u32 {
+        let now = Instant::now();
+        if self.pages.dots.tick(now) {
+            self.request_notches(Repaint::Full, |_| true);
+        }
+        self.pages
+            .dots
+            .due()
+            .map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+    /// The consent store changed: re-arm first so no later change is lost, then read it once.
+    fn privacy_signal(&mut self) {
+        let Some(watch) = &self.pages.watch else {
+            return;
+        };
+        watch.arm();
+        if self.pages.dots.set(watch.read(), Instant::now()) {
+            self.request_notches(Repaint::Full, |_| true);
+        }
     }
     /// Opens every visible notch; a notch hidden by a full-screen app stays hidden.
     fn open_notches(&mut self) {
@@ -2277,6 +2332,13 @@ impl Desktop {
         let eyes_changed = old.eyes != self.settings.eyes;
         if eyes_changed {
             self.pages.eyes = self.settings.eyes.then(Eyes::default);
+        }
+        if old.privacy != self.settings.privacy
+            && self
+                .pages
+                .set_privacy(self.settings.privacy, Instant::now())
+        {
+            self.request_notches(Repaint::Full, |_| true);
         }
         if old.dock_style != self.settings.dock_style
             || old.dock_buttons != self.settings.dock_buttons
@@ -3821,6 +3883,7 @@ impl Desktop {
             .min(self.refresh_edges())
             .min(self.refresh_rails())
             .min(self.refresh_eyes())
+            .min(self.refresh_privacy())
             .min(self.refresh_prayer());
         self.refresh_menu();
         self.paint_requested()?;
@@ -3953,8 +4016,12 @@ pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> 
 }
 
 fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog) -> Result<()> {
-    let events = controls.handles();
+    let mut events = controls.handles();
+    let base = events.len();
     loop {
+        // The registry watch's handle goes last, and only while the setting is on.
+        events.truncate(base);
+        events.extend(desktop.pages.watch.as_ref().map(privacy::Watch::handle));
         catalog.service()?;
         desktop.flush_store(false);
         desktop.refresh_graphics()?;
@@ -3991,7 +4058,9 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
             return Err(Error::from_thread());
         }
         let index = wake.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
-        if index < events.len() {
+        if index == base {
+            desktop.privacy_signal();
+        } else if index < base {
             match Command::ALL[index] {
                 Command::ShowPicker => desktop.open_picker(catalog)?,
                 Command::ShowSettings => desktop.open_settings()?,
