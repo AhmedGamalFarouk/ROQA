@@ -91,7 +91,7 @@ try {
     $foreground = [NativeProbe]::GetForegroundWindow()
     Assert-Check ($foreground -ne [IntPtr]::Zero) 'Existing foreground window recorded before launch'
     $hostProcess = Start-Process -FilePath $executable -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $evidence 'runtime.log')
-    $strips = switch ($EdgeSliders) { 'none' { @() } 'volume' { @('ROQA Volume Slider') } 'brightness' { @('ROQA Brightness Slider') } 'both' { @('ROQA Volume Slider', 'ROQA Brightness Slider') } }
+    $strips = @(switch ($EdgeSliders) { 'none' { @() } 'volume' { @('ROQA Volume Slider') } 'brightness' { @('ROQA Brightness Slider') } 'both' { @('ROQA Volume Slider', 'ROQA Brightness Slider') } })
     $perMonitor = 3 + $strips.Count
     $expected = $perMonitor * $monitors.Count
     $deadline = [DateTime]::UtcNow.AddSeconds(5)

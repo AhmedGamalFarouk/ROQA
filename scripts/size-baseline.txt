@@ -1,1 +1,3 @@
-921600
+968704
+raise-reason: notch tabs with hanging handle and icons, per-tab switches, mascot eyes (tabs/eyes batch)
+approved-by: user 2026-11-12

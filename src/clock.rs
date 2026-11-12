@@ -12,6 +12,8 @@ pub struct Clock {
     pub date: String,
     /// Wait this long to wake exactly once per minute; nothing else redraws the clock.
     pub next_minute_ms: u32,
+    /// Local hour, 0 to 23 (the mascot sleeps late at night).
+    pub hour: u8,
 }
 
 pub fn now() -> Clock {
@@ -46,6 +48,7 @@ pub fn now() -> Clock {
         time: text(&time, time_len),
         date: text(&date, date_len),
         next_minute_ms: next_minute_ms(local.wSecond, local.wMilliseconds),
+        hour: local.wHour.min(23) as u8,
     }
 }
 

@@ -6,11 +6,14 @@ use crate::{
     dock_menu::{self, Event, Item},
     dock_uia::{self, Accessibility},
     edge::Edges,
-    graphics::{COVER_DIPS, Canvas, DockScene, DockSlot, Graphics, NotchScene, ShelfSlot},
+    eyes::{self, Eyes},
+    graphics::{
+        COVER_DIPS, Canvas, DockScene, DockSlot, Graphics, NotchScene, RailScene, ShelfSlot,
+    },
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
     layout::{self, Bounds, SurfaceKind, placement},
-    media::{self, Media, Progress},
+    media::{self, Media, Progress, Track},
     motion::{self, Tween},
     native_window::{self, NativeWindow, WindowClass},
     notch_uia,
@@ -23,6 +26,7 @@ use crate::{
     shelf::{self, Check, Shelf},
     shelf_os::{self, DropEvent, Drops},
     store::{self, Flush, Pending, Store},
+    tabs::{self, Handle, Tab, Tabs},
     text_settings::TextSettings,
     theme::Palette,
     timer::{self, Timers},
@@ -142,6 +146,68 @@ enum Repaint {
     Full,
 }
 
+/// What the notches show besides the media session (features tabs-eyes): the tabs, and the mascot.
+struct Pages {
+    tabs: Tabs,
+    /// `None` with "Mascot eyes" off: no state, no deadline and no drawing.
+    eyes: Option<Eyes>,
+    /// Bumped when the shown tabs or the active page change, retiring older UI Automation elements.
+    rev: u32,
+    /// The last pointer or key input on a notch, and the local hour at the last clock tick: what the
+    /// mascot's sleepy mood reads.
+    last_input: Instant,
+    hour: u8,
+}
+impl Pages {
+    fn new(settings: &Settings, last: Tab) -> Self {
+        Self {
+            tabs: Tabs::new(settings.tabs, last),
+            eyes: settings.eyes.then(Eyes::default),
+            rev: 0,
+            last_input: Instant::now(),
+            hour: 12,
+        }
+    }
+    /// The track the notch shows: none with the Media tab off, so a session costs nothing then.
+    fn track<'a>(&self, media: &'a Media) -> Option<&'a Track> {
+        self.tabs
+            .on(Tab::Media)
+            .then(|| media.view().shown())
+            .flatten()
+    }
+    /// The page the open panel shows. With every tab off the panel is the plain clock (the Media page).
+    fn page(&self, media_live: bool) -> Tab {
+        self.tabs.active(media_live).unwrap_or(Tab::Media)
+    }
+    /// The handle's layout at open fraction `p`; `None` with fewer than two tabs.
+    fn rail(&self, media_live: bool, p: f32) -> Option<layout::Rail> {
+        let visible = self.tabs.visible();
+        let active = visible.position(self.page(media_live))?;
+        visible.handle().then_some(layout::Rail {
+            count: visible.as_slice().len(),
+            active,
+            p,
+        })
+    }
+    fn touch(&mut self) {
+        self.last_input = Instant::now();
+    }
+}
+
+/// A notch's handle: its open/closed intent (`tabs::Handle`) and the 0 to 1 tween drawn from it.
+struct Hang {
+    handle: Handle,
+    tween: Tween,
+}
+impl Hang {
+    fn rest() -> Self {
+        Self {
+            handle: Handle::default(),
+            tween: Tween::rest(0.0),
+        }
+    }
+}
+
 struct Surface {
     // Declared first: UIA must release the dock before its HWND is destroyed.
     role: Role,
@@ -165,6 +231,8 @@ struct Surface {
     bars: [i32; audio::BARS],
     /// Notch: what this pass has asked to repaint (`Desktop::paint_requested`).
     repaint: Repaint,
+    /// Notch: the tab handle's open state.
+    hang: Hang,
 }
 impl Drop for Surface {
     fn drop(&mut self) {
@@ -264,7 +332,36 @@ impl Surface {
             played: None,
             bars: [0; audio::BARS],
             repaint: Repaint::Nothing,
+            hang: Hang::rest(),
         })
+    }
+    /// The handle opens at once for the pointer or a focused tab and closes `tabs::COLLAPSE_DELAY` after
+    /// both end (`Desktop::refresh_rails` keeps that one deadline). Frames run only while it moves.
+    fn set_rail(&mut self, want: bool, now: Instant) {
+        if let Some(open) = self.hang.handle.set(want, now) {
+            self.hang
+                .tween
+                .retarget(f32::from(open), tabs::EXPAND, motion::EASE_OUT);
+            self.live = true;
+        }
+    }
+    /// Closes the handle if its delay passed. A closing or closed notch just snaps it shut: no frames for
+    /// a handle nobody sees.
+    fn tick_rail(&mut self, now: Instant) {
+        if let Some(open) = self.hang.handle.tick(now) {
+            if self.motion.target() <= 0.0 {
+                self.hang.tween = Tween::rest(f32::from(open));
+            } else {
+                self.hang
+                    .tween
+                    .retarget(f32::from(open), tabs::EXPAND, motion::EASE_OUT);
+                self.live = true;
+            }
+        }
+    }
+    /// Closed and not moving: nothing of the panel is drawn.
+    fn collapsed(&self, now: Instant) -> bool {
+        self.motion.target() <= 0.0 && !self.motion.running(now)
     }
     fn request(&mut self, repaint: Repaint) {
         self.repaint = self.repaint.max(repaint);
@@ -303,6 +400,7 @@ impl Surface {
         if !visible {
             // A hidden window gets no leave notification and needs no frames: settle at rest now.
             (self.hovered, self.live, self.motion) = (false, false, Tween::rest(0.0));
+            self.hang = Hang::rest();
             match &mut self.role {
                 Role::Notch {
                     engaged,
@@ -348,6 +446,10 @@ impl Surface {
                 self.hover_dock(None, false);
             } else {
                 self.set_notch_hover(false);
+                let tab_focus = self
+                    .focused()
+                    .is_some_and(|focus| focus.control >= notch_uia::TAB_BASE);
+                self.set_rail(tab_focus, Instant::now());
             }
         }
     }
@@ -379,12 +481,16 @@ impl Surface {
         timer: Option<&timer::View>,
         notice: Option<&str>,
         shelf: &ShelfView,
+        pages: &Pages,
     ) {
         let mut announce = false;
+        let track = pages.track(media);
+        let page = pages.page(track.is_some());
         if let Role::Notch { uia, focus, .. } = &self.role
             && let Ok(mut state) = uia.lock()
         {
             state.dpi = self.dpi;
+            state.track = track.is_some();
             let timer_name = timer.map_or("", |view| view.name.as_str());
             // A notice newly shown is announced once, after the lock is released.
             let notice = notice.unwrap_or("");
@@ -397,26 +503,47 @@ impl Surface {
                 state.timer.clear();
                 state.timer.push_str(timer_name);
             }
-            state.version = uia_version(media, &shelf.shelf);
+            state.version = uia_version(media, &shelf.shelf, pages.rev);
+            // A page switch republishes what each page lists.
+            if state.published_page != Some(page) {
+                state.published_page = Some(page);
+                (state.published_media, state.published_shelf) = (None, None);
+            }
             if state.published_shelf != Some(shelf.shelf.revision()) {
                 state.published_shelf = Some(shelf.shelf.revision());
-                state.shelf = (0..shelf.shelf.slot_count())
-                    .filter_map(|index| shelf.shelf.slot_label(index))
-                    .collect();
+                state.shelf = if page == Tab::Shelf {
+                    (0..shelf.shelf.slot_count())
+                        .filter_map(|index| shelf.shelf.slot_label(index))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
             }
             let media_stamp = (media.uia_revision(), audio.level());
             if state.published_media != Some(media_stamp) {
                 state.published_media = Some(media_stamp);
-                state.controls = media
-                    .view()
-                    .shown()
+                state.controls = track
+                    .filter(|_| page == Tab::Media)
                     .map(|track| {
                         let mut controls = notch_uia::controls(track);
                         controls.push(notch_uia::mute(audio.level()));
                         controls
                     })
                     .unwrap_or_default();
-                state.status = media.view().status();
+                state.status = track.is_none().then(|| media.view().status()).flatten();
+            }
+            let visible = pages.tabs.visible();
+            if state.published_tabs != Some((pages.rev, page)) {
+                state.published_tabs = Some((pages.rev, page));
+                let count = visible.as_slice().len();
+                state.tabs = if visible.handle() {
+                    (0..count)
+                        .map(|at| notch_uia::tab_name(visible.as_slice()[at], at, count))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                state.active_tab = visible.position(page).unwrap_or(0);
             }
             state.focus = focus.as_ref().map(|focus| focus.control);
             state.open = self.motion.target() >= 1.0;
@@ -433,6 +560,9 @@ impl Surface {
         }
     }
     /// Draws one frame, publishing it to UI Automation first.
+    // shortcut: eight arguments, each a distinct borrowed part of `Desktop`; bundle them into a view
+    // struct if a ninth is needed.
+    #[allow(clippy::too_many_arguments)]
     fn paint_notch(
         &mut self,
         (time, date): (&str, &str),
@@ -441,10 +571,18 @@ impl Surface {
         timers: &Timers,
         power: &Power,
         shelf: &ShelfView,
+        pages: &Pages,
     ) -> Result<()> {
-        let track = media.view().shown();
-        let progress = self.motion.value(Instant::now());
-        let timer = timers.view(Instant::now());
+        let track = pages.track(media);
+        let page = pages.page(track.is_some());
+        let now = Instant::now();
+        let progress = self.motion.value(now);
+        // A switched-off Timer tab draws and ticks nothing.
+        let timer = pages
+            .tabs
+            .on(Tab::Timer)
+            .then(|| timers.view(now))
+            .flatten();
         let notice = power.text();
         // Only a revealed panel row reads the time; a collapsed notch draws no progress.
         self.played = track
@@ -458,7 +596,7 @@ impl Surface {
             _ => [0.0; audio::BARS],
         };
         self.bars = layout::meter_heights(peaks, self.dpi);
-        self.publish_notch(media, audio, timer.as_ref(), notice, shelf);
+        self.publish_notch(media, audio, timer.as_ref(), notice, shelf, pages);
         let Role::Notch {
             shadow,
             area,
@@ -469,16 +607,20 @@ impl Surface {
             return Ok(());
         };
         let focus = focus.as_ref().map(|focus| focus.control);
+        let visible = pages.tabs.visible();
+        let rail = pages.rail(track.is_some(), self.hang.tween.value(now));
         // Input and drawing use the same frame progress and shape, without a speculative growth lead.
-        let rows = layout::notch_rows(self.bounds, self.dpi, progress, track.is_some());
+        let rows = layout::notch_rows(self.bounds, self.dpi, progress, track.is_some(), rail);
         if *area != rows {
             self.window.set_notch_region(&rows)?;
             *area = rows;
         }
+        let shelf_on = pages.tabs.on(Tab::Shelf);
         let mut slots: Vec<ShelfSlot> = shelf
             .shelf
             .visible()
             .iter()
+            .filter(|_| shelf_on)
             .enumerate()
             .map(|(index, entry)| ShelfSlot {
                 icon: shelf.icons.get(index).and_then(|icon| icon.as_deref()),
@@ -487,7 +629,7 @@ impl Surface {
                 add: false,
             })
             .collect();
-        if shelf.shelf.overflow() || shelf.shelf.is_empty() {
+        if shelf_on && (shelf.shelf.overflow() || shelf.shelf.is_empty()) {
             slots.push(ShelfSlot {
                 icon: None,
                 missing: false,
@@ -506,13 +648,21 @@ impl Surface {
             played: self.played,
             volume: audio.level(),
             bars: self.bars,
-            // A notice owns the panel text slots while it shows.
-            timer: timer.as_ref().filter(|_| notice.is_none()),
+            timer: timer.as_ref(),
             notice,
             shelf: &slots,
+            tab: page,
+            rail: rail.map(|layout| RailScene {
+                layout,
+                tabs: visible.as_slice(),
+                focus: focus.and_then(|control| control.checked_sub(notch_uia::TAB_BASE)),
+            }),
+            eyes: pages.eyes.map(|eyes| (eyes.mood(), eyes.pose())),
         };
         shadow.paint(&scene, self.window.0)?;
-        self.canvas.paint_notch(&scene, media.view().status())
+        let status = track.is_none().then(|| media.view().status()).flatten();
+        self.canvas
+            .paint_notch(&scene, status.filter(|_| pages.tabs.on(Tab::Media)))
     }
     /// Repaints only the visualizer slot with the new bar heights; no UIA state changes with them.
     fn paint_meter(&mut self, peaks: [f32; audio::BARS]) -> Result<()> {
@@ -569,6 +719,8 @@ impl Surface {
         if let Ok(mut state) = uia.lock() {
             (state.focus, state.open) = (Some(control), true);
         }
+        // A focused tab holds the handle open, as the pointer does.
+        self.set_rail(control >= notch_uia::TAB_BASE, Instant::now());
     }
     /// Ends keyboard focus, closing the panel unless the pointer still holds it.
     fn blur(&mut self) -> Option<Focus> {
@@ -589,6 +741,7 @@ impl Surface {
         if let Ok(mut state) = uia.lock() {
             (state.focus, state.open) = (None, self.motion.target() >= 1.0);
         }
+        self.set_rail(false, Instant::now());
         Some(ended)
     }
     fn focused(&self) -> Option<&Focus> {
@@ -872,9 +1025,12 @@ struct ShelfView {
     stale: bool,
 }
 
-/// What UI Automation elements are valid for: the media session and the shelf's list.
-fn uia_version(media: &Media, shelf: &Shelf) -> u32 {
-    (media.generation() as u32).wrapping_add(shelf.revision())
+/// What UI Automation elements are valid for: the media session, the shelf's list and the shown tabs and
+/// page (`Pages::rev`).
+fn uia_version(media: &Media, shelf: &Shelf, tabs: u32) -> u32 {
+    (media.generation() as u32)
+        .wrapping_add(shelf.revision())
+        .wrapping_add(tabs.rotate_left(16))
 }
 
 /// As `edit_pins`, for the shelf: only a real change marks the store dirty (once) and re-asks for icons.
@@ -972,6 +1128,8 @@ struct Desktop {
     /// settings whenever either changes (`edges_dirty`).
     edges: Edges,
     edges_dirty: bool,
+    /// The tabs and the mascot (features tabs-eyes).
+    pages: Pages,
 }
 impl Desktop {
     fn create(_probe: &Probe) -> Result<Self> {
@@ -990,6 +1148,7 @@ impl Desktop {
         if shelf.set_cap(settings.shelf_cap) {
             shelf.write_to(&mut store); // the cut list leaves the file with its next write
         }
+        let pages = Pages::new(&settings, store.last_tab);
         let timers = Timers::restore(&store.timers, timer::wall_now(), now);
         // The section now mirrors what is running; stale entries leave the file with its next write.
         timers.write_to(&mut store, &mut Pending::default(), now);
@@ -1047,6 +1206,7 @@ impl Desktop {
             menu: None,
             edges: Edges::default(),
             edges_dirty: true,
+            pages,
         };
         if desktop.settings.notch {
             desktop.show(SurfaceKind::Notch)?;
@@ -1114,6 +1274,7 @@ impl Desktop {
                 &self.timers,
                 &self.power,
                 &self.shelf,
+                &self.pages,
             )?;
             self.surfaces.push(surface);
         } else {
@@ -1140,8 +1301,14 @@ impl Desktop {
         if now >= self.clock_due {
             let clock = clock::now();
             self.clock_due = now + Duration::from_millis(clock.next_minute_ms.into());
+            self.pages.hour = clock.hour;
             if clock.time != self.clock || clock.date != self.date {
                 (self.clock, self.date) = (clock.time, clock.date);
+                // A blink starts only here (or on a mood change or the pointer entering): this repaint draws
+                // its first pose, and `refresh_eyes` owns the one deadline that ends it.
+                if let Some(eyes) = &mut self.pages.eyes {
+                    eyes.blink(now);
+                }
                 self.request_notches(Repaint::Full, |_| true);
             }
         }
@@ -1171,6 +1338,7 @@ impl Desktop {
                     &self.timers,
                     &self.power,
                     &self.shelf,
+                    &self.pages,
                 )?,
             }
         }
@@ -1183,8 +1351,9 @@ impl Desktop {
     #[inline(never)]
     fn refresh_progress(&mut self) -> Result<u32> {
         let mut next_due = None::<Instant>;
+        let media_page = self.page() == Tab::Media;
         for notch in self.surfaces.iter_mut().filter(|s| s.expanded()) {
-            let Some(track) = self.media.view().shown() else {
+            let Some(track) = self.pages.track(&self.media).filter(|_| media_page) else {
                 break;
             };
             let (now, ticks) = (Instant::now(), media::now_ticks());
@@ -1212,8 +1381,10 @@ impl Desktop {
     #[inline(never)]
     fn refresh_meter(&mut self) -> Result<u32> {
         let now = Instant::now();
-        let playing = self.media.view().shown().is_some_and(|track| track.playing);
-        let open = self.surfaces.iter().any(Surface::expanded);
+        let track = self.pages.track(&self.media);
+        let (shown, playing) = (track.is_some(), track.is_some_and(|track| track.playing));
+        // Only the Media page draws the visualizer; any other page, or no Media tab, makes no meter call.
+        let open = self.page() == Tab::Media && self.surfaces.iter().any(Surface::expanded);
         let due = meter_due(open, playing, self.audio.metered(), self.sampled, now);
         match due {
             None => self.audio.stop(),
@@ -1224,7 +1395,6 @@ impl Desktop {
             }
         }
         let peaks = self.audio.peaks();
-        let shown = self.media.view().shown().is_some();
         for notch in self.surfaces.iter_mut().filter(|s| s.expanded()) {
             // A running animation paints every frame already.
             if shown && !notch.live && notch.bars != layout::meter_heights(peaks, notch.dpi) {
@@ -1238,6 +1408,9 @@ impl Desktop {
     /// and no alert it does nothing and returns `INFINITE`: no wake, and collapsed notches get no tick.
     #[inline(never)]
     fn refresh_timers(&mut self) -> u32 {
+        if !self.pages.tabs.on(Tab::Timer) {
+            return INFINITE; // switched off: no deadline, no alert, nothing to tick
+        }
         let now = Instant::now();
         if self.timers.take_done(now) {
             self.timers
@@ -1249,7 +1422,7 @@ impl Desktop {
             self.surfaces.iter_mut().for_each(Surface::close_alert);
             self.request_notches(Repaint::Full, |_| true);
         }
-        let expanded = self.surfaces.iter().any(Surface::expanded);
+        let expanded = self.page() == Tab::Timer && self.surfaces.iter().any(Surface::expanded);
         if expanded {
             let panel = self.timers.view(now).map(|view| view.panel);
             if panel.as_deref().unwrap_or("") != self.timer_shown {
@@ -1261,6 +1434,73 @@ impl Desktop {
         self.timers
             .next_wake(expanded, now)
             .map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+    /// The page the open panel shows now.
+    fn page(&self) -> Tab {
+        self.pages.page(self.pages.track(&self.media).is_some())
+    }
+    /// A pick for the Media session's deadline only while the Media tab is on.
+    fn media_wait(&self) -> u32 {
+        if !self.pages.tabs.on(Tab::Media) {
+            return INFINITE;
+        }
+        self.media
+            .deadline()
+            .map_or(INFINITE, |due| milliseconds_until(due, Instant::now()))
+    }
+    /// The user (or UI Automation, or a finished timer) picked `tab`: it shows now, becomes the last used
+    /// tab (kept in the store) and retires older UI Automation elements.
+    fn select_tab(&mut self, tab: Tab) {
+        let live = self.pages.track(&self.media).is_some();
+        if !self.pages.tabs.select(tab, live) {
+            return;
+        }
+        self.pages.rev = self.pages.rev.wrapping_add(1);
+        if self.store.last_tab != tab {
+            self.store.last_tab = tab;
+            self.pending.mark(Instant::now());
+        }
+        self.request_notches(Repaint::Full, |_| true);
+        self.reconcile_focus(|_| true);
+    }
+    /// Closes each notch's tab handle once its delay passed; returns the wait until the next such deadline
+    /// (`INFINITE` with none waiting, the common case).
+    #[inline(never)]
+    fn refresh_rails(&mut self) -> u32 {
+        let now = Instant::now();
+        let mut due = None::<Instant>;
+        for notch in &mut self.surfaces {
+            notch.tick_rail(now);
+            due = [due, notch.hang.handle.due()].into_iter().flatten().min();
+        }
+        due.map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+    /// The mascot: picks the mood from the facts and steps a running blink. It never starts a blink itself
+    /// (that is the clock repaint, a mood change or the pointer); with the setting off it returns at once.
+    /// Returns the wait until the running sequence's next step, `INFINITE` at rest.
+    #[inline(never)]
+    fn refresh_eyes(&mut self) -> u32 {
+        let now = Instant::now();
+        let facts = eyes::Facts {
+            playing: self
+                .pages
+                .track(&self.media)
+                .is_some_and(|track| track.playing),
+            alert: self.power.text().is_some()
+                || (self.pages.tabs.on(Tab::Timer) && self.timers.finished()),
+            idle: now.saturating_duration_since(self.pages.last_input) >= eyes::IDLE_AFTER,
+            hour: self.pages.hour,
+        };
+        let Some(eyes) = &mut self.pages.eyes else {
+            return INFINITE;
+        };
+        let changed = eyes.set_mood(eyes::mood(facts), now) | eyes.tick(now);
+        let due = eyes.due();
+        if changed {
+            // A running animation paints every frame already; an open panel does not draw the eyes.
+            self.request_notches(Repaint::Full, |s| !s.live && s.motion.value(now) < 0.1);
+        }
+        due.map_or(INFINITE, |due| milliseconds_until(due, now))
     }
     /// Opens every visible notch; a notch hidden by a full-screen app stays hidden.
     fn open_notches(&mut self) {
@@ -1381,6 +1621,14 @@ impl Desktop {
     /// A timer finished: every visible notch opens (once, however many finished together) and the
     /// system sound plays if enabled. No toast: notification packaging is M6.
     fn complete_timer(&mut self) {
+        if self.pages.tabs.on(Tab::Timer) {
+            // The open it causes shows the finished timer, whatever page was last used.
+            let before = self.page();
+            self.pages.tabs.choice = Some(Tab::Timer);
+            if self.page() != before {
+                self.pages.rev = self.pages.rev.wrapping_add(1);
+            }
+        }
         self.open_notches();
         if self.settings.timer_sound {
             // SAFETY: plays the user's own default sound asynchronously; no pointers.
@@ -1418,10 +1666,12 @@ impl Desktop {
                         &self.timers,
                         &self.power,
                         &self.shelf,
+                        &self.pages,
                     )?,
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
                 surface.live = surface.motion.running(now)
+                    || surface.hang.tween.running(now)
                     || match &surface.role {
                         Role::Notch { intent, .. } => intent.is_some(),
                         Role::Dock { slots, .. } => slots.iter().any(|tween| tween.running(now)),
@@ -1492,7 +1742,11 @@ impl Desktop {
             self.apply_settings(next, catalog)?;
         }
         if let Some(seconds) = start {
-            let status = self.start_timer(seconds);
+            let status = if self.pages.tabs.on(Tab::Timer) {
+                self.start_timer(seconds)
+            } else {
+                "Switch the Timer tab on to start a timer.".to_owned()
+            };
             if let Some(window) = &self.settings_window {
                 let _ = window.say(&status);
             }
@@ -1510,6 +1764,20 @@ impl Desktop {
         let old = std::mem::replace(&mut self.settings, next);
         let restyle = old.theme != self.settings.theme;
         self.edges_dirty = true;
+        let tabs_changed = old.tabs != self.settings.tabs;
+        if tabs_changed {
+            self.pages.tabs.flags = self.settings.tabs;
+            self.pages.rev = self.pages.rev.wrapping_add(1);
+            // A tab back on picks up what it missed: icons for the shelf, an expired timer.
+            self.shelf.stale = true;
+            if !self.settings.tabs[Tab::Media.index()] {
+                self.audio.stop();
+            }
+        }
+        let eyes_changed = old.eyes != self.settings.eyes;
+        if eyes_changed {
+            self.pages.eyes = self.settings.eyes.then(Eyes::default);
+        }
         if old.desktop_only != self.settings.desktop_only {
             self.dock_generation = None; // the dock is rebuilt on the next pass
         }
@@ -1546,6 +1814,10 @@ impl Desktop {
                     self.show(kind)?;
                 }
             }
+        }
+        if tabs_changed || eyes_changed {
+            self.request_notches(Repaint::Full, |_| true);
+            self.reconcile_focus(|_| true);
         }
         let cap = self.settings.shelf_cap;
         self.change_shelf(|shelf| shelf.set_cap(cap));
@@ -1898,11 +2170,18 @@ impl Desktop {
                         notch.set_notch_hover(over);
                     }
                 }
-                DropEvent::Files(paths) => self.change_shelf(|shelf| shelf.add_all(&paths) > 0),
+                DropEvent::Files(paths) if self.pages.tabs.on(Tab::Shelf) => {
+                    self.change_shelf(|shelf| shelf.add_all(&paths) > 0)
+                }
+                DropEvent::Files(_) => {}
             }
         }
         let wanted = self.shelf.stale || self.icons_arrived;
-        if self.shelf.shelf.is_empty() || !wanted || !self.surfaces.iter().any(Surface::expanded) {
+        if self.shelf.shelf.is_empty()
+            || !wanted
+            || self.page() != Tab::Shelf
+            || !self.surfaces.iter().any(Surface::expanded)
+        {
             return;
         }
         let Some(size) = self.icon_size() else {
@@ -1949,7 +2228,9 @@ impl Desktop {
             edit,
         ) {
             self.request_notches(Repaint::Full, |_| true);
-            self.reconcile_focus(|control| control >= notch_uia::SHELF_BASE);
+            self.reconcile_focus(|control| {
+                (notch_uia::SHELF_BASE..notch_uia::TAB_BASE).contains(&control)
+            });
         }
     }
     /// The visible shelf entry under a window point of notch `notch`, if its slot is drawn and filled.
@@ -1957,7 +2238,10 @@ impl Desktop {
         let surface = &self.surfaces[notch];
         let (x, y) = point(lparam);
         let progress = surface.motion.value(Instant::now());
-        let media = self.media.view().shown().is_some();
+        let media = self.pages.track(&self.media).is_some();
+        if self.page() != Tab::Shelf {
+            return None;
+        }
         layout::shelf_at(surface.bounds.width, surface.dpi, progress, media, x, y)
             .filter(|&index| index < self.shelf.shelf.slot_count())
     }
@@ -2058,7 +2342,11 @@ impl Desktop {
             return false;
         };
         // UIA posts the session generation its element was created for; older ones are ignored.
-        let current = message.lParam.0 as u32 == uia_version(&self.media, &self.shelf.shelf);
+        let current =
+            message.lParam.0 as u32 == uia_version(&self.media, &self.shelf.shelf, self.pages.rev);
+        if matches!(message.message, WM_LBUTTONUP | WM_KEYDOWN) {
+            self.pages.touch();
+        }
         match message.message {
             WM_LBUTTONUP => return self.click_control(notch, message.lParam),
             WM_KEYDOWN => return self.notch_key(notch, message),
@@ -2078,15 +2366,30 @@ impl Desktop {
     fn click_control(&mut self, notch: usize, lparam: LPARAM) -> bool {
         let surface = &self.surfaces[notch];
         let (x, y) = point(lparam);
-        let progress = surface.motion.value(Instant::now());
+        let now = Instant::now();
+        let progress = surface.motion.value(now);
         let (width, dpi) = (surface.bounds.width, surface.dpi);
-        if let Some(index) = self.shelf_slot_at(notch, lparam) {
-            // SAFETY: reads this thread's keyboard state as of the message being handled.
-            let reveal = unsafe { GetKeyState(VK_CONTROL.0.into()) } < 0;
-            self.open_shelf(index, reveal);
+        let live = self.pages.track(&self.media).is_some();
+        // The tab handle first: it hangs below the panel.
+        if let Some(rail) = self.pages.rail(live, surface.hang.tween.value(now))
+            && let Some(position) = layout::rail_tab_at(width, dpi, progress, live, rail, (x, y))
+        {
+            if let Some(&tab) = self.pages.tabs.visible().as_slice().get(position) {
+                self.select_tab(tab);
+            }
             return true;
         }
-        if self.media.view().shown().is_none() {
+        let page = self.page();
+        if page == Tab::Shelf {
+            if let Some(index) = self.shelf_slot_at(notch, lparam) {
+                // SAFETY: reads this thread's keyboard state as of the message being handled.
+                let reveal = unsafe { GetKeyState(VK_CONTROL.0.into()) } < 0;
+                self.open_shelf(index, reveal);
+                return true;
+            }
+            return false;
+        }
+        if page != Tab::Media || !live {
             return false;
         }
         if let Some(control) = layout::media_control_at(width, dpi, progress, x, y) {
@@ -2102,23 +2405,39 @@ impl Desktop {
     }
     /// Presses a shown media control or the mute toggle.
     fn press(&mut self, control: usize) {
-        if control >= notch_uia::SHELF_BASE {
+        if let Some(position) = control.checked_sub(notch_uia::TAB_BASE) {
+            if let Some(&tab) = self.pages.tabs.visible().as_slice().get(position) {
+                self.select_tab(tab);
+            }
+        } else if control >= notch_uia::SHELF_BASE {
             self.open_shelf(control - notch_uia::SHELF_BASE, false);
         } else if control != audio::MUTE {
             self.media.command(control);
-        } else if self.media.view().shown().is_some() {
+        } else if self.pages.track(&self.media).is_some() {
             self.audio.toggle_mute();
         }
     }
-    /// The notch controls that take focus and presses: the player's three, then mute while a
-    /// default render endpoint is bound.
-    fn enabled(&self) -> [bool; 7] {
-        let track = self.media.view().shown();
-        let [previous, play_pause, next] = track.map_or([false; 3], |track| track.controls);
-        let mute = track.is_some() && self.audio.level().is_some();
-        let mut enabled = [previous, play_pause, next, mute, false, false, false];
-        for slot in 0..self.shelf.shelf.slot_count() {
-            enabled[notch_uia::SHELF_BASE + slot] = true;
+    /// The notch controls that take focus and presses: on the Media page the player's three, then mute while
+    /// a default render endpoint is bound; on the Shelf page its entries; and the tabs, when there is a handle.
+    fn enabled(&self) -> [bool; notch_uia::TAB_BASE + 5] {
+        let track = self.pages.track(&self.media);
+        let page = self.pages.page(track.is_some());
+        let mut enabled = [false; notch_uia::TAB_BASE + 5];
+        if let Some(track) = track.filter(|_| page == Tab::Media) {
+            let [previous, play_pause, next] = track.controls;
+            let mute = self.audio.level().is_some();
+            enabled[..4].copy_from_slice(&[previous, play_pause, next, mute]);
+        }
+        if page == Tab::Shelf {
+            for slot in 0..self.shelf.shelf.slot_count() {
+                enabled[notch_uia::SHELF_BASE + slot] = true;
+            }
+        }
+        let visible = self.pages.tabs.visible();
+        if visible.handle() {
+            for at in 0..visible.as_slice().len() {
+                enabled[notch_uia::TAB_BASE + at] = true;
+            }
         }
         enabled
     }
@@ -2151,8 +2470,7 @@ impl Desktop {
     /// controls, Enter and Space press the focused one, and Escape closes and returns the foreground.
     fn notch_key(&mut self, notch: usize, message: &MSG) -> bool {
         let enabled = self.enabled();
-        let surface = &mut self.surfaces[notch];
-        let Some(control) = surface.focused().map(|focus| focus.control) else {
+        let Some(control) = self.surfaces[notch].focused().map(|focus| focus.control) else {
             return false;
         };
         // SAFETY: reads this thread's keyboard state as of the message being handled.
@@ -2170,6 +2488,20 @@ impl Desktop {
             }
             return true;
         }
+        // Left and Right switch tabs while a handle exists (Tab and Up/Down still walk the controls); focus
+        // moves to the new tab so the keys keep working.
+        let visible = self.pages.tabs.visible();
+        if matches!(key, VK_LEFT | VK_RIGHT) && visible.handle() {
+            let next = visible.step(self.page(), key == VK_RIGHT);
+            self.select_tab(next);
+            if let Some(position) = visible.position(next) {
+                let surface = &mut self.surfaces[notch];
+                surface.focus_control(notch_uia::TAB_BASE + position, None);
+                surface.announce_focus();
+            }
+            return true;
+        }
+        let surface = &mut self.surfaces[notch];
         let next = match key {
             VK_TAB => step(enabled, Some(control), !shift),
             VK_RIGHT | VK_DOWN => step(enabled, Some(control), true),
@@ -2209,7 +2541,12 @@ impl Desktop {
     /// `replaced(control)`: whether the focused `control` was replaced (re-announced) by the change.
     fn reconcile_focus(&mut self, replaced: impl Fn(usize) -> bool) {
         let enabled = self.enabled();
-        let timer = self.timers.view(Instant::now());
+        let timer = self
+            .pages
+            .tabs
+            .on(Tab::Timer)
+            .then(|| self.timers.view(Instant::now()))
+            .flatten();
         for notch in &mut self.surfaces {
             notch.publish_notch(
                 &self.media,
@@ -2217,6 +2554,7 @@ impl Desktop {
                 timer.as_ref(),
                 self.power.text(),
                 &self.shelf,
+                &self.pages,
             );
             let Some(control) = notch.focused().map(|focus| focus.control) else {
                 continue;
@@ -2325,11 +2663,26 @@ impl Desktop {
                     }
                 } else {
                     let (x, y) = point(message.lParam);
-                    let progress = surface.motion.value(Instant::now());
+                    let now = Instant::now();
+                    let progress = surface.motion.value(now);
                     let width = surface.bounds.width;
-                    let media = self.media.view().shown().is_some();
-                    let over = layout::notch_hit(width, surface.dpi, progress, media, x, y);
+                    let media = self.pages.track(&self.media).is_some();
+                    let rail = self.pages.rail(media, surface.hang.tween.value(now));
+                    let over = layout::notch_hit(width, surface.dpi, progress, media, rail, x, y);
                     surface.set_notch_hover(over);
+                    // The handle opens under the pointer, or while a tab has keyboard focus.
+                    let on_rail = rail.is_some_and(|rail| {
+                        layout::rail_hit(width, surface.dpi, progress, media, rail, (x, y))
+                    });
+                    let tab_focus = surface
+                        .focused()
+                        .is_some_and(|focus| focus.control >= notch_uia::TAB_BASE);
+                    surface.set_rail(on_rail || tab_focus, now);
+                    self.pages.touch();
+                    if entered && let Some(eyes) = &mut self.pages.eyes {
+                        // The pill swells for the pointer; a blink rides those frames.
+                        eyes.blink(now);
+                    }
                 }
             }
             WM_MOUSELEAVE => surface.leave(),
@@ -2387,6 +2740,7 @@ impl Desktop {
                         &self.timers,
                         &self.power,
                         &self.shelf,
+                        &self.pages,
                     )?,
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
@@ -2494,15 +2848,34 @@ impl Desktop {
         if self.text.take_changed() {
             self.rescale_text()?;
         }
+        // A pick made during one open ends once every notch has closed.
+        if self.pages.tabs.choice.is_some() {
+            let now = Instant::now();
+            if self
+                .surfaces
+                .iter()
+                .filter(|s| s.kind() == SurfaceKind::Notch)
+                .all(|s| s.collapsed(now))
+            {
+                let before = self.page();
+                self.pages.tabs.choice = None;
+                if self.page() != before {
+                    self.pages.rev = self.pages.rev.wrapping_add(1);
+                }
+            }
+        }
+        let media_on = self.pages.tabs.on(Tab::Media);
         self.media
-            .set_expanded(self.surfaces.iter().any(Surface::expanded));
+            .set_expanded(media_on && self.surfaces.iter().any(Surface::expanded));
         // One paint per visible notch when the drawn track or status changes or its pause grace
-        // expires, whatever else this pass asks (`paint_requested`).
+        // expires, whatever else this pass asks (`paint_requested`). With the Media tab off the events are
+        // still applied but draw nothing.
         let generation = self.media.generation();
         let status = self.media.view().status();
-        let redraw =
+        let changed =
             self.media.refresh(self.cover_pixels()) || status != self.media.view().status();
-        let shown = self.media.view().shown().is_some();
+        let redraw = changed && media_on;
+        let shown = self.pages.track(&self.media).is_some();
         if shown || self.edges.wants_audio() {
             // Core Audio loads only once a media panel or the volume slider can show the level.
             self.audio.start();
@@ -2529,7 +2902,9 @@ impl Desktop {
             .min(self.refresh_timers())
             .min(self.refresh_power())
             .min(self.refresh_preview())
-            .min(self.refresh_edges());
+            .min(self.refresh_edges())
+            .min(self.refresh_rails())
+            .min(self.refresh_eyes());
         self.refresh_menu();
         self.paint_requested()?;
         if let Some(picker) = &mut self.picker {
@@ -2674,12 +3049,7 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
             .min(desktop.topology_wait())
             .min(desktop.fullscreen_wait())
             .min(desktop.store_wait())
-            .min(
-                desktop
-                    .media
-                    .deadline()
-                    .map_or(INFINITE, |due| milliseconds_until(due, Instant::now())),
-            )
+            .min(desktop.media_wait())
             .min(desktop.rebuild.wait(Instant::now()));
         // Bits set after this pass's refresh whose wake was lost or not posted: run again now.
         let timeout = if desktop.media.pending() || desktop.audio.pending() {
@@ -3155,5 +3525,35 @@ mod clock_wait_tests {
         for status in [WAIT_FAILED.0, 0xC01E0006, 0x80, 5] {
             assert!(!compositor_wake_supported(status, 4));
         }
+    }
+    #[test]
+    fn the_handle_follows_the_shown_tabs_and_the_active_page() {
+        let mut settings = Settings::default();
+        // Media, Timer and Shelf show: a handle, on Media while a session lives, else on the last tab used.
+        let pages = Pages::new(&settings, Tab::Shelf);
+        let rail = |pages: &Pages, live| pages.rail(live, 0.0).map(|r| (r.count, r.active));
+        assert_eq!(rail(&pages, true), Some((3, 0)));
+        assert_eq!(rail(&pages, false), Some((3, 2)));
+        assert_eq!(pages.page(false), Tab::Shelf);
+        // The Timer tab off leaves two; a pick during one open wins until it ends.
+        settings.tabs[Tab::Timer.index()] = false;
+        let mut pages = Pages::new(&settings, Tab::Media);
+        assert_eq!(rail(&pages, false), Some((2, 0)));
+        assert!(pages.tabs.select(Tab::Shelf, true));
+        assert_eq!(rail(&pages, true), Some((2, 1)));
+        // One tab: no handle. None: the plain clock panel is the Media page.
+        settings.tabs = [true, false, false, false, false];
+        assert_eq!(rail(&Pages::new(&settings, Tab::Media), true), None);
+        settings.tabs = [false; 5];
+        let none = Pages::new(&settings, Tab::Shelf);
+        assert_eq!((rail(&none, true), none.page(true)), (None, Tab::Media));
+    }
+
+    #[test]
+    fn the_mascot_has_no_state_with_the_setting_off() {
+        let mut settings = Settings::default();
+        assert!(Pages::new(&settings, Tab::Media).eyes.is_some());
+        settings.eyes = false;
+        assert!(Pages::new(&settings, Tab::Media).eyes.is_none());
     }
 }

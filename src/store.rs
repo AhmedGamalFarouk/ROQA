@@ -6,6 +6,7 @@
 //! aside instead, so a downgrade never rewrites it.
 
 use crate::settings::Settings;
+use crate::tabs::Tab;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -30,6 +31,8 @@ pub struct Store {
     pub timers: Vec<u64>,
     /// User settings; version 1 files had none, so they load as the defaults.
     pub settings: Settings,
+    /// The notch tab used last (a state, not a setting: the settings window must not write it back).
+    pub last_tab: Tab,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -154,6 +157,11 @@ fn parse(text: &str) -> Option<Store> {
             Some(("pin", value)) if !value.is_empty() => store.pins.push(value.into()),
             Some(("shelf", value)) if !value.is_empty() => store.shelf.push(value.into()),
             Some(("timer", value)) => store.timers.extend(value.parse::<u64>()),
+            Some(("lasttab", value)) => {
+                store.last_tab = Tab::from_key(value)
+                    .filter(|tab| tab.available())
+                    .unwrap_or_default();
+            }
             Some((key, value)) if store.settings.set(key, value) => {}
             _ => {} // Unknown keys and junk lines are ignored.
         }
@@ -192,6 +200,7 @@ impl Store {
         for expiry in &self.timers {
             out.push_str(&format!("timer={expiry}\n"));
         }
+        out.push_str(&format!("lasttab={}\n", self.last_tab.key()));
         self.settings.write_lines(&mut out);
         out.push_str("end\n");
         out
@@ -263,8 +272,12 @@ mod tests {
                 timer_sound: false,
                 shelf_cap: 6,
                 diagnostics: Some(r"C:\logs\run=1.json".into()),
+                // A tab switched off and the mascot off survive a restart.
+                tabs: [true, true, true, false, true],
+                eyes: false,
                 ..Settings::default()
             },
+            last_tab: Tab::Shelf,
         }
     }
 
@@ -300,6 +313,7 @@ mod tests {
                 shelf: vec!["b".into()],
                 timers: vec![77], // unparsable timer values are skipped
                 settings: Settings::default(),
+                last_tab: Tab::Media,
             })
         );
         assert_eq!(
@@ -368,10 +382,7 @@ mod tests {
                 shelf_cap: crate::shelf::MAX,
                 off_monitors: vec!["D2".into()],
                 diagnostics: Some(r"C:\d.json".into()),
-                theme: Default::default(),
-                desktop_only: false,
-                edge_volume: false,
-                edge_brightness: false,
+                ..Settings::default()
             }
         );
         // No settings lines in a v2 file means the defaults too.

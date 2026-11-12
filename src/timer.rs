@@ -127,6 +127,11 @@ impl Timers {
         done
     }
 
+    /// A completion's alert is showing (the mascot is surprised while it does).
+    pub fn finished(&self) -> bool {
+        self.alert.is_some()
+    }
+
     /// True once when the alert has run its course.
     pub fn alert_over(&mut self, now: Instant) -> bool {
         let over = self.alert.is_some_and(|until| now >= until);

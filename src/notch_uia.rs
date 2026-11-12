@@ -1,6 +1,7 @@
 //! UI Automation for the notch: a ToolBar root with one Button (Invoke) per media control (previous,
-//! play/pause, next, then the volume row's mute toggle) while a media session exists, then one Button (Invoke
-//! opens the file) per visible shelf entry. Like
+//! play/pause, next, then the volume row's mute toggle) while the Media page shows a session, then one Button
+//! (Invoke opens the file) per visible shelf entry while the Shelf page shows, then the tab list: one TabItem
+//! per shown tab, named such as "Weather tab, 2 of 5", whose Invoke switches to it. Like
 //! `dock_uia`, the providers read a small shared snapshot and post actions to the host loop, which
 //! validates them again before acting.
 #![allow(non_upper_case_globals)] // Matching on Windows SDK constant names.
@@ -33,6 +34,9 @@ pub const FIRST: usize = usize::MAX;
 /// Element ids of the shelf entries start here, after the media controls (including the mute toggle), so an
 /// id means the same thing with or without a media session.
 pub const SHELF_BASE: usize = 4;
+/// Element ids of the tab items start here, after the shelf's `shelf::VISIBLE` entries; id `TAB_BASE + n` is
+/// the n-th shown tab.
+pub const TAB_BASE: usize = SHELF_BASE + crate::shelf::VISIBLE;
 
 #[derive(Default)]
 pub struct State {
@@ -56,8 +60,19 @@ pub struct State {
     pub timer: String,
     /// A just-announced power notice (`power::Power::text`); empty without one. A polite live region.
     pub notice: String,
-    /// The visible shelf entries' names (`Shelf::label`); element id `SHELF_BASE + n` is entry n.
+    /// The visible shelf entries' names (`Shelf::label`); element id `SHELF_BASE + n` is entry n. Empty off the
+    /// Shelf page.
     pub shelf: Vec<String>,
+    /// The page last published, so a switch republishes the controls and the shelf.
+    pub published_page: Option<crate::tabs::Tab>,
+    /// The tabs revision and page the tab names were published for.
+    pub published_tabs: Option<(u32, crate::tabs::Tab)>,
+    /// A media track is drawn (the panel has the media shape), whichever page shows.
+    pub track: bool,
+    /// The shown tabs' names; element id `TAB_BASE + n` is tab n. Empty with fewer than two tabs.
+    pub tabs: Vec<String>,
+    /// The position of the active tab.
+    pub active_tab: usize,
 }
 pub type Shared = Arc<Mutex<State>>;
 
@@ -67,6 +82,7 @@ pub fn invalidate(state: &Shared) {
         state.hwnd = 0;
         state.controls.clear();
         state.shelf.clear();
+        state.tabs.clear();
         state.timer.clear();
         state.notice.clear();
         state.focus = None;
@@ -84,19 +100,28 @@ fn root_name(status: Option<&str>, notice: &str, timer: &str) -> String {
         .join(", ")
 }
 
-/// The element ids that exist, in tree order: the media controls, then the shelf entries.
+/// The element ids that exist, in tree order: the media controls, the shelf entries, then the tabs.
 fn ids(state: &State) -> Vec<usize> {
     (0..state.controls.len())
         .chain(SHELF_BASE..SHELF_BASE + state.shelf.len())
+        .chain(TAB_BASE..TAB_BASE + state.tabs.len())
         .collect()
 }
 
-/// The name and enabled state of element `id`. Shelf entries are always enabled.
+/// The name and enabled state of element `id`. Shelf entries and tabs are always enabled.
 fn entry(state: &State, id: usize) -> Option<(String, bool)> {
+    if let Some(n) = id.checked_sub(TAB_BASE) {
+        return state.tabs.get(n).map(|name| (name.clone(), true));
+    }
     match id.checked_sub(SHELF_BASE) {
         None => state.controls.get(id).cloned(),
         Some(n) => state.shelf.get(n).map(|name| (name.clone(), true)),
     }
+}
+
+/// A tab item's accessible name: the tab, its place among the shown ones.
+pub fn tab_name(tab: crate::tabs::Tab, position: usize, count: usize) -> String {
+    format!("{} tab, {} of {}", tab.name(), position + 1, count)
 }
 
 /// Accessible names and enabled states, in drawing order. Play/pause names its action and the
@@ -284,11 +309,11 @@ impl IRawElementProviderFragment_Impl for Root_Impl {
     }
     fn SetFocus(&self) -> Result<()> {
         let (hwnd, version, enabled) = read(&self.state, |state| {
-            (
-                state.hwnd,
-                state.version,
-                state.controls.iter().any(|(_, enabled)| *enabled),
-            )
+            let enabled = ids(state)
+                .into_iter()
+                .filter_map(|id| entry(state, id))
+                .any(|(_, enabled)| enabled);
+            (state.hwnd, state.version, enabled)
         })?;
         if !enabled {
             return Err(not_enabled());
@@ -302,18 +327,39 @@ impl IRawElementProviderFragment_Impl for Root_Impl {
 
 impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
     fn ElementProviderFromPoint(&self, x: f64, y: f64) -> Result<IRawElementProviderFragment> {
-        let (hwnd, dpi, open, media) = read(&self.state, |s| {
-            (s.hwnd, s.dpi, s.open, !s.controls.is_empty())
+        let (hwnd, dpi, open, track, controls, shelf, tabs, active) = read(&self.state, |s| {
+            (
+                s.hwnd,
+                s.dpi,
+                s.open,
+                s.track,
+                !s.controls.is_empty(),
+                !s.shelf.is_empty(),
+                s.tabs.len(),
+                s.active_tab,
+            )
         })?;
         let rect = window_rect(hwnd)?;
         let (x, y) = (x as i32 - rect.left, y as i32 - rect.top);
         let width = rect.right - rect.left;
         // Bounds are those of the open panel, as `Item::BoundingRectangle` reports them.
-        let control = media
+        let handle = layout::Rail {
+            count: tabs,
+            active,
+            p: 1.0,
+        };
+        let control = controls
             .then(|| layout::media_control_at(width, dpi, 1.0, x, y))
             .flatten()
             .or_else(|| {
-                layout::shelf_at(width, dpi, 1.0, media, x, y).map(|slot| SHELF_BASE + slot)
+                shelf
+                    .then(|| layout::shelf_at(width, dpi, 1.0, track, x, y))
+                    .flatten()
+                    .map(|slot| SHELF_BASE + slot)
+            })
+            .or_else(|| {
+                layout::rail_tab_at(width, dpi, 1.0, track, handle, (x, y))
+                    .map(|tab| TAB_BASE + tab)
             });
         match control {
             Some(id) if open => self.item(id),
@@ -405,11 +451,33 @@ impl IRawElementProviderSimple_Impl for Item_Impl {
             "RoqaShelf0",
             "RoqaShelf1",
             "RoqaShelf2",
+            "RoqaTab0",
+            "RoqaTab1",
+            "RoqaTab2",
+            "RoqaTab3",
+            "RoqaTab4",
         ];
+        let tab = self.index.checked_sub(TAB_BASE);
         Ok(match property {
+            UIA_ControlTypePropertyId if tab.is_some() => variant_i32(UIA_TabItemControlTypeId.0),
             UIA_ControlTypePropertyId => variant_i32(UIA_ButtonControlTypeId.0),
             UIA_NamePropertyId => variant_text(&name),
             UIA_AutomationIdPropertyId => variant_text(id.get(self.index).unwrap_or(&"")),
+            UIA_PositionInSetPropertyId if tab.is_some() => {
+                variant_i32(tab.map_or(0, |n| n as i32 + 1))
+            }
+            UIA_SizeOfSetPropertyId if tab.is_some() => {
+                variant_i32(self.current(|state, _| state.tabs.len() as i32)?)
+            }
+            // The tab list has no selection pattern: the active tab says so here.
+            UIA_ItemStatusPropertyId if tab.is_some() => {
+                let active = self.current(|state, _| state.active_tab)?;
+                if tab == Some(active) {
+                    variant_text("Selected")
+                } else {
+                    VARIANT::default()
+                }
+            }
             // Disabled controls stay in the tree, exposed as disabled.
             UIA_IsEnabledPropertyId => variant_bool(enabled),
             UIA_IsKeyboardFocusablePropertyId => variant_bool(enabled),
@@ -447,14 +515,39 @@ impl IRawElementProviderFragment_Impl for Item_Impl {
         dock_uia::runtime_id(self.version, self.index)
     }
     fn BoundingRectangle(&self) -> Result<UiaRect> {
-        let (hwnd, dpi, open, media) = self.current(|state, _| {
+        let (hwnd, dpi, open, media, tabs, active) = self.current(|state, _| {
             (
                 state.hwnd,
                 state.dpi,
                 state.open,
-                !state.controls.is_empty(),
+                state.track,
+                state.tabs.len(),
+                state.active_tab,
             )
         })?;
+        if let Some(tab) = self.index.checked_sub(TAB_BASE) {
+            // The open handle's button; a closed panel draws none (offscreen, and Invoke still works).
+            if !open {
+                return Ok(UiaRect::default());
+            }
+            let rect = window_rect(hwnd)?;
+            let handle = layout::Rail {
+                count: tabs,
+                active,
+                p: 1.0,
+            };
+            let Some(hang) = layout::rail_bounds(rect.right - rect.left, dpi, 1.0, media, handle)
+            else {
+                return Err(not_available());
+            };
+            let item = layout::rail_item(hang, dpi, handle, tab);
+            return Ok(UiaRect {
+                left: f64::from(rect.left + item.x),
+                top: f64::from(rect.top + item.y),
+                width: f64::from(item.width),
+                height: f64::from(item.height),
+            });
+        }
         // A collapsed panel draws no controls: they are offscreen, and Invoke still works.
         let control = match self.index.checked_sub(SHELF_BASE) {
             None => layout::media_controls(dpi).get(self.index).copied(),
@@ -467,7 +560,7 @@ impl IRawElementProviderFragment_Impl for Item_Impl {
             return Ok(UiaRect::default());
         }
         let rect = window_rect(hwnd)?;
-        let shape = layout::notch_shape(1.0, media || self.index < SHELF_BASE);
+        let shape = layout::notch_shape(1.0, media);
         let body = layout::notch_body(rect.right - rect.left, dpi, shape);
         Ok(UiaRect {
             left: f64::from(rect.left + body.left + control.x),

@@ -103,11 +103,17 @@ pub fn notch_radius(body: NotchBody, shape: NotchShape, dpi: u32) -> f32 {
 
 /// One-pixel rows contain the anti-aliased outline, with at most a one-pixel edge fringe. They
 /// exclude the shadow and empty corners; the height is bounded by the actual HWND.
-pub fn notch_rows(window: Bounds, dpi: u32, progress: f32, media: bool) -> Vec<Bounds> {
+pub fn notch_rows(
+    window: Bounds,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    rail: Option<Rail>,
+) -> Vec<Bounds> {
     let shape = notch_shape(progress, media);
     let body = notch_body(window.width, dpi, shape);
     let radius = notch_radius(body, shape, dpi);
-    (0..body.height.min(window.height))
+    let mut rows: Vec<Bounds> = (0..body.height.min(window.height))
         .map(|y| {
             let edge = notch_left(body, radius, y as f32);
             let left = (edge.floor() as i32).max(0);
@@ -119,14 +125,57 @@ pub fn notch_rows(window: Bounds, dpi: u32, progress: f32, media: bool) -> Vec<B
                 height: 1,
             }
         })
-        .collect()
+        .collect();
+    // The handle hangs from the panel's bottom edge, with its own concave ears and rounded corners.
+    if let Some(rail) = rail
+        && let Some(hang) = rail_bounds(window.width, dpi, progress, media, rail)
+    {
+        let shape = NotchBody {
+            left: hang.x,
+            width: hang.width,
+            height: hang.height,
+            ears: scaled(RAIL_EARS, dpi).min(hang.height),
+        };
+        let radius = rail_radius(shape, rail.p, dpi);
+        rows.extend(
+            (0..hang.height)
+                .take_while(|y| hang.y + y < window.height)
+                .map(|y| {
+                    let edge = notch_left(shape, radius, y as f32);
+                    let left = (edge.floor() as i32).max(0);
+                    let right = ((2 * shape.left + shape.width) as f32 - edge).ceil() as i32;
+                    Bounds {
+                        x: left,
+                        y: hang.y + y,
+                        width: right.min(window.width) - left,
+                        height: 1,
+                    }
+                }),
+        );
+    }
+    rows
 }
 
 /// Hover follows the silhouette with four DIP of slop; transparent side bands do not hold it open.
-pub fn notch_hit(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, y: i32) -> bool {
+pub fn notch_hit(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    rail: Option<Rail>,
+    x: i32,
+    y: i32,
+) -> bool {
     let shape = notch_shape(progress, media);
     let body = notch_body(window_width, dpi, shape);
     let slop = scaled(NOTCH_HOVER_SLOP, dpi);
+    if let Some(rail) = rail
+        && let Some(hang) = rail_bounds(window_width, dpi, progress, media, rail)
+        && (hang.y..hang.y + hang.height + slop).contains(&y)
+        && (hang.x - slop..hang.x + hang.width + slop).contains(&x)
+    {
+        return true;
+    }
     if !(0..body.height + slop).contains(&y) {
         return false;
     }
@@ -194,17 +243,38 @@ pub fn meter_heights(peaks: [f32; BARS], dpi: u32) -> [i32; BARS] {
     peaks.map(|peak| bar + (peak * (slot.height - bar) as f32).round() as i32)
 }
 
-/// The timer's text slots (slice S5, PROVISIONAL, no design review), in DIPs from the body's left and top
-/// edges: x, y, width, height. Plain panel: left of the centred 30 DIP clock (about 100 wide, so x 16-88
-/// is free), centred on its row (y 29). Media panel: under the 72 DIP cover (it ends at y 86), left of the
-/// controls and volume rows (from x 100). Plain pill: right of the centred 15 DIP clock; the media pill is
-/// full (cover, title, clock) and shows none.
-const TIMER_PANEL: [(f32, f32, f32, f32); 2] = [(16.0, 21.0, 72.0, 16.0), (16.0, 92.0, 72.0, 16.0)];
+/// The plain pill's minutes slot (slice S5, PROVISIONAL), in DIPs from the body's left and top edges: x, y,
+/// width, height, right of the centred 15 DIP clock; the media pill is full (cover, eyes, clock) and shows none.
 const TIMER_PILL: (f32, f32, f32, f32) = (108.0, 8.0, 30.0, 14.0);
 
-/// The panel timer slot in pixels from the body's left and top edges, for the plain or media panel.
-pub fn timer_panel(media: bool, dpi: u32) -> Bounds {
-    scaled_bounds(TIMER_PANEL[usize::from(media)], dpi)
+/// The pages other than Media (Timer, Shelf), in DIPs from the body's left and top edges: a title row, the
+/// Timer page's big value under it, and a small clock at the top right (right-aligned, 16 from the edge).
+const PAGE_TITLE: (f32, f32, f32, f32) = (16.0, 12.0, 160.0, 16.0);
+const PAGE_VALUE: (f32, f32, f32, f32) = (16.0, 30.0, 220.0, 32.0);
+const PAGE_CLOCK: (f32, f32, f32, f32) = (0.0, 11.0, 100.0, 16.0);
+const PAGE_CLOCK_MARGIN: f32 = 16.0;
+/// The Shelf page's hint beside the empty shelf's add slot.
+const SHELF_HINT: (f32, f32, f32, f32) = (48.0, 40.0, 240.0, 16.0);
+
+pub fn page_title(dpi: u32) -> Bounds {
+    scaled_bounds(PAGE_TITLE, dpi)
+}
+pub fn page_value(dpi: u32) -> Bounds {
+    scaled_bounds(PAGE_VALUE, dpi)
+}
+pub fn shelf_hint(dpi: u32) -> Bounds {
+    scaled_bounds(SHELF_HINT, dpi)
+}
+/// The page clock for the plain or media panel.
+pub fn page_clock(media: bool, dpi: u32) -> Bounds {
+    let width = if media {
+        MEDIA_EXPANDED
+    } else {
+        NOTCH_EXPANDED
+    }
+    .width;
+    let (_, y, w, h) = PAGE_CLOCK;
+    scaled_bounds((width - PAGE_CLOCK_MARGIN - w, y, w, h), dpi)
 }
 
 /// The plain pill's minutes slot in pixels from the body's left and top edges.
@@ -225,10 +295,9 @@ pub fn power_notice(media: bool, dpi: u32) -> Bounds {
 
 /// The file shelf's `shelf::VISIBLE` square slots (slice S6, PROVISIONAL, no design review), each
 /// `SHELF_SLOT` DIPs with the slot origin of the panel kind's first one, in DIPs from the body's left and
-/// top edges, then one slot further right per entry. Plain panel: right of the centred clock (it ends about
-/// x 228), on the clock's row. Media panel: the free pocket right of the controls row (it ends x 228) and left
-/// of the visualizer (from x 312), on the controls' centre line. Each slot draws a 16 DIP system icon.
-const SHELF_ORIGIN: [(f32, f32); 2] = [(236.0, 17.0), (232.0, 70.0)];
+/// top edges, then one slot further right per entry. On the Shelf page, under the title, on both panel kinds.
+/// Each slot draws a 16 DIP system icon.
+const SHELF_ORIGIN: [(f32, f32); 2] = [(16.0, 36.0), (16.0, 36.0)];
 const SHELF_SLOT: f32 = 24.0;
 
 /// A shelf slot in pixels from the body's left and top edges, for the plain or media panel.
@@ -307,6 +376,122 @@ pub fn media_seek_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32)
     let bar = media_progress(dpi);
     panel_offset(window_width, dpi, progress, bar, (x, y))
         .map(|offset| f64::from(offset) / f64::from(bar.width))
+}
+
+/// The tab handle (design round 2, T3 "Hanging handle"): a bar hanging off the open panel's bottom edge,
+/// dots at rest that grow into 24 DIP icon buttons as `p` goes 0 to 1. The active tab is a longer bar at
+/// rest. `count` tabs are shown, `active` is the position of the selected one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rail {
+    pub count: usize,
+    pub active: usize,
+    pub p: f32,
+}
+
+pub const RAIL_EARS: f32 = 6.0;
+const RAIL_PAD_X: f32 = 8.0;
+
+/// Dot or button side, the active one's width, the gap between items and the vertical padding, in DIPs.
+fn rail_metrics(p: f32) -> (f32, f32, f32, f32) {
+    let lerp = |a: f32, b: f32| a + (b - a) * p.clamp(0.0, 1.0);
+    (
+        lerp(5.0, 24.0),
+        lerp(14.0, 24.0),
+        lerp(5.0, 4.0),
+        lerp(3.0, 4.0),
+    )
+}
+
+/// The handle's full size in DIPs: 70 x 11 at rest and 152 x 32 open for five tabs.
+pub fn rail_size(rail: Rail) -> (f32, f32) {
+    let (side, active, gap, pad) = rail_metrics(rail.p);
+    let others = rail.count.saturating_sub(1) as f32;
+    (
+        2.0 * RAIL_PAD_X + active + others * (side + gap),
+        2.0 * pad + side,
+    )
+}
+
+/// The handle's bottom corner radius in pixels (7 DIP at rest, 14 open), kept inside its shape.
+pub fn rail_radius(shape: NotchBody, p: f32, dpi: u32) -> f32 {
+    scaled(7.0 + 7.0 * p.clamp(0.0, 1.0), dpi)
+        .min(shape.height - shape.ears)
+        .min(shape.width / 2)
+        .max(0) as f32
+}
+
+/// The handle in window pixels, hanging from the body's bottom edge and growing with the panel's reveal;
+/// none while the panel is not drawn or fewer than two tabs show.
+pub fn rail_bounds(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    rail: Rail,
+) -> Option<Bounds> {
+    let reveal = motion::reveal(progress);
+    if reveal <= 0.0 || rail.count < 2 {
+        return None;
+    }
+    let body = notch_body(window_width, dpi, notch_shape(progress, media));
+    let (width, height) = rail_size(rail);
+    let width = scaled(width, dpi);
+    let height = (scaled(height, dpi) as f32 * reveal).round() as i32;
+    (height > 0).then_some(Bounds {
+        x: (window_width - width).div_euclid(2),
+        y: body.height,
+        width,
+        height,
+    })
+}
+
+/// Handle item `index` in window pixels; they sit left to right inside the handle, the active one longer.
+pub fn rail_item(handle: Bounds, dpi: u32, rail: Rail, index: usize) -> Bounds {
+    let (side, active, gap, pad) = rail_metrics(rail.p);
+    let width = |item: usize| if item == rail.active { active } else { side };
+    let before: f32 = (0..index).map(|item| width(item) + gap).sum();
+    Bounds {
+        x: handle.x + scaled(RAIL_PAD_X + before, dpi),
+        y: handle.y + scaled(pad, dpi),
+        width: scaled(width(index), dpi),
+        height: scaled(side, dpi),
+    }
+}
+
+/// Whether a window point is on the drawn handle (what makes it open).
+pub fn rail_hit(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    rail: Rail,
+    (x, y): (i32, i32),
+) -> bool {
+    rail_bounds(window_width, dpi, progress, media, rail).is_some_and(|hang| {
+        (hang.x..hang.x + hang.width).contains(&x) && (hang.y..hang.y + hang.height).contains(&y)
+    })
+}
+
+/// The tab position under a window point. The gap beside an item belongs to it, so a click between two
+/// buttons still lands; a point outside the item row hits none.
+pub fn rail_tab_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    rail: Rail,
+    (x, y): (i32, i32),
+) -> Option<usize> {
+    let hang = rail_bounds(window_width, dpi, progress, media, rail)?;
+    let first = rail_item(hang, dpi, rail, 0);
+    if !(first.y..first.y + first.height).contains(&y) {
+        return None;
+    }
+    let half_gap = scaled(rail_metrics(rail.p).2, dpi) / 2;
+    (0..rail.count).find(|&index| {
+        let item = rail_item(hang, dpi, rail, index);
+        (item.x - half_gap..item.x + item.width + half_gap).contains(&x)
+    })
 }
 
 fn scaled(dips: f32, dpi: u32) -> i32 {
@@ -613,7 +798,7 @@ mod tests {
             for progress in [-0.09, 0.0, 0.07, 0.3, 0.7, 1.0, 1.07] {
                 let shape = notch_shape(progress, media);
                 let body = notch_body(window.width, dpi, shape);
-                let rows = notch_rows(window, dpi, progress, media);
+                let rows = notch_rows(window, dpi, progress, media, None);
                 let contains = |x, y| {
                     rows.iter()
                         .any(|r| r.y == y && x >= r.x && x < r.x + r.width)
@@ -625,6 +810,7 @@ mod tests {
                     dpi,
                     progress,
                     media,
+                    None,
                     middle,
                     body.height / 2
                 ));
@@ -636,6 +822,7 @@ mod tests {
                     dpi,
                     progress,
                     media,
+                    None,
                     side_x,
                     side_y
                 ));
@@ -645,6 +832,7 @@ mod tests {
                     dpi,
                     progress,
                     media,
+                    None,
                     body.left - scaled(5.0, dpi),
                     body.height - 1
                 ));
@@ -653,7 +841,7 @@ mod tests {
         }
         // Independent review's concrete regression point, 10 px beside the plain panel, moved with
         // the window's 20 px wider sides.
-        assert!(!notch_hit(440, 96, 1.0, false, 50, 40));
+        assert!(!notch_hit(440, 96, 1.0, false, None, 50, 40));
         assert!(
             !notch_rows(
                 Bounds {
@@ -664,7 +852,8 @@ mod tests {
                 },
                 96,
                 1.0,
-                false
+                false,
+                None
             )
             .iter()
             .any(|r| r.y == 40 && r.x <= 50)
@@ -705,42 +894,55 @@ mod tests {
         }
     }
 
+    fn hit(a: Bounds, b: Bounds) -> bool {
+        a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+    }
+
     #[test]
-    fn timer_slots_stay_inside_their_body_and_overlap_no_other_element() {
-        let hit = |a: Bounds, b: Bounds| {
-            a.x < b.x + b.width
-                && b.x < a.x + a.width
-                && a.y < b.y + b.height
-                && b.y < a.y + a.height
-        };
+    fn page_slots_stay_inside_their_body_and_overlap_nothing_on_the_page() {
         for dpi in [96, 144, 192, 240] {
-            let fits = |slot: Bounds, shape: NotchShape| {
+            for media in [false, true] {
+                let shape = if media {
+                    MEDIA_EXPANDED
+                } else {
+                    NOTCH_EXPANDED
+                };
                 let body = notch_body(scaled(440.0, dpi), dpi, shape);
-                slot.x >= 0
-                    && slot.y >= 0
-                    && slot.x + slot.width <= body.width
-                    && slot.y + slot.height <= body.height
-            };
-            // Media panel: the cover (16,14,72), controls, progress, volume and visualizer slot.
-            let media = timer_panel(true, dpi);
-            assert!(fits(media, MEDIA_EXPANDED), "{dpi}");
-            let cover = scaled_bounds((16.0, 14.0, 72.0, 72.0), dpi);
-            let others = media_controls(dpi).into_iter().chain([
-                cover,
-                media_progress(dpi),
-                volume_bar(dpi),
-                meter(dpi).0,
-            ]);
-            assert!(!others.into_iter().any(|other| hit(media, other)), "{dpi}");
-            // Plain panel: above the date row (y 48-68) and left of the clock (from about x 100).
-            let plain = timer_panel(false, dpi);
-            assert!(fits(plain, NOTCH_EXPANDED), "{dpi}");
-            assert!(plain.y + plain.height <= scaled(48.0, dpi), "{dpi}");
-            assert!(plain.x + plain.width <= scaled(90.0, dpi), "{dpi}");
+                let fits = |slot: Bounds| {
+                    slot.x >= 0
+                        && slot.y >= 0
+                        && slot.x + slot.width <= body.width
+                        && slot.y + slot.height <= body.height
+                };
+                let (title, value, clock) =
+                    (page_title(dpi), page_value(dpi), page_clock(media, dpi));
+                let notice = power_notice(media, dpi);
+                let shelf = shelf_slot(media, 0, dpi);
+                for slot in [title, value, clock, notice, shelf, shelf_hint(dpi)] {
+                    assert!(fits(slot), "{dpi} {media}");
+                }
+                // Timer page: title, value, clock and the notice row never share a pixel.
+                let timer_page = [title, value, clock, notice];
+                for (a, first) in timer_page.iter().enumerate() {
+                    for second in &timer_page[a + 1..] {
+                        assert!(!hit(*first, *second), "{dpi} {media}");
+                    }
+                }
+                // Shelf page: the add slot, its hint, the title and the clock.
+                let shelf_page = [title, clock, shelf, shelf_hint(dpi)];
+                for (a, first) in shelf_page.iter().enumerate() {
+                    for second in &shelf_page[a + 1..] {
+                        assert!(!hit(*first, *second), "{dpi} {media}");
+                    }
+                }
+            }
             // Plain pill: right of the centred clock (about x 47-103 of 150).
             let pill = timer_pill(dpi);
-            assert!(fits(pill, NOTCH), "{dpi}");
-            assert!(pill.x >= scaled(105.0, dpi), "{dpi}");
+            let body = notch_body(scaled(440.0, dpi), dpi, NOTCH);
+            assert!(
+                pill.x + pill.width <= body.width && pill.x >= scaled(105.0, dpi),
+                "{dpi}"
+            );
         }
     }
 
@@ -802,25 +1004,12 @@ mod tests {
                     );
                     assert!(slot.y + slot.height <= body.height, "{dpi} {media}");
                 }
-                let mut others = vec![timer_panel(media, dpi)];
-                if media {
-                    // Cover, title and artist rows, the top-right clock, then the controls, progress,
-                    // volume and visualizer.
-                    others.extend([
-                        scaled_bounds((16.0, 14.0, 72.0, 72.0), dpi),
-                        scaled_bounds((100.0, 9.0, 244.0, 40.0), dpi),
-                        media_progress(dpi),
-                        volume_bar(dpi),
-                        meter(dpi).0,
-                    ]);
-                    others.extend(media_controls(dpi));
-                } else {
-                    // The centred clock (about x 92-228, y 5-53) and the date row (y 48-68).
-                    others.extend([
-                        scaled_bounds((90.0, 5.0, 140.0, 48.0), dpi),
-                        scaled_bounds((90.0, 48.0, 140.0, 20.0), dpi),
-                    ]);
-                }
+                // The page's own title, clock and notice row; the Media page's elements are not drawn here.
+                let others = [
+                    page_title(dpi),
+                    page_clock(media, dpi),
+                    power_notice(media, dpi),
+                ];
                 for slot in &slots {
                     assert!(
                         !others.iter().any(|&other| hit(*slot, other)),
@@ -851,6 +1040,168 @@ mod tests {
                     // Not drawn while the panel is closed.
                     assert_eq!(shelf_at(width, dpi, 0.0, media, x, y), None);
                 }
+            }
+        }
+    }
+
+    fn rail(count: usize, active: usize, p: f32) -> Rail {
+        Rail { count, active, p }
+    }
+
+    #[test]
+    fn the_handle_matches_the_design_sizes_and_grows_from_dots_to_buttons() {
+        // Design T3: 70 x 11 at rest and 152 x 32 open for five tabs; fewer tabs are narrower.
+        let (rest_w, rest_h) = rail_size(rail(5, 0, 0.0));
+        assert_eq!((rest_w, rest_h), (70.0, 11.0));
+        let (open_w, open_h) = rail_size(rail(5, 0, 1.0));
+        assert_eq!((open_w, open_h), (152.0, 32.0));
+        assert!(rail_size(rail(3, 0, 1.0)).0 < open_w);
+        let mut last = rail_size(rail(3, 1, 0.0));
+        for step in 1..=10 {
+            let now = rail_size(rail(3, 1, step as f32 / 10.0));
+            assert!(now.0 >= last.0 && now.1 >= last.1, "{step}");
+            last = now;
+        }
+    }
+
+    #[test]
+    fn the_handle_hangs_from_the_open_panel_and_stays_inside_the_window() {
+        for dpi in [96, 144, 192, 240] {
+            let window = Bounds {
+                x: 0,
+                y: 0,
+                width: scaled(440.0, dpi),
+                height: scaled(164.0, dpi),
+            };
+            for media in [false, true] {
+                let r = rail(5, 2, 1.0);
+                // Collapsed or barely open: no handle.
+                for progress in [-0.09, 0.0, 0.07, 0.35] {
+                    assert_eq!(rail_bounds(window.width, dpi, progress, media, r), None);
+                }
+                for progress in [0.8, 1.0, 1.07] {
+                    let body = notch_body(window.width, dpi, notch_shape(progress, media));
+                    let hang = rail_bounds(window.width, dpi, progress, media, r).unwrap();
+                    assert_eq!(hang.y, body.height, "joined to the panel's bottom edge");
+                    assert!(hang.x >= 0 && hang.x + hang.width <= window.width);
+                    assert!(
+                        hang.y + hang.height <= window.height,
+                        "{dpi} {media} {progress}"
+                    );
+                    // Centred like the body.
+                    assert_eq!(hang.x + hang.width / 2, window.width / 2);
+                    // The region takes its rows, and only those rows hold the pointer.
+                    let rows = notch_rows(window, dpi, progress, media, Some(r));
+                    let below = rows.iter().filter(|row| row.y >= body.height).count() as i32;
+                    assert_eq!(below, hang.height.min(window.height - hang.y));
+                    assert!(notch_hit(
+                        window.width,
+                        dpi,
+                        progress,
+                        media,
+                        Some(r),
+                        window.width / 2,
+                        hang.y + hang.height / 2
+                    ));
+                    assert!(!notch_hit(
+                        window.width,
+                        dpi,
+                        progress,
+                        media,
+                        None,
+                        window.width / 2,
+                        hang.y + hang.height / 2
+                    ));
+                    // Beside the handle, under the panel, is transparent again.
+                    assert!(!notch_hit(
+                        window.width,
+                        dpi,
+                        progress,
+                        media,
+                        Some(r),
+                        hang.x - scaled(30.0, dpi),
+                        hang.y + scaled(10.0, dpi)
+                    ));
+                }
+                // It grows out of the panel with the reveal.
+                let part = rail_bounds(window.width, dpi, 0.5, media, r).unwrap();
+                let full = rail_bounds(window.width, dpi, 1.0, media, r).unwrap();
+                assert!(part.height < full.height);
+            }
+        }
+    }
+
+    #[test]
+    fn a_single_tab_has_no_handle() {
+        let window = 440;
+        assert_eq!(rail_bounds(window, 96, 1.0, true, rail(1, 0, 1.0)), None);
+        assert_eq!(rail_bounds(window, 96, 1.0, true, rail(0, 0, 1.0)), None);
+        let rows = notch_rows(
+            Bounds {
+                x: 0,
+                y: 0,
+                width: window,
+                height: 164,
+            },
+            96,
+            1.0,
+            true,
+            Some(rail(1, 0, 1.0)),
+        );
+        assert_eq!(rows.len(), 120, "just the panel");
+    }
+
+    #[test]
+    fn handle_items_lie_inside_it_in_order_and_each_point_picks_one_tab() {
+        for dpi in [96, 144, 192] {
+            let width = scaled(440.0, dpi);
+            for p in [0.0, 0.5, 1.0] {
+                let r = rail(5, 1, p);
+                let hang = rail_bounds(width, dpi, 1.0, true, r).unwrap();
+                let items: Vec<Bounds> = (0..5).map(|i| rail_item(hang, dpi, r, i)).collect();
+                for (i, item) in items.iter().enumerate() {
+                    assert!(
+                        item.x >= hang.x && item.x + item.width <= hang.x + hang.width,
+                        "{dpi} {p} {i}"
+                    );
+                    assert!(
+                        item.y >= hang.y && item.y + item.height <= hang.y + hang.height,
+                        "{dpi} {p} {i}"
+                    );
+                    assert!(
+                        i == 0 || item.x >= items[i - 1].x + items[i - 1].width,
+                        "ordered, no overlap"
+                    );
+                    let middle = (item.x + item.width / 2, item.y + item.height / 2);
+                    assert_eq!(
+                        rail_tab_at(width, dpi, 1.0, true, r, middle),
+                        Some(i),
+                        "{dpi} {p}"
+                    );
+                    assert!(rail_hit(width, dpi, 1.0, true, r, middle));
+                }
+                // The active tab is the longer bar at rest, and equal to the others when open.
+                assert!(
+                    items[1].width > items[0].width || p == 1.0 && items[1].width == items[0].width,
+                    "{p}"
+                );
+                // Above the item row, or outside the handle, picks nothing.
+                assert_eq!(
+                    rail_tab_at(width, dpi, 1.0, true, r, (items[2].x, hang.y - 1)),
+                    None
+                );
+                assert_eq!(
+                    rail_tab_at(width, dpi, 1.0, true, r, (hang.x - 1, items[0].y)),
+                    None
+                );
+                assert!(!rail_hit(
+                    width,
+                    dpi,
+                    1.0,
+                    true,
+                    r,
+                    (hang.x - 1, items[0].y)
+                ));
             }
         }
     }

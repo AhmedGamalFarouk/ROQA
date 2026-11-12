@@ -11,6 +11,11 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
       (`IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop`).
 - [x] B2.5: volume (right edge) and brightness (left edge) hover sliders per monitor; the volume icon switches output device ([packet](features-edge-sliders.md)).
 - [x] B3: a non-modal dock context menu (close window, new instance, pin/unpin) ([packet](features-b3.md)).
+- [x] T1: notch tabs (hanging handle: Media, Weather, Prayer, Timer, Shelf), a Settings switch per tab and the squash-capsule mascot eyes ([packet](features-tabs-eyes.md)).
+- [ ] W1: Weather tab content: city (geocoded) plus WinRT Geolocator auto-detect; refresh on open if older than ~1 h, ~3 h in the background only while a notch is visible. Then `Tab::Weather.available()` goes true.
+- [ ] P1: Prayer tab: wire `prayer.rs`, location, a reminder that expands the notch with the user's chosen sound (MCI, lazy). Then `Tab::Prayer.available()` goes true.
+- [ ] M1: mascot states that wait on content: adhan (half-lidded, stepped glow) and rain (droopy), plus the per-tab mood pairing.
+- [ ] T2: tab polish after a native run: SelectionItem UIA pattern, handle hover timing, RTL order, text-scale fit.
 - [ ] B4: picker as command palette (installed apps from Start menu shortcuts, inline math).
 - [ ] B5: privacy mic/camera indicator.
 - [ ] B6: audio output device list (switching opens Sound settings).

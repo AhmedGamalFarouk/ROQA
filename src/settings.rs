@@ -1,7 +1,13 @@
 //! Settings (M5 S7): a pure model with defaults and clamping. The store keeps it as `key=value` lines;
 //! the host applies a change live through `surface_diff`. No launch-at-login: PLAN forbids startup registration.
 
-use crate::{layout::SurfaceKind, shelf, theme::Theme, timer};
+use crate::{
+    layout::SurfaceKind,
+    shelf,
+    tabs::{Flags, Tab},
+    theme::Theme,
+    timer,
+};
 
 const KINDS: [SurfaceKind; 2] = [SurfaceKind::Notch, SurfaceKind::Dock];
 /// Monitors remembered as off, and the longest device name or diagnostics path kept.
@@ -28,6 +34,10 @@ pub struct Settings {
     /// The hover sliders on each monitor's right (volume) and left (brightness) edge (`edge.rs`).
     pub edge_volume: bool,
     pub edge_brightness: bool,
+    /// One switch per notch tab (`Tab::ALL` order). A switched-off tab leaves the bar and stops its work.
+    pub tabs: Flags,
+    /// The mascot eyes in the pill; off removes their state, deadlines and drawing.
+    pub eyes: bool,
 }
 
 impl Default for Settings {
@@ -44,6 +54,8 @@ impl Default for Settings {
             // Off until a native run proves the 2 px strips leave edge scrollbars alone; a stored value wins.
             edge_volume: false,
             edge_brightness: false,
+            tabs: [true; 5],
+            eyes: true,
         }
     }
 }
@@ -107,6 +119,13 @@ impl Settings {
             "desktop" => flag(value).map(|v| self.desktop_only = v).is_some(),
             "edgevol" => flag(value).map(|v| self.edge_volume = v).is_some(),
             "edgebri" => flag(value).map(|v| self.edge_brightness = v).is_some(),
+            "eyes" => flag(value).map(|v| self.eyes = v).is_some(),
+            _ if key.starts_with("tab") => key
+                .strip_prefix("tab")
+                .and_then(Tab::from_key)
+                .zip(flag(value))
+                .map(|(tab, on)| self.tabs[tab.index()] = on)
+                .is_some(),
             "shelfcap" => value.parse().map(|v| self.shelf_cap = v).is_ok(),
             "theme" => Theme::from_key(value).map(|v| self.theme = v).is_some(),
             "diag" if !value.is_empty() => {
@@ -135,6 +154,14 @@ impl Settings {
             u8::from(self.edge_volume),
             u8::from(self.edge_brightness)
         ));
+        out.push_str(&format!("eyes={}\n", u8::from(self.eyes)));
+        for tab in Tab::ALL {
+            out.push_str(&format!(
+                "tab{}={}\n",
+                tab.key(),
+                u8::from(self.tabs[tab.index()])
+            ));
+        }
         for device in self.off_monitors.iter().filter(one_line) {
             out.push_str(&format!("off={device}\n"));
         }
@@ -217,6 +244,8 @@ mod tests {
             desktop_only: true,
             edge_volume: false,
             edge_brightness: false,
+            tabs: [true; 5],
+            eyes: true,
         }
         .clamped();
         assert!(!wild.dock && wild.notch, "one surface kind always stays on");
@@ -370,6 +399,8 @@ mod tests {
             theme: Theme::Midnight,
             desktop_only: true,
             edge_volume: true,
+            tabs: [false, true, false, true, false],
+            eyes: false,
             ..Settings::default()
         };
         let mut text = String::new();
@@ -409,6 +440,38 @@ mod tests {
         let mut text = String::new();
         stored.write_lines(&mut text);
         assert!(text.contains("edgevol=1\n") && text.contains("edgebri=0\n"));
+    }
+
+    #[test]
+    fn tabs_and_eyes_default_on_round_trip_and_ignore_unknown_tabs() {
+        let defaults = Settings::default();
+        assert!(defaults.tabs.iter().all(|&on| on) && defaults.eyes);
+        // Each switch is its own line, so one tab can be off without touching the others.
+        let mut off = Settings::default();
+        assert!(off.set("tabtimer", "0") && off.set("tabweather", "0"));
+        assert_eq!(off.tabs, [true, false, true, false, true]);
+        let mut text = String::new();
+        off.write_lines(&mut text);
+        for line in [
+            "tabmedia=1",
+            "tabweather=0",
+            "tabprayer=1",
+            "tabtimer=0",
+            "tabshelf=1",
+            "eyes=1",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line}");
+        }
+        let mut read = Settings::default();
+        for line in text.lines() {
+            let (key, value) = line.split_once('=').unwrap();
+            assert!(read.set(key, value), "{line}");
+        }
+        assert_eq!(read, off);
+        for (key, value) in [("tabfuture", "0"), ("tabmedia", "2"), ("eyes", "x")] {
+            assert!(!read.set(key, value), "{key}={value}");
+        }
+        assert_eq!(read, off);
     }
 
     #[test]

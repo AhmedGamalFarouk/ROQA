@@ -12,6 +12,7 @@ use crate::{
     picker_font::PickerFont,
     settings::{MAX_OFF, MAX_PATH, Settings, parse_timer},
     shelf,
+    tabs::Tab,
     theme::Theme,
     window_model::WindowKey,
 };
@@ -37,6 +38,9 @@ const SOUND: usize = 102;
 const DESKTOP: usize = 111;
 const EDGE_VOLUME: usize = 112;
 const EDGE_BRIGHTNESS: usize = 113;
+/// One checkbox per notch tab (`Tab::ALL` order), then the mascot eyes.
+const TAB: usize = 150;
+const EYES: usize = TAB + 5;
 const SHELF: usize = 103;
 const THEME: usize = 110;
 const DIAGNOSTICS: usize = 104;
@@ -65,6 +69,9 @@ pub struct SettingsWindow {
     /// The volume (right) and brightness (left) edge sliders.
     edge_volume: HWND,
     edge_brightness: HWND,
+    /// "Media tab" and so on, in `Tab::ALL` order, and "Mascot eyes".
+    tabs: [HWND; 5],
+    eyes: HWND,
     /// Drop-down list of `Theme::ALL`, in that order.
     theme: HWND,
     /// One checkbox per connected monitor (at most `MAX_OFF`), named by its GDI device.
@@ -130,6 +137,8 @@ impl SettingsWindow {
             desktop: HWND::default(),
             edge_volume: HWND::default(),
             edge_brightness: HWND::default(),
+            tabs: [HWND::default(); 5],
+            eyes: HWND::default(),
             theme: HWND::default(),
             monitors: Vec::new(),
             shelf: HWND::default(),
@@ -309,6 +318,19 @@ impl SettingsWindow {
             check,
             flat,
         )?;
+        // Tab order follows the screen: the tabs, left to right and top to bottom, then the mascot.
+        for tab in Tab::ALL {
+            let name = match tab {
+                Tab::Media => "&Media tab",
+                Tab::Weather => "Weather tab (coming soon)",
+                Tab::Prayer => "Prayer tab (coming soon)",
+                Tab::Timer => "Timer ta&b",
+                Tab::Shelf => "Shelf ta&b",
+            };
+            self.tabs[tab.index()] =
+                control(window, w!("Button"), name, TAB + tab.index(), check, flat)?;
+        }
+        self.eyes = control(window, w!("Button"), "Mascot e&yes", EYES, check, flat)?;
         let theme_label = label("T&heme")?;
         self.theme = control(
             window,
@@ -412,6 +434,8 @@ impl SettingsWindow {
             self.theme,
             self.shelf,
         ];
+        all.extend(self.tabs);
+        all.push(self.eyes);
         all.extend([self.pin_label, self.pins, self.earlier, self.later]);
         all.extend(self.monitors.iter().map(|(handle, _)| *handle));
         all.extend([self.diagnostics, self.timer, self.status]);
@@ -427,6 +451,10 @@ impl SettingsWindow {
         set_checked(self.desktop, settings.desktop_only);
         set_checked(self.edge_volume, settings.edge_volume);
         set_checked(self.edge_brightness, settings.edge_brightness);
+        for tab in Tab::ALL {
+            set_checked(self.tabs[tab.index()], settings.tabs[tab.index()]);
+        }
+        set_checked(self.eyes, settings.eyes);
         let index = Theme::ALL
             .iter()
             .position(|t| *t == settings.theme)
@@ -455,6 +483,10 @@ impl SettingsWindow {
         next.desktop_only = checked(self.desktop);
         next.edge_volume = checked(self.edge_volume);
         next.edge_brightness = checked(self.edge_brightness);
+        for tab in Tab::ALL {
+            next.tabs[tab.index()] = checked(self.tabs[tab.index()]);
+        }
+        next.eyes = checked(self.eyes);
         // SAFETY: scalar query of our own combo box; -1 (nothing chosen) keeps the current theme.
         let chosen = unsafe { SendMessageW(self.theme, CB_GETCURSEL, None, None) }.0;
         next.theme = usize::try_from(chosen)
@@ -525,6 +557,7 @@ impl SettingsWindow {
                             self.move_pin = Some((index as usize, id == LATER));
                         }
                     }
+                    TAB..=EYES if notification == BN_CLICKED => self.commit()?,
                     THEME if notification == CBN_SELCHANGE => self.commit()?,
                     _ if monitor && notification == BN_CLICKED => self.commit()?,
                     SHELF | DIAGNOSTICS if notification == EN_KILLFOCUS => self.commit()?,
@@ -592,7 +625,8 @@ impl SettingsWindow {
     fn position(&self, scale: f64, dpi: u32, work: Bounds) -> Result<()> {
         let px = |value: f64| (value * scale).round() as i32;
         // Row heights in DIPs, top to bottom: one list gives both the window height and every control's top.
-        let mut heights = vec![24.0; 6 + self.monitors.len()]; // dock, notch, monitors, sound, desktop, two edge sliders
+        // dock, notch, monitors, sound, desktop, two edge sliders, then the tabs and mascot in two columns
+        let mut heights = vec![24.0; 6 + self.monitors.len() + 3];
         // theme, shelf, diagnostics label and edit, timer label and row, status, pins, buttons
         heights.extend([28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0, 28.0]);
         let tops: Vec<i32> = heights
@@ -635,7 +669,8 @@ impl SettingsWindow {
             let inner = (client.right - margin * 2).max(1);
             let half = |units: f64| px(units).min(inner);
             let after = 3 + self.monitors.len(); // the desktop checkbox, then two more
-            let end = after + 2;
+            let grid = after + 3; // three rows of two checkboxes: the five tabs, then the mascot
+            let end = grid + 2;
             let mut places = vec![
                 (self.dock, margin, tops[0], inner, px(24.0)),
                 (self.notch, margin, tops[1], inner, px(24.0)),
@@ -652,6 +687,16 @@ impl SettingsWindow {
             ];
             for (index, (handle, _)) in self.monitors.iter().enumerate() {
                 places.push((*handle, margin, tops[2 + index], inner, px(24.0)));
+            }
+            let column = (inner / 2).max(1);
+            for (index, handle) in self.tabs.iter().chain([&self.eyes]).enumerate() {
+                places.push((
+                    *handle,
+                    margin + column * (index as i32 % 2),
+                    tops[grid + index / 2],
+                    column,
+                    px(24.0),
+                ));
             }
             let [
                 theme_label,

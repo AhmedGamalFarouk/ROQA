@@ -975,3 +975,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Idle 15 min, 2 monitors, off vs on:** private 22,093,824 vs 22,069,248 B; 0.243 vs 0.330 ms/s; handles 508 vs 500; USER 23 vs 27; threads 19 vs 18; wakes 3.54 vs 3.12/s; paints 30 vs 30.
 - **Gates:** private bytes and static CPU PASS (1 run each); paints, 3-monitor INCONCLUSIVE; SHA `5B21B4F110A209D5B364272728FFEB0065F3073C04B6A1CE67FCBD345C81F19C`.
 - **NOT RUN:** Nectar/Nusa, churn, cold start, input p95, expanded media, real edge-strip mouse test; reviews paused (REVIEW NOT RUN).
+
+## Notch tabs and mascot eyes (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/tabs-eyes`; [packet](features-tabs-eyes.md), [queue](features-queue.md). No native/GUI run. Design: eyes C "Squash", tabs T3 "Hanging handle".
+- **Tabs:** Media, Weather, Prayer, Timer, Shelf; Weather and Prayer hidden (`Tab::available`). Dots grow into icons on hover/focus (450 ms close), UIA TabItems, Left/Right. A Settings switch per tab stops that tab's work; one tab left hides the handle.
+- **Eyes:** idle/happy/sleepy/surprised, squash on blink and mood change; a blink starts only from the clock repaint, a mood change or hover (2 paints a minute idle instead of 1; setting off removes all). Also `topology-check.ps1` `@(switch)` fix.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 252 tests, locked release); 968,704 B, ratchet tripped (+5.12%), baseline raised to 968704; SHA `7428929EDBAF6897024B79DEF0B09ECF902D8BB98E08F68027FC4F5B9B0BE96A`.
+- **NOT RUN:** real drawing, input, UIA read, DPI/text scale, GUI paint counts; reviews paused (REVIEW NOT RUN).

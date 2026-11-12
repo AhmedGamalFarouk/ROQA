@@ -2,10 +2,12 @@ use crate::{
     audio::{BARS, Level},
     dock,
     edge::{Layout, ListRow},
+    eyes::{Mood, Pose},
     icons::IconPixels,
     layout::{self, Bounds},
     media::{PLAY_PAUSE, Progress, Track},
     motion,
+    tabs::Tab,
     theme::{Palette, Rgba},
     timer,
 };
@@ -61,6 +63,8 @@ use windows::Win32::{
 };
 use windows::core::{Error, HRESULT, Interface, PCWSTR, Result, w};
 use windows_numerics::{Matrix3x2, Vector2};
+
+mod tab_art;
 
 #[derive(Clone)]
 pub struct Graphics {
@@ -168,6 +172,19 @@ pub struct NotchScene<'a> {
     pub notice: Option<&'a str>,
     /// The file shelf's visible entries (S6, PROVISIONAL); empty draws nothing.
     pub shelf: &'a [ShelfSlot<'a>],
+    /// The page the open panel shows. Media is the media and clock panel; the others draw their own content.
+    pub tab: Tab,
+    /// The hanging tab handle; `None` draws none (fewer than two tabs).
+    pub rail: Option<RailScene<'a>>,
+    /// The mascot's mood and pose in the pill; `None` draws no eyes and leaves the title where it was.
+    pub eyes: Option<(Mood, Pose)>,
+}
+
+/// The tab handle: its geometry, the shown tabs in order and the one position with keyboard focus.
+pub struct RailScene<'a> {
+    pub layout: layout::Rail,
+    pub tabs: &'a [Tab],
+    pub focus: Option<usize>,
 }
 
 /// One shelf entry: its system icon once the worker delivered it (a plain square until then), and whether
@@ -321,7 +338,12 @@ impl Canvas {
                 .and_then(|art| notch_text(context, scene, &body, scale, art.as_ref(), status, &p));
             // SAFETY: balances the PushAxisAlignedClip above on the same live context.
             unsafe { context.PopAxisAlignedClip() };
-            drawn
+            drawn?;
+            // The handle hangs below the body, so it is drawn outside the body's clip.
+            match &scene.rail {
+                Some(handle) => tab_art::rail(context, scene, handle, rect, &p),
+                None => Ok(()),
+            }
         })
     }
     /// Repaints only the visualizer slot of a settled, open media panel: the rest of the surface is
@@ -688,8 +710,31 @@ fn notch_text(
 ) -> Result<()> {
     timer_text(context, scene, body, scale, p)?;
     notice_text(context, scene, body, scale, p)?;
+    if let Some((mood, pose)) = scene.eyes {
+        tab_art::draw_eyes(context, scene, mood, pose, body, scale, p)?;
+    }
+    if scene.tab == Tab::Media {
+        return media_page(context, scene, body, scale, art, status, p);
+    }
+    // Another page: the pill's content fades out as the page fades in.
+    let reveal = motion::reveal(scene.progress);
+    tab_art::faded(context, 1.0 - reveal, || {
+        media_page(context, scene, body, scale, art, status, p)
+    })?;
+    tab_art::page(context, scene, body, scale, reveal, p)
+}
+
+/// The Media page, and the pill every page starts from: the media track or the plain clock, date and status.
+fn media_page(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    scale: f32,
+    art: Option<&ID2D1Bitmap1>,
+    status: Option<&str>,
+    p: &Palette,
+) -> Result<()> {
     let status = status.filter(|_| scene.notice.is_none());
-    shelf_row(context, scene, body, scale, p)?;
     if let Some(track) = scene.track {
         let font = media_clock(motion::smooth(scene.progress), scale);
         let clock = text_width(scene.time, &font)?;
@@ -752,9 +797,9 @@ fn notch_text(
     }
 }
 
-/// PROVISIONAL (S5): the soonest timer in 12 DIP white 85 %. The panel text (`m:ss` and `+N`) fades in with
-/// the date; the plain pill's whole-minute text fades out as it does, so the two never share a frame at
-/// full strength. The media pill has no room and draws none. Slots: `layout::timer_panel`, `timer_pill`.
+/// PROVISIONAL (S5): the plain pill's whole minutes left on the soonest timer, 12 DIP white 85 %, fading out
+/// as the panel opens. The media pill has no room and draws none; the countdown itself is the Timer page's
+/// (`tab_art::page`). Slot: `layout::timer_pill`.
 fn timer_text(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -762,53 +807,40 @@ fn timer_text(
     scale: f32,
     p: &Palette,
 ) -> Result<()> {
-    let Some(view) = scene.timer else {
+    let reveal = motion::reveal(scene.progress);
+    let Some(view) = scene
+        .timer
+        .filter(|_| scene.track.is_none() && reveal < 1.0)
+    else {
         return Ok(());
     };
-    let (media, reveal) = (scene.track.is_some(), motion::reveal(scene.progress));
-    let draw = |text: &str, slot: Bounds, align, alpha: f32| {
-        let left = body.left + slot.x as f32;
-        let top = body.top + slot.y as f32;
-        let font = Font {
-            family: TEXT_FONT,
-            size: 12.0 * scale,
-            weight: DWRITE_FONT_WEIGHT_NORMAL,
-            designator: 1.0,
-            align,
-        };
-        let rect = D2D_RECT_F {
-            left,
-            top,
-            right: left + slot.width as f32,
-            bottom: top + slot.height as f32,
-        };
-        draw_text(
-            context,
-            text,
-            &font,
-            rect,
-            with_alpha(p.ink, p.ink_alpha(0.85 * alpha)),
-        )
+    let slot = layout::timer_pill(scene.dpi);
+    let left = body.left + slot.x as f32;
+    let top = body.top + slot.y as f32;
+    let font = Font {
+        family: TEXT_FONT,
+        size: 12.0 * scale,
+        weight: DWRITE_FONT_WEIGHT_NORMAL,
+        designator: 1.0,
+        align: DWRITE_TEXT_ALIGNMENT_TRAILING,
     };
-    if reveal > 0.0 {
-        let slot = layout::timer_panel(media, scene.dpi);
-        draw(&view.panel, slot, DWRITE_TEXT_ALIGNMENT_LEADING, reveal)?;
-    }
-    if !media && reveal < 1.0 {
-        let slot = layout::timer_pill(scene.dpi);
-        draw(
-            &view.pill,
-            slot,
-            DWRITE_TEXT_ALIGNMENT_TRAILING,
-            1.0 - reveal,
-        )?;
-    }
-    Ok(())
+    let rect = D2D_RECT_F {
+        left,
+        top,
+        right: left + slot.width as f32,
+        bottom: top + slot.height as f32,
+    };
+    draw_text(
+        context,
+        &view.pill,
+        &font,
+        rect,
+        with_alpha(p.ink, p.ink_alpha(0.85 * (1.0 - reveal))),
+    )
 }
 
 /// PROVISIONAL (B1): the power pill's text in 11 DIP white 85 %, fading in with the panel; it replaces the
-/// plain panel's status line and, while it shows, the media panel's timer text (`host` leaves that out).
-/// Slot: `layout::power_notice`.
+/// plain panel's status line and shows on every page. Slot: `layout::power_notice`.
 fn notice_text(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -1182,6 +1214,8 @@ fn media_plan<'a>(
     };
     let dim = if track.playing { 1.0 } else { 0.60 };
     let artist = motion::reveal(scene.progress);
+    // With the mascot in the pill's title lane the title arrives with the panel.
+    let title_fade = if scene.eyes.is_some() { open } else { 1.0 };
     let mut lines = vec![
         Line {
             text: scene.time.into(),
@@ -1200,7 +1234,7 @@ fn media_plan<'a>(
                 },
             ),
             rect: row(title, at(middle, 21.0), 12.0),
-            alpha: at(0.85, 1.0) * dim,
+            alpha: at(0.85, 1.0) * dim * title_fade,
         },
         Line {
             text: track.artist.as_str().into(),
@@ -2134,6 +2168,9 @@ mod media_tests {
             timer: None,
             notice: None,
             shelf: &[],
+            tab: Tab::Media,
+            rail: None,
+            eyes: None,
         };
         let clock = clock_width(time, progress, dpi);
         media_plan(&scene, scene.track.unwrap(), &body(dpi, progress), clock)
@@ -2162,6 +2199,9 @@ mod media_tests {
                 timer: None,
                 notice: None,
                 shelf: &[],
+                tab: Tab::Media,
+                rail: None,
+                eyes: None,
             };
             let clock = clock_width("9:50 pm", progress, 96);
             let plan = media_plan(&scene, scene.track.unwrap(), &body(96, progress), clock);
@@ -2420,6 +2460,9 @@ mod media_tests {
                 timer: None,
                 notice: None,
                 shelf: &[],
+                tab: Tab::Media,
+                rail: None,
+                eyes: None,
             };
             meter_bars(&scene, &body(96, progress))
         };
@@ -2470,6 +2513,9 @@ mod media_tests {
                     timer: None,
                     notice: None,
                     shelf: &[],
+                    tab: Tab::Media,
+                    rail: None,
+                    eyes: None,
                 };
                 let (bars, _) = meter_bars(&scene, &body(dpi, 1.0)).unwrap();
                 for bar in bars {
