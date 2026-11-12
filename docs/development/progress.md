@@ -967,3 +967,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Done:** I1 sliders off by default, bare-strip click/wheel opens the pill and applies; I2 audio only on an open volume pill or `WM_GETOBJECT`; I3 baseline raise needs a sign-off (`baseline-gate.ps1`), `topology-check.ps1` expects edge strips; M1 refused brightness write restored; M2 2 s pending deadline; M3 all physical monitors; M4 console role decides; M5 limit documented; M6 one power post.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 232 tests, locked release); 925,696 B, baseline unchanged (921,600, within 2%); SHA `46B7E3FB968156ABB5E123F45318502BD43DD41F91A08295D6D58E182BB5D45D`.
 - **NOT RUN:** native hover/strip input, UIA query, DDC, power broadcast, topology/smoke scripts, M5 re-measure on HEAD; reviews paused (REVIEW NOT RUN).
+
+## M5 native run 3 (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `test/native-8`, candidate `4a41cb4`; [results](m5-results-3.md). Doc only, no source change.
+- **Suites:** picker 226, catalog 67, packaged-hung 16 PASS; `topology-check` (`none`) FAIL as shipped (StrictMode `$strips.Count` on `$null`, script defect), patched copy PASS 25; `-EdgeSliders both` PASS 29; `smoke.ps1` NOT RUN (media session).
+- **Idle 15 min, 2 monitors, off vs on:** private 22,093,824 vs 22,069,248 B; 0.243 vs 0.330 ms/s; handles 508 vs 500; USER 23 vs 27; threads 19 vs 18; wakes 3.54 vs 3.12/s; paints 30 vs 30.
+- **Gates:** private bytes and static CPU PASS (1 run each); paints, 3-monitor INCONCLUSIVE; SHA `5B21B4F110A209D5B364272728FFEB0065F3073C04B6A1CE67FCBD345C81F19C`.
+- **NOT RUN:** Nectar/Nusa, churn, cold start, input p95, expanded media, real edge-strip mouse test; reviews paused (REVIEW NOT RUN).
