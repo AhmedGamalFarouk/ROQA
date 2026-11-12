@@ -26,6 +26,7 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
 - [x] B4: skipped by the user 2026-11-12 (picker as command palette); no code.
 - [x] B5: privacy mic/camera indicator ([packet](features-privacy-moods.md)).
 - [x] B6: dropped: covered by the edge slider device switch; no code.
+- [x] S1: sidebar Settings shell (8 pages, card pane, switches, dark/high contrast/RTL) and seven new settings ([packet](features-settings-shell.md)). Not built: stepper/segmented/tile controls, monitor map, About pinned to the bottom.
 
 ## Research pending
 - AI usage meter.

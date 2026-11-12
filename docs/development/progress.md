@@ -1057,3 +1057,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** main 16d5785, release 1,223,680 B, SHA `39743F402B49B3769FC5CE6A3E1F7DF6802A5A75596A6D92A2717E1806E063EB`; [results](m5-results-4.md). Docs only.
 - **Suites:** catalog 67 PASS, packaged-hung 16 PASS, topology none 25 / both 29 PASS; picker-smoke FAIL as shipped (stale slot-0 vs default Start button), 226 PASS with dock buttons off; smoke.ps1 NOT RUN.
 - **Idle:** all three 15-min runs (off, sliders on, Weather+Prayer+Limits) ABORTED by the input guard (user active); no numbers, `--diagnostics` counters NOT RUN. Reviews paused (REVIEW NOT RUN).
+
+## S1 sidebar Settings (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/s1-settings`; [packet](features-settings-shell.md). 8-page sidebar shell from one `PAGES` table, switches, dark/high-contrast/RTL, seven new settings (`fshide notchopen notchsize animspeed rsounds ppause pshift`). Landed f982f94 (W1), 9879fa6 (W2+W3).
+- **Checks:** verify.ps1 PASS (fmt/clippy, 346 tests, locked release); 1,236,992 B, ratchet within 2% (baseline unchanged; `Tween::retarget` not inlined saved 8 KB); SHA `8CA579007018C1D2C2756650E96AB6547B07ACB487B60E7B74AFB8F4A064D14B`.
+- **NOT RUN:** drawing, hit/focus, dark/HC/RTL, 150% text, Narrator; not built: steppers, segmented, tiles, monitor map. Reviews paused (REVIEW NOT RUN).
