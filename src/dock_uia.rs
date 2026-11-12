@@ -40,6 +40,8 @@ pub struct State {
     pub buttons: dock::Buttons,
     /// The cell with keyboard focus (the dock holds the foreground), if any.
     pub focus: Option<usize>,
+    /// Pixels the dock content is still below its window while it slides (`dock::slide_offset`).
+    pub slide: i32,
 }
 impl State {
     /// Slots among the cells (the picker and the app groups).
@@ -368,11 +370,12 @@ impl IRawElementProviderFragment_Impl for Item_Impl {
             return Ok(UiaRect::default()); // Clipped slot: offscreen, still reachable through the picker.
         }
         let (left, cell) = dock::span(buttons, width, dpi, hit);
+        let slide = read(&self.state, |state| state.slide)?;
         Ok(UiaRect {
             left: f64::from(rect.left + left),
-            top: f64::from(rect.top),
+            top: f64::from(rect.top + slide),
             width: f64::from(cell),
-            height: f64::from(rect.bottom - rect.top),
+            height: f64::from(rect.bottom - rect.top - slide),
         })
     }
     fn GetEmbeddedFragmentRoots(&self) -> Result<*mut SAFEARRAY> {

@@ -156,6 +156,8 @@ pub struct DockScene<'a> {
     pub dpi: u32,
     /// Attached style: notch material, flat bottom, rounded top corners.
     pub attached: bool,
+    /// Pixels the whole dock is pushed down while it slides in or out (`dock::slide_offset`).
+    pub slide: i32,
 }
 
 pub struct NotchScene<'a> {
@@ -559,6 +561,8 @@ impl Canvas {
     pub fn paint_dock(&self, scene: &DockScene) -> Result<()> {
         let p = self.palette;
         self.draw(|context, rect| {
+            // SAFETY: context is live between surface BeginDraw/EndDraw; `draw_within` restores identity.
+            unsafe { context.SetTransform(&Matrix3x2::translation(0.0, scene.slide as f32)) };
             let px = |dips: i32| dock::px(dips, scene.dpi) as f32;
             let radius = px(dock::RADIUS_DIPS);
             if scene.attached {
@@ -581,17 +585,6 @@ impl Canvas {
             }
             // A one-physical-pixel inner hairline separates the black bar from dark wallpapers.
             self.rounded_body(context, rect, radius, p.dock_fill(scene.inside))?;
-            if p.sheen.is_some() && scene.inside > 0.0 {
-                // Glass has no flat fill to blend, so the hover is a faint white wash.
-                // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this call.
-                unsafe {
-                    let wash = context.CreateSolidColorBrush(
-                        &with_alpha((255, 255, 255), 0.08 * scene.inside),
-                        None,
-                    )?;
-                    context.FillRoundedRectangle(&rounded(rect, radius), &wash);
-                }
-            }
             paint_slots(context, &rect, self.width as i32, scene, &px, &p)
         })
     }
@@ -719,6 +712,7 @@ impl Canvas {
             context.Clear(Some(&rgba(0, 0, 0, 0.0)));
             context.PopAxisAlignedClip();
             let drawing = content(&context, rect);
+            context.SetTransform(&Matrix3x2::identity());
             let ended = self.surface.EndDraw();
             drawing?;
             ended?;

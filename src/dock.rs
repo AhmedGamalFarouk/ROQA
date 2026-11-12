@@ -322,6 +322,15 @@ pub fn system_rtl() -> bool {
     read > 0 && layout[0] == 1
 }
 
+/// How long the dock takes to slide up (or down) at its bottom edge.
+pub const SLIDE_TIME: std::time::Duration = std::time::Duration::from_millis(180);
+
+/// Pixels the dock content is pushed below its window at slide `progress` (0 hidden, 1 settled): the
+/// whole `height` at 0 and nothing at 1. Only the window's rows from here down are visible and hit.
+pub fn slide_offset(progress: f32, height: i32) -> i32 {
+    ((1.0 - progress.clamp(0.0, 1.0)) * height as f32).round() as i32
+}
+
 pub fn px(dips: i32, dpi: u32) -> i32 {
     ((i64::from(dips) * i64::from(dpi.max(1)) + 48) / 96) as i32
 }
@@ -682,6 +691,42 @@ pub fn perform(action: Action) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::motion::{EASE_OUT, Tween};
+    use std::time::Instant;
+
+    #[test]
+    fn slide_offset_runs_from_the_full_height_to_zero_and_stays_inside_the_window() {
+        assert_eq!(super::slide_offset(0.0, 64), 64);
+        assert_eq!(super::slide_offset(1.0, 64), 0);
+        assert_eq!(super::slide_offset(0.5, 64), 32);
+        // The easing may leave 0..1 by float error; the content never rises above or sinks below the window.
+        assert_eq!(
+            (super::slide_offset(-0.3, 64), super::slide_offset(1.4, 64)),
+            (64, 0)
+        );
+        assert_eq!(super::slide_offset(0.5, 0), 0);
+        let steps: Vec<i32> = (0..=10)
+            .map(|i| super::slide_offset(i as f32 / 10.0, 63))
+            .collect();
+        assert!(steps.windows(2).all(|pair| pair[0] >= pair[1]));
+    }
+
+    #[test]
+    fn the_slide_timeline_starts_hidden_ends_settled_and_is_idle_afterwards() {
+        let mut slide = Tween::rest(0.0);
+        let start = Instant::now();
+        assert_eq!(super::slide_offset(slide.value(start), 64), 64);
+        slide.retarget(1.0, super::SLIDE_TIME, EASE_OUT);
+        // Past its end the tween sits exactly on 1 and reports no running frames, so nothing keeps ticking.
+        let end = Instant::now() + super::SLIDE_TIME * 2;
+        assert_eq!(slide.value(end), 1.0);
+        assert!(!slide.running(end));
+        assert_eq!(super::slide_offset(slide.value(end), 64), 0);
+        // Leaving again starts from where it is, so an interruption never jumps.
+        slide.retarget(0.0, super::SLIDE_TIME, EASE_OUT);
+        assert!(slide.running(Instant::now()));
+    }
+
     use super::*;
     use crate::window_model::WindowRecord;
 

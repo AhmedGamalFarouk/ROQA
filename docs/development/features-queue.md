@@ -18,6 +18,7 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
 - [x] W1: Weather tab content: city (geocoded) plus WinRT Geolocator auto-detect; refresh on open if older than ~1 h, ~3 h in the background only while a notch is visible; `Tab::Weather` available ([packet](features-weather.md)).
 - [x] P1: Prayer tab ([packet](features-prayer.md)): wire `prayer.rs`, location, a reminder that expands the notch with the user's chosen sound (MCI, lazy). Then `Tab::Prayer.available()` goes true.
 - [x] D1: dock style Floating or Attached to the bottom edge ([packet](features-dock-styles.md)).
+- [x] A1: dock slide-up on show/startup/un-hide, both styles; slide-down on hide not done ([packet](features-dock-styles.md)).
 - [x] D2: taskbar buttons on the dock: Start, Search, Task View, minimized-apps list, show-desktop strip ([packet](features-dock-system.md)).
 - [x] F3: prayer alert over full screen, Weather independent of Prayer ([packet](features-f3.md)).
 - [x] U1: Limits tab: Claude, Codex and Antigravity plan-limit percentages ([packet](features-limits.md)).

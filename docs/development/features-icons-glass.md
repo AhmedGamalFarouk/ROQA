@@ -22,7 +22,7 @@
 
 - **Landed:** theme `Liquid glass` (key `liquid-glass`) beside `Frosted tint`, which is unchanged. No live blur, no per-frame effect, no timer, no new crate.
 - **Bake:** `Palette.sheen` (top/bottom stops around `body`, specular alpha) plus `rim`. `graphics::Glass` holds three brushes over the unit square (body gradient, radial specular blob near the top, diagonal lit rim: bright top/left, dim bottom/right), built once per canvas on first paint (`baked`, keyed by the sheen; a theme change replaces the canvas, device loss rebuilds it) and placed on each body by a brush transform, so resize, the morphing notch and repaints never rebuild them. One shared `Canvas::body` draws notch, both dock styles, edge pills, the list panel and the meter slot refill; flat themes keep their paths.
-- **Contrast:** `Palette::fills()` lists every body stop; the readability and accent tests use all of them, plus a test for the specular peak (ink >= 4.5:1). Hover on the floating dock adds a faint white wash.
+- **Contrast:** `Palette::fills()` lists every body stop; the readability and accent tests use all of them, plus a test for the specular peak (ink >= 4.5:1).
 - **Skipped (size/cheapness):** wallpaper snapshot with GaussianBlur and edge DisplacementMap lens (needs WIC decode and effects; would exceed the 2% ratchet headroom), inner shadow, noise.
 - **Native (2026-11-12, Chief-confirmed, private store, own process):** screenshots of the floating and attached dock and the resting notch show the gradient (floating: top 84,93,113 to bottom 61,70,90; Frosted flat 64,69,79) with readable icons. NOT RUN: open notch (the hover did not expand it), edge pill, DPI, Settings drop-down.
 - **Checks:** verify.ps1 (see ledger). Binary 1,241,088 B, within the 2% limit (1,242,408).

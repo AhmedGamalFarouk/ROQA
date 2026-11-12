@@ -1069,3 +1069,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/g1b-slideup`; [packet](features-icons-glass.md). Theme "Liquid glass": cached unit-square gradient, specular and rim brushes placed by brush transform; Frosted tint unchanged. Wallpaper snapshot/lens skipped.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 348 tests, locked release); 1,241,088 B, ratchet within 2% (baseline 1,218,048 unchanged, limit 1,242,408; trimmed with non-inlined shared helpers).
 - **Native:** dock (both styles) and resting notch screenshots seen. NOT RUN: open notch, edge pill, DPI; reviews paused (REVIEW NOT RUN).
+
+
+## A1 dock slide-up (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/g1b-slideup`; [packet](features-dock-styles.md). Dock content slides up 180 ms on show/startup/un-hide (both styles) via the existing frame loop; window region and UIA bounds follow the offset. Slide-down on hide and hover reveal not done.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 350 tests, locked release); 1,242,112 B, ratchet within 2% (limit 1,242,408, baseline unchanged); glass dock hover wash dropped to fit.
+- **Native:** start and settled states seen, mid-slide frames NOT captured; NOT RUN: clicks during slide, multi-monitor, bottom taskbar; reviews paused (REVIEW NOT RUN).

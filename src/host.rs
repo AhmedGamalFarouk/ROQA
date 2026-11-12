@@ -266,6 +266,8 @@ struct Surface {
     live: bool,
     /// Notch: 0 collapsed to 1 expanded. Dock: pointer-inside progress of the bar fill.
     motion: Tween,
+    /// A dock's slide in from below its bottom edge: 0 hidden, 1 settled. Unused by the notch.
+    slide: Tween,
     /// Notch: the progress row last drawn, if any.
     played: Option<Progress>,
     /// Notch: the visualizer bar heights last drawn.
@@ -402,6 +404,7 @@ impl Surface {
             visible: false,
             live: false,
             motion: Tween::rest(0.0),
+            slide: Tween::rest(0.0),
             played: None,
             bars: [0; audio::BARS],
             repaint: Repaint::Nothing,
@@ -475,9 +478,15 @@ impl Surface {
                 window.hide()
             }
         }
+        if visible && matches!(self.role, Role::Dock { .. }) {
+            // The dock was painted below its window (slide 0): it rises over `SLIDE_TIME`.
+            self.slide.retarget(1.0, dock::SLIDE_TIME, motion::EASE_OUT);
+            self.live = true;
+        }
         if !visible {
             // A hidden window gets no leave notification and needs no frames: settle at rest now.
             (self.hovered, self.live, self.motion) = (false, false, Tween::rest(0.0));
+            self.slide = Tween::rest(0.0);
             self.hang = Hang::rest();
             match &mut self.role {
                 Role::Notch {
@@ -992,6 +1001,21 @@ impl Surface {
                     hover: hover(Hit::Slot(index + 1)),
                 }),
         );
+        // Only the window rows from the content's top down are visible and take input: a region clips
+        // the rest, and UI Automation reports the same offset.
+        let slide = dock::slide_offset(self.slide.value(now), self.bounds.height);
+        let top = slide.min(self.bounds.height - 1);
+        if let Role::Dock { uia, .. } = &self.role
+            && let Ok(mut state) = uia.lock()
+        {
+            state.slide = slide;
+        }
+        self.window.set_notch_region(&[Bounds {
+            x: 0,
+            y: top,
+            width: self.bounds.width,
+            height: self.bounds.height - top,
+        }])?;
         self.canvas.paint_dock(&DockScene {
             slots,
             layout: self.dock_buttons,
@@ -1006,6 +1030,7 @@ impl Surface {
             inside: self.motion.value(now),
             dpi: self.dpi,
             attached: self.dock_style == DockStyle::Attached,
+            slide,
         })
     }
     /// The slot or button under the pointer.
@@ -2198,6 +2223,7 @@ impl Desktop {
                 surface.live = surface.motion.running(now)
                     || surface.hang.tween.running(now)
                     || surface.volume_fill.running(now)
+                    || surface.slide.running(now)
                     || match &surface.role {
                         Role::Notch { intent, .. } => intent.is_some(),
                         Role::Dock { slots, .. } => slots.iter().any(|tween| tween.running(now)),
