@@ -10,6 +10,9 @@ use crate::{
     native_window,
     picker::{ACTION, CLOSE, DIALOG_STYLE, RELAYOUT, control, empty_dialog, wide},
     picker_font::PickerFont,
+    prayer::Method,
+    prayer_os,
+    prayer_tab::{self, LEADS, SILENT},
     settings::{MAX_OFF, MAX_PATH, Settings, parse_timer},
     shelf,
     tabs::Tab,
@@ -46,6 +49,13 @@ const EYES: usize = TAB + 5;
 const CITY: usize = 114;
 const DETECT: usize = 115;
 const UNITS: usize = 116;
+/// The prayer reminder checkbox, method list, sound list with Browse and Test, and the heads-up list.
+const PRAYER: usize = 160;
+const PMETHOD: usize = 161;
+const PSOUND: usize = 162;
+const PBROWSE: usize = 163;
+const PTEST: usize = 164;
+const PLEAD: usize = 165;
 const SHELF: usize = 103;
 const THEME: usize = 110;
 const DIAGNOSTICS: usize = 104;
@@ -58,6 +68,13 @@ const MONITOR: usize = 120;
 const OK: usize = 1;
 /// Timer length shown when the window opens.
 const FIRST_TIMER: &str = "5";
+
+/// What the Settings window asks the host to do with the prayer sound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoundAction {
+    Browse,
+    Test,
+}
 
 pub struct SettingsWindow {
     window: HWND,
@@ -81,6 +98,18 @@ pub struct SettingsWindow {
     detect: HWND,
     /// Drop-down list of `Units::ALL`, in that order.
     units: HWND,
+    prayer: HWND,
+    /// Drop-down list of `Method::ALL`.
+    pmethod: HWND,
+    /// Drop-down list: row 0 is silent, then `sounds` in order.
+    psound: HWND,
+    pbrowse: HWND,
+    ptest: HWND,
+    /// Drop-down list of `LEADS`.
+    plead: HWND,
+    /// The audio files found (and the chosen one if it is elsewhere), full paths.
+    sounds: Vec<String>,
+    sound_action: Option<SoundAction>,
     /// Drop-down list of `Theme::ALL`, in that order.
     theme: HWND,
     /// One checkbox per connected monitor (at most `MAX_OFF`), named by its GDI device.
@@ -104,6 +133,29 @@ pub struct SettingsWindow {
 /// A combo row kept inside `len` items; `CB_ERR` (no selection) becomes the first row.
 fn clamp_selection(row: isize, len: usize) -> usize {
     (row.max(0) as usize).min(len.saturating_sub(1))
+}
+fn add_row(combo: HWND, text: &str) {
+    let text = wide(text);
+    // SAFETY: the combo box copies the terminated string synchronously.
+    unsafe {
+        SendMessageW(
+            combo,
+            CB_ADDSTRING,
+            None,
+            Some(LPARAM(text.as_ptr() as isize)),
+        );
+    }
+}
+fn select(combo: HWND, row: Option<usize>) {
+    // SAFETY: scalar selection index on our own combo box.
+    unsafe {
+        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(row.unwrap_or(0))), None);
+    }
+}
+/// The selected row of a drop-down list; `None` when nothing is chosen.
+fn chosen_row(combo: HWND) -> Option<usize> {
+    // SAFETY: scalar query of our own combo box.
+    usize::try_from(unsafe { SendMessageW(combo, CB_GETCURSEL, None, None) }.0).ok()
 }
 fn checked(control: HWND) -> bool {
     // SAFETY: scalar query of our own checkbox.
@@ -151,6 +203,14 @@ impl SettingsWindow {
             city: HWND::default(),
             detect: HWND::default(),
             units: HWND::default(),
+            prayer: HWND::default(),
+            pmethod: HWND::default(),
+            psound: HWND::default(),
+            pbrowse: HWND::default(),
+            ptest: HWND::default(),
+            plead: HWND::default(),
+            sounds: prayer_os::discover(),
+            sound_action: None,
             theme: HWND::default(),
             monitors: Vec::new(),
             shelf: HWND::default(),
@@ -167,6 +227,7 @@ impl SettingsWindow {
             closed: false,
         };
         this.build(devices)?;
+        this.fill_sounds(&current.prayer_sound);
         this.show(current);
         this.relayout()?;
         // SAFETY: explicit user request only. Windows retains its normal foreground restrictions.
@@ -403,6 +464,48 @@ impl SettingsWindow {
                 );
             }
         }
+        self.prayer = control(
+            window,
+            w!("Button"),
+            "Prayer &reminders",
+            PRAYER,
+            check,
+            flat,
+        )?;
+        let combo = CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | tab;
+        self.pmethod = control(
+            window,
+            w!("ComboBox"),
+            "Prayer method",
+            PMETHOD,
+            combo,
+            flat,
+        )?;
+        for method in Method::ALL {
+            add_row(self.pmethod, method.label());
+        }
+        self.psound = control(window, w!("ComboBox"), "Prayer sound", PSOUND, combo, flat)?;
+        self.pbrowse = control(window, w!("Button"), "Bro&wse...", PBROWSE, tab, flat)?;
+        self.ptest = control(window, w!("Button"), "Te&st sound", PTEST, tab, flat)?;
+        let lead_label = label("Heads-up before the prayer")?;
+        self.plead = control(
+            window,
+            w!("ComboBox"),
+            "Heads-up before the prayer",
+            PLEAD,
+            combo,
+            flat,
+        )?;
+        for lead in LEADS {
+            add_row(
+                self.plead,
+                &if lead == 0 {
+                    "Off".to_owned()
+                } else {
+                    format!("{lead} minutes before")
+                },
+            );
+        }
         let diagnostics_label = label("Dia&gnostics report file (empty is off)")?;
         self.diagnostics = control(window, w!("Edit"), "", DIAGNOSTICS, edit, WS_EX_CLIENTEDGE)?;
         let timer_label = label("&Timer length (minutes, m:ss or h:mm:ss)")?;
@@ -452,6 +555,7 @@ impl SettingsWindow {
             start,
             reset,
             close,
+            lead_label,
         ];
         // SAFETY: scalar limits on our own edits; Windows bounds what a user can type or paste.
         unsafe {
@@ -480,6 +584,12 @@ impl SettingsWindow {
             self.city,
             self.detect,
             self.units,
+            self.prayer,
+            self.pmethod,
+            self.psound,
+            self.pbrowse,
+            self.ptest,
+            self.plead,
         ];
         all.extend(self.tabs);
         all.push(self.eyes);
@@ -528,6 +638,57 @@ impl SettingsWindow {
             self.diagnostics,
             settings.diagnostics.as_deref().unwrap_or(""),
         );
+        set_checked(self.prayer, settings.prayer_remind);
+        select(
+            self.pmethod,
+            Method::ALL
+                .iter()
+                .position(|m| *m == settings.prayer_method),
+        );
+        select(
+            self.plead,
+            LEADS.iter().position(|l| *l == settings.prayer_lead),
+        );
+        select(self.psound, Some(self.sound_row(&settings.prayer_sound)));
+    }
+
+    /// The sound list row for a stored setting: silent is 0; the default is its file's row (or silent without one).
+    fn sound_row(&self, setting: &str) -> usize {
+        match prayer_tab::resolve(setting, &self.sounds) {
+            None => 0,
+            Some(path) => self
+                .sounds
+                .iter()
+                .position(|s| s == path)
+                .map_or(0, |i| i + 1),
+        }
+    }
+
+    /// Fills the sound list: silent, the files found and, when the chosen file is elsewhere, that one too.
+    fn fill_sounds(&mut self, setting: &str) {
+        if !matches!(setting, "" | SILENT) && !self.sounds.iter().any(|s| s == setting) {
+            self.sounds.push(setting.to_owned());
+        }
+        // SAFETY: our own combo box.
+        unsafe {
+            SendMessageW(self.psound, CB_RESETCONTENT, None, None);
+        }
+        add_row(self.psound, "None (silent)");
+        for sound in &self.sounds {
+            add_row(self.psound, prayer_tab::label(sound));
+        }
+    }
+
+    /// The host stored a file the user browsed to: list it and select it.
+    pub fn set_sound(&mut self, setting: &str) {
+        self.current.prayer_sound = setting.to_owned();
+        self.fill_sounds(setting);
+        select(self.psound, Some(self.sound_row(setting)));
+    }
+
+    /// What the user asked of the sound since the host last asked.
+    pub fn take_sound_action(&mut self) -> Option<SoundAction> {
+        self.sound_action.take()
     }
 
     /// Reads the controls, brings them into range, shows what was kept and hands a real change to the host.
@@ -568,6 +729,22 @@ impl SettingsWindow {
             .and_then(|index| Units::ALL.get(index).copied())
             .unwrap_or(next.units);
         next.diagnostics = Some(text(self.diagnostics, MAX_PATH));
+        next.prayer_remind = checked(self.prayer);
+        next.prayer_method = chosen_row(self.pmethod)
+            .and_then(|i| Method::ALL.get(i).copied())
+            .unwrap_or(next.prayer_method);
+        next.prayer_lead = chosen_row(self.plead)
+            .and_then(|i| LEADS.get(i).copied())
+            .unwrap_or(next.prayer_lead);
+        // A row differing from what the stored setting shows is a pick; otherwise "default" stays "default".
+        if let Some(row) =
+            chosen_row(self.psound).filter(|&r| r != self.sound_row(&next.prayer_sound))
+        {
+            next.prayer_sound = match row {
+                0 => SILENT.to_owned(),
+                n => self.sounds.get(n - 1).cloned().unwrap_or_default(),
+            };
+        }
         let kept_a_kind = next.dock || next.notch;
         let ranged = next.clamped();
         let next = ranged.clone().keep_one_monitor(&devices);
@@ -610,7 +787,16 @@ impl SettingsWindow {
                 let notification = (message.wParam.0 >> 16) as u32;
                 let monitor = (MONITOR..MONITOR + self.monitors.len()).contains(&id);
                 match id {
+                    PBROWSE | PTEST if notification == BN_CLICKED => {
+                        self.sound_action = Some(if id == PTEST {
+                            SoundAction::Test
+                        } else {
+                            SoundAction::Browse
+                        });
+                    }
+                    PMETHOD | PSOUND | PLEAD if notification == CBN_SELCHANGE => self.commit()?,
                     DOCK | NOTCH | SOUND | DESKTOP | EDGE_VOLUME | EDGE_BRIGHTNESS | DETECT
+                    | PRAYER
                         if notification == BN_CLICKED =>
                     {
                         self.commit()?
@@ -695,7 +881,7 @@ impl SettingsWindow {
         // theme, shelf, weather city, detect and units, diagnostics label and edit, timer label and row,
         // status, pins, buttons
         heights.extend([
-            28.0, 28.0, 28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0, 28.0,
+            28.0, 28.0, 28.0, 28.0, 28.0, 28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0, 28.0,
         ]);
         let tops: Vec<i32> = heights
             .iter()
@@ -775,6 +961,7 @@ impl SettingsWindow {
                 start,
                 reset,
                 close,
+                lead_label,
             ] = self.others[..]
             else {
                 return Err(Error::new(E_FAIL, "Settings controls missing."));
@@ -865,18 +1052,67 @@ impl SettingsWindow {
                     half(180.0),
                     px(160.0),
                 ),
-                (diagnostics_label, margin, tops[end + 5], inner, px(20.0)),
-                (self.diagnostics, margin, tops[end + 6], inner, px(28.0)),
-                (timer_label, margin, tops[end + 7], inner, px(20.0)),
-                (self.timer, margin, tops[end + 8], half(120.0), px(28.0)),
+                (
+                    self.prayer,
+                    margin,
+                    tops[end + 5] + px(2.0),
+                    inner - half(240.0),
+                    px(24.0),
+                ),
+                (
+                    self.pmethod,
+                    margin + inner - half(230.0),
+                    tops[end + 5],
+                    half(230.0),
+                    px(160.0),
+                ),
+                (
+                    self.psound,
+                    margin,
+                    tops[end + 6],
+                    (inner - half(200.0)).max(1),
+                    px(160.0),
+                ),
+                (
+                    self.pbrowse,
+                    margin + (inner - half(190.0)).max(0),
+                    tops[end + 6],
+                    half(90.0),
+                    px(28.0),
+                ),
+                (
+                    self.ptest,
+                    margin + (inner - half(94.0)).max(0),
+                    tops[end + 6],
+                    half(94.0),
+                    px(28.0),
+                ),
+                (
+                    lead_label,
+                    margin,
+                    tops[end + 7] + px(5.0),
+                    inner - half(190.0),
+                    px(20.0),
+                ),
+                (
+                    self.plead,
+                    margin + inner - half(180.0),
+                    tops[end + 7],
+                    half(180.0),
+                    px(160.0),
+                ),
+                (diagnostics_label, margin, tops[end + 8], inner, px(20.0)),
+                (self.diagnostics, margin, tops[end + 9], inner, px(28.0)),
+                (timer_label, margin, tops[end + 10], inner, px(20.0)),
+                (self.timer, margin, tops[end + 11], half(120.0), px(28.0)),
                 (
                     start,
                     margin + half(128.0),
-                    tops[end + 8],
+                    tops[end + 11],
                     half(150.0),
                     px(28.0),
                 ),
-                (self.status, margin, tops[end + 9], inner, px(42.0)),
+                (self.status, margin, tops[end + 12], inner, px(42.0)),
                 (reset, margin, tops[last], half(180.0), px(28.0)),
                 (
                     close,

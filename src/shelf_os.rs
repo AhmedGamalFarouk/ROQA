@@ -180,7 +180,7 @@ pub fn revoke(hwnd: HWND) {
 }
 
 /// Multi-select file-system dialog. Cancellation is empty; other failures are reported without paths.
-fn pick_files(cancel: &std::sync::Arc<std::sync::Mutex<DialogState>>) -> Vec<String> {
+fn pick_files(cancel: &std::sync::Arc<std::sync::Mutex<DialogState>>, one: bool) -> Vec<String> {
     let picked = || -> Result<Vec<String>> {
         // SAFETY: the dialog and its result objects are used and released on this thread; each returned
         // name is freed with `CoTaskMemFree` after it is copied.
@@ -189,7 +189,11 @@ fn pick_files(cancel: &std::sync::Arc<std::sync::Mutex<DialogState>>) -> Vec<Str
                 CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
             dialog.SetOptions(
                 dialog.GetOptions()?
-                    | FOS_ALLOWMULTISELECT
+                    | if one {
+                        Default::default()
+                    } else {
+                        FOS_ALLOWMULTISELECT
+                    }
                     | FOS_FORCEFILESYSTEM
                     | FOS_FILEMUSTEXIST
                     | FOS_DONTADDTORECENT,
@@ -407,6 +411,8 @@ impl windows::Win32::UI::Shell::IFileDialogEvents_Impl for DialogEvents_Impl {
 }
 #[derive(Default)]
 pub struct FilePicker {
+    /// The open or last dialog chooses the prayer sound (one file) instead of shelf files.
+    pub for_sound: bool,
     worker: Option<std::thread::JoinHandle<()>>,
     result: Option<std::sync::mpsc::Receiver<Vec<String>>>,
     state: std::sync::Arc<std::sync::Mutex<DialogState>>,
@@ -415,9 +421,13 @@ impl FilePicker {
     /// Starts the dialog. With one already open this does nothing; if it finished but its wake was lost
     /// (a failed `PostThreadMessageW`), the result is returned here so the picker never stays dead.
     pub fn start(&mut self) -> Option<Vec<String>> {
+        self.start_with(false)
+    }
+    pub fn start_with(&mut self, sound: bool) -> Option<Vec<String>> {
         if self.worker.is_some() {
             return self.take();
         }
+        self.for_sound = sound;
         self.state = Default::default();
         let state = self.state.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -434,7 +444,7 @@ impl FilePicker {
                             state.thread =
                                 unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
                         }
-                        pick_files(&state)
+                        pick_files(&state, sound)
                     }
                     Err(error) => {
                         eprintln!("Shelf picker COM initialization: {error}");

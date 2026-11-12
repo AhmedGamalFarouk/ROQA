@@ -711,6 +711,7 @@ pub(super) fn page(
             Ok(())
         }
         Tab::Weather => weather_page(context, scene, body, scale, reveal, p),
+        Tab::Prayer => prayer_page(context, scene, body, scale, reveal, p),
         _ => Ok(()),
     }
 }
@@ -824,6 +825,113 @@ fn weather_page(
         &footer,
         at(16.0, row, width, 12.0),
         ink(0.45),
+    )
+}
+
+/// The Prayer page: the next prayer and its countdown at the left, the five times as columns at the right with
+/// the current one on a wash, and the Hijri date as the footer (the notice takes its row while it shows).
+fn prayer_page(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    scale: f32,
+    reveal: f32,
+    p: &Palette,
+) -> Result<()> {
+    let Some(view) = scene.prayer else {
+        return Ok(());
+    };
+    let media = scene.track.is_some();
+    let width = if media { 328.0 } else { 288.0 };
+    let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha * reveal));
+    let at = |x: f32, y: f32, w: f32, h: f32| D2D_RECT_F {
+        left: body.left + x * scale,
+        top: body.top + y * scale,
+        right: body.left + (x + w) * scale,
+        bottom: body.top + (y + h) * scale,
+    };
+    let font = |family, size: f32, weight, align| Font {
+        family,
+        size: size * scale,
+        weight,
+        designator: 1.0,
+        align,
+    };
+    let (lead, middle) = (DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_CENTER);
+    let normal = DWRITE_FONT_WEIGHT_NORMAL;
+    if let Some(message) = view.message {
+        return draw_text(
+            context,
+            message,
+            &font(TEXT_FONT, 12.0, normal, lead),
+            at(16.0, 32.0, width, 16.0),
+            ink(0.6),
+        );
+    }
+    let column = if media { 40.0 } else { 36.0 };
+    let left = 16.0 + width - column * view.rows.len() as f32;
+    let name = font(DISPLAY_FONT, 18.0, DWRITE_FONT_WEIGHT_BOLD, lead);
+    draw_text(
+        context,
+        &view.next,
+        &name,
+        at(16.0, 29.0, left - 20.0, 24.0),
+        ink(1.0),
+    )?;
+    let small = font(TEXT_FONT, 11.0, normal, lead);
+    draw_text(
+        context,
+        &view.left,
+        &small,
+        at(16.0, 54.0, left - 20.0, 14.0),
+        ink(0.7),
+    )?;
+    for (index, row) in view.rows.iter().enumerate() {
+        let x = left + column * index as f32;
+        if row.current {
+            // SAFETY: a brush and a fill on the frame's own device context.
+            unsafe {
+                let wash = context.CreateSolidColorBrush(
+                    &with_alpha(p.accent, p.ink_alpha(0.22 * reveal)),
+                    None,
+                )?;
+                context.FillRoundedRectangle(
+                    &rounded(at(x + 1.0, 27.0, column - 2.0, 34.0), 6.0 * scale),
+                    &wash,
+                );
+            }
+        }
+        let weight = if row.current {
+            DWRITE_FONT_WEIGHT_SEMI_BOLD
+        } else {
+            normal
+        };
+        let alpha = if row.current { 1.0 } else { 0.6 };
+        draw_text(
+            context,
+            row.name,
+            &font(TEXT_FONT, 10.0, normal, middle),
+            at(x, 29.0, column, 12.0),
+            ink(alpha),
+        )?;
+        draw_text(
+            context,
+            &row.time,
+            &font(TEXT_FONT, 11.0, weight, middle),
+            at(x, 44.0, column, 14.0),
+            ink(if row.current { 1.0 } else { 0.85 }),
+        )?;
+    }
+    if scene.notice.is_some() || view.hijri.is_empty() {
+        return Ok(());
+    }
+    let row = if media { 98.0 } else { 66.0 };
+    draw_text(
+        context,
+        &view.hijri,
+        &font(TEXT_FONT, 10.0, normal, lead),
+        at(16.0, row, width, 12.0),
+        ink(0.5),
     )
 }
 

@@ -24,6 +24,27 @@ enum Isha {
 }
 
 impl Method {
+    pub const ALL: [Method; 4] = [
+        Method::Egyptian,
+        Method::Mwl,
+        Method::UmmAlQura,
+        Method::Isna,
+    ];
+    /// The store value and the Settings list text.
+    pub fn key(self) -> &'static str {
+        ["egypt", "mwl", "uaq", "isna"][self as usize]
+    }
+    pub fn label(self) -> &'static str {
+        [
+            "Egyptian General Authority",
+            "Muslim World League",
+            "Umm al-Qura",
+            "ISNA (North America)",
+        ][self as usize]
+    }
+    pub fn from_key(key: &str) -> Option<Method> {
+        Method::ALL.into_iter().find(|m| m.key() == key)
+    }
     /// (Fajr sun depression in degrees, Isha rule).
     fn rule(self) -> (f64, Isha) {
         match self {
@@ -46,6 +67,9 @@ pub enum Prayer {
 }
 
 impl Prayer {
+    pub fn name(self) -> &'static str {
+        ["Fajr", "Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha"][self as usize]
+    }
     pub const ALL: [Prayer; 6] = [
         Prayer::Fajr,
         Prayer::Sunrise,
@@ -165,6 +189,7 @@ pub struct Next {
 
 impl Next {
     /// Countdown as (hours, minutes), rounded up so it never shows 0:00 before the time.
+    #[cfg(test)] // the page words it with `prayer_tab::countdown`
     pub fn hm(self) -> (u32, u32) {
         let m = self.secs_left.div_ceil(60);
         (m / 60, m % 60)

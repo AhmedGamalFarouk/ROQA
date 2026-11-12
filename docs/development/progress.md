@@ -1002,3 +1002,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/f2-prayer`; [packet](features-f2.md). Eased notch volume fill (120 ms, no timer when settled), wake on unlock/display-on, settings cog as a UIA Button and keyboard stop. No native/GUI run.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 275 tests, locked release); 1,079,808 B, ratchet within 2% (baseline unchanged); SHA `D7847DDBCAD2D0E34EB86AEA4D68B074F87D751AAC443AE73BFA9F2A4DD24EB1`.
 - **NOT RUN:** drawing, real unlock/display-on, Narrator/keyboard on the cog; reviews paused (REVIEW NOT RUN).
+
+
+## Prayer tab P1 (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/f2-prayer`; [packet](features-prayer.md), [queue](features-queue.md). Wires `prayer.rs`: page, one-deadline reminder, MCI sound picker (assets/, Browse, Test, silent), Hijri date, Settings. No native/GUI run, no audio run.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 290 tests, locked release); 1,122,816 B, ratchet tripped (+3.98% over F2), baseline raised, approved in-session by Chief; SHA `7CCC73C9BFB7B5CD19F1F7617361568893120D4C489E7E99DE5BDC93A8550DBC`.
+- **NOT RUN:** drawing, playback, real reminder, Narrator read, Settings layout fit; reviews paused (REVIEW NOT RUN).

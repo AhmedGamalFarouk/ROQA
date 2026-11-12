@@ -98,6 +98,11 @@ impl Power {
         true
     }
 
+    /// Shows `text` for `hold` in place of any power notice: the prayer reminder reuses the notice row.
+    pub fn announce(&mut self, text: String, now: Instant, hold: Duration) {
+        self.notice = Some((text, now + hold));
+    }
+
     pub fn text(&self) -> Option<&str> {
         self.notice.as_ref().map(|(text, _)| text.as_str())
     }

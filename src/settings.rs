@@ -3,6 +3,8 @@
 
 use crate::{
     layout::SurfaceKind,
+    prayer::Method,
+    prayer_tab::LEADS,
     shelf,
     tabs::{Flags, Tab},
     theme::Theme,
@@ -44,6 +46,12 @@ pub struct Settings {
     pub city: String,
     pub detect: bool,
     pub units: Units,
+    /// Prayer reminders (the notch expands and the sound plays), the calculation method, the optional
+    /// heads-up in minutes (one of `LEADS`) and the sound: empty is the default, `SILENT`, or a file path.
+    pub prayer_remind: bool,
+    pub prayer_method: Method,
+    pub prayer_lead: u32,
+    pub prayer_sound: String,
 }
 
 impl Default for Settings {
@@ -65,6 +73,10 @@ impl Default for Settings {
             city: String::new(),
             detect: false,
             units: Units::Auto,
+            prayer_remind: true,
+            prayer_method: Method::Egyptian,
+            prayer_lead: 0,
+            prayer_sound: String::new(),
         }
     }
 }
@@ -99,6 +111,15 @@ impl Settings {
             .collect::<String>()
             .trim()
             .to_owned();
+        if !LEADS.contains(&self.prayer_lead) {
+            self.prayer_lead = 0;
+        }
+        self.prayer_sound = self.prayer_sound.trim().trim_matches('"').trim().to_owned();
+        if self.prayer_sound.chars().count() > MAX_PATH
+            || self.prayer_sound.contains(char::is_control)
+        {
+            self.prayer_sound.clear();
+        }
         self.diagnostics = self
             .diagnostics
             .map(|p| p.trim().trim_matches('"').trim().to_owned())
@@ -138,6 +159,15 @@ impl Settings {
             "edgebri" => flag(value).map(|v| self.edge_brightness = v).is_some(),
             "eyes" => flag(value).map(|v| self.eyes = v).is_some(),
             "detect" => flag(value).map(|v| self.detect = v).is_some(),
+            "premind" => flag(value).map(|v| self.prayer_remind = v).is_some(),
+            "pmethod" => Method::from_key(value)
+                .map(|v| self.prayer_method = v)
+                .is_some(),
+            "plead" => value.parse().map(|v| self.prayer_lead = v).is_ok(),
+            "psound" if !value.is_empty() => {
+                self.prayer_sound = value.to_owned();
+                true
+            }
             "units" => Units::from_key(value).map(|v| self.units = v).is_some(),
             "city" if !value.is_empty() => {
                 self.city = value.to_owned();
@@ -183,6 +213,22 @@ impl Settings {
             u8::from(self.detect),
             self.units.key()
         ));
+        out.push_str(&format!(
+            "premind={}
+pmethod={}
+plead={}
+",
+            u8::from(self.prayer_remind),
+            self.prayer_method.key(),
+            self.prayer_lead
+        ));
+        if !self.prayer_sound.is_empty() && one_line(&&self.prayer_sound) {
+            out.push_str(&format!(
+                "psound={}
+",
+                self.prayer_sound
+            ));
+        }
         if !self.city.is_empty() && one_line(&&self.city) {
             out.push_str(&format!("city={}\n", self.city));
         }
@@ -280,8 +326,20 @@ mod tests {
             city: "  Ca\niro \u{7}".into(),
             detect: true,
             units: Units::Fahrenheit,
+            prayer_remind: true,
+            prayer_method: Method::Isna,
+            prayer_lead: 7,
+            prayer_sound: r#"  "C:\a\takbeer.mp3"  "#.into(),
         }
         .clamped();
+        assert_eq!(
+            (
+                wild.prayer_lead,
+                wild.prayer_method,
+                wild.prayer_sound.as_str()
+            ),
+            (0, Method::Isna, r"C:\a\takbeer.mp3")
+        );
         assert!(!wild.dock && wild.notch, "one surface kind always stays on");
         assert_eq!(wild.off_monitors, ["a", "b"]);
         assert_eq!(wild.shelf_cap, shelf::MAX);
@@ -447,6 +505,10 @@ mod tests {
             city: "Washington, D.C.".into(),
             detect: true,
             units: Units::Celsius,
+            prayer_remind: false,
+            prayer_method: Method::Mwl,
+            prayer_lead: 10,
+            prayer_sound: "D:\\a b\\x.mp3".into(),
             ..Settings::default()
         };
         let mut text = String::new();

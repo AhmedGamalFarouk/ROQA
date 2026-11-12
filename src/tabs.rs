@@ -26,9 +26,9 @@ impl Tab {
         Tab::Shelf,
     ];
 
-    /// Prayer is a placeholder: hidden until its content ships.
+    /// Every tab ships; a tab is hidden only by its Settings switch.
     pub fn available(self) -> bool {
-        self != Tab::Prayer
+        true
     }
     pub fn index(self) -> usize {
         self as usize
@@ -186,19 +186,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tabs_keep_their_order_and_placeholders_stay_hidden() {
+    fn tabs_keep_their_order_and_every_tab_ships() {
         let all = Visible::new([true; 5]);
         assert_eq!(
             all.as_slice(),
-            [Tab::Media, Tab::Weather, Tab::Timer, Tab::Shelf]
+            [
+                Tab::Media,
+                Tab::Weather,
+                Tab::Prayer,
+                Tab::Timer,
+                Tab::Shelf
+            ]
         );
-        assert!(Tab::Weather.available() && !Tab::Prayer.available());
+        assert!(Tab::Weather.available() && Tab::Prayer.available());
         assert_eq!(
             Visible::new([false, true, true, true, true]).as_slice(),
-            [Tab::Weather, Tab::Timer, Tab::Shelf]
+            [Tab::Weather, Tab::Prayer, Tab::Timer, Tab::Shelf]
         );
-        assert_eq!(all.position(Tab::Shelf), Some(3));
-        assert_eq!(all.position(Tab::Prayer), None);
+        assert_eq!(all.position(Tab::Shelf), Some(4));
+        assert_eq!(all.position(Tab::Prayer), Some(2));
         for tab in Tab::ALL {
             assert_eq!(Tab::from_key(tab.key()), Some(tab));
         }
@@ -208,14 +214,10 @@ mod tests {
     #[test]
     fn the_handle_needs_two_tabs() {
         assert!(Visible::new([true; 5]).handle());
-        assert!(!Visible::new([true, false, true, false, false]).handle());
         assert!(Visible::new([true, true, false, false, false]).handle());
         assert!(!Visible::new([false; 5]).handle());
-        // Switching Prayer on or off changes nothing while it is a placeholder.
-        assert_eq!(
-            Visible::new([true, false, false, false, true]),
-            Visible::new([true, false, true, false, true])
-        );
+        // Prayer counts like any other tab.
+        assert!(Visible::new([true, false, true, false, false]).handle());
     }
 
     #[test]
@@ -228,11 +230,12 @@ mod tests {
             pick(&visible, Some(Tab::Timer), true, Tab::Shelf),
             Some(Tab::Timer)
         );
-        // A hidden tab is never shown: fall back, and a placeholder cannot be the last one.
+        // A hidden tab is never shown: fall back.
         let no_media = Visible::new([false, true, true, true, true]);
         assert_eq!(pick(&no_media, None, true, Tab::Timer), Some(Tab::Timer));
+        let no_prayer = Visible::new([false, true, false, true, true]);
         assert_eq!(
-            pick(&no_media, None, false, Tab::Prayer),
+            pick(&no_prayer, None, false, Tab::Prayer),
             Some(Tab::Weather)
         );
         assert_eq!(
@@ -258,10 +261,6 @@ mod tests {
             !tabs.select(Tab::Shelf, true),
             "same tab: nothing to repaint"
         );
-        assert!(
-            !tabs.select(Tab::Prayer, true),
-            "a placeholder cannot be picked"
-        );
         tabs.flags[Tab::Timer.index()] = false;
         assert!(
             !tabs.select(Tab::Timer, true),
@@ -277,12 +276,14 @@ mod tests {
     fn stepping_wraps_over_the_shown_tabs_only() {
         let visible = Visible::new([true; 5]);
         assert_eq!(visible.step(Tab::Media, true), Tab::Weather);
-        assert_eq!(visible.step(Tab::Weather, true), Tab::Timer);
+        assert_eq!(visible.step(Tab::Weather, true), Tab::Prayer);
+        assert_eq!(visible.step(Tab::Prayer, true), Tab::Timer);
         assert_eq!(visible.step(Tab::Shelf, true), Tab::Media);
         assert_eq!(visible.step(Tab::Media, false), Tab::Shelf);
         let one = Visible::new([true, false, false, false, false]);
         assert_eq!(one.step(Tab::Media, true), Tab::Media);
-        assert_eq!(visible.step(Tab::Prayer, true), Tab::Prayer);
+        let no_prayer = Visible::new([true, true, false, true, true]);
+        assert_eq!(no_prayer.step(Tab::Prayer, true), Tab::Prayer, "not shown");
     }
 
     #[test]

@@ -20,9 +20,9 @@ use crate::{
     picker::Picker,
     pins::Pins,
     power::{self, Power},
-    preview,
+    prayer_os, prayer_tab, preview,
     settings::{self, Settings},
-    settings_window::SettingsWindow,
+    settings_window::{SettingsWindow, SoundAction},
     shelf::{self, Check, Shelf},
     shelf_os::{self, DropEvent, Drops},
     store::{self, Flush, Pending, Store},
@@ -163,6 +163,9 @@ struct Pages {
     /// revision and minute it was built for.
     weather: weather::View,
     weather_key: Option<(u32, String)>,
+    /// The Prayer page's text, rebuilt by `refresh_prayer` only while that page shows, and what it was built for.
+    prayer: prayer_tab::View,
+    prayer_key: Option<(String, u32, crate::prayer::Method)>,
 }
 impl Pages {
     fn new(settings: &Settings, last: Tab) -> Self {
@@ -179,6 +182,8 @@ impl Pages {
             hour: 12,
             weather: weather::View::default(),
             weather_key: None,
+            prayer: prayer_tab::View::default(),
+            prayer_key: None,
         }
     }
     /// The track the notch shows: none with the Media tab off, so a session costs nothing then.
@@ -533,10 +538,10 @@ impl Surface {
                 state.timer.clear();
                 state.timer.push_str(timer_name);
             }
-            let weather = if page == Tab::Weather {
-                pages.weather.name.as_str()
-            } else {
-                ""
+            let weather = match page {
+                Tab::Weather => pages.weather.name.as_str(),
+                Tab::Prayer => pages.prayer.name.as_str(),
+                _ => "",
             };
             if state.weather != weather {
                 state.weather.clear();
@@ -708,6 +713,7 @@ impl Surface {
             grip: self.grip,
             volume_fill,
             weather: (page == Tab::Weather).then_some(&pages.weather),
+            prayer: (page == Tab::Prayer).then_some(&pages.prayer),
         };
         shadow.paint(&scene, self.window.0)?;
         let status = track.is_none().then(|| media.view().status()).flatten();
@@ -1191,7 +1197,21 @@ struct Desktop {
     weather: Feed,
     weather_io: weather_os::Io,
     region: String,
+    /// The prayer reminders' schedule and sound (features P1).
+    prayer: PrayerRun,
 }
+/// The reminder schedule for the day, the last pass it was checked at, and the MCI sound while one plays.
+#[derive(Default)]
+struct PrayerRun {
+    /// The facts `events` were computed for: date, UTC offset, place, method and heads-up minutes.
+    key: Option<(prayer_tab::Local, i32, i32, crate::prayer::Method, u32)>,
+    events: Vec<prayer_tab::Event>,
+    last: Option<((i32, u32, u32), i32)>,
+    player: prayer_os::Player,
+    sound_end: Option<Instant>,
+}
+/// How long a prayer reminder holds the notch open.
+const PRAYER_NOTICE: Duration = Duration::from_secs(8);
 impl Desktop {
     fn create(_probe: &Probe) -> Result<Self> {
         let monitors = topology::settle(native_window::monitors()?)
@@ -1273,6 +1293,7 @@ impl Desktop {
             weather,
             weather_io: weather_os::Io::new(),
             region: weather_os::region(),
+            prayer: PrayerRun::default(),
         };
         if desktop.settings.notch {
             desktop.show(SurfaceKind::Notch)?;
@@ -1537,7 +1558,8 @@ impl Desktop {
                 self.pending.mark(now);
             }
         }
-        if !self.pages.tabs.on(Tab::Weather) {
+        // The Prayer tab takes the place (not the report) from the same lookup.
+        if !self.pages.tabs.on(Tab::Weather) && !self.pages.tabs.on(Tab::Prayer) {
             return; // no fetch, no worker, no page
         }
         let shown = self.page() == Tab::Weather;
@@ -1565,7 +1587,7 @@ impl Desktop {
             key.as_ref()
                 .is_some_and(|(rev, clock)| *rev == self.weather.rev && *clock == self.clock)
         };
-        if shown && !current(&self.pages.weather_key) {
+        if shown && self.pages.tabs.on(Tab::Weather) && !current(&self.pages.weather_key) {
             let fahrenheit = self.settings.units.fahrenheit(&self.region);
             self.pages.weather = weather::view(
                 &self.weather,
@@ -1577,6 +1599,118 @@ impl Desktop {
             self.pages.weather_key = Some((self.weather.rev, self.clock.clone()));
             self.request_notches(Repaint::Full, |s| motion::reveal(s.motion.value(now)) > 0.0);
         }
+    }
+    /// Prayer (features P1): builds the page while it shows, then runs the reminders: one pass computes the day's
+    /// events (when the date, offset, place, method or heads-up changed) and returns the wait until the next
+    /// reminder or a second after midnight. A due reminder expands the notch and starts the sound. Also ends a
+    /// finished sound. Off, or without a place, it has no deadline.
+    #[inline(never)]
+    fn refresh_prayer(&mut self) -> u32 {
+        let now = Instant::now();
+        if self.prayer.sound_end.is_some_and(|end| now >= end) {
+            self.prayer.sound_end = None;
+            self.prayer.player.stop();
+        }
+        let sound_wait = self
+            .prayer
+            .sound_end
+            .map_or(INFINITE, |end| milliseconds_until(end, now));
+        if !self.pages.tabs.on(Tab::Prayer) {
+            return sound_wait;
+        }
+        let shown = self.page() == Tab::Prayer;
+        let remind = self.settings.prayer_remind;
+        if !shown && !remind {
+            return sound_wait;
+        }
+        let local = prayer_os::local_now();
+        let method = self.settings.prayer_method;
+        let params = self
+            .weather
+            .place
+            .as_ref()
+            .filter(|_| weather::configured(self.settings.detect, &self.settings.city))
+            .map(|place| crate::prayer::Params {
+                lat: f64::from(place.lat) / 1e4,
+                lon: f64::from(place.lon) / 1e4,
+                utc_offset_min: local.offset_min,
+                method,
+                hanafi: false,
+            });
+        if shown {
+            let key = (self.clock.clone(), self.weather.rev, method);
+            if self.pages.prayer_key.as_ref() != Some(&key) {
+                let message = if !weather::configured(self.settings.detect, &self.settings.city) {
+                    "Set your city in Settings"
+                } else if self.weather.last_fail == Some(weather::Fail::Unlocated) {
+                    "Location not found. Set your city in Settings"
+                } else {
+                    "Finding your location…"
+                };
+                self.pages.prayer = prayer_tab::view(
+                    params.as_ref(),
+                    message,
+                    local,
+                    prayer_os::hijri(local.ymd).unwrap_or_default(),
+                    &prayer_os::time_label,
+                );
+                self.pages.prayer_key = Some(key);
+                self.request_notches(Repaint::Full, |s| motion::reveal(s.motion.value(now)) > 0.0);
+            }
+        }
+        let Some(params) = params.filter(|_| remind) else {
+            self.prayer.key = None;
+            return sound_wait;
+        };
+        let lead = self.settings.prayer_lead;
+        let key = (
+            prayer_tab::Local { secs: 0, ..local },
+            (params.lat * 1e4) as i32,
+            (params.lon * 1e4) as i32,
+            method,
+            lead,
+        );
+        if self.prayer.key != Some(key) {
+            self.prayer.key = Some(key);
+            self.prayer.events = crate::prayer::times(&params, local.ymd)
+                .map(|times| prayer_tab::events(&times, lead))
+                .unwrap_or_default();
+        }
+        let (due, wait) = prayer_tab::step(
+            &self.prayer.events,
+            (local.ymd, local.secs),
+            &mut self.prayer.last,
+        );
+        if let Some(event) = due {
+            self.fire_prayer(event, now);
+        }
+        sound_wait.min(wait.saturating_mul(1000))
+    }
+    /// A reminder is due: the notch expands with the prayer's name and the sound plays, unless a full-screen app
+    /// hides the notches (like any other notice).
+    fn fire_prayer(&mut self, event: prayer_tab::Event, now: Instant) {
+        if !self
+            .surfaces
+            .iter()
+            .any(|s| s.kind() == SurfaceKind::Notch && s.visible)
+        {
+            return;
+        }
+        self.power
+            .announce(prayer_tab::notice(event), now, PRAYER_NOTICE);
+        self.open_notches();
+        self.request_notches(Repaint::Full, |_| true);
+        self.play_prayer_sound(now);
+    }
+    /// Plays the chosen sound (none when silent or no default exists); false when nothing played.
+    fn play_prayer_sound(&mut self, now: Instant) -> bool {
+        let found = prayer_os::discover();
+        let Some(path) = prayer_tab::resolve(&self.settings.prayer_sound, &found) else {
+            return false;
+        };
+        let length = self.prayer.player.play(path);
+        self.prayer.sound_end = length.map(|length| now + length);
+        length.is_some()
     }
     /// Closes each notch's tab handle once its delay passed; returns the wait until the next such deadline
     /// (`INFINITE` with none waiting, the common case).
@@ -1841,11 +1975,30 @@ impl Desktop {
         let Some(window) = &mut self.settings_window else {
             return Ok(());
         };
-        let (change, start, movement) = (
+        let (change, start, movement, sound) = (
             window.take_change(),
             window.take_start(),
             window.take_move(),
+            window.take_sound_action(),
         );
+        match sound {
+            Some(SoundAction::Browse) => {
+                if let Some(paths) = self.file_picker.start_with(true) {
+                    self.choose_sound(paths);
+                }
+            }
+            Some(SoundAction::Test) => {
+                let status = if self.play_prayer_sound(Instant::now()) {
+                    "Playing the prayer sound."
+                } else {
+                    "Nothing to play: the sound is None, or the file would not open."
+                };
+                if let Some(window) = &self.settings_window {
+                    let _ = window.say(status);
+                }
+            }
+            None => {}
+        }
         if let Some((from, later)) = movement {
             let to = if later {
                 from.saturating_add(1)
@@ -1872,6 +2025,26 @@ impl Desktop {
             }
         }
         Ok(())
+    }
+    /// The file the user browsed to becomes the prayer sound.
+    fn choose_sound(&mut self, paths: Vec<String>) {
+        let Some(path) = paths.into_iter().next() else {
+            return;
+        };
+        let next = Settings {
+            prayer_sound: path,
+            ..self.settings.clone()
+        }
+        .clamped();
+        if next.prayer_sound == self.settings.prayer_sound {
+            return;
+        }
+        self.settings = next;
+        self.store.settings = self.settings.clone();
+        self.pending.mark(Instant::now());
+        if let Some(window) = &mut self.settings_window {
+            window.set_sound(&self.settings.prayer_sound);
+        }
     }
     /// Applies new settings live: creates and destroys exactly the surfaces `settings::surface_diff` names,
     /// trims the shelf to its cap, repoints the diagnostics report and marks the store dirty once.
@@ -2801,7 +2974,11 @@ impl Desktop {
     fn message(&mut self, message: &MSG) -> Result<()> {
         if message.message == shelf_os::PICKED && message.hwnd.is_invalid() {
             if let Some(paths) = self.file_picker.take() {
-                self.change_shelf(|shelf| shelf.add_all(&paths) > 0);
+                if self.file_picker.for_sound {
+                    self.choose_sound(paths);
+                } else {
+                    self.change_shelf(|shelf| shelf.add_all(&paths) > 0);
+                }
             }
             return Ok(());
         }
@@ -2836,6 +3013,8 @@ impl Desktop {
             self.request_topology();
             // A clock, time-zone or locale change, or a resume, can alter the text before the deadline.
             self.clock_due = Instant::now();
+            self.prayer.key = None; // the day's times are computed again
+            self.pages.prayer_key = None;
             // Countdowns keep their remaining time; only their stored wall-clock expiry moves.
             let now = Instant::now();
             if self.timers.resync(timer::wall_now(), now) {
@@ -3197,7 +3376,8 @@ impl Desktop {
             .min(self.refresh_preview())
             .min(self.refresh_edges())
             .min(self.refresh_rails())
-            .min(self.refresh_eyes());
+            .min(self.refresh_eyes())
+            .min(self.refresh_prayer());
         self.refresh_menu();
         self.paint_requested()?;
         if let Some(picker) = &mut self.picker {
@@ -3826,19 +4006,19 @@ mod clock_wait_tests {
     #[test]
     fn the_handle_follows_the_shown_tabs_and_the_active_page() {
         let mut settings = Settings::default();
-        // Media, Weather, Timer and Shelf show: a handle, on Media while a session lives, else on the last tab used.
+        // All five tabs show: a handle, on Media while a session lives, else on the last tab used.
         let pages = Pages::new(&settings, Tab::Shelf);
         let rail = |pages: &Pages, live| pages.rail(live, 0.0).map(|r| (r.count, r.active));
-        assert_eq!(rail(&pages, true), Some((4, 0)));
-        assert_eq!(rail(&pages, false), Some((4, 3)));
+        assert_eq!(rail(&pages, true), Some((5, 0)));
+        assert_eq!(rail(&pages, false), Some((5, 4)));
         assert_eq!(pages.page(false), Tab::Shelf);
-        // The Timer and Weather tabs off leave two; a pick during one open wins until it ends.
+        // The Timer and Weather tabs off leave three; a pick during one open wins until it ends.
         settings.tabs[Tab::Timer.index()] = false;
         settings.tabs[Tab::Weather.index()] = false;
         let mut pages = Pages::new(&settings, Tab::Media);
-        assert_eq!(rail(&pages, false), Some((2, 0)));
+        assert_eq!(rail(&pages, false), Some((3, 0)));
         assert!(pages.tabs.select(Tab::Shelf, true));
-        assert_eq!(rail(&pages, true), Some((2, 1)));
+        assert_eq!(rail(&pages, true), Some((3, 2)));
         // One tab: no handle. None: the plain clock panel is the Media page.
         settings.tabs = [true, false, false, false, false];
         assert_eq!(rail(&Pages::new(&settings, Tab::Media), true), None);
