@@ -1136,3 +1136,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u2-council-fixes`; [packet](ui-council-u2.md). Timer start/restart line (5 min), empty Weather/Prayer line opens Settings, Media "Nothing playing".
 - **Checks:** verify.ps1 PASS (fmt/clippy, 369 tests, locked release); 1,141,760 B (+512); limit 1,143,705, headroom 1,945; baseline unchanged.
 - **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN). Not done for size: tab labels/bigger hit targets, drawn Set city button, more presets.
+
+## U2-P5 Eyes, dock, themes (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u2-council-fixes`; [packet](ui-council-u2.md). Eyes 7.5 x 15 DIP; faint edge on Classic/Midnight/Light panels and the attached dock; softer Light palette; lighter Start glyph.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 369 tests, locked release); 1,141,760 B (+0); limit 1,143,705, headroom 1,945; baseline unchanged.
+- **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN). Not done: full-width attached dock, distinct picker icon, glass ears.

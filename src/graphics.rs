@@ -354,7 +354,8 @@ impl Canvas {
                 context,
                 &body,
                 p.body,
-                None,
+                // A faint edge so the panel does not merge into a dark backdrop.
+                Some(0.14),
                 &geometry_shape(context, &outline),
             )?;
             // SAFETY: context is live between surface BeginDraw/EndDraw; the clip is popped below.
@@ -580,7 +581,7 @@ impl Canvas {
                     context,
                     &rect,
                     p.body,
-                    None,
+                    Some(0.10),
                     &geometry_shape(context, &outline),
                 )?;
                 return paint_slots(context, &rect, self.width as i32, scene, &px, &p);

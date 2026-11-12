@@ -185,7 +185,9 @@ impl Glyph {
             Glyph::Shelf => {
                 "M3.5 13.8l2.1-6.9a1.6 1.6 0 0 1 1.5-1.1h9.8a1.6 1.6 0 0 1 1.5 1.1l2.1 6.9v4.2a1.6 1.6 0 0 1-1.6 1.6H5.1A1.6 1.6 0 0 1 3.5 18zM3.5 13.8h4.6a3.9 3.9 0 0 0 7.8 0h4.6"
             }
-            Glyph::Start => "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
+            Glyph::Start => {
+                "M5 5h5.5v5.5H5zM13.5 5H19v5.5h-5.5zM5 13.5h5.5V19H5zM13.5 13.5H19V19h-5.5z"
+            }
             Glyph::Limits => "M4 18a9 9 0 1 1 16 0M12 13l4-5M6 14H4M18 14h2M7 7l1.4 1.4M12 4v2",
             Glyph::Search => "M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13zM15.4 15.4L20.5 20.5",
             Glyph::TaskView => {

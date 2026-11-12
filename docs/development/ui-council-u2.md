@@ -30,3 +30,11 @@ Source: `docs/development/ui-council-fixes.md` (root checkout, untracked) and `a
 - Media with nothing playing says "Nothing playing" under the date (the media failure line still wins).
 - Size 1,141,248 -> 1,141,760 B (+512). 369 tests.
 - Not done (size): preset buttons beyond the one 5 min start, a drawn "Set city" button, tab handle labels, bigger handle hit targets, Tab/UIA control for the new click lines. NOT RUN: native/GUI.
+
+## P5 Eyes, dock, themes
+- Eyes 7.5 x 15 DIP at rest (was 5.5 x 11), 22 DIP apart (was 17); same idle-only shows and rules, still inside the 80 DIP lane.
+- Classic, Midnight and Light notch panels, and the attached dock, get a faint 14% / 10% ink hairline (glass keeps its rim).
+- Light theme softer: body 236,238,242 (was 244,245,247), hover 226,229,234, tile 198,202,209; ink unchanged.
+- Dock Start glyph redrawn as four lighter 5.5 DIP panes (same stroke, less chunky next to Search and the chevron).
+- Size 1,141,760 -> 1,141,760 B (+0). 369 tests (two expectations updated: eye size, Light dock blend).
+- Not done: attached dock as a full-width bar (placement and slot tests assume the centred pill), picker icon distinct from Start, glass "ears" cleanup. NOT RUN: native/GUI.

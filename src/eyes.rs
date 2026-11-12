@@ -80,8 +80,8 @@ pub struct Eye {
 }
 
 /// Distance between the two eyes' centres, and the base capsule.
-pub const GAP: f32 = 17.0;
-const BASE: (f32, f32) = (5.5, 11.0);
+pub const GAP: f32 = 22.0;
+const BASE: (f32, f32) = (7.5, 15.0);
 
 /// Design C's shapes: (width factor, height factor, dy, top lid, bottom lid) per mood, then the pose's
 /// factors on top (`blsq`: wide and flat at the squash, tall and thin at the stretch).
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn poses_squash_wide_and_flat_and_stretch_tall() {
         let rest = eye(Mood::Idle, Pose::Rest);
-        assert_eq!((rest.w, rest.h), (5.5, 11.0));
+        assert_eq!((rest.w, rest.h), (7.5, 15.0));
         let squash = eye(Mood::Idle, Pose::Squash);
         assert!(squash.w > rest.w && squash.h < rest.h / 5.0);
         let stretch = eye(Mood::Idle, Pose::Stretch);

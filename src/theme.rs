@@ -128,13 +128,13 @@ impl Theme {
             },
             Self::Light => Palette {
                 high_contrast: None,
-                body: Rgba(244, 245, 247, 1.0),
-                dock_hover: Rgba(232, 234, 238, 1.0),
+                body: Rgba(236, 238, 242, 1.0),
+                dock_hover: Rgba(226, 229, 234, 1.0),
                 ink: (20, 22, 26),
                 accent: (20, 22, 26),
                 on_ink: (255, 255, 255),
                 glyph: (52, 56, 64),
-                tile: Rgba(205, 208, 214, 1.0),
+                tile: Rgba(198, 202, 209, 1.0),
                 shadow: 0.35,
                 rim: None,
                 sheen: None,
@@ -539,6 +539,6 @@ mod tests {
             assert!(mid.3 >= p.body.3.min(p.dock_hover.3) && mid.3 <= p.body.3.max(p.dock_hover.3));
         }
         let light = Theme::Light.palette().dock_fill(0.5);
-        assert_eq!((light.0, light.1, light.2), (238, 240, 243));
+        assert_eq!((light.0, light.1, light.2), (231, 234, 238));
     }
 }
