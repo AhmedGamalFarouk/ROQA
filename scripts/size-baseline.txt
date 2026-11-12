@@ -1,3 +1,3 @@
-968704
-raise-reason: notch tabs with hanging handle and icons, per-tab switches, mascot eyes (tabs/eyes batch)
-approved-by: user 2026-11-12
+1070080
+raise-reason: Weather tab: WinHTTP client, WinRT Geolocator bindings, JSON scanner, 8 condition icons, settings controls (weather batch, approved by user 2026-11-12)
+approved-by: user (weather batch) 2026-11-12

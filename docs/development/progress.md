@@ -983,3 +983,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Eyes:** idle/happy/sleepy/surprised, squash on blink and mood change; a blink starts only from the clock repaint, a mood change or hover (2 paints a minute idle instead of 1; setting off removes all). Also `topology-check.ps1` `@(switch)` fix.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 252 tests, locked release); 968,704 B, ratchet tripped (+5.12%), baseline raised to 968704; SHA `7428929EDBAF6897024B79DEF0B09ECF902D8BB98E08F68027FC4F5B9B0BE96A`.
 - **NOT RUN:** real drawing, input, UIA read, DPI/text scale, GUI paint counts; reviews paused (REVIEW NOT RUN).
+
+## Weather tab W1 (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/weather`; [packet](features-weather.md), [queue](features-queue.md). Layout J "Hero". No native/GUI run, no real network call.
+- **Done:** pure `weather.rs` (JSON scanner, WMO to 8 icons, refresh rules, back-off, store cache), `weather_os.rs` (WinHTTP + WinRT Geolocator, one thread per fetch), Settings city/detect/units, UIA name, `Tab::Weather` on. No new crates, nothing requested before a city or detection is set.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 268 tests, locked release); 1,070,080 B, ratchet tripped (+10.46%), baseline raised with sign-off; SHA `7D9BD380FC9571076FC1C496D46A2DFAFCDFFA817BE45B682A6564B284F4DE7A`.
+- **NOT RUN:** real fetch, geolocation prompt, offline behaviour, drawing, UIA read, small-screen settings fit; reviews paused (REVIEW NOT RUN).

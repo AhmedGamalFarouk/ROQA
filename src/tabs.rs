@@ -26,9 +26,9 @@ impl Tab {
         Tab::Shelf,
     ];
 
-    /// Weather and Prayer are placeholders: hidden until their content ships.
+    /// Prayer is a placeholder: hidden until its content ships.
     pub fn available(self) -> bool {
-        !matches!(self, Tab::Weather | Tab::Prayer)
+        self != Tab::Prayer
     }
     pub fn index(self) -> usize {
         self as usize
@@ -188,14 +188,17 @@ mod tests {
     #[test]
     fn tabs_keep_their_order_and_placeholders_stay_hidden() {
         let all = Visible::new([true; 5]);
-        assert_eq!(all.as_slice(), [Tab::Media, Tab::Timer, Tab::Shelf]);
-        assert!(!Tab::Weather.available() && !Tab::Prayer.available());
+        assert_eq!(
+            all.as_slice(),
+            [Tab::Media, Tab::Weather, Tab::Timer, Tab::Shelf]
+        );
+        assert!(Tab::Weather.available() && !Tab::Prayer.available());
         assert_eq!(
             Visible::new([false, true, true, true, true]).as_slice(),
-            [Tab::Timer, Tab::Shelf]
+            [Tab::Weather, Tab::Timer, Tab::Shelf]
         );
-        assert_eq!(all.position(Tab::Shelf), Some(2));
-        assert_eq!(all.position(Tab::Weather), None);
+        assert_eq!(all.position(Tab::Shelf), Some(3));
+        assert_eq!(all.position(Tab::Prayer), None);
         for tab in Tab::ALL {
             assert_eq!(Tab::from_key(tab.key()), Some(tab));
         }
@@ -205,12 +208,13 @@ mod tests {
     #[test]
     fn the_handle_needs_two_tabs() {
         assert!(Visible::new([true; 5]).handle());
-        assert!(!Visible::new([true, true, true, false, false]).handle());
+        assert!(!Visible::new([true, false, true, false, false]).handle());
+        assert!(Visible::new([true, true, false, false, false]).handle());
         assert!(!Visible::new([false; 5]).handle());
-        // Switching off Weather or Prayer changes nothing while they are placeholders.
+        // Switching Prayer on or off changes nothing while it is a placeholder.
         assert_eq!(
             Visible::new([true, false, false, false, true]),
-            Visible::new([true, true, true, false, true])
+            Visible::new([true, false, true, false, true])
         );
     }
 
@@ -227,7 +231,10 @@ mod tests {
         // A hidden tab is never shown: fall back, and a placeholder cannot be the last one.
         let no_media = Visible::new([false, true, true, true, true]);
         assert_eq!(pick(&no_media, None, true, Tab::Timer), Some(Tab::Timer));
-        assert_eq!(pick(&no_media, None, false, Tab::Weather), Some(Tab::Timer));
+        assert_eq!(
+            pick(&no_media, None, false, Tab::Prayer),
+            Some(Tab::Weather)
+        );
         assert_eq!(
             pick(&no_media, Some(Tab::Media), false, Tab::Shelf),
             Some(Tab::Shelf)
@@ -252,7 +259,7 @@ mod tests {
             "same tab: nothing to repaint"
         );
         assert!(
-            !tabs.select(Tab::Weather, true),
+            !tabs.select(Tab::Prayer, true),
             "a placeholder cannot be picked"
         );
         tabs.flags[Tab::Timer.index()] = false;
@@ -269,12 +276,13 @@ mod tests {
     #[test]
     fn stepping_wraps_over_the_shown_tabs_only() {
         let visible = Visible::new([true; 5]);
-        assert_eq!(visible.step(Tab::Media, true), Tab::Timer);
+        assert_eq!(visible.step(Tab::Media, true), Tab::Weather);
+        assert_eq!(visible.step(Tab::Weather, true), Tab::Timer);
         assert_eq!(visible.step(Tab::Shelf, true), Tab::Media);
         assert_eq!(visible.step(Tab::Media, false), Tab::Shelf);
         let one = Visible::new([true, false, false, false, false]);
         assert_eq!(one.step(Tab::Media, true), Tab::Media);
-        assert_eq!(visible.step(Tab::Weather, true), Tab::Weather);
+        assert_eq!(visible.step(Tab::Prayer, true), Tab::Prayer);
     }
 
     #[test]

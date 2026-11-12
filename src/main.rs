@@ -48,6 +48,8 @@ mod text_settings;
 mod theme;
 mod timer;
 mod topology;
+mod weather;
+mod weather_os;
 mod window_catalog;
 mod window_model;
 mod window_source;

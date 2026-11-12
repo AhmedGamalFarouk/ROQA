@@ -178,6 +178,8 @@ pub struct NotchScene<'a> {
     pub rail: Option<RailScene<'a>>,
     /// The mascot's mood and pose in the pill; `None` draws no eyes and leaves the title where it was.
     pub eyes: Option<(Mood, Pose)>,
+    /// The Weather page's text and pictures; `Some` only while that page shows.
+    pub weather: Option<&'a crate::weather::View>,
 }
 
 /// The tab handle: its geometry, the shown tabs in order and the one position with keyboard focus.
@@ -2171,6 +2173,7 @@ mod media_tests {
             tab: Tab::Media,
             rail: None,
             eyes: None,
+            weather: None,
         };
         let clock = clock_width(time, progress, dpi);
         media_plan(&scene, scene.track.unwrap(), &body(dpi, progress), clock)
@@ -2202,6 +2205,7 @@ mod media_tests {
                 tab: Tab::Media,
                 rail: None,
                 eyes: None,
+                weather: None,
             };
             let clock = clock_width("9:50 pm", progress, 96);
             let plan = media_plan(&scene, scene.track.unwrap(), &body(96, progress), clock);
@@ -2463,6 +2467,7 @@ mod media_tests {
                 tab: Tab::Media,
                 rail: None,
                 eyes: None,
+                weather: None,
             };
             meter_bars(&scene, &body(96, progress))
         };
@@ -2516,6 +2521,7 @@ mod media_tests {
                     tab: Tab::Media,
                     rail: None,
                     eyes: None,
+                    weather: None,
                 };
                 let (bars, _) = meter_bars(&scene, &body(dpi, 1.0)).unwrap();
                 for bar in bars {

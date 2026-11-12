@@ -8,6 +8,7 @@ use crate::{
     eyes::{self, Eye},
     layout::NotchBody,
     tabs::Tab,
+    weather::Icon,
 };
 use windows::Win32::Graphics::Direct2D::{
     Common::{D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN},
@@ -186,6 +187,160 @@ const SHELF: Art = Art {
     circles: &[],
 };
 
+// The Weather page's pictures (features W1), on the same grid. A cloud is the Weather tab's own outline, moved.
+const SUN: Art = Art {
+    paths: &[(
+        &[
+            M(8.0, 1.4),
+            L(8.0, 2.8),
+            M(8.0, 13.2),
+            L(8.0, 14.6),
+            M(1.4, 8.0),
+            L(2.8, 8.0),
+            M(13.2, 8.0),
+            L(14.6, 8.0),
+            M(3.3, 3.3),
+            L(4.4, 4.4),
+            M(12.7, 3.3),
+            L(11.6, 4.4),
+            M(3.3, 12.7),
+            L(4.4, 11.6),
+            M(12.7, 12.7),
+            L(11.6, 11.6),
+        ],
+        false,
+    )],
+    circles: &[(8.0, 8.0, 2.9, false)],
+};
+const CLOUD: Art = Art {
+    paths: &[(
+        &[
+            M(4.6, 12.2),
+            L(11.2, 12.2),
+            A(11.5, 7.4, 2.4, false, false),
+            A(4.6, 8.3, 3.6, false, false),
+            A(4.6, 12.2, 2.1, false, false),
+            Z,
+        ],
+        false,
+    )],
+    circles: &[],
+};
+const FOG: Art = Art {
+    paths: &[(
+        &[
+            M(3.0, 4.5),
+            L(13.0, 4.5),
+            M(2.0, 7.5),
+            L(12.0, 7.5),
+            M(4.0, 10.5),
+            L(14.0, 10.5),
+            M(3.0, 13.5),
+            L(11.0, 13.5),
+        ],
+        false,
+    )],
+    circles: &[],
+};
+const DRIZZLE: Art = Art {
+    paths: &[
+        (
+            &[
+                M(4.6, 9.7),
+                L(11.2, 9.7),
+                A(11.5, 4.9, 2.4, false, false),
+                A(4.6, 5.8, 3.6, false, false),
+                A(4.6, 9.7, 2.1, false, false),
+                Z,
+            ],
+            false,
+        ),
+        (
+            &[M(6.0, 12.0), L(5.6, 13.4), M(9.6, 12.0), L(9.2, 13.4)],
+            false,
+        ),
+    ],
+    circles: &[],
+};
+const RAIN: Art = Art {
+    paths: &[
+        (
+            &[
+                M(4.6, 9.7),
+                L(11.2, 9.7),
+                A(11.5, 4.9, 2.4, false, false),
+                A(4.6, 5.8, 3.6, false, false),
+                A(4.6, 9.7, 2.1, false, false),
+                Z,
+            ],
+            false,
+        ),
+        (
+            &[
+                M(5.6, 11.6),
+                L(4.8, 14.4),
+                M(8.6, 11.6),
+                L(7.8, 14.4),
+                M(11.6, 11.6),
+                L(10.8, 14.4),
+            ],
+            false,
+        ),
+    ],
+    circles: &[],
+};
+const SNOW: Art = Art {
+    paths: &[(
+        &[
+            M(4.6, 9.7),
+            L(11.2, 9.7),
+            A(11.5, 4.9, 2.4, false, false),
+            A(4.6, 5.8, 3.6, false, false),
+            A(4.6, 9.7, 2.1, false, false),
+            Z,
+        ],
+        false,
+    )],
+    circles: &[
+        (5.6, 12.8, 0.3, true),
+        (8.8, 13.9, 0.3, true),
+        (12.0, 12.8, 0.3, true),
+    ],
+};
+const STORM: Art = Art {
+    paths: &[
+        (
+            &[
+                M(4.6, 9.7),
+                L(11.2, 9.7),
+                A(11.5, 4.9, 2.4, false, false),
+                A(4.6, 5.8, 3.6, false, false),
+                A(4.6, 9.7, 2.1, false, false),
+                Z,
+            ],
+            false,
+        ),
+        (
+            &[M(9.0, 10.8), L(6.8, 13.2), L(9.4, 13.2), L(7.2, 15.6)],
+            false,
+        ),
+    ],
+    circles: &[],
+};
+
+fn weather_art(icon: Icon) -> &'static Art {
+    match icon {
+        Icon::Clear => &SUN,
+        Icon::PartlyCloudy => &WEATHER,
+        Icon::Cloud => &CLOUD,
+        Icon::Fog => &FOG,
+        Icon::Drizzle => &DRIZZLE,
+        Icon::Rain => &RAIN,
+        Icon::Snow => &SNOW,
+        Icon::Storm => &STORM,
+    }
+}
+
 fn art(tab: Tab) -> &'static Art {
     match tab {
         Tab::Media => &MEDIA,
@@ -203,12 +358,20 @@ fn icon(
     square: D2D_RECT_F,
     color: D2D1_COLOR_F,
 ) -> Result<()> {
+    draw_art(context, art(tab), square, color)
+}
+
+fn draw_art(
+    context: &ID2D1DeviceContext,
+    art: &Art,
+    square: D2D_RECT_F,
+    color: D2D1_COLOR_F,
+) -> Result<()> {
     let unit = (square.right - square.left) / 16.0;
     let at = |x: f32, y: f32| Vector2 {
         X: square.left + x * unit,
         Y: square.top + y * unit,
     };
-    let art = art(tab);
     // SAFETY: context is live between surface BeginDraw/EndDraw; the brush, stroke style, geometry and sink
     // are local COM objects scoped to this draw, and each sink is closed before its geometry is used.
     unsafe {
@@ -469,9 +632,13 @@ pub(super) fn page(
         designator,
         align,
     };
+    let title = match scene.weather.filter(|_| scene.tab == Tab::Weather) {
+        Some(view) => view.title.as_str(),
+        None => scene.tab.name(),
+    };
     draw_text(
         context,
-        scene.tab.name(),
+        title,
         &font(
             TEXT_FONT,
             13.0,
@@ -543,8 +710,121 @@ pub(super) fn page(
             }
             Ok(())
         }
+        Tab::Weather => weather_page(context, scene, body, scale, reveal, p),
         _ => Ok(()),
     }
+}
+
+/// The Weather page (design J "Hero"): a condition picture and the big temperature at the left with the day's
+/// range and the condition beside them, the next hours as columns at the right, and the attribution as the
+/// footer (the power notice takes its row while it shows). The columns are three in the plain panel and four
+/// in the wider media one; with no data one line says why. Positions are DIPs from the body's corner.
+fn weather_page(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    scale: f32,
+    reveal: f32,
+    p: &Palette,
+) -> Result<()> {
+    let Some(view) = scene.weather else {
+        return Ok(());
+    };
+    let media = scene.track.is_some();
+    let width = if media { 328.0 } else { 288.0 };
+    let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha * reveal));
+    let at = |x: f32, y: f32, w: f32, h: f32| D2D_RECT_F {
+        left: body.left + x * scale,
+        top: body.top + y * scale,
+        right: body.left + (x + w) * scale,
+        bottom: body.top + (y + h) * scale,
+    };
+    let font = |family, size: f32, weight, align| Font {
+        family,
+        size: size * scale,
+        weight,
+        designator: 1.0,
+        align,
+    };
+    let (lead, middle) = (DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_CENTER);
+    let normal = DWRITE_FONT_WEIGHT_NORMAL;
+    if let Some(message) = view.message {
+        let font = font(TEXT_FONT, 12.0, normal, lead);
+        return draw_text(
+            context,
+            message,
+            &font,
+            at(16.0, 32.0, width, 16.0),
+            ink(0.6),
+        );
+    }
+    draw_art(
+        context,
+        weather_art(view.icon),
+        at(16.0, 33.0, 28.0, 28.0),
+        ink(1.0),
+    )?;
+    let temp = font(DISPLAY_FONT, 26.0, DWRITE_FONT_WEIGHT_BOLD, lead);
+    draw_text(
+        context,
+        &view.temp,
+        &temp,
+        at(50.0, 30.0, 56.0, 32.0),
+        ink(1.0),
+    )?;
+    let small = font(TEXT_FONT, 11.0, normal, lead);
+    draw_text(
+        context,
+        &view.range,
+        &small,
+        at(108.0, 33.0, 72.0, 14.0),
+        ink(0.8),
+    )?;
+    draw_text(
+        context,
+        view.cond,
+        &small,
+        at(108.0, 48.0, 72.0, 14.0),
+        ink(0.6),
+    )?;
+    let columns = if media { 4 } else { 3 };
+    for (index, cell) in view.hours.iter().take(columns).enumerate() {
+        let x = 182.0 + 40.0 * index as f32;
+        let label = font(TEXT_FONT, 10.0, normal, middle);
+        draw_text(
+            context,
+            &cell.label,
+            &label,
+            at(x, 29.0, 40.0, 12.0),
+            ink(0.6),
+        )?;
+        draw_art(
+            context,
+            weather_art(cell.icon),
+            at(x + 15.0, 42.0, 10.0, 10.0),
+            ink(0.85),
+        )?;
+        let value = font(TEXT_FONT, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, middle);
+        draw_text(
+            context,
+            &cell.temp,
+            &value,
+            at(x, 53.0, 40.0, 13.0),
+            ink(1.0),
+        )?;
+    }
+    if scene.notice.is_some() {
+        return Ok(());
+    }
+    let row = if media { 98.0 } else { 66.0 };
+    let footer = font(TEXT_FONT, 10.0, normal, lead);
+    draw_text(
+        context,
+        &view.footer,
+        &footer,
+        at(16.0, row, width, 12.0),
+        ink(0.45),
+    )
 }
 
 /// Where the eye pair is centred in the pill, in DIPs from the body's left: the middle of the media pill's

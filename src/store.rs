@@ -7,6 +7,7 @@
 
 use crate::settings::Settings;
 use crate::tabs::Tab;
+use crate::weather::{Place, Report};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -33,6 +34,9 @@ pub struct Store {
     pub settings: Settings,
     /// The notch tab used last (a state, not a setting: the settings window must not write it back).
     pub last_tab: Tab,
+    /// The weather place and the last report (features W1): shown at once on the next start.
+    pub place: Option<Place>,
+    pub report: Option<Report>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -162,6 +166,8 @@ fn parse(text: &str) -> Option<Store> {
                     .filter(|tab| tab.available())
                     .unwrap_or_default();
             }
+            Some(("wxplace", value)) => store.place = Place::from_line(value),
+            Some(("wxdata", value)) => store.report = Report::from_line(value),
             Some((key, value)) if store.settings.set(key, value) => {}
             _ => {} // Unknown keys and junk lines are ignored.
         }
@@ -201,6 +207,13 @@ impl Store {
             out.push_str(&format!("timer={expiry}\n"));
         }
         out.push_str(&format!("lasttab={}\n", self.last_tab.key()));
+        // A report goes with its place only: a stray one would be shown under the wrong name.
+        if let Some(place) = &self.place {
+            out.push_str(&format!("wxplace={}\n", place.to_line()));
+            if let Some(report) = &self.report {
+                out.push_str(&format!("wxdata={}\n", report.to_line()));
+            }
+        }
         self.settings.write_lines(&mut out);
         out.push_str("end\n");
         out
@@ -237,6 +250,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::weather::Hour;
 
     /// A fresh directory under the system temp dir, removed on drop. Never touches `%LOCALAPPDATA%`.
     struct Dir(PathBuf);
@@ -278,6 +292,24 @@ mod tests {
                 ..Settings::default()
             },
             last_tab: Tab::Shelf,
+            place: Some(Place {
+                lat: 300_444,
+                lon: -12_005,
+                detected: false,
+                name: "Cairo, Egypt".into(),
+            }),
+            report: Some(Report {
+                at: 1_800_000_000,
+                tenths: 243,
+                code: 2,
+                hi: 291,
+                lo: 180,
+                hours: vec![Hour {
+                    hour: 15,
+                    tenths: 251,
+                    code: 1,
+                }],
+            }),
         }
     }
 
@@ -290,6 +322,19 @@ mod tests {
         // Order and an empty store both survive.
         Store::default().save(&dir.file()).unwrap();
         assert_eq!(load(&dir.file()), (Store::default(), Load::Loaded));
+    }
+
+    #[test]
+    fn a_report_is_kept_only_with_its_place_and_junk_weather_lines_are_ignored() {
+        let mut orphan = sample();
+        orphan.place = None;
+        let text = orphan.serialize();
+        assert!(!text.contains("wxdata") && !text.contains("wxplace"));
+        let parsed = parse("version=2\nwxplace=1,2\nwxdata=x\nend\n").unwrap();
+        assert!(parsed.place.is_none() && parsed.report.is_none());
+        let lines = sample().serialize();
+        assert!(lines.contains("wxplace=300444,-12005,0,Cairo, Egypt\n"));
+        assert!(lines.contains("wxdata=1800000000,243,2,291,180,15:251:1\n"));
     }
 
     #[test]
@@ -314,6 +359,8 @@ mod tests {
                 timers: vec![77], // unparsable timer values are skipped
                 settings: Settings::default(),
                 last_tab: Tab::Media,
+                place: None,
+                report: None,
             })
         );
         assert_eq!(

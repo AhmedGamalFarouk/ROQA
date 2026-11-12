@@ -7,6 +7,7 @@ use crate::{
     tabs::{Flags, Tab},
     theme::Theme,
     timer,
+    weather::{MAX_CITY, Units},
 };
 
 const KINDS: [SurfaceKind; 2] = [SurfaceKind::Notch, SurfaceKind::Dock];
@@ -38,6 +39,11 @@ pub struct Settings {
     pub tabs: Flags,
     /// The mascot eyes in the pill; off removes their state, deadlines and drawing.
     pub eyes: bool,
+    /// The weather city as typed (empty is none), the opt-in device location (it wins over the city while
+    /// it works) and °C or °F. Nothing is requested until a city is set or detection is on.
+    pub city: String,
+    pub detect: bool,
+    pub units: Units,
 }
 
 impl Default for Settings {
@@ -56,6 +62,9 @@ impl Default for Settings {
             edge_brightness: false,
             tabs: [true; 5],
             eyes: true,
+            city: String::new(),
+            detect: false,
+            units: Units::Auto,
         }
     }
 }
@@ -82,6 +91,14 @@ impl Settings {
         self.off_monitors.dedup();
         self.off_monitors.truncate(MAX_OFF);
         self.shelf_cap = self.shelf_cap.clamp(1, shelf::MAX);
+        self.city = self
+            .city
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(MAX_CITY)
+            .collect::<String>()
+            .trim()
+            .to_owned();
         self.diagnostics = self
             .diagnostics
             .map(|p| p.trim().trim_matches('"').trim().to_owned())
@@ -120,6 +137,12 @@ impl Settings {
             "edgevol" => flag(value).map(|v| self.edge_volume = v).is_some(),
             "edgebri" => flag(value).map(|v| self.edge_brightness = v).is_some(),
             "eyes" => flag(value).map(|v| self.eyes = v).is_some(),
+            "detect" => flag(value).map(|v| self.detect = v).is_some(),
+            "units" => Units::from_key(value).map(|v| self.units = v).is_some(),
+            "city" if !value.is_empty() => {
+                self.city = value.to_owned();
+                true
+            }
             _ if key.starts_with("tab") => key
                 .strip_prefix("tab")
                 .and_then(Tab::from_key)
@@ -154,7 +177,15 @@ impl Settings {
             u8::from(self.edge_volume),
             u8::from(self.edge_brightness)
         ));
-        out.push_str(&format!("eyes={}\n", u8::from(self.eyes)));
+        out.push_str(&format!(
+            "eyes={}\ndetect={}\nunits={}\n",
+            u8::from(self.eyes),
+            u8::from(self.detect),
+            self.units.key()
+        ));
+        if !self.city.is_empty() && one_line(&&self.city) {
+            out.push_str(&format!("city={}\n", self.city));
+        }
         for tab in Tab::ALL {
             out.push_str(&format!(
                 "tab{}={}\n",
@@ -246,6 +277,9 @@ mod tests {
             edge_brightness: false,
             tabs: [true; 5],
             eyes: true,
+            city: "  Ca\niro \u{7}".into(),
+            detect: true,
+            units: Units::Fahrenheit,
         }
         .clamped();
         assert!(!wild.dock && wild.notch, "one surface kind always stays on");
@@ -254,6 +288,15 @@ mod tests {
         assert_eq!(wild.theme, Theme::Glass);
         assert!(wild.desktop_only && !wild.edge_volume && !wild.edge_brightness);
         assert_eq!(wild.diagnostics.as_deref(), Some(r"C:\logs\roqa.json"));
+        assert_eq!(
+            (wild.city.as_str(), wild.detect, wild.units),
+            ("Cairo", true, Units::Fahrenheit)
+        );
+        let long = Settings {
+            city: "c".repeat(MAX_CITY + 9),
+            ..Settings::default()
+        };
+        assert_eq!(long.clamped().city.chars().count(), MAX_CITY);
         let low = Settings {
             shelf_cap: 0,
             ..Settings::default()
@@ -401,6 +444,9 @@ mod tests {
             edge_volume: true,
             tabs: [false, true, false, true, false],
             eyes: false,
+            city: "Washington, D.C.".into(),
+            detect: true,
+            units: Units::Celsius,
             ..Settings::default()
         };
         let mut text = String::new();
@@ -421,6 +467,9 @@ mod tests {
             ("off", ""),
             ("pin", "a"),
             ("future", "1"),
+            ("detect", "2"),
+            ("units", "k"),
+            ("city", ""),
         ] {
             assert!(!s.set(key, value), "{key}={value}");
         }
@@ -428,6 +477,17 @@ mod tests {
         // An out-of-range stored value is accepted by `set` and brought into range by `clamped`.
         assert!(s.set("shelfcap", "9999"));
         assert_eq!(s.clamped().shelf_cap, shelf::MAX);
+    }
+
+    #[test]
+    fn weather_defaults_ask_for_nothing_and_an_empty_city_is_not_written() {
+        let defaults = Settings::default();
+        assert!(defaults.city.is_empty() && !defaults.detect && defaults.units == Units::Auto);
+        assert!(!crate::weather::configured(defaults.detect, &defaults.city));
+        let mut text = String::new();
+        defaults.write_lines(&mut text);
+        assert!(text.contains("detect=0\n") && text.contains("units=auto\n"));
+        assert!(!text.contains("city="));
     }
 
     #[test]

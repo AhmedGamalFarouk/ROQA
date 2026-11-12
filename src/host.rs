@@ -31,6 +31,8 @@ use crate::{
     theme::Palette,
     timer::{self, Timers},
     topology::{self, Monitor},
+    weather::{self, Feed},
+    weather_os,
     window_catalog::Catalog,
     window_model::{Identity, WindowKey, WindowModel},
 };
@@ -157,6 +159,10 @@ struct Pages {
     /// mascot's sleepy mood reads.
     last_input: Instant,
     hour: u8,
+    /// The Weather page's text, rebuilt by `refresh_weather` only while that page shows, and the feed
+    /// revision and minute it was built for.
+    weather: weather::View,
+    weather_key: Option<(u32, String)>,
 }
 impl Pages {
     fn new(settings: &Settings, last: Tab) -> Self {
@@ -166,6 +172,8 @@ impl Pages {
             rev: 0,
             last_input: Instant::now(),
             hour: 12,
+            weather: weather::View::default(),
+            weather_key: None,
         }
     }
     /// The track the notch shows: none with the Media tab off, so a session costs nothing then.
@@ -503,6 +511,15 @@ impl Surface {
                 state.timer.clear();
                 state.timer.push_str(timer_name);
             }
+            let weather = if page == Tab::Weather {
+                pages.weather.name.as_str()
+            } else {
+                ""
+            };
+            if state.weather != weather {
+                state.weather.clear();
+                state.weather.push_str(weather);
+            }
             state.version = uia_version(media, &shelf.shelf, pages.rev);
             // A page switch republishes what each page lists.
             if state.published_page != Some(page) {
@@ -658,6 +675,7 @@ impl Surface {
                 focus: focus.and_then(|control| control.checked_sub(notch_uia::TAB_BASE)),
             }),
             eyes: pages.eyes.map(|eyes| (eyes.mood(), eyes.pose())),
+            weather: (page == Tab::Weather).then_some(&pages.weather),
         };
         shadow.paint(&scene, self.window.0)?;
         let status = track.is_none().then(|| media.view().status()).flatten();
@@ -1130,6 +1148,10 @@ struct Desktop {
     edges_dirty: bool,
     /// The tabs and the mascot (features tabs-eyes).
     pages: Pages,
+    /// The weather place, report and back-off, the worker channel and the locale's region (features W1).
+    weather: Feed,
+    weather_io: weather_os::Io,
+    region: String,
 }
 impl Desktop {
     fn create(_probe: &Probe) -> Result<Self> {
@@ -1149,6 +1171,7 @@ impl Desktop {
             shelf.write_to(&mut store); // the cut list leaves the file with its next write
         }
         let pages = Pages::new(&settings, store.last_tab);
+        let weather = Feed::new(store.place.clone(), store.report.clone(), settings.detect);
         let timers = Timers::restore(&store.timers, timer::wall_now(), now);
         // The section now mirrors what is running; stale entries leave the file with its next write.
         timers.write_to(&mut store, &mut Pending::default(), now);
@@ -1207,6 +1230,9 @@ impl Desktop {
             edges: Edges::default(),
             edges_dirty: true,
             pages,
+            weather,
+            weather_io: weather_os::Io::new(),
+            region: weather_os::region(),
         };
         if desktop.settings.notch {
             desktop.show(SurfaceKind::Notch)?;
@@ -1462,6 +1488,60 @@ impl Desktop {
         }
         self.request_notches(Repaint::Full, |_| true);
         self.reconcile_focus(|_| true);
+    }
+    /// Weather (features W1): takes a finished worker's answer, starts a job when `Feed::wants` says so and
+    /// keeps the page text current. It sets no deadline of its own: the minute clock's wake runs it, so a due
+    /// refresh lands within a minute, and a switched-off tab costs nothing but this early return.
+    #[inline(never)]
+    fn refresh_weather(&mut self) {
+        let now = Instant::now();
+        while let Some((id, outcome)) = self.weather_io.poll() {
+            if self.weather.finish(id, outcome, now) {
+                self.store.place = self.weather.place.clone();
+                self.store.report = self.weather.report.clone();
+                self.pending.mark(now);
+            }
+        }
+        if !self.pages.tabs.on(Tab::Weather) {
+            return; // no fetch, no worker, no page
+        }
+        let shown = self.page() == Tab::Weather;
+        let (detect, configured) = (
+            self.settings.detect,
+            weather::configured(self.settings.detect, &self.settings.city),
+        );
+        let ctx = weather::Ctx {
+            enabled: true,
+            configured,
+            visible: self
+                .surfaces
+                .iter()
+                .any(|s| s.visible && s.kind() == SurfaceKind::Notch),
+            open: shown && self.surfaces.iter().any(Surface::expanded),
+            wall: timer::wall_now(),
+        };
+        let idle = || weather_os::idle_secs() >= weather_os::IDLE_AFTER_SECS;
+        if self.weather.wants(&ctx, now, idle) {
+            let job = self.weather.start(now, detect, &self.settings.city);
+            self.weather_io.spawn(job);
+        }
+        // The text is rebuilt when the data or the minute (the age) changed, and only while it shows.
+        let current = |key: &Option<(u32, String)>| {
+            key.as_ref()
+                .is_some_and(|(rev, clock)| *rev == self.weather.rev && *clock == self.clock)
+        };
+        if shown && !current(&self.pages.weather_key) {
+            let fahrenheit = self.settings.units.fahrenheit(&self.region);
+            self.pages.weather = weather::view(
+                &self.weather,
+                configured,
+                fahrenheit,
+                ctx.wall,
+                &weather_os::hour_label,
+            );
+            self.pages.weather_key = Some((self.weather.rev, self.clock.clone()));
+            self.request_notches(Repaint::Full, |s| motion::reveal(s.motion.value(now)) > 0.0);
+        }
     }
     /// Closes each notch's tab handle once its delay passed; returns the wait until the next such deadline
     /// (`INFINITE` with none waiting, the common case).
@@ -1773,6 +1853,13 @@ impl Desktop {
             if !self.settings.tabs[Tab::Media.index()] {
                 self.audio.stop();
             }
+        }
+        if (old.city.as_str(), old.detect) != (self.settings.city.as_str(), self.settings.detect) {
+            // A new place: forget the old one and what was fetched for it; the next pass fetches if due.
+            self.weather.reset(self.settings.detect);
+            (self.store.place, self.store.report) = (None, None);
+        } else if old.units != self.settings.units {
+            self.weather.rev = self.weather.rev.wrapping_add(1);
         }
         let eyes_changed = old.eyes != self.settings.eyes;
         if eyes_changed {
@@ -2894,6 +2981,7 @@ impl Desktop {
         }
         self.refresh_dock(model)?;
         self.refresh_shelf();
+        self.refresh_weather();
         self.refresh_fullscreen(model.generation)?;
         let wait = self
             .refresh_clock()?
@@ -3529,14 +3617,15 @@ mod clock_wait_tests {
     #[test]
     fn the_handle_follows_the_shown_tabs_and_the_active_page() {
         let mut settings = Settings::default();
-        // Media, Timer and Shelf show: a handle, on Media while a session lives, else on the last tab used.
+        // Media, Weather, Timer and Shelf show: a handle, on Media while a session lives, else on the last tab used.
         let pages = Pages::new(&settings, Tab::Shelf);
         let rail = |pages: &Pages, live| pages.rail(live, 0.0).map(|r| (r.count, r.active));
-        assert_eq!(rail(&pages, true), Some((3, 0)));
-        assert_eq!(rail(&pages, false), Some((3, 2)));
+        assert_eq!(rail(&pages, true), Some((4, 0)));
+        assert_eq!(rail(&pages, false), Some((4, 3)));
         assert_eq!(pages.page(false), Tab::Shelf);
-        // The Timer tab off leaves two; a pick during one open wins until it ends.
+        // The Timer and Weather tabs off leave two; a pick during one open wins until it ends.
         settings.tabs[Tab::Timer.index()] = false;
+        settings.tabs[Tab::Weather.index()] = false;
         let mut pages = Pages::new(&settings, Tab::Media);
         assert_eq!(rail(&pages, false), Some((2, 0)));
         assert!(pages.tabs.select(Tab::Shelf, true));

@@ -14,6 +14,8 @@ windows-numerics = "=0.3.1"
 windows-future = "=0.3.2"
 windows = { version = "=0.62.2", features = [
     "Media_Control",
+    # Geolocator: the opt-in "Detect automatically" weather location (features W1).
+    "Devices_Geolocation",
     "Storage_Streams",
     # Core Audio: IMMDeviceEnumerator, IMMNotificationClient and AUDIO_VOLUME_NOTIFICATION_DATA (slice 6).
     # IAudioEndpointVolume and its callback (slice 6).
@@ -54,6 +56,8 @@ windows = { version = "=0.62.2", features = [
     "Win32_UI_HiDpi",
     # GetPhysicalMonitorsFromHMONITOR, GetMonitorBrightness, SetMonitorBrightness: DDC/CI (edge sliders).
     "Win32_Devices_Display",
+    # WinHTTP: the Open-Meteo requests, through the OS TLS stack (features W1).
+    "Win32_Networking_WinHttp",
     "Win32_UI_Accessibility",
     "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",

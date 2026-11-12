@@ -14,6 +14,7 @@ use crate::{
     shelf,
     tabs::Tab,
     theme::Theme,
+    weather::{MAX_CITY, Units},
     window_model::WindowKey,
 };
 use windows::{
@@ -41,6 +42,10 @@ const EDGE_BRIGHTNESS: usize = 113;
 /// One checkbox per notch tab (`Tab::ALL` order), then the mascot eyes.
 const TAB: usize = 150;
 const EYES: usize = TAB + 5;
+/// The weather city, the device-location checkbox and the units list.
+const CITY: usize = 114;
+const DETECT: usize = 115;
+const UNITS: usize = 116;
 const SHELF: usize = 103;
 const THEME: usize = 110;
 const DIAGNOSTICS: usize = 104;
@@ -72,6 +77,10 @@ pub struct SettingsWindow {
     /// "Media tab" and so on, in `Tab::ALL` order, and "Mascot eyes".
     tabs: [HWND; 5],
     eyes: HWND,
+    city: HWND,
+    detect: HWND,
+    /// Drop-down list of `Units::ALL`, in that order.
+    units: HWND,
     /// Drop-down list of `Theme::ALL`, in that order.
     theme: HWND,
     /// One checkbox per connected monitor (at most `MAX_OFF`), named by its GDI device.
@@ -139,6 +148,9 @@ impl SettingsWindow {
             edge_brightness: HWND::default(),
             tabs: [HWND::default(); 5],
             eyes: HWND::default(),
+            city: HWND::default(),
+            detect: HWND::default(),
+            units: HWND::default(),
             theme: HWND::default(),
             monitors: Vec::new(),
             shelf: HWND::default(),
@@ -322,7 +334,7 @@ impl SettingsWindow {
         for tab in Tab::ALL {
             let name = match tab {
                 Tab::Media => "&Media tab",
-                Tab::Weather => "Weather tab (coming soon)",
+                Tab::Weather => "&Weather tab",
                 Tab::Prayer => "Prayer tab (coming soon)",
                 Tab::Timer => "Timer ta&b",
                 Tab::Shelf => "Shelf ta&b",
@@ -361,6 +373,36 @@ impl SettingsWindow {
             edit | ES_NUMBER as u32,
             WS_EX_CLIENTEDGE,
         )?;
+        let city_label = label("Weather c&ity (empty is none)")?;
+        self.city = control(window, w!("Edit"), "", CITY, edit, WS_EX_CLIENTEDGE)?;
+        self.detect = control(
+            window,
+            w!("Button"),
+            "Detect location a&utomatically",
+            DETECT,
+            check,
+            flat,
+        )?;
+        self.units = control(
+            window,
+            w!("ComboBox"),
+            "",
+            UNITS,
+            CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | tab,
+            flat,
+        )?;
+        for units in Units::ALL {
+            let name = wide(units.label());
+            // SAFETY: the combo box copies the terminated string synchronously.
+            unsafe {
+                SendMessageW(
+                    self.units,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(name.as_ptr() as isize)),
+                );
+            }
+        }
         let diagnostics_label = label("Dia&gnostics report file (empty is off)")?;
         self.diagnostics = control(window, w!("Edit"), "", DIAGNOSTICS, edit, WS_EX_CLIENTEDGE)?;
         let timer_label = label("&Timer length (minutes, m:ss or h:mm:ss)")?;
@@ -404,6 +446,7 @@ impl SettingsWindow {
         self.others = vec![
             theme_label,
             shelf_label,
+            city_label,
             diagnostics_label,
             timer_label,
             start,
@@ -414,6 +457,7 @@ impl SettingsWindow {
         unsafe {
             for (edit, limit) in [
                 (self.shelf, 3),
+                (self.city, MAX_CITY),
                 (self.diagnostics, MAX_PATH),
                 (self.timer, 8),
             ] {
@@ -433,6 +477,9 @@ impl SettingsWindow {
             self.edge_brightness,
             self.theme,
             self.shelf,
+            self.city,
+            self.detect,
+            self.units,
         ];
         all.extend(self.tabs);
         all.push(self.eyes);
@@ -467,6 +514,16 @@ impl SettingsWindow {
             set_checked(*handle, !settings.off_monitors.contains(device));
         }
         let _ = set_text(self.shelf, &settings.shelf_cap.to_string());
+        let _ = set_text(self.city, &settings.city);
+        set_checked(self.detect, settings.detect);
+        let units = Units::ALL
+            .iter()
+            .position(|u| *u == settings.units)
+            .unwrap_or(0);
+        // SAFETY: scalar selection index on our own combo box.
+        unsafe {
+            SendMessageW(self.units, CB_SETCURSEL, Some(WPARAM(units)), None);
+        }
         let _ = set_text(
             self.diagnostics,
             settings.diagnostics.as_deref().unwrap_or(""),
@@ -502,6 +559,14 @@ impl SettingsWindow {
                 .map(|(_, d)| d.clone()),
         );
         next.shelf_cap = text(self.shelf, 3).trim().parse().unwrap_or(next.shelf_cap);
+        next.city = text(self.city, MAX_CITY);
+        next.detect = checked(self.detect);
+        // SAFETY: scalar query of our own combo box; -1 (nothing chosen) keeps the current units.
+        let chosen = unsafe { SendMessageW(self.units, CB_GETCURSEL, None, None) }.0;
+        next.units = usize::try_from(chosen)
+            .ok()
+            .and_then(|index| Units::ALL.get(index).copied())
+            .unwrap_or(next.units);
         next.diagnostics = Some(text(self.diagnostics, MAX_PATH));
         let kept_a_kind = next.dock || next.notch;
         let ranged = next.clamped();
@@ -545,7 +610,7 @@ impl SettingsWindow {
                 let notification = (message.wParam.0 >> 16) as u32;
                 let monitor = (MONITOR..MONITOR + self.monitors.len()).contains(&id);
                 match id {
-                    DOCK | NOTCH | SOUND | DESKTOP | EDGE_VOLUME | EDGE_BRIGHTNESS
+                    DOCK | NOTCH | SOUND | DESKTOP | EDGE_VOLUME | EDGE_BRIGHTNESS | DETECT
                         if notification == BN_CLICKED =>
                     {
                         self.commit()?
@@ -558,9 +623,9 @@ impl SettingsWindow {
                         }
                     }
                     TAB..=EYES if notification == BN_CLICKED => self.commit()?,
-                    THEME if notification == CBN_SELCHANGE => self.commit()?,
+                    THEME | UNITS if notification == CBN_SELCHANGE => self.commit()?,
                     _ if monitor && notification == BN_CLICKED => self.commit()?,
-                    SHELF | DIAGNOSTICS if notification == EN_KILLFOCUS => self.commit()?,
+                    SHELF | CITY | DIAGNOSTICS if notification == EN_KILLFOCUS => self.commit()?,
                     OK => self.commit()?,
                     START => match parse_timer(&text(self.timer, 8)) {
                         Some(seconds) => self.start = Some(seconds),
@@ -627,8 +692,11 @@ impl SettingsWindow {
         // Row heights in DIPs, top to bottom: one list gives both the window height and every control's top.
         // dock, notch, monitors, sound, desktop, two edge sliders, then the tabs and mascot in two columns
         let mut heights = vec![24.0; 6 + self.monitors.len() + 3];
-        // theme, shelf, diagnostics label and edit, timer label and row, status, pins, buttons
-        heights.extend([28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0, 28.0]);
+        // theme, shelf, weather city, detect and units, diagnostics label and edit, timer label and row,
+        // status, pins, buttons
+        heights.extend([
+            28.0, 28.0, 28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0, 28.0,
+        ]);
         let tops: Vec<i32> = heights
             .iter()
             .scan(16.0, |y, height| {
@@ -701,6 +769,7 @@ impl SettingsWindow {
             let [
                 theme_label,
                 shelf_label,
+                city_label,
                 diagnostics_label,
                 timer_label,
                 start,
@@ -768,23 +837,51 @@ impl SettingsWindow {
                     half(70.0),
                     px(28.0),
                 ),
-                (diagnostics_label, margin, tops[end + 3], inner, px(20.0)),
-                (self.diagnostics, margin, tops[end + 4], inner, px(28.0)),
-                (timer_label, margin, tops[end + 5], inner, px(20.0)),
-                (self.timer, margin, tops[end + 6], half(120.0), px(28.0)),
+                (
+                    city_label,
+                    margin,
+                    tops[end + 3] + px(5.0),
+                    inner - half(230.0),
+                    px(20.0),
+                ),
+                (
+                    self.city,
+                    margin + inner - half(220.0),
+                    tops[end + 3],
+                    half(220.0),
+                    px(28.0),
+                ),
+                (
+                    self.detect,
+                    margin,
+                    tops[end + 4] + px(2.0),
+                    inner - half(190.0),
+                    px(24.0),
+                ),
+                (
+                    self.units,
+                    margin + inner - half(180.0),
+                    tops[end + 4],
+                    half(180.0),
+                    px(160.0),
+                ),
+                (diagnostics_label, margin, tops[end + 5], inner, px(20.0)),
+                (self.diagnostics, margin, tops[end + 6], inner, px(28.0)),
+                (timer_label, margin, tops[end + 7], inner, px(20.0)),
+                (self.timer, margin, tops[end + 8], half(120.0), px(28.0)),
                 (
                     start,
                     margin + half(128.0),
-                    tops[end + 6],
+                    tops[end + 8],
                     half(150.0),
                     px(28.0),
                 ),
-                (self.status, margin, tops[end + 7], inner, px(42.0)),
-                (reset, margin, tops[end + 9], half(180.0), px(28.0)),
+                (self.status, margin, tops[end + 9], inner, px(42.0)),
+                (reset, margin, tops[last], half(180.0), px(28.0)),
                 (
                     close,
                     client.right - margin - half(100.0),
-                    tops[end + 9],
+                    tops[last],
                     half(100.0),
                     px(28.0),
                 ),
