@@ -25,4 +25,4 @@
 - **Contrast:** `Palette::fills()` lists every body stop; the readability and accent tests use all of them, plus a test for the specular peak (ink >= 4.5:1). Hover on the floating dock adds a faint white wash.
 - **Skipped (size/cheapness):** wallpaper snapshot with GaussianBlur and edge DisplacementMap lens (needs WIC decode and effects; would exceed the 2% ratchet headroom), inner shadow, noise.
 - **Native (2026-11-12, Chief-confirmed, private store, own process):** screenshots of the floating and attached dock and the resting notch show the gradient (floating: top 84,93,113 to bottom 61,70,90; Frosted flat 64,69,79) with readable icons. NOT RUN: open notch (the hover did not expand it), edge pill, DPI, Settings drop-down.
-- **Checks:** verify.ps1 (see ledger). Binary 1,231,360 B, within the 2% limit (1,242,408).
+- **Checks:** verify.ps1 (see ledger). Binary 1,241,088 B, within the 2% limit (1,242,408).

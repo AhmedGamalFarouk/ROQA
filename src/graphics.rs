@@ -346,15 +346,13 @@ impl Canvas {
                 layout::notch_radius(pixels, shape, scene.dpi),
                 pixels.ears as f32,
             )?;
-            self.body(context, &body, p.body, None, &|brush, width| {
-                // SAFETY: context is live between surface BeginDraw/EndDraw.
-                unsafe {
-                    match width {
-                        None => context.FillGeometry(&outline, brush, None),
-                        Some(width) => context.DrawGeometry(&outline, brush, width, None),
-                    }
-                }
-            })?;
+            self.body(
+                context,
+                &body,
+                p.body,
+                None,
+                &geometry_shape(context, &outline),
+            )?;
             // SAFETY: context is live between surface BeginDraw/EndDraw; the clip is popped below.
             unsafe {
                 context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
@@ -572,15 +570,13 @@ impl Canvas {
                 };
                 let corner = layout::attached_radius(bounds, scene.dpi);
                 let outline = attached_outline(context, &rect, corner)?;
-                self.body(context, &rect, p.body, None, &|brush, width| {
-                    // SAFETY: context is live between surface BeginDraw/EndDraw.
-                    unsafe {
-                        match width {
-                            None => context.FillGeometry(&outline, brush, None),
-                            Some(width) => context.DrawGeometry(&outline, brush, width, None),
-                        }
-                    }
-                })?;
+                self.body(
+                    context,
+                    &rect,
+                    p.body,
+                    None,
+                    &geometry_shape(context, &outline),
+                )?;
                 return paint_slots(context, &rect, self.width as i32, scene, &px, &p);
             }
             // A one-physical-pixel inner hairline separates the black bar from dark wallpapers.
@@ -601,6 +597,7 @@ impl Canvas {
     }
     /// The baked liquid-glass brushes for this palette, or `None` in the other themes. Built once per
     /// canvas (the theme is fixed for it) and shared by every later paint.
+    #[inline(never)]
     fn glass(&self, context: &ID2D1DeviceContext) -> Result<Option<Glass>> {
         let Some(sheen) = self.palette.sheen else {
             return Ok(None);
@@ -612,6 +609,7 @@ impl Canvas {
     }
     /// One body: the flat fill with the rim (or `hairline` alpha, if any), or the baked glass layers placed
     /// on `span`. `shape(brush, None)` fills the shape, `shape(brush, Some(width))` strokes its outline.
+    #[inline(never)]
     fn body(
         &self,
         context: &ID2D1DeviceContext,
@@ -651,6 +649,7 @@ impl Canvas {
         Ok(())
     }
     /// A rounded body in the theme's fill with the hairline (or glass rim) the dock bar has.
+    #[inline(never)]
     fn rounded_body(
         &self,
         context: &ID2D1DeviceContext,
@@ -2237,6 +2236,22 @@ fn draw_slot(
 
 fn color(Rgba(red, green, blue, alpha): Rgba) -> D2D1_COLOR_F {
     rgba(red, green, blue, alpha)
+}
+
+/// An outline as a `Canvas::body` shape: filled with `None`, stroked with a width.
+fn geometry_shape<'a>(
+    context: &'a ID2D1DeviceContext,
+    outline: &'a ID2D1PathGeometry,
+) -> impl Fn(&ID2D1Brush, Option<f32>) + 'a {
+    move |brush, width| {
+        // SAFETY: context is live between surface BeginDraw/EndDraw.
+        unsafe {
+            match width {
+                None => context.FillGeometry(outline, brush, None),
+                Some(width) => context.DrawGeometry(outline, brush, width, None),
+            }
+        }
+    }
 }
 
 /// A gradient's stops, straight sRGB, clamped.

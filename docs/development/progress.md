@@ -1067,5 +1067,5 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 ## G1b baked Liquid glass (2026-11-12 Africa/Cairo)
 
 - **Scope:** branch `feat/g1b-slideup`; [packet](features-icons-glass.md). Theme "Liquid glass": cached unit-square gradient, specular and rim brushes placed by brush transform; Frosted tint unchanged. Wallpaper snapshot/lens skipped.
-- **Checks:** verify.ps1 PASS (fmt/clippy, 341 tests, locked release); 1,231,360 B, ratchet within 2% (baseline 1,218,048 unchanged).
+- **Checks:** verify.ps1 PASS (fmt/clippy, 348 tests, locked release); 1,241,088 B, ratchet within 2% (baseline 1,218,048 unchanged, limit 1,242,408; trimmed with non-inlined shared helpers).
 - **Native:** dock (both styles) and resting notch screenshots seen. NOT RUN: open notch, edge pill, DPI; reviews paused (REVIEW NOT RUN).
