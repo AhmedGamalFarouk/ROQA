@@ -12,6 +12,11 @@ New-Item -ItemType Directory -Force -Path $evidence | Out-Null
 $executable = Join-Path $projectRoot 'target/release/roqa.exe'
 $result = [ordered]@{ Status = 'RUNNING'; Utc = [DateTime]::UtcNow.ToString('o'); PowerShellPid = $PID; BinarySha256 = (Get-FileHash $executable -Algorithm SHA256).Hash; Checks = @(); Samples = @(); Limits = 'Native standard-control and UIA proof only. Actual Narrator speech, OS text-scale setting changes and IME composition remain untested; an IME context is not composition evidence.' }
 $resident = $null; $fixture = [IntPtr]::Zero; $picker = [IntPtr]::Zero
+# Private store with the dock's system buttons (Start, Search, Task View, minimized, desktop) off, so slot 0 is the picker button; the user's real store is untouched.
+$privateStore = Join-Path ([IO.Path]::GetTempPath()) "roqa-picker-smoke-$PID"; $originalLocalAppData = $env:LOCALAPPDATA
+New-Item -ItemType Directory -Force -Path (Join-Path $privateStore 'ROQA') | Out-Null
+[IO.File]::WriteAllText((Join-Path $privateStore 'ROQA/store.roqa'), "version=2`ndbstart=0`ndbsearch=0`ndbtask=0`ndbmin=0`ndbdesk=0`nend`n")
+$env:LOCALAPPDATA = $privateStore
 $originalForeground = [NativeProbe]::GetForegroundWindow()
 function Check([bool]$Condition, [string]$Name) { if (!$Condition) { throw "FAIL: $Name" }; $result.Checks += $Name }
 function Wait-Until([scriptblock]$Predicate, [string]$Name) {
@@ -196,6 +201,7 @@ try {
     }
     if ($fixture -ne [IntPtr]::Zero) { [NativeProbe]::StopAnchor($fixture) }
     [void][NativeProbe]::SetForegroundWindow($originalForeground)
+    $env:LOCALAPPDATA = $originalLocalAppData; Remove-Item -LiteralPath $privateStore -Recurse -Force -ErrorAction SilentlyContinue
     $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidence 'picker-smoke.json') -Encoding UTF8
 }
 Write-Host "Picker smoke passed. Evidence: $evidence"
