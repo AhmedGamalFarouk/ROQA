@@ -38,3 +38,9 @@ Source: `docs/development/ui-council-fixes.md` (root checkout, untracked) and `a
 - Dock Start glyph redrawn as four lighter 5.5 DIP panes (same stroke, less chunky next to Search and the chevron).
 - Size 1,141,760 -> 1,141,760 B (+0). 369 tests (two expectations updated: eye size, Light dock blend).
 - Not done: attached dock as a full-width bar (placement and slot tests assume the centred pill), picker icon distinct from Start, glass "ears" cleanup. NOT RUN: native/GUI.
+
+## P6 Accessibility
+- Pointer-free entry, no `RegisterHotKey` and no global hook: Settings > General > Behaviour has two Tab-reachable buttons, "Focus the notch" and "Focus the dock". Each hands keyboard focus to that surface through the same path a UIA focus request takes (`enter_focus` / `enter_dock_focus`: foreground taken with the usual Windows rule, Tab/arrows move, Enter or Space press, Esc returns to the window it came from, here Settings). A hidden surface says so in the footer. Settings itself is reached from the notch gear or the dock/notch right-click menu.
+- Options for a true global entry (not built, needs a decision): `RegisterHotKey` (an optional Win+Alt+key, off by default, one registration, released on quit), or a tray icon (needs startup/shell presence). Both are global registrations the rules reserve for an explicit go-ahead.
+- Size 1,141,760 -> 1,142,272 B (+512). 369 tests.
+- Not done: edge sliders reporting keyboard focus in UIA. They are passive, non-activating windows with no key handling; claiming focus without handling keys would mislead, and real focus needs a key path on the slider (about the size of the notch's). NOT RUN: native/GUI, Narrator.

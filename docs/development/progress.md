@@ -1142,3 +1142,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u2-council-fixes`; [packet](ui-council-u2.md). Eyes 7.5 x 15 DIP; faint edge on Classic/Midnight/Light panels and the attached dock; softer Light palette; lighter Start glyph.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 369 tests, locked release); 1,141,760 B (+0); limit 1,143,705, headroom 1,945; baseline unchanged.
 - **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN). Not done: full-width attached dock, distinct picker icon, glass ears.
+
+## U2-P6 Keyboard entry (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u2-council-fixes`; [packet](ui-council-u2.md). Settings buttons "Focus the notch" / "Focus the dock" hand keyboard focus to the surface (no RegisterHotKey, no global hook).
+- **Checks:** verify.ps1 PASS (fmt/clippy, 369 tests, locked release); 1,142,272 B (+512); limit 1,143,705, headroom 1,433; baseline unchanged.
+- **NOT RUN:** native/GUI, Narrator; reviews paused (REVIEW NOT RUN). Not done: edge slider keyboard focus in UIA; global hotkey options in the packet.

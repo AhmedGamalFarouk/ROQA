@@ -104,6 +104,9 @@ const WDRANK: usize = 187;
 const PCFG: usize = 188;
 const PSTART: usize = 192;
 const PSKIP: usize = 193;
+/// Keyboard entry: move keyboard focus to the notch or to the dock (no global hotkey needed).
+const KEYFOCUS: usize = 194;
+const KEYDOCK: usize = 195;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -190,6 +193,13 @@ const PAGES: &[Page] = &[
                         "Reminder s&ounds",
                         "Master switch for the timer and prayer sounds",
                     ),
+                    r(
+                        KEYFOCUS,
+                        Kind::Btn,
+                        "Focus the notch",
+                        "Keyboard entry: arrows move, Enter presses, Esc returns",
+                    ),
+                    r(KEYDOCK, Kind::Btn, "Focus the dock", ""),
                 ],
             },
         ],
@@ -525,6 +535,8 @@ pub struct SettingsWindow {
     drank: bool,
     /// A Pomodoro request: false start or pause, true skip.
     pomo: Option<bool>,
+    /// A keyboard entry request: false the notch, true the dock.
+    focus: Option<bool>,
     return_to: Option<WindowKey>,
     closed: bool,
 }
@@ -1176,6 +1188,7 @@ impl SettingsWindow {
             start: None,
             drank: false,
             pomo: None,
+            focus: None,
             return_to: foreground_key(),
             closed: false,
         };
@@ -1723,6 +1736,10 @@ impl SettingsWindow {
         self.pomo.take()
     }
 
+    pub fn take_focus(&mut self) -> Option<bool> {
+        self.focus.take()
+    }
+
     /// The user pressed "I drank a glass".
     pub fn take_drank(&mut self) -> bool {
         std::mem::take(&mut self.drank)
@@ -1768,6 +1785,9 @@ impl SettingsWindow {
                         }
                     }
                     (WDRANK, _) if notification == BN_CLICKED => self.drank = true,
+                    (KEYFOCUS | KEYDOCK, _) if notification == BN_CLICKED => {
+                        self.focus = Some(id == KEYDOCK)
+                    }
                     (PSTART | PSKIP, _) if notification == BN_CLICKED => {
                         self.pomo = Some(id == PSKIP)
                     }

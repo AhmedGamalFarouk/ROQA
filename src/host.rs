@@ -2380,13 +2380,14 @@ impl Desktop {
         let Some(window) = &mut self.settings_window else {
             return Ok(());
         };
-        let (change, start, movement, sound, drank, pomo) = (
+        let (change, start, movement, sound, drank, pomo, focus) = (
             window.take_change(),
             window.take_start(),
             window.take_move(),
             window.take_sound_action(),
             window.take_drank(),
             window.take_pomo(),
+            window.take_focus(),
         );
         match sound {
             Some(SoundAction::Browse) => {
@@ -2423,6 +2424,21 @@ impl Desktop {
         }
         if drank {
             self.water_drink();
+        }
+        if let Some(dock) = focus {
+            let kind = if dock {
+                SurfaceKind::Dock
+            } else {
+                SurfaceKind::Notch
+            };
+            if let Some(at) = self.surfaces.iter().position(|s| s.kind() == kind) {
+                match self.surfaces[at].layout_version() {
+                    Some(version) => self.enter_dock_focus(at, 0, version),
+                    None => self.enter_focus(at, notch_uia::FIRST),
+                }
+            } else if let Some(window) = &self.settings_window {
+                let _ = window.say("That surface is not showing.");
+            }
         }
         if let Some(skip) = pomo {
             let status = if self.pages.tabs.on(Tab::Timer) {
