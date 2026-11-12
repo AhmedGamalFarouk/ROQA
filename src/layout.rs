@@ -338,7 +338,7 @@ const PAGE_VALUE: (f32, f32, f32, f32) = (16.0, 30.0, 220.0, 32.0);
 const PAGE_CLOCK: (f32, f32, f32, f32) = (0.0, 11.0, 100.0, 16.0);
 const PAGE_CLOCK_MARGIN: f32 = 16.0;
 /// The Shelf page's hint beside the empty shelf's add slot.
-const SHELF_HINT: (f32, f32, f32, f32) = (48.0, 40.0, 240.0, 16.0);
+const SHELF_HINT: (f32, f32, f32, f32) = (112.0, 40.0, 192.0, 16.0);
 
 pub fn page_title(dpi: u32) -> Bounds {
     scaled_bounds(PAGE_TITLE, dpi)
@@ -380,15 +380,20 @@ pub fn power_notice(media: bool, dpi: u32) -> Bounds {
 /// The file shelf's `shelf::VISIBLE` square slots (slice S6, PROVISIONAL, no design review), each
 /// `SHELF_SLOT` DIPs with the slot origin of the panel kind's first one, in DIPs from the body's left and
 /// top edges, then one slot further right per entry. On the Shelf page, under the title, on both panel kinds.
-/// Each slot draws a 16 DIP system icon.
-const SHELF_ORIGIN: [(f32, f32); 2] = [(16.0, 36.0), (16.0, 36.0)];
-const SHELF_SLOT: f32 = 24.0;
+/// Each slot draws a 20 DIP system icon with the file name under it.
+const SHELF_ORIGIN: [(f32, f32); 2] = [(16.0, 30.0), (16.0, 30.0)];
+const SHELF_SLOT: (f32, f32) = (96.0, 36.0);
 
 /// A shelf slot in pixels from the body's left and top edges, for the plain or media panel.
 pub fn shelf_slot(media: bool, index: usize, dpi: u32) -> Bounds {
     let (x, y) = SHELF_ORIGIN[usize::from(media)];
     scaled_bounds(
-        (x + SHELF_SLOT * index as f32, y, SHELF_SLOT, SHELF_SLOT),
+        (
+            x + SHELF_SLOT.0 * index as f32,
+            y,
+            SHELF_SLOT.0,
+            SHELF_SLOT.1,
+        ),
         dpi,
     )
 }

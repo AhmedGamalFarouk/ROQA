@@ -215,6 +215,8 @@ pub struct RailScene<'a> {
 /// the last activation found the target gone.
 pub struct ShelfSlot<'a> {
     pub icon: Option<&'a IconPixels>,
+    /// The file name shown under the icon; empty for the add and more slots.
+    pub name: &'a str,
     pub missing: bool,
     pub more: bool,
     pub add: bool,
@@ -1090,7 +1092,7 @@ fn notice_text(
 }
 
 /// Side of a shelf icon inside its slot, in DIPs.
-const SHELF_ICON: f32 = 16.0;
+const SHELF_ICON: f32 = 20.0;
 
 /// PROVISIONAL (S6): the shelf's entries in their `layout::shelf_slot` cells, faded in with the panel. A
 /// missing target is dimmed like a disabled control. The tiny icon bitmaps are uploaded per paint, which only
@@ -1115,55 +1117,56 @@ fn shelf_row(
         let inset = ((cell.width as f32 - side) / 2.0).round();
         let square = pixel_square(
             body.left + (cell.x as f32 + inset),
-            body.top + (cell.y as f32 + inset),
+            body.top + (cell.y as f32 + 2.0 * scale),
             side,
         );
         let alpha = reveal * if slot.missing { DISABLED } else { 1.0 };
         let shape = rounded(square, 3.0 * scale);
+        let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha));
+        // The whole cell (icon and name) takes the keyboard focus ring.
+        let (left, top) = (body.left + cell.x as f32, body.top + cell.y as f32);
+        let area = D2D_RECT_F {
+            left,
+            top,
+            right: left + cell.width as f32,
+            bottom: top + cell.height as f32,
+        };
         if scene.focus == Some(crate::notch_uia::SHELF_BASE + index) {
             // SAFETY: live draw context and local brush.
             unsafe {
                 let brush = context
                     .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(reveal)), None)?;
-                context.DrawRoundedRectangle(
-                    &rounded(
-                        pixel_square(
-                            square.left - 3.0 * scale,
-                            square.top - 3.0 * scale,
-                            side + 6.0 * scale,
-                        ),
-                        4.0 * scale,
-                    ),
-                    &brush,
-                    scale,
-                    None,
-                );
+                context.DrawRoundedRectangle(&rounded(area, 4.0 * scale), &brush, scale, None);
             }
         }
+        let name = match (slot.add, slot.more) {
+            (true, _) => "Add",
+            (_, true) => "More",
+            _ => slot.name,
+        };
+        let font = Font {
+            family: TEXT_FONT,
+            size: 10.0 * scale,
+            weight: DWRITE_FONT_WEIGHT_NORMAL,
+            designator: 1.0,
+            align: DWRITE_TEXT_ALIGNMENT_CENTER,
+        };
+        let line = D2D_RECT_F {
+            top: square.bottom + 2.0 * scale,
+            left: left + 2.0 * scale,
+            right: area.right - 2.0 * scale,
+            ..area
+        };
+        draw_text(context, name, &font, line, ink(0.8 * alpha))?;
         if slot.add || slot.more {
-            glyphs::draw(
-                context,
-                square,
-                if slot.add { Glyph::Add } else { Glyph::More },
-                with_alpha(p.ink, p.ink_alpha(reveal)),
-            )?;
-            continue;
-        }
-        match slot.icon {
-            Some(icon) => {
-                let bitmap = upload(context, icon)?;
-                fill_art(context, &shape, icon.width, &bitmap, alpha)?;
-            }
-            None => {
-                // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw.
-                unsafe {
-                    let brush = context.CreateSolidColorBrush(
-                        &tint(p.ink_dim(slot.missing, COVER_FILL * alpha)),
-                        None,
-                    )?;
-                    context.FillRoundedRectangle(&shape, &brush);
-                }
-            }
+            let glyph = if slot.add { Glyph::Add } else { Glyph::More };
+            glyphs::draw(context, square, glyph, ink(reveal))?;
+        } else if let Some(icon) = slot.icon {
+            let bitmap = upload(context, icon)?;
+            fill_art(context, &shape, icon.width, &bitmap, alpha)?;
+        } else {
+            // No icon yet, or the shell had none: a file glyph instead of an empty square.
+            glyphs::draw(context, square, Glyph::File, ink(0.6 * alpha))?;
         }
     }
     Ok(())

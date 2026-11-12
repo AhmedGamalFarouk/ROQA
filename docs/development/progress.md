@@ -1118,3 +1118,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u2-council-fixes`; [packet](ui-council-u2.md). Footer strip + divider, rows clipped above it, message left of Close; wrapped captions measured; dark edits/combos (`DarkMode_CFD`); shell accent for switches; 2 px sidebar focus ring; MDL2 glyph tiles.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 369 tests, locked release); 1,140,224 B (was 1,137,152, +3,072); limit 1,143,705, headroom 3,481; baseline unchanged.
 - **NOT RUN:** native/GUI (CFD theme, glyphs, clipping, DPI/light unverified by eye); reviews paused (REVIEW NOT RUN).
+
+## U2-P2 Shelf names and icons (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u2-council-fixes`; [packet](ui-council-u2.md). Slots 96 x 36 DIP: shell icon plus persistent file name; `File` glyph fallback; focus ring on the cell; empty hint moved beside the add slot.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 369 tests, locked release); 1,140,736 B (+512); limit 1,143,705, headroom 2,969; baseline unchanged.
+- **NOT RUN:** native/GUI (icon arrival, text fit unverified by eye); reviews paused (REVIEW NOT RUN).

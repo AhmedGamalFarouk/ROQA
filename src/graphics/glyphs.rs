@@ -45,8 +45,10 @@ pub enum Glyph {
     Desktop,
     Add,
     More,
+    /// A shelf entry whose system icon did not load.
+    File,
 }
-const ALL: [Glyph; 28] = [
+const ALL: [Glyph; 29] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -75,6 +77,7 @@ const ALL: [Glyph; 28] = [
     Glyph::Desktop,
     Glyph::Add,
     Glyph::More,
+    Glyph::File,
 ];
 /// Grid size and stroke, in grid units.
 const GRID: f32 = 24.0;
@@ -192,6 +195,7 @@ impl Glyph {
             Glyph::Desktop => "M12 4v16",
             Glyph::Add => "M12 4v16M4 12h16",
             Glyph::More => "M5 12h.01M12 12h.01M19 12h.01",
+            Glyph::File => "M7 3.5h7l4 4v13H7zM14 3.5v4h4",
         }
     }
 }

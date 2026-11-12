@@ -760,6 +760,7 @@ impl Surface {
             .enumerate()
             .map(|(index, entry)| ShelfSlot {
                 icon: shelf.icons.get(index).and_then(|icon| icon.as_deref()),
+                name: &entry.name,
                 missing: entry.check == Check::Missing,
                 more: false,
                 add: false,
@@ -768,6 +769,7 @@ impl Surface {
         if shelf_on && (shelf.shelf.overflow() || shelf.shelf.is_empty()) {
             slots.push(ShelfSlot {
                 icon: None,
+                name: "",
                 missing: false,
                 more: shelf.shelf.overflow(),
                 add: shelf.shelf.is_empty(),
