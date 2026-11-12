@@ -16,7 +16,7 @@ use crate::{
     prayer::Method,
     prayer_os,
     prayer_tab::{self, LEADS, SILENT},
-    settings::{MAX_OFF, MAX_PATH, NOTCH_SIZES, Settings, parse_timer},
+    settings::{MAX_OFF, MAX_PATH, MAX_SHIFT, NOTCH_SIZES, Settings, parse_timer},
     theme::Theme,
     weather::{MAX_CITY, Units},
     window_model::WindowKey,
@@ -354,7 +354,12 @@ const PAGES: &[Page] = &[
                 rows: &[
                     r(PSOUND, Kind::Combo(230), "Prayer sound", ""),
                     r(PBROWSE, Kind::Btn, "Bro&wse...", "Choose a sound file"),
-                    r(PTEST, Kind::Btn, "Te&st sound", "Play it once"),
+                    r(
+                        PTEST,
+                        Kind::Btn,
+                        "Te&st sound",
+                        "Plays even when Reminder sounds is off",
+                    ),
                 ],
             },
         ],
@@ -1420,6 +1425,7 @@ impl SettingsWindow {
     fn commit(&mut self) -> Result<()> {
         let mut next = self.current.clone();
         let mut off = Vec::new();
+        let mut invalid = false;
         for item in &self.items {
             let h = item.h;
             match item.kind {
@@ -1463,7 +1469,8 @@ impl SettingsWindow {
                     CITY => next.city = text(h, MAX_CITY),
                     PSHIFT..=174 => {
                         let slot = &mut next.prayer_shift[item.id - PSHIFT];
-                        *slot = text(h, 4).trim().parse().unwrap_or(*slot);
+                        let (minutes, valid) = parse_shift(&text(h, 4), *slot);
+                        (*slot, invalid) = (minutes, invalid || !valid);
                     }
                     DIAGNOSTICS => next.diagnostics = Some(text(h, MAX_PATH)),
                     _ => {}
@@ -1478,7 +1485,10 @@ impl SettingsWindow {
         let ranged = next.clamped();
         let next = ranged.clone().keep_one_monitor(&self.devices);
         self.show(&next);
-        if !kept_a_kind {
+        if invalid {
+            // The box already shows the value that was kept (`show` above), so the message explains the change.
+            self.say("A prayer shift is a whole number of minutes from -30 to 30. The nearest allowed value is kept.")?;
+        } else if !kept_a_kind {
             self.say("Keep the dock or the notch on.")?;
         } else if ranged != next {
             self.say("Keep at least one monitor on.")?;
@@ -1931,6 +1941,16 @@ impl Drop for SettingsWindow {
     }
 }
 
+/// A typed prayer shift: the minutes and whether the text was valid. A number outside -30..=30 is brought to
+/// the nearest end; text that is not a whole number keeps `old`. Either way `false` makes the window say so.
+fn parse_shift(text: &str, old: i8) -> (i8, bool) {
+    let max = i32::from(MAX_SHIFT);
+    match text.trim().parse::<i32>() {
+        Ok(n) => (n.clamp(-max, max) as i8, (-max..=max).contains(&n)),
+        Err(_) => (old, false),
+    }
+}
+
 fn focus_scroll(scroll: i32, top: i32, bottom: i32, viewport: i32) -> i32 {
     if top < 0 {
         scroll + top
@@ -1952,6 +1972,20 @@ mod tests {
         assert_eq!(focus_scroll(100, 590, 618, 600), 118);
         assert_eq!(focus_scroll(100, 12, 40, 600), 100);
         assert_eq!(focus_scroll(0, 1190, 1218, 600), 618);
+    }
+
+    #[test]
+    fn a_typed_shift_is_checked_and_a_bad_one_is_reported() {
+        assert_eq!(parse_shift(" -30 ", 0), (-30, true));
+        assert_eq!(parse_shift("+30", 0), (30, true));
+        assert_eq!(parse_shift("0", 5), (0, true));
+        // Out of range: the nearest end, reported. Not a number (or empty, or huge): old value, reported.
+        assert_eq!(parse_shift("45", 0), (30, false));
+        assert_eq!(parse_shift("-999999", 0), (-30, false));
+        assert_eq!(parse_shift("abc", 7), (7, false));
+        assert_eq!(parse_shift("", 7), (7, false));
+        assert_eq!(parse_shift("1.5", -2), (-2, false));
+        assert_eq!(parse_shift("99999999999", 3), (3, false));
     }
 
     #[test]

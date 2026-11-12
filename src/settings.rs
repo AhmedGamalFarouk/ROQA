@@ -193,6 +193,15 @@ impl Settings {
         [fajr, 0, dhuhr, asr, maghrib, isha]
     }
 
+    /// The real reminders' sound gates. "Reminder sounds" off silences both; the Settings Test button is an
+    /// explicit action and does not ask (its caption says so).
+    pub fn reminder_plays(&self) -> bool {
+        self.reminder_sounds
+    }
+    pub fn timer_beeps(&self) -> bool {
+        self.timer_sound && self.reminder_sounds
+    }
+
     /// Pushes the settings that live outside the host's own state: animation pace, click-to-open, pill size.
     pub fn apply_globals(&self) {
         crate::motion::configure(self.anim_fast, self.open_click);
@@ -578,6 +587,23 @@ mod tests {
         ] {
             assert!(!read.clone().set(key, value), "{key}={value}");
         }
+    }
+
+    #[test]
+    fn the_master_switch_silences_the_real_prayer_and_timer_sounds_only() {
+        let on = Settings::default();
+        assert!(on.reminder_plays() && on.timer_beeps());
+        let off = Settings {
+            reminder_sounds: false,
+            ..Settings::default()
+        };
+        // The sound choices stay as they were; only the gate closes.
+        assert!(!off.reminder_plays() && !off.timer_beeps() && off.timer_sound);
+        let quiet_timer = Settings {
+            timer_sound: false,
+            ..Settings::default()
+        };
+        assert!(quiet_timer.reminder_plays() && !quiet_timer.timer_beeps());
     }
 
     #[test]

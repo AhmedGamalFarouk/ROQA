@@ -2,7 +2,7 @@
 //! the next, the page's ready-made text, the countdown wording, the Hijri text and which audio file plays.
 //! No clock, window or file is touched here; `prayer_os.rs` supplies the facts.
 
-use crate::prayer::{self, Params, Prayer, Times, Ymd};
+use crate::prayer::{self, Params, Prayer, Ymd};
 use std::path::{Path, PathBuf};
 
 /// The sound setting that means "no sound"; empty means "the default" (the first `takbeer*` file, if any).
@@ -46,25 +46,24 @@ pub struct Event {
     pub lead: u32,
 }
 
-/// Today's reminders in time order: each of the five prayers, and with `lead` minutes set, a heads-up before it.
-pub fn events(times: &Times, lead: u32) -> Vec<Event> {
-    let mut all = Vec::with_capacity(10);
-    for prayer in FIVE {
-        let at = times[prayer as usize];
-        all.push(Event {
-            at,
-            prayer,
-            lead: 0,
-        });
-        if lead > 0 && at > lead as i32 * 60 {
-            all.push(Event {
-                at: at - lead as i32 * 60,
-                prayer,
-                lead,
-            });
+/// Today's reminders in time order from `prayer::timeline` (yesterday, today and tomorrow, so a shifted prayer
+/// that crossed midnight is on the day it really falls): each of the five prayers, and with `lead` minutes
+/// set, a heads-up before it. Kept: those from `-GRACE` (a reminder just before midnight that a late wake may
+/// still announce) up to the end of today.
+pub fn events(timeline: &[(i32, Prayer)], lead: u32) -> Vec<Event> {
+    let mut all = Vec::with_capacity(20);
+    for &(time, prayer) in timeline.iter().filter(|e| FIVE.contains(&e.1)) {
+        let mut keep = |at: i32, lead: u32| {
+            if (-GRACE..86_400).contains(&at) {
+                all.push(Event { at, prayer, lead });
+            }
+        };
+        keep(time, 0);
+        if lead > 0 {
+            keep(time - lead as i32 * 60, lead);
         }
     }
-    all.sort_by_key(|e| e.at);
+    crate::sort::by(&mut all, |a, b| a.at.cmp(&b.at));
     all
 }
 
@@ -78,14 +77,19 @@ pub fn step(
     last: &mut Option<(Ymd, i32)>,
 ) -> (Option<Event>, u32) {
     let (ymd, secs) = now;
+    // Absolute seconds, so an event at -10 (just before today's midnight) that fired yesterday does not fire twice.
+    let abs = |ymd: Ymd, secs: i32| day_number(ymd) * 86_400 + i64::from(secs);
+    let seen = last.map(|(y, s)| abs(y, s));
     let fire = events
         .iter()
         .rev()
         .find(|e| {
-            last.is_some() && e.at <= secs && secs - e.at <= GRACE && Some((ymd, e.at)) > *last
+            seen.is_some_and(|seen| abs(ymd, e.at) > seen) && e.at <= secs && secs - e.at <= GRACE
         })
         .copied();
-    *last = Some(last.map_or((ymd, secs), |old| old.max((ymd, secs))));
+    if seen.is_none_or(|seen| abs(ymd, secs) > seen) {
+        *last = Some((ymd, secs));
+    }
     let next = events
         .iter()
         .find(|e| e.at > secs)
@@ -159,24 +163,28 @@ pub fn view(
     let Some(params) = params else {
         return none(message);
     };
-    let (Some(times), Some(next)) = (
+    let (Some(times), Some(line)) = (
         prayer::times(params, local.ymd),
-        prayer::next_prayer(params, local.ymd, local.secs),
+        prayer::timeline(params, local.ymd),
     ) else {
         return none("No prayer times for this place today");
     };
     // The current prayer is the latest started; before Fajr it is still last night's Isha.
-    let current = FIVE
+    // (A shifted Isha that passed midnight is still last night's current prayer, so the neighbour days count.)
+    let current = line
         .iter()
-        .rposition(|&p| times[p as usize] <= local.secs)
+        .rev()
+        .find(|e| e.0 <= local.secs && FIVE.contains(&e.1))
+        .and_then(|e| FIVE.iter().position(|&p| p == e.1))
         .unwrap_or(FIVE.len() - 1);
-    let (next_name, short) = (next.prayer.name(), countdown(next.secs_left, false));
+    let Some(&(at, ahead)) = line.iter().find(|e| e.0 > local.secs) else {
+        return none("No prayer times for this place today");
+    };
+    let left = (at - local.secs) as u32;
+    let (next_name, short) = (ahead.name(), countdown(left, false));
     View {
         message: None,
-        name: format!(
-            "Next prayer {next_name} {}",
-            countdown(next.secs_left, true)
-        ),
+        name: format!("Next prayer {next_name} {}", countdown(left, true)),
         next: next_name.to_owned(),
         left: short,
         hijri,
@@ -279,7 +287,14 @@ mod tests {
     use crate::prayer::Method;
 
     const DAY: Ymd = (2026, 11, 12);
-    const TIMES: Times = [
+    /// A day's times as the timeline `events` reads (today only).
+    fn line(times: &prayer::Times) -> Vec<(i32, Prayer)> {
+        Prayer::ALL
+            .into_iter()
+            .map(|p| (times[p as usize], p))
+            .collect()
+    }
+    const TIMES: prayer::Times = [
         4 * 3600 + 900,
         6 * 3600,
         11 * 3600 + 1800,
@@ -290,14 +305,14 @@ mod tests {
 
     #[test]
     fn events_are_ordered_and_a_lead_adds_a_heads_up_before_each() {
-        let plain = events(&TIMES, 0);
+        let plain = events(&line(&TIMES), 0);
         assert_eq!(plain.len(), 5);
         assert!(
             plain
                 .iter()
                 .all(|e| e.lead == 0 && e.prayer != Prayer::Sunrise)
         );
-        let with = events(&TIMES, 10);
+        let with = events(&line(&TIMES), 10);
         assert_eq!(with.len(), 10);
         assert!(with.windows(2).all(|w| w[0].at <= w[1].at));
         assert_eq!(
@@ -308,7 +323,7 @@ mod tests {
 
     #[test]
     fn a_step_fires_on_time_once_and_waits_for_the_next() {
-        let ev = events(&TIMES, 0);
+        let ev = events(&line(&TIMES), 0);
         let mut last = None;
         // The first pass only sets the baseline.
         // Before Fajr: nothing due, wait exactly until it.
@@ -324,7 +339,7 @@ mod tests {
 
     #[test]
     fn a_wake_long_after_an_event_is_stale_and_the_first_pass_announces_nothing() {
-        let ev = events(&TIMES, 0);
+        let ev = events(&line(&TIMES), 0);
         let mut last = None;
         // First pass after start, minutes after Dhuhr: no catch-up.
         assert_eq!(step(&ev, (DAY, TIMES[2] + 60), &mut last).0, None);
@@ -342,7 +357,7 @@ mod tests {
 
     #[test]
     fn the_wait_ends_at_midnight_and_the_next_day_starts_fresh() {
-        let ev = events(&TIMES, 0);
+        let ev = events(&line(&TIMES), 0);
         let mut last = None;
         let (_, wait) = step(&ev, (DAY, TIMES[4] + 3 * 3600), &mut last);
         assert_eq!(wait, (86_401 - TIMES[4] - 3 * 3600) as u32);
@@ -369,7 +384,103 @@ mod tests {
         let winter = prayer::times(&cairo(120), DAY).unwrap();
         let summer = prayer::times(&cairo(180), DAY).unwrap();
         assert_eq!(summer[2] - winter[2], 3600);
-        assert_eq!(events(&summer, 0)[1].at - events(&winter, 0)[1].at, 3600);
+        assert_eq!(
+            events(&line(&summer), 0)[1].at - events(&line(&winter), 0)[1].at,
+            3600
+        );
+    }
+
+    #[test]
+    fn midnight_crossing_reminders_land_on_the_right_day_without_firing_twice() {
+        let fajr = Prayer::Fajr;
+        let isha = Prayer::Isha;
+        // Yesterday's Isha shifted to 00:20 today, tomorrow's Fajr shifted to 23:40 today, an Asr that is
+        // tomorrow's proper (beyond today) and a prayer a minute before today's midnight.
+        let tl = [
+            (1200, isha),
+            (17_000, fajr),
+            (86_400 - 60, isha),
+            (85_200, fajr),
+            (86_400 + 20_000, Prayer::Asr),
+        ];
+        let ev = events(&tl, 10);
+        let at: Vec<(i32, u32)> = ev.iter().map(|e| (e.at, e.lead)).collect();
+        // Isha 00:20 (heads-up 00:10), Fajr 04:43, tomorrow's early Fajr 23:40, 23:59; nothing from tomorrow.
+        assert_eq!(
+            at,
+            [
+                (600, 10),
+                (1200, 0),
+                (16_400, 10),
+                (17_000, 0),
+                (84_600, 10),
+                (85_200, 0),
+                (85_740, 10),
+                (86_340, 0)
+            ]
+        );
+        // The heads-up of tomorrow's early prayer still falls today.
+        let ev = events(&[(86_400 + 100, fajr)], 5);
+        assert_eq!(
+            ev.iter().map(|e| (e.at, e.lead)).collect::<Vec<_>>(),
+            [(86_200, 5)]
+        );
+        // A reminder at 23:59:50 fires yesterday and is not repeated by today's list holding it at -10.
+        let before = [(-10, fajr)];
+        let ev = events(&before, 0);
+        let mut last = Some(((2026, 11, 11), 86_380));
+        let yesterday = events(&[(86_390, fajr)], 0);
+        assert_eq!(
+            step(&yesterday, ((2026, 11, 11), 86_395), &mut last)
+                .0
+                .map(|e| e.at),
+            Some(86_390)
+        );
+        assert_eq!(step(&ev, ((2026, 11, 12), 5), &mut last).0, None);
+        // Woken after midnight with nothing seen: 15 s late is inside the grace, so it fires once.
+        let mut last = Some(((2026, 11, 11), 80_000));
+        assert_eq!(
+            step(&ev, ((2026, 11, 12), 5), &mut last).0.map(|e| e.at),
+            Some(-10)
+        );
+        assert_eq!(step(&ev, ((2026, 11, 12), 6), &mut last).0, None);
+        // More than two minutes late is stale and skipped.
+        let mut last = Some(((2026, 11, 11), 80_000));
+        assert_eq!(step(&ev, ((2026, 11, 12), 200), &mut last).0, None);
+    }
+
+    #[test]
+    fn a_shifted_dst_day_moves_with_its_offset_and_the_page_shows_the_wrapped_time() {
+        let cairo = |offset_min| Params {
+            lat: 30.0444,
+            lon: 31.2357,
+            utc_offset_min: offset_min,
+            method: Method::Egyptian,
+            hanafi: false,
+            shift: [0, 0, 0, 0, 0, 30],
+        };
+        let winter = prayer::times(&cairo(120), DAY).unwrap();
+        let summer = prayer::times(&cairo(180), DAY).unwrap();
+        assert_eq!(
+            summer[5] - winter[5],
+            3600,
+            "the shift rides along with the offset"
+        );
+        // Isha 00:20 (a shifted 23:50) shows as a time of day, and is still the current prayer at 00:30.
+        let night = Params {
+            utc_offset_min: 450,
+            ..cairo(120)
+        };
+        let t = prayer::times(&night, DAY).unwrap();
+        let local = Local {
+            ymd: DAY,
+            secs: 0,
+            offset_min: 450,
+        };
+        let v = view(Some(&night), "x", local, String::new(), &|s| {
+            format!("{}", s.rem_euclid(86_400))
+        });
+        assert_eq!(v.rows[4].time, format!("{}", t[5].rem_euclid(86_400)));
     }
 
     #[test]

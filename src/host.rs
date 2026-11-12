@@ -1908,8 +1908,8 @@ impl Desktop {
         );
         if self.prayer.key != Some(key) {
             self.prayer.key = Some(key);
-            self.prayer.events = crate::prayer::times(&params, local.ymd)
-                .map(|times| prayer_tab::events(&times, lead))
+            self.prayer.events = crate::prayer::timeline(&params, local.ymd)
+                .map(|line| prayer_tab::events(&line, lead))
                 .unwrap_or_default();
         }
         let (due, wait) = prayer_tab::step(
@@ -1925,7 +1925,7 @@ impl Desktop {
     /// A reminder is due: the sound always plays. The notch expands with the prayer's name; on a monitor a
     /// full-screen app covers it appears over the app (topmost, never activated) and hides again once retracted.
     fn fire_prayer(&mut self, event: prayer_tab::Event, now: Instant) {
-        if self.settings.reminder_sounds {
+        if self.settings.reminder_plays() {
             self.play_prayer_sound(now);
         }
         // Pausing is one request, never undone; nothing happens when nothing plays or the Media tab is off.
@@ -2180,7 +2180,7 @@ impl Desktop {
             }
         }
         self.open_notches();
-        if self.settings.timer_sound && self.settings.reminder_sounds {
+        if self.settings.timer_beeps() {
             // SAFETY: plays the user's own default sound asynchronously; no pointers.
             unsafe {
                 let _ = MessageBeep(MB_ICONASTERISK);

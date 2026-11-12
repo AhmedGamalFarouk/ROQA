@@ -126,6 +126,7 @@ fn sun(jd: f64) -> (f64, f64) {
 }
 
 /// `jd0` is 0h UT of the local date. None when the sun does not rise and set (polar day or night).
+#[inline(never)]
 fn day(p: &Params, jd0: f64) -> Option<Times> {
     let tz = f64::from(p.utc_offset_min) / 60.0;
     let lat = p.lat.to_radians();
@@ -200,22 +201,40 @@ impl Next {
     }
 }
 
+/// Every prayer of yesterday, today and tomorrow, in seconds since TODAY's local midnight and in time order: a
+/// time shifted past midnight lands on the next day (Isha 23:50 + 30 min is 87 600) and one shifted before it
+/// on the previous day (Fajr 00:10 - 30 min is on yesterday's list at 85 200 and negative on its own day), so
+/// the neighbour days are needed to see a prayer that crossed the date line. None when today has no times.
+// shortcut: the neighbour days use today's UTC offset, so across a DST change night their times are an hour off
+// until the pass after midnight reads the new offset; upgrade by passing each day's own offset.
+pub fn timeline(p: &Params, ymd: Ymd) -> Option<Vec<(i32, Prayer)>> {
+    let jd = julian(ymd);
+    let mut all = Vec::with_capacity(18);
+    // One call site for `day` (it is large): yesterday, today, tomorrow.
+    for days in -1..=1 {
+        let Some(times) = day(p, jd + f64::from(days)) else {
+            if days == 0 {
+                return None;
+            }
+            continue;
+        };
+        for (i, t) in times.into_iter().enumerate() {
+            all.push((t + days * 86_400, Prayer::ALL[i]));
+        }
+    }
+    crate::sort::by(&mut all, |a, b| a.0.cmp(&b.0));
+    Some(all)
+}
+
 /// The next event after `now_secs` (seconds since local midnight of `ymd`); after Isha it is tomorrow's Fajr.
 // shortcut: tomorrow's Fajr uses today's UTC offset, so the countdown is an hour off on a DST-change night until
 // the caller asks again after midnight; upgrade by passing tomorrow's offset when the reminder needs it.
+#[cfg(test)] // the page and the reminders read `timeline` directly
 pub fn next_prayer(p: &Params, ymd: Ymd, now_secs: i32) -> Option<Next> {
-    let jd = julian(ymd);
-    let today = day(p, jd)?;
-    if let Some(i) = today.iter().position(|&t| t > now_secs) {
-        return Some(Next {
-            prayer: Prayer::ALL[i],
-            secs_left: (today[i] - now_secs) as u32,
-        });
-    }
-    let fajr = day(p, jd + 1.0)?[Prayer::Fajr as usize];
+    let &(at, prayer) = timeline(p, ymd)?.iter().find(|e| e.0 > now_secs)?;
     Some(Next {
-        prayer: Prayer::Fajr,
-        secs_left: (86_400 + fajr - now_secs) as u32,
+        prayer,
+        secs_left: (at - now_secs) as u32,
     })
 }
 
@@ -274,6 +293,65 @@ mod tests {
             (next.prayer, next.secs_left as i32),
             (Prayer::Sunrise, plain[1] - now)
         );
+    }
+
+    // Cairo's clock moved by an offset change puts a prayer near midnight (the engine adds the offset only).
+    const LATE_DAY: Params = Params {
+        utc_offset_min: 450,
+        ..CAIRO
+    };
+    const EARLY_DAY: Params = Params {
+        utc_offset_min: -165,
+        ..CAIRO
+    };
+
+    #[test]
+    fn a_late_shift_carries_isha_past_midnight_into_the_next_days_countdown() {
+        let plain = times(&LATE_DAY, NOV12).unwrap();
+        assert!(
+            (84_600..86_400).contains(&plain[5]),
+            "Isha near 23:50: {}",
+            plain[5]
+        );
+        let late = Params {
+            shift: [0, 0, 0, 0, 0, 30],
+            ..LATE_DAY
+        };
+        let shifted = plain[5] + 1800;
+        assert!(shifted >= 86_400, "crosses midnight");
+        // The same evening: Isha is next, 15 minutes ahead.
+        let next = next_prayer(&late, NOV12, plain[5] + 900).unwrap();
+        assert_eq!((next.prayer, next.secs_left), (Prayer::Isha, 900));
+        // Just after midnight the date has changed; yesterday's Isha (00:2x now) is still ahead.
+        let next = next_prayer(&late, (2026, 11, 13), shifted - 86_400 - 60).unwrap();
+        assert_eq!((next.prayer, next.secs_left), (Prayer::Isha, 60));
+        // The list lists it once, in order, at today's seconds plus a day.
+        let line = timeline(&late, NOV12).unwrap();
+        assert!(line.contains(&(shifted, Prayer::Isha)));
+        assert!(line.windows(2).all(|w| w[0].0 <= w[1].0));
+    }
+
+    #[test]
+    fn an_early_shift_carries_fajr_before_midnight_into_the_previous_days_countdown() {
+        let plain = times(&EARLY_DAY, NOV12).unwrap();
+        assert!(
+            (0..1800).contains(&plain[0]),
+            "Fajr just after midnight: {}",
+            plain[0]
+        );
+        let early = Params {
+            shift: [-30, 0, 0, 0, 0, 0],
+            ..EARLY_DAY
+        };
+        let fajr = plain[0] - 1800; // negative: 23:3x of the previous day
+        assert!(fajr < 0);
+        // On the previous date, that Fajr is the evening's next prayer.
+        let previous = (2026, 11, 11);
+        let next = next_prayer(&early, previous, 86_400 + fajr - 60).unwrap();
+        assert_eq!((next.prayer, next.secs_left), (Prayer::Fajr, 60));
+        // On its own date it is already past: after it comes Sunrise.
+        let next = next_prayer(&early, NOV12, 10).unwrap();
+        assert_eq!(next.prayer, Prayer::Sunrise);
     }
 
     #[test]

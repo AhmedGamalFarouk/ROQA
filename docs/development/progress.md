@@ -1076,3 +1076,7 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/g1b-slideup`; [packet](features-dock-styles.md). Dock content slides up 180 ms on show/startup/un-hide (both styles) via the existing frame loop; window region and UIA bounds follow the offset. Slide-down on hide and hover reveal not done.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 350 tests, locked release); 1,242,112 B, ratchet within 2% (limit 1,242,408, baseline unchanged); glass dock hover wash dropped to fit.
 - **Native:** start and settled states seen, mid-slide frames NOT captured; NOT RUN: clicks during slide, multi-monitor, bottom taskbar; reviews paused (REVIEW NOT RUN).
+
+## S1 fixes (2026-11-12 Africa/Cairo)
+
+- Prayer shift rolls across midnight (timeline of 3 days: next prayer, page, countdown, reminders, heads-up, grace without double fire); shift entry validated with a status message; Test button caption says it plays with Reminder sounds off, real reminders gated by `reminder_plays`/`timer_beeps` (tests). Packet updated. No native run.
