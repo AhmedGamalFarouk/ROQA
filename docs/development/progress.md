@@ -1094,3 +1094,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/f5-features`; [packet](features-f5.md). Settings Displays card: monitors to scale, native checkbox tiles (same `off_monitors` key), primary and size/DPI in the UIA name.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 362 tests, locked release); 1,125,376 B, ratchet within 2% (baseline 1,121,280 unchanged); SHA `1B4439966ABAFC13AB986FDEF910C85A9BBA565B0E73EE484854A000988A9451`.
 - **NOT RUN:** native/GUI (drawing, input, Narrator, multi-monitor); reviews paused (REVIEW NOT RUN).
+
+## F5-P2 dock slide-down (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/f5-features`; [packet](features-f5.md). Dock slides down 180 ms before its window hides (full-screen path); frame loop only, region/UIA follow the offset.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 362 tests, locked release); 1,125,888 B, within 2% (baseline unchanged); SHA `9DAE54E599731B98400A0556C806004DCFA1A61B7422F63B0BFF27F472754995`.
+- **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN).

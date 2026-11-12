@@ -268,6 +268,8 @@ struct Surface {
     motion: Tween,
     /// A dock's slide in from below its bottom edge: 0 hidden, 1 settled. Unused by the notch.
     slide: Tween,
+    /// A dock sliding down before it hides: it stays visible until `animate` sees the slide end.
+    leaving: bool,
     /// Notch: the progress row last drawn, if any.
     played: Option<Progress>,
     /// Notch: the visualizer bar heights last drawn.
@@ -405,6 +407,7 @@ impl Surface {
             live: false,
             motion: Tween::rest(0.0),
             slide: Tween::rest(0.0),
+            leaving: false,
             played: None,
             bars: [0; audio::BARS],
             repaint: Repaint::Nothing,
@@ -460,6 +463,24 @@ impl Surface {
     /// Hides or restores the surface (and the notch's shadow) without releasing anything. Hidden
     /// surfaces are not painted, so callers paint before restoring one.
     fn set_visible(&mut self, visible: bool) {
+        if matches!(self.role, Role::Dock { .. }) && self.visible {
+            // A visible dock slides down before its window hides (`animate` finishes it); showing again
+            // while it leaves just turns the slide around.
+            if !visible && !self.leaving {
+                (self.leaving, self.live) = (true, true);
+                self.slide.retarget(0.0, dock::SLIDE_TIME, motion::EASE_OUT);
+            } else if visible && self.leaving {
+                (self.leaving, self.live) = (false, true);
+                self.slide.retarget(1.0, dock::SLIDE_TIME, motion::EASE_OUT);
+            }
+            if self.leaving || visible {
+                return;
+            }
+        }
+        self.apply_visible(visible);
+    }
+    fn apply_visible(&mut self, visible: bool) {
+        self.leaving = false;
         if visible == self.visible {
             return;
         }
@@ -2234,6 +2255,9 @@ impl Desktop {
                         Role::Notch { intent, .. } => intent.is_some(),
                         Role::Dock { slots, .. } => slots.iter().any(|tween| tween.running(now)),
                     };
+            }
+            if surface.leaving && !surface.slide.running(now) {
+                surface.apply_visible(false);
             }
             if surface.overlay && !surface.live && surface.motion.value(now) <= 0.0 {
                 surface.overlay = false;
