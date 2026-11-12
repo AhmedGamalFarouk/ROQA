@@ -84,16 +84,6 @@ impl Visible {
     pub fn handle(&self) -> bool {
         self.len >= 2
     }
-    /// The neighbour of `tab`, wrapping; `tab` itself with one tab or when it is not shown.
-    pub fn step(&self, tab: Tab, forward: bool) -> Tab {
-        let tabs = self.as_slice();
-        match self.position(tab) {
-            Some(at) if tabs.len() > 1 => {
-                tabs[(at + if forward { 1 } else { tabs.len() - 1 }) % tabs.len()]
-            }
-            _ => tab,
-        }
-    }
 }
 
 /// The tab to show: the user's pick during this open, else Media while a session exists, else the last
@@ -288,24 +278,6 @@ mod tests {
         tabs.choice = None;
         assert_eq!(tabs.active(false), Some(Tab::Shelf));
         assert_eq!(tabs.active(true), Some(Tab::Media));
-    }
-
-    #[test]
-    fn stepping_wraps_over_the_shown_tabs_only() {
-        // Limits is off by default: the wrap closes at Shelf. With it on, Limits is last.
-        let on = Visible::new([true; 6]);
-        assert_eq!(on.step(Tab::Shelf, true), Tab::Limits);
-        assert_eq!(on.step(Tab::Limits, true), Tab::Media);
-        let visible = Visible::new(Tab::DEFAULT);
-        assert_eq!(visible.step(Tab::Media, true), Tab::Weather);
-        assert_eq!(visible.step(Tab::Weather, true), Tab::Prayer);
-        assert_eq!(visible.step(Tab::Prayer, true), Tab::Timer);
-        assert_eq!(visible.step(Tab::Shelf, true), Tab::Media);
-        assert_eq!(visible.step(Tab::Media, false), Tab::Shelf);
-        let one = Visible::new([true, false, false, false, false, false]);
-        assert_eq!(one.step(Tab::Media, true), Tab::Media);
-        let no_prayer = Visible::new([true, true, false, true, true, false]);
-        assert_eq!(no_prayer.step(Tab::Prayer, true), Tab::Prayer, "not shown");
     }
 
     #[test]

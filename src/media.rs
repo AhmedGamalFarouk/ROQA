@@ -578,7 +578,6 @@ fn hand_off(
 /// Host-thread owner of the GSMTC manager, the current session and their event tokens.
 /// Must be dropped on the host thread before its `RoInitialize` and COM apartment guards.
 pub struct Media {
-    uia_revision: u64,
     // Teardown is field order after `drop` cancels pending reads: the session's tokens are removed
     // and it is released before the manager's.
     session: Option<Subscribed<Session>>,
@@ -614,7 +613,6 @@ impl Media {
     /// Idle until `start`; the calling thread is the host thread that `refresh` runs on.
     pub fn create() -> Self {
         Self {
-            uia_revision: 0,
             session: None,
             manager: None,
             request: None,
@@ -681,11 +679,7 @@ impl Media {
             _ => None,
         }
     }
-    /// Bumped on every wake that may change what UI Automation reports, so the host republishes labels.
-    pub fn uia_revision(&self) -> u64 {
-        self.uia_revision
-    }
-    /// The session generation; UI Automation elements from an older one are stale.
+    #[cfg(test)]
     pub fn generation(&self) -> u64 {
         self.state.generation
     }
@@ -779,7 +773,6 @@ impl Media {
         }
         self.refreshes = self.refreshes.wrapping_add(1);
         crate::diagnostics::MEDIA_REFRESHES.fetch_add(1, Ordering::Relaxed);
-        self.uia_revision = self.uia_revision.wrapping_add(1);
         if dirty == 0 {
             return true;
         }
@@ -1830,10 +1823,7 @@ mod tests {
         for _ in 0..1000 {
             assert!(!media.refresh(72));
         }
-        assert_eq!(
-            (media.refreshes, media.wakes, media.uia_revision()),
-            (0, 0, 0)
-        );
+        assert_eq!((media.refreshes, media.wakes), (0, 0));
         // A wake is one refresh, and the next idle passes add none.
         media.reconnect();
         media.refresh(72);

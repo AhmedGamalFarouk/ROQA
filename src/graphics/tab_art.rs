@@ -48,7 +48,7 @@ pub(super) fn faded(
 
 /// The hanging handle (design T3), drawn after the body clip is popped because it lies below the body: a
 /// body-coloured shape with the notch's own concave ears, then per tab a dot that becomes an icon as the
-/// handle opens (`p`), the active one accented, and a ring around the one with keyboard focus.
+/// handle opens (`p`) and the active one accented.
 pub(super) fn rail(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -100,7 +100,7 @@ pub(super) fn rail(
     drawn
 }
 
-/// The handle's dots, icons, active wash and focus ring.
+/// The handle's dots, icons and active wash.
 fn items(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -192,26 +192,6 @@ fn items(
                     text,
                     with_alpha(glyphs::active_ink(p), p.ink_alpha(alpha)),
                 )?;
-            }
-        }
-        if handle.focus == Some(position) {
-            // SAFETY: as above.
-            unsafe {
-                let brush =
-                    context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(reveal)), None)?;
-                let gap = scale;
-                let ring = D2D_RECT_F {
-                    left: cell.left - gap,
-                    top: cell.top - gap,
-                    right: cell.right + gap,
-                    bottom: cell.bottom + gap,
-                };
-                context.DrawRoundedRectangle(
-                    &rounded(ring, corner + gap),
-                    &brush,
-                    2.0 * scale,
-                    None,
-                );
             }
         }
     }
@@ -663,7 +643,7 @@ fn limits_page(
         DWRITE_TEXT_ALIGNMENT_TRAILING,
     );
     let normal = DWRITE_FONT_WEIGHT_NORMAL;
-    // The Refresh button: an outlined label, with the focus ring when the keyboard is on it.
+    // The Refresh button: an outlined label.
     let button = layout::refresh(scene.dpi);
     let square = D2D_RECT_F {
         left: body.left + button.x as f32,
@@ -671,23 +651,10 @@ fn limits_page(
         right: body.left + (button.x + button.width) as f32,
         bottom: body.top + (button.y + button.height) as f32,
     };
-    let focused = scene.focus == Some(crate::notch_uia::REFRESH);
     // SAFETY: a brush and an outline on the frame's own device context.
     unsafe {
-        let brush = context.CreateSolidColorBrush(
-            &if focused {
-                with_alpha(p.accent, p.ink_alpha(reveal))
-            } else {
-                ink(0.3)
-            },
-            None,
-        )?;
-        context.DrawRoundedRectangle(
-            &rounded(square, 6.0 * scale),
-            &brush,
-            (if focused { FOCUS_STROKE } else { 1.0 }) * scale,
-            None,
-        );
+        let brush = context.CreateSolidColorBrush(&ink(0.3), None)?;
+        context.DrawRoundedRectangle(&rounded(square, 6.0 * scale), &brush, scale, None);
     }
     draw_text(
         context,

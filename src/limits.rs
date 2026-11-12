@@ -542,8 +542,6 @@ pub struct RowView {
 pub struct View {
     pub rows: Vec<RowView>,
     pub refreshing: bool,
-    /// The UI Automation text, one sentence per window.
-    pub name: String,
 }
 
 const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -587,7 +585,6 @@ pub fn view(
         refreshing,
         ..View::default()
     };
-    let mut names = Vec::new();
     for (tool, reading) in Tool::ALL.into_iter().zip(rows) {
         let name = tool.name();
         let (snap, why) = match reading {
@@ -612,36 +609,8 @@ pub fn view(
             stale,
             why,
         };
-        if let Some(why) = why {
-            names.push(format!("{name}, unavailable, {why}"));
-        }
-        let tail = match (row.as_of.is_empty(), stale) {
-            (true, _) => String::new(),
-            (false, false) => format!(", {}", row.as_of),
-            (false, true) => format!(", stale, {}", row.as_of),
-        };
-        for (what, line, weekly) in [("five-hour", &row.h5, false), ("weekly", &row.wk, true)] {
-            let words = |reset: &str| {
-                if weekly {
-                    format!("resets {reset}")
-                } else {
-                    format!("resets at {reset}")
-                }
-            };
-            match line {
-                Line::Hidden => {}
-                Line::Used { pct, reset } => names.push(format!(
-                    "{name}, {what} limit, {pct} percent used, {}{tail}",
-                    words(reset)
-                )),
-                Line::Reset { reset } => names.push(format!(
-                    "{name}, {what} limit, window reset (it was due {reset}){tail}"
-                )),
-            }
-        }
         view.rows.push(row);
     }
-    view.name = names.join(". ");
     view
 }
 
@@ -941,19 +910,10 @@ mod tests {
         assert_eq!(v.rows[1].h5, Line::Hidden);
         assert!(v.rows[1].stale && v.rows[1].as_of == "1 h ago");
         assert_eq!(v.rows[2].why, Some(OFF_AGY));
-        assert!(
-            v.name
-                .contains("Antigravity, unavailable, Allow ROQA to run agy in Settings")
-        );
-        assert!(
-            !v.name.contains("80 percent")
-                && v.name.contains("Codex, weekly limit, 5 percent used")
-        );
-        assert!(v.name.contains("stale, 1 h ago"));
     }
 
     #[test]
-    fn the_accessible_sentence_names_tool_window_percent_reset_and_time() {
+    fn a_row_carries_the_used_percent_and_the_reset_time_in_local_time() {
         // 2026-11-12 16:50 UTC is a Thursday; at UTC+2 the five-hour reset reads 18:50.
         let reset = parse_iso("2026-11-12T16:50:00Z").unwrap();
         let now = reset - 3600;
@@ -968,18 +928,8 @@ mod tests {
             None,
         ];
         let v = view(&rows, now, &clock(120), false);
-        assert!(
-            v.name.starts_with(
-                "Claude, five-hour limit, 48 percent used, resets at 18:50, as of 17:48. "
-            ),
-            "{}",
-            v.name
-        );
-        assert!(
-            v.name
-                .contains("Claude, weekly limit, 10 percent used, resets Sun 07:00, as of 17:48")
-        );
-        assert!(v.name.contains("Codex, unavailable, Reading..."));
+        assert_eq!(v.rows[0].as_of, "as of 17:48");
+        assert_eq!(v.rows[2].why, Some(WAITING));
         assert_eq!(
             v.rows[0].h5,
             Line::Used {

@@ -591,8 +591,6 @@ pub struct View {
     pub footer: String,
     /// Shown instead of the data when there is none.
     pub message: Option<&'static str>,
-    /// The UI Automation name, such as "Cairo, 24 degrees, clear".
-    pub name: String,
 }
 
 /// Whole degrees from tenths of a degree Celsius.
@@ -626,7 +624,6 @@ pub fn view(
         };
         return View {
             title: "Weather".to_owned(),
-            name: format!("Weather, {message}"),
             message: Some(message),
             ..View::default()
         };
@@ -654,12 +651,6 @@ pub fn view(
             .collect(),
         footer,
         message: None,
-        name: format!(
-            "{}, {} degrees, {}",
-            place.name,
-            degrees(report.tenths, fahrenheit),
-            icon.label().to_lowercase()
-        ),
     }
 }
 
@@ -1081,7 +1072,6 @@ mod tests {
             (page.title.as_str(), page.temp.as_str(), page.range.as_str()),
             ("Cairo", "20°", "H 25°  L 15°")
         );
-        assert_eq!(page.name, "Cairo, 20 degrees, clear");
         assert_eq!(page.footer, "Weather by Open-Meteo.com · 2 h ago");
         assert_eq!(
             (

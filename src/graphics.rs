@@ -149,8 +149,6 @@ pub struct DockScene<'a> {
     /// Which taskbar buttons are on, and each enabled one's hover progress.
     pub layout: dock::Buttons,
     pub buttons: Vec<(dock::Button, f32)>,
-    /// The slot or button with keyboard focus, drawn with a ring.
-    pub focus: Option<dock::Hit>,
     /// Pointer-inside animation progress for the bar fill; keeps the M1 hover background semantic.
     pub inside: f32,
     pub dpi: u32,
@@ -187,8 +185,6 @@ pub struct NotchScene<'a> {
     /// 0 collapsed, 1 expanded; the open curve briefly overshoots 1.
     pub progress: f32,
     pub dpi: u32,
-    /// The media control with keyboard focus, drawn with a focus ring.
-    pub focus: Option<usize>,
     /// The panel's progress row; none while collapsed or without a track duration.
     pub played: Option<Progress>,
     /// The panel's volume row; `None` without an audio endpoint draws it disabled.
@@ -222,11 +218,10 @@ pub struct NotchScene<'a> {
     pub fx: Fx,
 }
 
-/// The tab handle: its geometry, the shown tabs in order and the one position with keyboard focus.
+/// The tab handle: its geometry and the shown tabs in order.
 pub struct RailScene<'a> {
     pub layout: layout::Rail,
     pub tabs: &'a [Tab],
-    pub focus: Option<usize>,
 }
 
 /// One shelf entry: its system icon once the worker delivered it (a plain square until then), and whether
@@ -927,33 +922,12 @@ fn settings_button(
     if reveal <= 0.0 {
         return Ok(());
     }
-    let scale = scene.dpi as f32 / 96.0;
     let gear = layout::gear(scene.dpi, scene.track.is_some());
     let square = pixel_square(
         body.left + gear.x as f32,
         body.top + gear.y as f32,
         gear.width as f32,
     );
-    if scene.focus == Some(crate::notch_uia::GEAR) {
-        let out = (FOCUS_GAP + FOCUS_STROKE / 2.0) * scale;
-        let ring = D2D_RECT_F {
-            left: square.left - out,
-            top: square.top - out,
-            right: square.right + out,
-            bottom: square.bottom + out,
-        };
-        // SAFETY: a brush and an outline drawn on the frame's own device context.
-        unsafe {
-            let brush =
-                context.CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(reveal)), None)?;
-            context.DrawRoundedRectangle(
-                &rounded(ring, 8.0 * scale),
-                &brush,
-                FOCUS_STROKE * scale,
-                None,
-            );
-        }
-    }
     glyphs::draw(
         context,
         square,
@@ -1156,22 +1130,6 @@ fn shelf_row(
         let alpha = reveal * if slot.missing { DISABLED } else { 1.0 };
         let shape = rounded(square, 3.0 * scale);
         let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha));
-        // The whole cell (icon and name) takes the keyboard focus ring.
-        let (left, top) = (body.left + cell.x as f32, body.top + cell.y as f32);
-        let area = D2D_RECT_F {
-            left,
-            top,
-            right: left + cell.width as f32,
-            bottom: top + cell.height as f32,
-        };
-        if scene.focus == Some(crate::notch_uia::SHELF_BASE + index) {
-            // SAFETY: live draw context and local brush.
-            unsafe {
-                let brush = context
-                    .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(reveal)), None)?;
-                context.DrawRoundedRectangle(&rounded(area, 4.0 * scale), &brush, scale, None);
-            }
-        }
         let name = match (slot.add, slot.more) {
             (true, _) => "Add",
             (_, true) => "More",
@@ -1184,11 +1142,12 @@ fn shelf_row(
             designator: 1.0,
             align: DWRITE_TEXT_ALIGNMENT_CENTER,
         };
+        let (left, top) = (body.left + cell.x as f32, body.top + cell.y as f32);
         let line = D2D_RECT_F {
             top: square.bottom + 2.0 * scale,
             left: left + 2.0 * scale,
-            right: area.right - 2.0 * scale,
-            ..area
+            right: left + cell.width as f32 - 2.0 * scale,
+            bottom: top + cell.height as f32,
         };
         draw_text(context, name, &font, line, ink(0.8 * alpha))?;
         if slot.add || slot.more {
@@ -1235,8 +1194,6 @@ struct MediaPlan<'a> {
     /// The progress bar's track and filled part, and their opacity.
     bar: Option<([D2D1_ROUNDED_RECT; 2], f32)>,
     chips: Vec<Chip>,
-    /// Around the control with keyboard focus.
-    ring: Option<Ring>,
     volume: Option<VolumeBar>,
     /// The visualizer's bars and their opacity.
     meter: Option<([D2D1_ROUNDED_RECT; BARS], f32)>,
@@ -1285,16 +1242,8 @@ struct Chip {
     /// The player does not accept it now: high contrast draws it in the system grey-text colour.
     disabled: bool,
 }
-struct Ring {
-    shape: D2D1_ROUNDED_RECT,
-    stroke: f32,
-    alpha: f32,
-}
 /// Opacity of a control the player does not accept now.
 const DISABLED: f32 = 0.30;
-/// Focus ring: stroke width and its gap from the control's edge, in DIPs.
-const FOCUS_STROKE: f32 = 2.0;
-const FOCUS_GAP: f32 = 2.0;
 
 /// What the pointer is doing on the volume bar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1412,10 +1361,6 @@ fn media_plan<'a>(
     ];
     let bar = progress_row(&mut lines, scene, body);
     let chips = media_chips(scene, track, body);
-    let ring = scene
-        .focus
-        .and_then(|index| chips.get(index))
-        .map(|chip| focus_ring(chip, scale, motion::reveal(scene.progress)));
     MediaPlan {
         cover: rounded(cover, at(5.0, 10.0) * scale),
         art: scene.art.map(|(_, pixels)| pixels),
@@ -1429,7 +1374,6 @@ fn media_plan<'a>(
             .collect(),
         bar,
         chips,
-        ring,
         volume: volume_bar(scene, body),
         meter: meter_bars(scene, body),
     }
@@ -1641,29 +1585,6 @@ fn media_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip
         .collect()
 }
 
-/// The keyboard focus ring around `chip`: a circle around play/pause, a rounded rect otherwise.
-fn focus_ring(chip: &Chip, scale: f32, alpha: f32) -> Ring {
-    let stroke = FOCUS_STROKE * scale;
-    // The stroke is centred on the path: its inner edge sits FOCUS_GAP outside the control.
-    let out = FOCUS_GAP * scale + stroke / 2.0;
-    let rect = D2D_RECT_F {
-        left: chip.rect.left - out,
-        top: chip.rect.top - out,
-        right: chip.rect.right + out,
-        bottom: chip.rect.bottom + out,
-    };
-    let radius = if chip.filled {
-        (rect.bottom - rect.top) / 2.0
-    } else {
-        8.0 * scale + out
-    };
-    Ring {
-        shape: rounded(rect, radius),
-        stroke,
-        alpha,
-    }
-}
-
 fn media_text(
     context: &ID2D1DeviceContext,
     plan: &MediaPlan,
@@ -1784,14 +1705,6 @@ fn media_text(
             for bar in bars {
                 context.FillRoundedRectangle(bar, &brush);
             }
-        }
-    }
-    if let Some(ring) = &plan.ring {
-        // SAFETY: as above.
-        unsafe {
-            let brush = context
-                .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(ring.alpha)), None)?;
-            context.DrawRoundedRectangle(&ring.shape, &brush, ring.stroke, None);
         }
     }
     Ok(())
@@ -2082,19 +1995,6 @@ fn paint_slots(
                 bottom: rect.bottom - px(20),
             };
             context.FillRectangle(&hairline, &line);
-        }
-        // The keyboard focus ring, as the notch draws it.
-        if let Some(hit) = scene.focus {
-            let c = cell(hit);
-            let ring = D2D_RECT_F {
-                left: c.left + px(2),
-                top: c.top + px(10),
-                right: c.right - px(2),
-                bottom: c.bottom - px(10),
-            };
-            let brush =
-                context.CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(1.0)), None)?;
-            context.DrawRoundedRectangle(&rounded(ring, px(12)), &brush, px(2), None);
         }
     }
     Ok(())
@@ -2556,43 +2456,31 @@ mod media_tests {
     }
     /// The scene `Desktop` builds from a media view, planned as `notch_text` plans it.
     fn plan<'a>(view: &'a View, time: &'a str, progress: f32, dpi: u32) -> MediaPlan<'a> {
-        focused(view, time, progress, dpi, None)
-    }
-    fn focused<'a>(
-        view: &'a View,
-        time: &'a str,
-        progress: f32,
-        dpi: u32,
-        focus: Option<usize>,
-    ) -> MediaPlan<'a> {
-        played(view, time, progress, dpi, focus, None)
+        played(view, time, progress, dpi, None)
     }
     fn played<'a>(
         view: &'a View,
         time: &'a str,
         progress: f32,
         dpi: u32,
-        focus: Option<usize>,
         played: Option<Progress>,
     ) -> MediaPlan<'a> {
-        planned(view, time, progress, dpi, focus, played, None)
+        planned(view, time, progress, dpi, played, None)
     }
     fn volume<'a>(
         view: &'a View,
         time: &'a str,
         progress: f32,
         dpi: u32,
-        focus: Option<usize>,
         volume: Option<Level>,
     ) -> MediaPlan<'a> {
-        planned(view, time, progress, dpi, focus, None, volume)
+        planned(view, time, progress, dpi, None, volume)
     }
     fn planned<'a>(
         view: &'a View,
         time: &'a str,
         progress: f32,
         dpi: u32,
-        focus: Option<usize>,
         played: Option<Progress>,
         volume: Option<Level>,
     ) -> MediaPlan<'a> {
@@ -2603,7 +2491,6 @@ mod media_tests {
             art: None,
             progress,
             dpi,
-            focus,
             played,
             volume,
             bars: [0; BARS],
@@ -2641,7 +2528,6 @@ mod media_tests {
                 art: Some((1, &art)),
                 progress,
                 dpi: 96,
-                focus: None,
                 played: None,
                 volume: None,
                 bars: [0; BARS],
@@ -2729,9 +2615,8 @@ mod media_tests {
             (title.weight, title.align),
             (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING)
         );
-        // The pill draws no controls, even with keyboard focus on one.
-        let plan = focused(&song, "9:50 pm", 0.0, 96, Some(PLAY_PAUSE));
-        assert!(plan.chips.is_empty() && plan.ring.is_none());
+        // The pill draws no controls.
+        assert!(plan.chips.is_empty());
     }
 
     #[test]
@@ -2812,7 +2697,6 @@ mod media_tests {
                 ),
             ]
         );
-        assert!(panel.ring.is_none());
         assert!(track("Song", "Artist", false).shown().is_none());
         // The controls fade in with the artist and keep their place while the body grows.
         let opening = plan(&song, "9:50 pm", 0.6, 96);
@@ -2832,7 +2716,7 @@ mod media_tests {
             total: 296,
             filled: 41,
         };
-        let panel = played(&song, "9:50 pm", 1.0, 96, None, Some(row));
+        let panel = played(&song, "9:50 pm", 1.0, 96, Some(row));
         // Body x 40..400: elapsed from 100, bar 140..304 centred on y 57, total trailing at 344.
         let ([track, fill], alpha) = panel.bar.expect("a bar");
         assert_eq!(track.rect, rect(180.0, 55.0, 344.0, 59.0));
@@ -2850,7 +2734,7 @@ mod media_tests {
         // Above the controls row and inside the body at every scale.
         assert!(panel.chips.iter().all(|chip| chip.rect.top >= 65.0));
         for dpi in [144, 192] {
-            let panel = played(&song, "9:50 pm", 1.0, dpi, None, Some(row));
+            let panel = played(&song, "9:50 pm", 1.0, dpi, Some(row));
             let body = body(dpi, 1.0);
             let ([track, _], _) = panel.bar.unwrap();
             for item in panel.lines.iter().map(|l| l.rect).chain([track.rect]) {
@@ -2858,40 +2742,20 @@ mod media_tests {
             }
         }
         // It fades in with the controls; collapsed or without a row, nothing is drawn.
-        let opening = played(&song, "9:50 pm", 0.6, 96, None, Some(row));
+        let opening = played(&song, "9:50 pm", 0.6, 96, Some(row));
         assert_eq!(opening.bar.unwrap().1, motion::reveal(0.6));
-        assert!(
-            played(&song, "9:50 pm", 0.0, 96, None, Some(row))
-                .bar
-                .is_none()
-        );
+        assert!(played(&song, "9:50 pm", 0.0, 96, Some(row)).bar.is_none());
         let plain = plan(&song, "9:50 pm", 1.0, 96);
         assert!(plain.bar.is_none() && plain.lines.len() == 3);
     }
 
     #[test]
-    fn keyboard_focus_rings_the_focused_control_at_any_scale() {
+    fn controls_stay_inside_the_panel_body_at_any_scale() {
         let song = track("Song", "Artist", true);
-        let plan = focused(&song, "9:50 pm", 1.0, 96, Some(PLAY_PAUSE));
-        let ring = plan.ring.expect("a ring");
-        // 2 DIP stroke centred 3 DIP outside the 32 DIP circle: a 38 DIP circle.
-        assert_eq!(ring.shape.rect, rect(185.0, 63.0, 223.0, 101.0));
-        assert_eq!(
-            (ring.shape.radiusX, ring.stroke, ring.alpha),
-            (19.0, 2.0, 1.0)
-        );
-        let next = focused(&song, "9:50 pm", 1.0, 96, Some(2)).ring.unwrap();
-        assert_eq!(next.shape.rect, rect(237.0, 63.0, 271.0, 101.0));
-        assert_eq!(next.shape.radiusX, 11.0);
-        for dpi in [144, 192] {
-            let scale = dpi as f32 / 96.0;
-            let plan = focused(&song, "9:50 pm", 1.0, dpi, Some(0));
-            let (chip, ring) = (&plan.chips[0], plan.ring.unwrap());
-            assert_eq!(ring.stroke, 2.0 * scale);
-            assert_eq!(chip.rect.left - ring.shape.rect.left, 3.0 * scale);
-            // Every control and its ring stay inside the panel body.
+        for dpi in [96, 144, 192] {
+            let plan = plan(&song, "9:50 pm", 1.0, dpi);
             let body = body(dpi, 1.0);
-            for item in plan.chips.iter().map(|c| c.rect).chain([ring.shape.rect]) {
+            for item in plan.chips.iter().map(|c| c.rect) {
                 assert!(item.left >= body.left && item.right <= body.right, "{dpi}");
                 assert!(item.top >= body.top && item.bottom <= body.bottom, "{dpi}");
             }
@@ -2909,7 +2773,6 @@ mod media_tests {
                 art: None,
                 progress,
                 dpi: 96,
-                focus: None,
                 played: None,
                 volume: None,
                 bars: [4, 20, 12, 8, 4],
@@ -2969,7 +2832,6 @@ mod media_tests {
                     art: None,
                     progress: 1.0,
                     dpi,
-                    focus: None,
                     played: None,
                     volume: None,
                     bars: heights,
@@ -3014,7 +2876,6 @@ mod media_tests {
             art: None,
             progress: 1.0,
             dpi: 96,
-            focus: None,
             played: None,
             volume: Some(Level {
                 percent: 40,
@@ -3056,7 +2917,7 @@ mod media_tests {
     fn volume_row_fills_to_the_shown_percent_and_dims_while_muted_or_unavailable() {
         let song = track("Song", "Artist", true);
         let level = |percent, muted| Some(Level { percent, muted });
-        let panel = volume(&song, "9:50 pm", 1.0, 96, None, level(40, false));
+        let panel = volume(&song, "9:50 pm", 1.0, 96, level(40, false));
         let bar = panel.volume.unwrap();
         // Bar x 172..360 in the body at 40; 6 DIP thick, centred in 100..116; the thumb sits on the fill end.
         assert_eq!(bar.track.rect, rect(172.0, 105.0, 360.0, 111.0));
@@ -3068,22 +2929,20 @@ mod media_tests {
             (panel.chips[3].shape, panel.chips[3].alpha),
             (Glyph::Speaker, 1.0)
         );
-        let muted = volume(&song, "9:50 pm", 1.0, 96, None, level(40, true));
+        let muted = volume(&song, "9:50 pm", 1.0, 96, level(40, true));
         assert_eq!(muted.chips[3].shape, Glyph::Muted);
         assert_eq!(muted.chips[3].alpha, 1.0); // Still a live toggle.
         assert_eq!(muted.volume.unwrap().fill_alpha, MUTED_FILL);
-        let unavailable = volume(&song, "9:50 pm", 1.0, 96, None, None);
+        let unavailable = volume(&song, "9:50 pm", 1.0, 96, None);
         let bar = unavailable.volume.unwrap();
         assert_eq!((bar.fill.rect.right, bar.fill_alpha), (172.0, DISABLED));
-        // The ring fits the mute toggle inside the body; the row is not drawn while collapsed.
-        let ring = volume(&song, "9:50 pm", 1.0, 96, Some(3), level(40, false)).ring;
-        assert_eq!(ring.unwrap().shape.rect, rect(137.0, 97.0, 167.0, 119.0));
+        // The row is not drawn while collapsed.
         assert!(
-            volume(&song, "9:50 pm", 0.0, 96, None, level(40, false))
+            volume(&song, "9:50 pm", 0.0, 96, level(40, false))
                 .volume
                 .is_none()
         );
-        let full = volume(&song, "9:50 pm", 1.0, 192, None, level(100, false))
+        let full = volume(&song, "9:50 pm", 1.0, 192, level(100, false))
             .volume
             .unwrap();
         assert_eq!(full.fill.rect.right, full.track.rect.right);

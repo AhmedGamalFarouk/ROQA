@@ -9,8 +9,6 @@ use crate::{
     audio::{Audio, Device},
     brightness::{Brightness, Target},
     dock::px,
-    dock_uia::Accessibility,
-    edge_uia,
     graphics::{Canvas, Glyph, Graphics, ListScene, SliderScene},
     layout::Bounds,
     native_window::NativeWindow,
@@ -19,10 +17,7 @@ use crate::{
     theme::Palette,
     topology::Monitor,
 };
-use std::{
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use windows::{
     Win32::{
         Foundation::LPARAM,
@@ -84,12 +79,6 @@ impl Kind {
         match self {
             Kind::Volume => w!("ROQA Volume Slider"),
             Kind::Brightness => w!("ROQA Brightness Slider"),
-        }
-    }
-    fn id(self) -> &'static str {
-        match self {
-            Kind::Volume => "RoqaVolumeSlider",
-            Kind::Brightness => "RoqaBrightnessSlider",
         }
     }
     fn enabled(self, settings: &Settings) -> bool {
@@ -409,8 +398,6 @@ enum View {
 }
 
 struct Slider {
-    // UIA is released first, then the canvas, then the window.
-    accessibility: Accessibility,
     canvas: Option<Canvas>,
     window: NativeWindow,
     kind: Kind,
@@ -426,8 +413,6 @@ struct Slider {
     /// The level being dragged, shown instead of the device's until the drag ends.
     drag: Option<u8>,
     wheel: i32,
-    /// A UIA client has asked for this element, so a screen reader may want the volume level.
-    queried: bool,
     /// Input that landed on the bare strip, applied once the pill is up.
     input: Option<Input>,
     brightness: Reading,
@@ -435,16 +420,9 @@ struct Slider {
     /// When a pending brightness reading counts as unsupported; set while the pill is shown.
     read_due: Option<Instant>,
     throttle: Throttle,
-    /// The default device's name, for the accessible name; `name_revision` bumps when it changes.
-    device: Option<String>,
-    name_revision: u32,
-    published: Option<(u8, bool, bool, u32, bool, bool)>,
-    uia: edge_uia::Shared,
 }
 impl Drop for Slider {
     fn drop(&mut self) {
-        self.accessibility.disconnect();
-        edge_uia::invalidate(&self.uia);
         if self.drag.is_some() {
             // SAFETY: releases this thread's own capture; harmless if it is already gone.
             let _ = unsafe { ReleaseCapture() };
@@ -478,14 +456,8 @@ impl Slider {
     fn create(kind: Kind, monitor: &Monitor) -> Result<Self> {
         let window =
             NativeWindow::create_hidden(strip(monitor.work, monitor.dpi, kind), kind.title())?;
-        let uia: edge_uia::Shared = Arc::new(Mutex::new(edge_uia::State {
-            id: kind.id(),
-            ..Default::default()
-        }));
-        let accessibility = edge_uia::accessibility(window.0, &uia)?;
         window.show();
         Ok(Self {
-            accessibility,
             canvas: None,
             window,
             kind,
@@ -499,16 +471,11 @@ impl Slider {
             drawn: None,
             drag: None,
             wheel: 0,
-            queried: false,
             input: None,
             brightness: Reading::Pending,
             read_wanted: false,
             read_due: None,
             throttle: Throttle::default(),
-            device: None,
-            name_revision: 0,
-            published: None,
-            uia,
         })
     }
     fn target(&self) -> Target {
@@ -533,21 +500,11 @@ impl Slider {
             },
         }
     }
-    fn enabled(&self, audio: &Audio) -> bool {
-        match self.kind {
-            // Before Core Audio starts there is nothing to say against it.
-            Kind::Volume => audio.level().is_some() || !audio.active(),
-            Kind::Brightness => self.brightness != Reading::Unsupported,
-        }
-    }
-
     // Showing and hiding.
 
-    fn open(&mut self, graphics: &Graphics, palette: Palette, audio: &Audio, now: Instant) {
+    fn open(&mut self, graphics: &Graphics, palette: Palette, now: Instant) {
         self.mode = Mode::Level;
-        if self.kind == Kind::Volume {
-            self.set_device(audio.default_name());
-        } else {
+        if self.kind == Kind::Brightness {
             self.brightness = Reading::Pending;
             self.read_wanted = true;
             self.read_due = Some(now + READ_LIMIT);
@@ -598,13 +555,6 @@ impl Slider {
             self.window.show();
         }
     }
-    fn set_device(&mut self, name: Option<String>) {
-        if name != self.device {
-            self.device = name;
-            self.name_revision += 1;
-        }
-    }
-
     /// Records what the worker found, or what the deadline decided; a note needs the wider window.
     fn settle(&mut self, reading: Reading, graphics: &Graphics, palette: Palette) {
         let was = self.wide();
@@ -662,8 +612,6 @@ impl Slider {
                     self.hover.request(now);
                 }
             }
-            edge_uia::SET => self.set_level(message.wParam.0.min(100) as u8, audio),
-            edge_uia::QUERIED => self.queried = true,
             _ => return false,
         }
         true
@@ -708,7 +656,6 @@ impl Slider {
             eprintln!("Edge slider: switch device: {error}");
             open_sound_settings();
         }
-        self.set_device(Some(device.name));
         self.mode = Mode::Level;
         self.drawn = None;
         if let Err(error) = self.resize_to(self.layout().size) {
@@ -901,49 +848,6 @@ impl Slider {
             _ => self.drawn = Some(view),
         }
     }
-    /// Shares the level and name with UI Automation when either changes.
-    fn publish(&mut self, audio: &Audio) {
-        let percent = self.percent(audio).unwrap_or(0);
-        let muted = self.kind == Kind::Volume && audio.level().is_some_and(|level| level.muted);
-        let enabled = self.enabled(audio);
-        let key = (
-            percent,
-            enabled,
-            muted,
-            self.name_revision,
-            self.brightness == Reading::Pending,
-            audio.active(),
-        );
-        if self.published == Some(key) {
-            return;
-        }
-        self.published = Some(key);
-        let name = match (self.kind, enabled) {
-            (Kind::Volume, false) => "Volume unavailable, no audio device".to_owned(),
-            (Kind::Volume, true) if !audio.active() => "Volume".to_owned(),
-            (Kind::Volume, true) => {
-                let device = self
-                    .device
-                    .as_deref()
-                    .map(|name| format!(", {name}"))
-                    .unwrap_or_default();
-                format!(
-                    "Volume {percent}%{}{device}",
-                    if muted { ", muted" } else { "" }
-                )
-            }
-            (Kind::Brightness, false) => UNSUPPORTED.to_owned(),
-            (Kind::Brightness, true) if self.brightness == Reading::Pending => {
-                "Brightness".to_owned()
-            }
-            (Kind::Brightness, true) => format!("Brightness {percent}%"),
-        };
-        if let Ok(mut state) = self.uia.lock() {
-            state.name = name;
-            state.percent = percent;
-            state.enabled = enabled;
-        }
-    }
 }
 
 /// Every slider of every monitor, and the brightness worker they share.
@@ -953,20 +857,12 @@ pub struct Edges {
     brightness: Option<Brightness>,
 }
 impl Edges {
-    /// Whether Core Audio should run for the volume slider: its pill is open, or a UI Automation client has
-    /// asked for its element (`WM_GETOBJECT`). A pointer passing over the bare strip does not load it.
+    /// Whether Core Audio should run for the volume slider: its pill is open. A pointer passing over the
+    /// bare strip does not load it.
     pub fn wants_audio(&self) -> bool {
-        self.sliders.iter().any(|slider| {
-            slider.kind == Kind::Volume && (slider.queried || slider.canvas.is_some())
-        })
-    }
-    /// Core Audio just started: an open volume pill names the default device it could not know before.
-    pub fn audio_started(&mut self, audio: &Audio) {
-        for slider in &mut self.sliders {
-            if slider.kind == Kind::Volume && slider.canvas.is_some() {
-                slider.set_device(audio.default_name());
-            }
-        }
+        self.sliders
+            .iter()
+            .any(|slider| slider.kind == Kind::Volume && slider.canvas.is_some())
     }
     /// Creates and removes sliders to match the monitors and settings. A monitor the user switched off
     /// gets none; a changed work area or DPI replaces its sliders.
@@ -1010,7 +906,7 @@ impl Edges {
             .is_some_and(|slider| slider.message(message, audio, now))
     }
     /// One host pass: applies hover deadlines and brightness readings, sends throttled writes, paints what
-    /// changed and publishes to UI Automation. `covered` says whether a full-screen app hides a monitor.
+    /// changed. `covered` says whether a full-screen app hides a monitor.
     /// Returns the soonest deadline, if any.
     pub fn refresh(
         &mut self,
@@ -1039,7 +935,7 @@ impl Edges {
                 continue;
             }
             match slider.hover.tick(now, slider.drag.is_some()) {
-                Some(true) => slider.open(graphics, palette, audio, now),
+                Some(true) => slider.open(graphics, palette, now),
                 Some(false) => slider.close(),
                 None => {}
             }
@@ -1067,7 +963,6 @@ impl Edges {
             }
             let slider = &mut self.sliders[index];
             slider.paint(audio);
-            slider.publish(audio);
             let read_due = slider
                 .read_due
                 .filter(|_| slider.brightness == Reading::Pending);

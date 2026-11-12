@@ -58,8 +58,6 @@ pub struct Picker {
     rows: Vec<Row>,
     return_to: Option<WindowKey>,
     closed: bool,
-    /// Windows refused foreground; keep saying so until the user focuses the picker.
-    denied: bool,
 }
 impl Picker {
     pub fn create(model: &WindowModel) -> Result<Self> {
@@ -79,7 +77,6 @@ impl Picker {
             rows: Vec::new(),
             return_to: foreground_key(),
             closed: false,
-            denied: false,
         };
         picker.create_controls()?;
         picker.text = Some(TextSettings::create()?);
@@ -91,9 +88,6 @@ impl Picker {
             let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
             if SetForegroundWindow(window).as_bool() {
                 SetFocus(Some(picker.filter))?;
-            } else {
-                picker.denied = true;
-                picker.refilter()?;
             }
         }
         Ok(picker)
@@ -102,7 +96,7 @@ impl Picker {
         self.label = control(
             self.window,
             w!("Static"),
-            "&Filter windows",
+            "Filter windows",
             99,
             0,
             WS_EX_NOPARENTNOTIFY,
@@ -112,7 +106,7 @@ impl Picker {
             w!("Edit"),
             "",
             FILTER,
-            ES_AUTOHSCROLL as u32 | WS_BORDER.0 | WS_TABSTOP.0,
+            ES_AUTOHSCROLL as u32 | WS_BORDER.0,
             WS_EX_CLIENTEDGE,
         )?;
         self.list = control(
@@ -120,11 +114,7 @@ impl Picker {
             w!("ListBox"),
             "",
             LIST,
-            LBS_NOTIFY as u32
-                | LBS_NOINTEGRALHEIGHT as u32
-                | WS_VSCROLL.0
-                | WS_HSCROLL.0
-                | WS_TABSTOP.0,
+            LBS_NOTIFY as u32 | LBS_NOINTEGRALHEIGHT as u32 | WS_VSCROLL.0 | WS_HSCROLL.0,
             WS_EX_CLIENTEDGE,
         )?;
         self.status = control(
@@ -138,20 +128,20 @@ impl Picker {
         self.open = control(
             self.window,
             w!("Button"),
-            "&Open window",
+            "Open window",
             OPEN,
-            BS_DEFPUSHBUTTON as u32 | WS_TABSTOP.0,
+            BS_PUSHBUTTON as u32,
             WINDOW_EX_STYLE(0),
         )?;
         self.close = control(
             self.window,
             w!("Button"),
-            "&Close",
+            "Close",
             CLOSE,
-            WS_TABSTOP.0,
+            0,
             WINDOW_EX_STYLE(0),
         )?;
-        // SAFETY: these messages target our standard edit/dialog controls; scalar parameters only.
+        // SAFETY: this message targets our standard edit control; scalar parameters only.
         unsafe {
             SendMessageW(
                 self.filter,
@@ -159,21 +149,10 @@ impl Picker {
                 Some(WPARAM(256)),
                 Some(LPARAM(0)),
             );
-            SendMessageW(
-                self.window,
-                DM_SETDEFID,
-                Some(WPARAM(OPEN)),
-                Some(LPARAM(0)),
-            );
         }
         Ok(())
     }
     pub fn synchronize(&mut self, model: &WindowModel) -> Result<()> {
-        // SAFETY: scalar foreground comparison with our own live dialog.
-        if self.denied && unsafe { GetForegroundWindow() } == self.window {
-            self.denied = false;
-            self.refilter()?;
-        }
         if self.text.as_ref().is_some_and(TextSettings::take_changed) {
             self.relayout()?;
         }
@@ -241,12 +220,10 @@ impl Picker {
         unsafe {
             let _ = EnableWindow(self.open, !self.rows.is_empty());
         }
-        let hint = if self.denied {
-            "Windows kept your current app in front. Click this window to use the keyboard."
-        } else {
-            "Filter, choose a window, then press Enter."
-        };
-        self.set_status(&format!("{} windows. {hint}", self.rows.len()))
+        self.set_status(&format!(
+            "{} windows. Filter, then double-click one.",
+            self.rows.len()
+        ))
     }
     fn set_status(&self, text: &str) -> Result<()> {
         let text = wide(text);
@@ -303,10 +280,6 @@ impl Picker {
     }
     pub fn closed(&self) -> bool {
         self.closed
-    }
-    pub fn keyboard(&self, message: &MSG) -> bool {
-        // SAFETY: no Rust state is exposed to the reentrant dialog procedure; it posts scalar actions only.
-        unsafe { IsDialogMessageW(self.window, message).as_bool() }
     }
     fn relayout(&mut self) -> Result<()> {
         let work = native_window::primary_work_area()?;

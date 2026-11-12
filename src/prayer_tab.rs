@@ -113,23 +113,14 @@ pub fn notice(e: Event) -> String {
     }
 }
 
-/// "in 2 h 10 min" (drawn) or "in 2 hours 10 minutes" (spoken); minutes round up, so never "in 0 min" early.
-pub fn countdown(secs_left: u32, spoken: bool) -> String {
+/// "in 2 h 10 min"; minutes round up, so never "in 0 min" early.
+pub fn countdown(secs_left: u32) -> String {
     let minutes = secs_left.div_ceil(60);
     let (h, m) = (minutes / 60, minutes % 60);
-    let unit = |n: u32, short: &str, long: &str| {
-        if !spoken {
-            format!("{n} {short}")
-        } else if n == 1 {
-            format!("1 {long}")
-        } else {
-            format!("{n} {long}s")
-        }
-    };
-    let parts: Vec<String> = [(h, "h", "hour"), (m, "min", "minute")]
+    let parts: Vec<String> = [(h, "h"), (m, "min")]
         .into_iter()
-        .filter(|&(n, ..)| n > 0)
-        .map(|(n, short, long)| unit(n, short, long))
+        .filter(|&(n, _)| n > 0)
+        .map(|(n, unit)| format!("{n} {unit}"))
         .collect();
     format!("in {}", parts.join(" "))
 }
@@ -149,8 +140,6 @@ pub struct View {
     pub left: String,
     pub hijri: String,
     pub rows: Vec<Row>,
-    /// The UI Automation name, such as "Next prayer Asr in 2 hours 10 minutes".
-    pub name: String,
 }
 
 /// The page for `params` (or `message` without a place) at `local`; `label` writes a time of day.
@@ -163,7 +152,6 @@ pub fn view(
 ) -> View {
     let none = |message: &'static str| View {
         message: Some(message),
-        name: message.to_owned(),
         ..View::default()
     };
     let Some(params) = params else {
@@ -187,10 +175,9 @@ pub fn view(
         return none("No prayer times for this place today");
     };
     let left = (at - local.secs) as u32;
-    let (next_name, short) = (ahead.name(), countdown(left, false));
+    let (next_name, short) = (ahead.name(), countdown(left));
     View {
         message: None,
-        name: format!("Next prayer {next_name} {}", countdown(left, true)),
         next: next_name.to_owned(),
         left: short,
         hijri,
@@ -490,13 +477,11 @@ mod tests {
     }
 
     #[test]
-    fn countdown_reads_short_and_spoken() {
-        assert_eq!(countdown(2 * 3600 + 10 * 60 - 5, false), "in 2 h 10 min");
-        assert_eq!(countdown(2 * 3600 + 10 * 60, true), "in 2 hours 10 minutes");
-        assert_eq!(countdown(3600, true), "in 1 hour");
-        assert_eq!(countdown(59, false), "in 1 min");
-        assert_eq!(countdown(3 * 3600, false), "in 3 h");
-        assert_eq!(countdown(61, true), "in 2 minutes");
+    fn countdown_rounds_minutes_up() {
+        assert_eq!(countdown(2 * 3600 + 10 * 60 - 5), "in 2 h 10 min");
+        assert_eq!(countdown(59), "in 1 min");
+        assert_eq!(countdown(3 * 3600), "in 3 h");
+        assert_eq!(countdown(61), "in 2 min");
     }
 
     #[test]
@@ -548,7 +533,6 @@ mod tests {
             Some(2),
             "Asr has started"
         );
-        assert!(v.name.starts_with("Next prayer Maghrib in "), "{}", v.name);
         // After Isha the next is tomorrow's Fajr and Isha stays current; before Fajr too.
         let late = Local {
             secs: times[5] + 60,
@@ -574,13 +558,7 @@ mod tests {
             String::new(),
             &|s| format!("{s}"),
         );
-        assert_eq!(
-            (none.message, none.name.as_str()),
-            (
-                Some("Set your city in Settings"),
-                "Set your city in Settings"
-            )
-        );
+        assert_eq!(none.message, Some("Set your city in Settings"));
     }
 
     #[test]

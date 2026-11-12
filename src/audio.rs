@@ -437,18 +437,6 @@ impl Audio {
             self.changed(set);
         }
     }
-    /// The default render endpoint's friendly name, for the volume slider's accessible name.
-    pub fn default_name(&self) -> Option<String> {
-        let devices = self.devices.as_ref()?;
-        // SAFETY: host-thread calls on the live enumerator.
-        unsafe {
-            let device = devices
-                .enumerator
-                .GetDefaultAudioEndpoint(eRender, eConsole)
-                .ok()?;
-            endpoint_name(&device)
-        }
-    }
     /// The active render endpoints and the default one (host thread). Empty before `start`, or when the
     /// enumerator fails, in which case the caller falls back to the Sound settings page.
     pub fn devices(&self) -> Vec<Device> {

@@ -82,8 +82,3 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
-
-[[bin]]
-name = "roqa-uia-probe"
-path = "tests/support/uia_probe.rs"
-test = false

@@ -107,34 +107,6 @@ pub fn items_with_pins(model: &WindowModel, pins: &Pins, desktop_only: bool) -> 
     merged
 }
 
-/// Accessible names per slot: the picker, then each group's first real window title with count and state.
-pub fn names(items: &[DockItem], model: &WindowModel) -> Vec<String> {
-    let mut names = vec!["All windows".to_string()];
-    for item in items {
-        if item.windows.is_empty() {
-            names.push(format!(
-                "{}, pinned, not running",
-                pins::display_name(&item.identity)
-            ));
-            continue;
-        }
-        let title = item
-            .windows
-            .first()
-            .and_then(|key| model.windows.iter().find(|window| window.key == *key))
-            .map_or("Window", |window| window.title.as_str());
-        let mut name = title.to_string();
-        if item.windows.len() > 1 {
-            name.push_str(&format!(", {} windows", item.windows.len()));
-        }
-        if item.active {
-            name.push_str(", active");
-        }
-        names.push(name);
-    }
-    names
-}
-
 /// Taskbar-style buttons beside the app slots (features D2). Start, Search and Task View sit left of the
 /// picker; the minimized-apps chevron and the show-desktop strip sit at the right end.
 pub const BTN_DIPS: i32 = 44;
@@ -226,7 +198,7 @@ impl Default for Buttons {
     }
 }
 
-/// What a point or a UIA element is: an app slot (0 is the picker) or a button.
+/// What a point is: an app slot (0 is the picker) or a button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
     Slot(usize),
@@ -241,10 +213,10 @@ impl Hit {
     }
 }
 
-// The layout functions below are `#[inline(never)]`: each has many callers (paint, hit-testing, UIA, menus),
+// The layout functions below are `#[inline(never)]`: each has many callers (paint, hit-testing, menus),
 // and inlining every copy cost ~2.5 KB of release binary.
 
-/// Cells in visual order (also the UIA child order): lead buttons, `slots` slots, tail buttons.
+/// Cells in visual order: lead buttons, `slots` slots, tail buttons.
 #[inline(never)]
 pub fn cell_count(buttons: Buttons, slots: usize) -> usize {
     buttons.lead().count() + slots + buttons.tail().count()
@@ -273,18 +245,6 @@ pub fn cell_index(buttons: Buttons, slots: usize, hit: Hit) -> Option<usize> {
                 .map(|at| lead + slots + at),
         },
     }
-}
-
-/// Accessible names in cell order: the buttons around the slots' own names.
-pub fn cell_names(buttons: Buttons, slot_names: &[String], minimized: usize) -> Vec<String> {
-    let name = |button: Button| match button {
-        Button::Minimized => format!("{}, {minimized} windows", button.label()),
-        _ => button.label().to_string(),
-    };
-    let mut names: Vec<String> = buttons.lead().map(name).collect();
-    names.extend_from_slice(slot_names);
-    names.extend(buttons.tail().map(name));
-    names
 }
 
 /// Whether a catalog window belongs in the minimized-apps list: minimized, and on this desktop when the
@@ -467,35 +427,6 @@ pub fn separators(buttons: Buttons, width_px: i32, dpi: u32) -> [Option<i32>; 2]
             .has_tail()
             .then(|| at(width_px - tail_px(buttons, dpi) + half)),
     ]
-}
-
-/// Whether the keyboard can rest on `cell`: a button, or a slot that is not clipped off the bar.
-pub fn reachable(buttons: Buttons, width_px: i32, dpi: u32, slots: usize, cell: usize) -> bool {
-    let lead = buttons.lead().count();
-    let visible = visible_slots(buttons, width_px, dpi, slots);
-    cell < cell_count(buttons, slots) && !(lead + visible..lead + slots).contains(&cell)
-}
-
-/// The next reachable cell after `from` in index order, wrapping; `from` itself when it is the only one.
-pub fn step_cell(
-    buttons: Buttons,
-    width_px: i32,
-    dpi: u32,
-    slots: usize,
-    from: usize,
-    forward: bool,
-) -> usize {
-    let count = cell_count(buttons, slots);
-    (1..count)
-        .map(|n| {
-            if forward {
-                (from + n) % count
-            } else {
-                (from + count - n) % count
-            }
-        })
-        .find(|&cell| reachable(buttons, width_px, dpi, slots, cell))
-        .unwrap_or(from)
 }
 
 /// Pointer travel (DIPs) before a press on a pinned slot becomes a reorder drag instead of a click.
@@ -777,10 +708,6 @@ mod tests {
         assert!(items[1].active && !items[0].active);
         assert_eq!(items[2].identity, Identity::Unavailable(7));
         assert!(super::items(&WindowModel::default(), false).is_empty());
-        assert_eq!(
-            names(&items, &model),
-            vec!["All windows", "w3", "w5, 2 windows, active", "w7"]
-        );
     }
 
     fn pins_of(identities: &[Identity]) -> Pins {
@@ -926,14 +853,6 @@ mod tests {
         ]);
         let model = WindowModel::default();
         let merged = items_with_pins(&model, &pins, false);
-        assert_eq!(
-            names(&merged, &model),
-            [
-                "All windows",
-                "Contoso.Mail, pinned, not running",
-                "edit, pinned, not running"
-            ]
-        );
         assert_eq!(
             action(&merged[0], None),
             Some(Action::Launch(
@@ -1169,24 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn names_and_keys_follow_the_buttons() {
-        let slots = vec!["All windows".to_string(), "w1".to_string()];
-        assert_eq!(cell_names(N, &slots, 3), slots);
-        assert_eq!(
-            cell_names(Buttons::default(), &slots, 3),
-            [
-                "Start",
-                "Search",
-                "All windows",
-                "w1",
-                "Show minimized apps, 3 windows",
-                "Show desktop"
-            ]
-        );
-        assert_eq!(
-            cell_names(only(Button::TaskView), &slots, 0)[0],
-            "Task View"
-        );
+    fn keys_follow_the_buttons() {
         assert_eq!(Button::Start.keys(), Some(&[VK_LWIN][..]));
         assert_eq!(Button::Search.keys(), Some(&[VK_LWIN, VK_S][..]));
         assert_eq!(Button::TaskView.keys(), Some(&[VK_LWIN, VK_TAB][..]));
@@ -1278,29 +1180,10 @@ mod tests {
     }
 
     #[test]
-    fn the_keyboard_walks_every_reachable_cell_in_a_ring() {
-        let b = Buttons::default(); // Start, Search, 4 slots, chevron, strip = 8 cells
-        let width = width_px(b, 4, 96);
-        let walk = |from, forward| step_cell(b, width, 96, 4, from, forward);
-        assert_eq!(
-            (walk(0, true), walk(1, true), walk(5, true), walk(6, true)),
-            (1, 2, 6, 7)
-        );
-        assert_eq!((walk(7, true), walk(0, false), walk(2, false)), (0, 7, 1));
-        let mut seen = vec![0];
-        while seen.len() < 8 {
-            seen.push(walk(*seen.last().unwrap(), true));
-        }
-        assert_eq!(seen, [0, 1, 2, 3, 4, 5, 6, 7]);
-        // A bar too narrow for the last two slots skips them in both directions, never the buttons.
-        let narrow = width - 2 * px(SLOT_DIPS, 96);
+    fn a_narrow_bar_hides_the_last_slots() {
+        let b = Buttons::default();
+        let narrow = width_px(b, 4, 96) - 2 * px(SLOT_DIPS, 96);
         assert_eq!(visible_slots(b, narrow, 96, 4), 2);
-        let walk = |from, forward| step_cell(b, narrow, 96, 4, from, forward);
-        assert!(!reachable(b, narrow, 96, 4, 4) && !reachable(b, narrow, 96, 4, 5));
-        assert_eq!((walk(3, true), walk(6, false)), (6, 3));
-        // The only cell steps to itself, and a cell past the end is not reachable.
-        assert_eq!(step_cell(N, 100, 96, 1, 0, true), 0);
-        assert!(!reachable(b, width, 96, 4, 8));
     }
 
     #[test]

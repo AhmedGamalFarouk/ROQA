@@ -44,8 +44,6 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shelf {
     entries: Vec<Entry>,
-    /// Bumped on every visible change, so UI Automation retires elements of an older list.
-    revision: u32,
     /// Entries kept, `1..=MAX` (the settings' shelf size).
     cap: usize,
     page: usize,
@@ -55,7 +53,6 @@ impl Default for Shelf {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
-            revision: 0,
             cap: MAX,
             page: 0,
         }
@@ -177,33 +174,15 @@ impl Shelf {
     pub fn slot_count(&self) -> usize {
         (self.visible().len() + usize::from(self.overflow())).max(1)
     }
-    pub fn slot_label(&self, slot: usize) -> Option<String> {
-        if self.is_empty() && slot == 0 {
-            return Some("Add shelf files (Ctrl+O)".to_owned());
-        }
-        if self.overflow() && slot == self.visible().len() {
-            Some(format!(
-                "More shelf files, page {} of {}",
-                self.page_start() / 2 + 1,
-                self.entries.len().div_ceil(2)
-            ))
-        } else {
-            self.absolute(slot).and_then(|index| self.label(index))
-        }
-    }
     pub fn next_page(&mut self) -> bool {
         if !self.overflow() {
             return false;
         }
         self.page = (self.page_start() / 2 + 1) % self.entries.len().div_ceil(2);
-        self.revision = self.revision.wrapping_add(1);
         true
     }
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
-    }
-    pub fn revision(&self) -> u32 {
-        self.revision
     }
 
     fn has(&self, path: &str) -> bool {
@@ -231,7 +210,6 @@ impl Shelf {
             fresh.append(&mut self.entries);
             fresh.truncate(self.cap);
             self.entries = fresh;
-            self.revision = self.revision.wrapping_add(1);
         }
         added
     }
@@ -242,7 +220,6 @@ impl Shelf {
         let cut = self.entries.len() > self.cap;
         if cut {
             self.entries.truncate(self.cap);
-            self.revision = self.revision.wrapping_add(1);
         }
         cut
     }
@@ -252,7 +229,6 @@ impl Shelf {
         let found = index < self.entries.len();
         if found {
             self.entries.remove(index);
-            self.revision = self.revision.wrapping_add(1);
         }
         found
     }
@@ -269,19 +245,7 @@ impl Shelf {
         };
         let changed = entry.check != check;
         entry.check = check;
-        self.revision = self.revision.wrapping_add(u32::from(changed));
         changed
-    }
-
-    /// The accessible name of a visible entry, such as "Shelf: notes.txt, file not found".
-    pub fn label(&self, index: usize) -> Option<String> {
-        let entry = self.entries.get(index)?;
-        let note = match entry.check {
-            Check::Unknown => "",
-            Check::NotChecked => ", network location, not checked",
-            Check::Missing => ", file not found",
-        };
-        Some(format!("Shelf: {}{note}", entry.name))
     }
 }
 
@@ -302,12 +266,7 @@ mod tests {
             for slot in 0..shelf.visible().len() {
                 visited.push(shelf.absolute(slot).unwrap());
             }
-            assert!(
-                shelf
-                    .slot_label(shelf.visible().len())
-                    .unwrap()
-                    .starts_with("More shelf files")
-            );
+            assert!(shelf.overflow());
             assert!(shelf.next_page());
         }
         assert_eq!(visited, (0..12).collect::<Vec<_>>());
@@ -387,9 +346,8 @@ mod tests {
     fn dedupe_ignores_case_slashes_and_a_trailing_separator() {
         let mut shelf = Shelf::default();
         assert_eq!(shelf.add_all(&[r"C:\A\b.txt"]), 1);
-        let revision = shelf.revision();
         assert_eq!(shelf.add_all(&["c:/a/B.TXT", r"C:\A\b.txt\"]), 0);
-        assert_eq!((shelf.entries().len(), shelf.revision()), (1, revision));
+        assert_eq!(shelf.entries().len(), 1);
     }
 
     #[test]
@@ -411,10 +369,8 @@ mod tests {
             [r"C:\one.txt", r"C:\two.txt", r"C:\three.txt", r"C:\old.txt"]
         );
         // Nothing valid: nothing changes, so nothing is repainted or written.
-        let revision = shelf.revision();
         assert_eq!(shelf.add_all::<&str>(&[]), 0);
         assert_eq!(shelf.add_all(&["x", ""]), 0);
-        assert_eq!(shelf.revision(), revision);
     }
 
     #[test]
@@ -440,31 +396,21 @@ mod tests {
     }
 
     #[test]
-    fn remove_and_missing_transitions_bump_the_revision_only_on_a_real_change() {
+    fn remove_and_missing_transitions_report_only_a_real_change() {
         let mut shelf = Shelf::default();
         shelf.add_all(&[r"C:\a.txt", r"\\srv\share\b.txt"]);
-        let revision = shelf.revision();
         assert!(shelf.set_missing(0, true));
         assert_eq!(shelf.entries()[0].check, Check::Missing);
-        assert_eq!(shelf.label(0).unwrap(), "Shelf: a.txt, file not found");
         assert!(!shelf.set_missing(0, true)); // already known
         assert!(shelf.set_missing(0, false)); // present again at the next activation
         assert_eq!(shelf.entries()[0].check, Check::Unknown);
         // A UNC entry stays "not checked" whatever an activation reports.
         assert!(!shelf.set_missing(1, true));
         assert_eq!(shelf.entries()[1].check, Check::NotChecked);
-        assert_eq!(
-            shelf.label(1).unwrap(),
-            "Shelf: b.txt, network location, not checked"
-        );
         assert!(!shelf.set_missing(9, true));
-        assert!(shelf.revision() > revision);
-        let revision = shelf.revision();
         assert!(!shelf.remove(5));
-        assert_eq!(shelf.revision(), revision);
         assert!(shelf.remove(0));
         assert_eq!(paths(&shelf), [r"\\srv\share\b.txt"]);
-        assert_ne!(shelf.revision(), revision);
     }
 
     #[test]
@@ -501,11 +447,9 @@ mod tests {
     fn a_lower_cap_drops_the_oldest_and_a_mapped_drive_counts_as_network() {
         let mut shelf = Shelf::default();
         shelf.add_all(&[r"C:\a", r"C:\b", r"C:\c", r"C:\d"]);
-        let revision = shelf.revision();
         assert!(!shelf.set_cap(99), "clamped to the ceiling: nothing cut");
         assert!(shelf.set_cap(2));
         assert_eq!(paths(&shelf), [r"C:\a", r"C:\b"]);
-        assert_ne!(shelf.revision(), revision);
         assert_eq!(shelf.add_all(&[r"C:\e"]), 1);
         assert_eq!(
             paths(&shelf),

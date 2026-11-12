@@ -1,32 +1,25 @@
 //! Dock context menu (features B3): right-click on a slot opens a small owned popup above it with the
 //! actions that apply to that slot. It is not `TrackPopupMenu`, which is modal and would stop the host
-//! loop. The popup exists only while open, takes the foreground for the keyboard, and ends on Escape, a
+//! loop. The popup exists only while open, takes the foreground, and ends on a
 //! press elsewhere, losing the foreground, its slot changing or a full-screen app; closed, it costs nothing.
 use crate::{
     dock::{self, DockItem},
-    dock_uia::Accessibility,
     edge::{ListRow, list_layout, row_at, row_rect},
     graphics::{Canvas, Graphics, ListScene},
     icons::IconPixels,
     layout::Bounds,
-    menu_uia,
     native_window::{self, NativeWindow},
     pins::{self, Pins},
     theme::Palette,
     window_model::{Identity, WindowKey},
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use windows::{
     Win32::{
         Foundation::HWND,
-        UI::{
-            Input::KeyboardAndMouse::{
-                VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_SPACE, VK_TAB, VK_UP,
-            },
-            WindowsAndMessaging::{
-                MSG, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
-                WM_RBUTTONDOWN, WM_RBUTTONUP,
-            },
+        UI::WindowsAndMessaging::{
+            MSG, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN,
+            WM_RBUTTONUP,
         },
     },
     core::Result,
@@ -110,31 +103,6 @@ pub fn place_below(x: i32, bottom: i32, work: Bounds, size: (i32, i32)) -> Bound
     }
 }
 
-/// What a key does to the menu.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Key {
-    Select(usize),
-    Choose(usize),
-    Dismiss,
-    Ignore,
-}
-
-/// Down and Tab step forward and Up back, wrapping; Enter and Space choose the highlighted row (once per
-/// press, not on auto-repeat); Escape dismisses.
-pub fn key(vk: VIRTUAL_KEY, selected: Option<usize>, len: usize, repeat: bool) -> Key {
-    match vk {
-        _ if len == 0 => Key::Ignore,
-        VK_ESCAPE => Key::Dismiss,
-        VK_DOWN | VK_TAB => Key::Select(selected.map_or(0, |at| (at + 1) % len)),
-        VK_UP => Key::Select(selected.map_or(len - 1, |at| (at + len - 1) % len)),
-        VK_RETURN | VK_SPACE => match selected {
-            Some(at) if !repeat => Key::Choose(at),
-            _ => Key::Ignore,
-        },
-        _ => Key::Ignore,
-    }
-}
-
 /// What the host does with a message offered to the menu.
 pub enum Event {
     /// Not the menu's business.
@@ -167,11 +135,8 @@ pub struct Spec {
 }
 
 pub struct Menu {
-    // UIA is released first, then the canvas, then the window.
-    accessibility: Accessibility,
     canvas: Canvas,
     window: NativeWindow,
-    uia: menu_uia::Shared,
     dock: HWND,
     pub slot: usize,
     pub identity: Identity,
@@ -183,13 +148,6 @@ pub struct Menu {
     drawn: Option<Option<usize>>,
     pub return_to: Option<WindowKey>,
 }
-impl Drop for Menu {
-    fn drop(&mut self) {
-        self.accessibility.disconnect();
-        menu_uia::invalidate(&self.uia);
-    }
-}
-
 /// A row's text: its window title when it has one, else the action's fixed label.
 fn row_label<'a>(items: &'a [Item], titles: &'a [String], index: usize) -> &'a str {
     titles
@@ -208,24 +166,13 @@ impl Menu {
     /// Creates, paints and shows the popup (not yet the foreground: the host asks for that).
     pub fn open(graphics: &Graphics, palette: Palette, spec: Spec) -> Result<Self> {
         let dpi = spec.dpi;
-        let (size, panel) = list_layout(dpi, spec.items.len());
+        let (size, _) = list_layout(dpi, spec.items.len());
         let slot_x = spec.x;
         let bounds = match spec.below {
             Some(bottom) => place_below(slot_x, bottom, spec.work, size),
             None => place(slot_x, spec.dock_bounds, spec.work, size),
         };
         let window = NativeWindow::create_menu(bounds, &format!("{} menu", spec.app))?;
-        let uia: menu_uia::Shared = Arc::new(Mutex::new(menu_uia::State {
-            name: format!("{} menu", spec.app),
-            rows: (0..spec.items.len())
-                .map(|index| {
-                    let label = row_label(&spec.items, &spec.titles, index);
-                    (label.to_owned(), row_rect(dpi, panel, index))
-                })
-                .collect(),
-            ..Default::default()
-        }));
-        let accessibility = menu_uia::accessibility(window.0, &uia)?;
         let surface = Bounds {
             x: 0,
             y: 0,
@@ -234,10 +181,8 @@ impl Menu {
         };
         let canvas = Canvas::create(graphics, window.0, surface, palette)?;
         let mut menu = Self {
-            accessibility,
             canvas,
             window,
-            uia,
             dock: spec.dock,
             slot: spec.slot,
             identity: spec.identity,
@@ -288,8 +233,8 @@ impl Menu {
         self.drawn = Some(self.selected);
         Ok(())
     }
-    /// One message: mouse and key input for the menu's window, UIA invokes, losing the foreground, and a
-    /// button press on any other ROQA window.
+    /// One message: mouse input for the menu's window, losing the foreground, and a button press on any
+    /// other ROQA window.
     pub fn message(&mut self, message: &MSG) -> Event {
         if message.hwnd != self.window.0 {
             let press = matches!(
@@ -312,22 +257,6 @@ impl Menu {
                 return at(message).map_or(Event::Consumed, |row| Event::Choose(self.items[row]));
             }
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_RBUTTONUP => {}
-            menu_uia::INVOKE => {
-                return self
-                    .items
-                    .get(message.wParam.0)
-                    .map_or(Event::Consumed, |&item| Event::Choose(item));
-            }
-            WM_KEYDOWN => {
-                let repeat = message.lParam.0 & (1 << 30) != 0;
-                let vk = VIRTUAL_KEY(message.wParam.0 as u16);
-                match key(vk, self.selected, self.items.len(), repeat) {
-                    Key::Select(row) => self.selected = Some(row),
-                    Key::Choose(row) => return Event::Choose(self.items[row]),
-                    Key::Dismiss => return Event::Dismiss,
-                    Key::Ignore => {}
-                }
-            }
             native_window::DEACTIVATED => return Event::Dismiss,
             _ => return Event::Ignored,
         }
@@ -456,24 +385,6 @@ mod tests {
         let closed = dock_item(app.clone(), &[]);
         assert!(!describes(&app, &shown, Some(&closed), &pins));
         assert!(!describes(&app, &shown, Some(&same), &pinned(&app)));
-    }
-
-    #[test]
-    fn arrows_wrap_enter_chooses_once_and_escape_dismisses() {
-        let at = |vk, selected, repeat| key(vk, selected, 3, repeat);
-        assert_eq!(at(VK_DOWN, None, false), Key::Select(0));
-        assert_eq!(at(VK_DOWN, Some(2), false), Key::Select(0));
-        assert_eq!(at(VK_TAB, Some(0), false), Key::Select(1));
-        assert_eq!(at(VK_UP, None, false), Key::Select(2));
-        assert_eq!(at(VK_UP, Some(0), false), Key::Select(2));
-        assert_eq!(at(VK_RETURN, Some(1), false), Key::Choose(1));
-        assert_eq!(at(VK_SPACE, Some(1), false), Key::Choose(1));
-        // Nothing highlighted, or a held key, chooses nothing.
-        assert_eq!(at(VK_RETURN, None, false), Key::Ignore);
-        assert_eq!(at(VK_RETURN, Some(1), true), Key::Ignore);
-        assert_eq!(at(VK_ESCAPE, Some(1), false), Key::Dismiss);
-        assert_eq!(at(VIRTUAL_KEY(0x41), Some(1), false), Key::Ignore);
-        assert_eq!(key(VK_DOWN, None, 0, false), Key::Ignore);
     }
 
     #[test]

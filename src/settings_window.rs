@@ -1,6 +1,6 @@
 //! The settings window: a sidebar of pages and a card pane, built from the `PAGES` table (one loop creates the
-//! controls, one lays them out, `commit`/`show` read and write them by id). Standard child controls give tab
-//! order, mnemonics, Narrator and text scaling; only the background, cards and sidebar are drawn here, in GDI
+//! controls, one lays them out, `commit`/`show` read and write them by id). Standard child controls give
+//! mouse use and text scaling (keyboard navigation and screen readers are deliberately not supported); only the background, cards and sidebar are drawn here, in GDI
 //! with stock objects. It owns no timer or thread: it exists only while open and does work only in the message
 //! loop turns its own controls cause. A change goes to the host (`take_change`) which applies it live; a timer
 //! request likewise (`take_start`).
@@ -27,7 +27,7 @@ use crate::{
 use std::cell::RefCell;
 use windows::{
     Win32::{
-        Foundation::{COLORREF, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM},
+        Foundation::{COLORREF, HANDLE, HWND, LPARAM, RECT, WPARAM},
         Graphics::{
             Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
             Gdi::*,
@@ -40,7 +40,6 @@ use windows::{
             Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
             Controls::*,
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow},
-            Input::KeyboardAndMouse::{GetFocus, SetFocus},
             WindowsAndMessaging::*,
         },
     },
@@ -107,9 +106,6 @@ const WDRANK: usize = 187;
 const PCFG: usize = 188;
 const PSTART: usize = 192;
 const PSKIP: usize = 193;
-/// Keyboard entry: move keyboard focus to the notch or to the dock (no global hotkey needed).
-const KEYFOCUS: usize = 194;
-const KEYDOCK: usize = 195;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -128,7 +124,7 @@ pub enum SoundAction {
     Test,
 }
 
-/// How a row's control looks: the title is its accessible name (the checkbox text, or the label before it).
+/// How a row's control looks: the title is the checkbox text, or the label before the control.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Check,
@@ -164,7 +160,7 @@ const fn r(id: usize, kind: Kind, title: &'static str, caption: &'static str) ->
 }
 const C: Kind = Kind::Check;
 
-/// Every setting appears once, in tab order. Monitors are added at runtime after `NOTCH`.
+/// Every setting appears once, in page order. Monitors are added at runtime after `NOTCH`.
 const PAGES: &[Page] = &[
     Page {
         name: "General",
@@ -172,8 +168,8 @@ const PAGES: &[Page] = &[
             Card {
                 label: "Show ROQA",
                 rows: &[
-                    r(DOCK, C, "Show the &dock", ""),
-                    r(NOTCH, C, "Show the &notch", ""),
+                    r(DOCK, C, "Show the dock", ""),
+                    r(NOTCH, C, "Show the notch", ""),
                 ],
             },
             Card {
@@ -183,26 +179,19 @@ const PAGES: &[Page] = &[
             Card {
                 label: "Behaviour",
                 rows: &[
-                    r(DESKTOP, C, "Show only windows on this des&ktop", ""),
+                    r(DESKTOP, C, "Show only windows on this desktop", ""),
                     r(
                         FSHIDE,
                         C,
-                        "Hide in &full screen",
+                        "Hide in full screen",
                         "Hide the dock and notch over a full-screen app",
                     ),
                     r(
                         RSOUNDS,
                         C,
-                        "Reminder s&ounds",
+                        "Reminder sounds",
                         "Master switch for the timer and prayer sounds",
                     ),
-                    r(
-                        KEYFOCUS,
-                        Kind::Btn,
-                        "Focus the notch",
-                        "Keyboard entry: arrows move, Enter presses, Esc returns",
-                    ),
-                    r(KEYDOCK, Kind::Btn, "Focus the dock", ""),
                 ],
             },
         ],
@@ -212,7 +201,7 @@ const PAGES: &[Page] = &[
         cards: &[
             Card {
                 label: "Colours",
-                rows: &[r(THEME, Kind::Combo(170), "T&heme", "")],
+                rows: &[r(THEME, Kind::Combo(170), "Theme", "")],
             },
             Card {
                 label: "Notch",
@@ -220,21 +209,21 @@ const PAGES: &[Page] = &[
                     r(
                         NSIZE,
                         Kind::Combo(120),
-                        "Notch si&ze",
+                        "Notch size",
                         "Auto is the designed size",
                     ),
                     r(
                         NOPEN,
                         Kind::Combo(120),
-                        "&Open the notch",
+                        "Open the notch",
                         "By hovering or by a click",
                     ),
-                    r(ANIM, Kind::Combo(120), "A&nimation speed", ""),
+                    r(ANIM, Kind::Combo(120), "Animation speed", ""),
                 ],
             },
             Card {
                 label: "Dock",
-                rows: &[r(DOCKSTYLE, Kind::Combo(170), "Dock st&yle", "")],
+                rows: &[r(DOCKSTYLE, Kind::Combo(170), "Dock style", "")],
             },
         ],
     },
@@ -244,32 +233,32 @@ const PAGES: &[Page] = &[
             Card {
                 label: "Tabs",
                 rows: &[
-                    r(TAB, C, "&Media tab", ""),
-                    r(TAB + 1, C, "&Weather tab", ""),
+                    r(TAB, C, "Media tab", ""),
+                    r(TAB + 1, C, "Weather tab", ""),
                     r(TAB + 2, C, "Prayer tab", ""),
-                    r(TAB + 3, C, "Timer ta&b", ""),
-                    r(TAB + 4, C, "S&helf tab", ""),
+                    r(TAB + 3, C, "Timer tab", ""),
+                    r(TAB + 4, C, "Shelf tab", ""),
                     r(TAB + 5, C, "Limits tab", ""),
                 ],
             },
             Card {
                 label: "In the notch",
                 rows: &[
-                    r(EYES, C, "Mascot e&yes", ""),
-                    r(PRIVACY, C, "Privacy &indicator", ""),
+                    r(EYES, C, "Mascot eyes", ""),
+                    r(PRIVACY, C, "Privacy indicator", ""),
                 ],
             },
             Card {
                 label: "Timer",
                 rows: &[
-                    r(SOUND, C, "Play a s&ound when a timer finishes", ""),
+                    r(SOUND, C, "Play a sound when a timer finishes", ""),
                     r(
                         TIMER,
                         Kind::Edit(120),
-                        "&Timer length",
+                        "Timer length",
                         "Minutes, m:ss or h:mm:ss",
                     ),
-                    r(START, Kind::Btn, "St&art timer", ""),
+                    r(START, Kind::Btn, "Start timer", ""),
                 ],
             },
             Card {
@@ -278,7 +267,7 @@ const PAGES: &[Page] = &[
                     r(
                         WATER,
                         C,
-                        "Water remi&nders",
+                        "Water reminders",
                         "A reminder to drink during the active hours",
                     ),
                     r(WCFG, Kind::Edit(70), water::LABELS[0], ""),
@@ -286,7 +275,7 @@ const PAGES: &[Page] = &[
                     r(WCFG + 2, Kind::Edit(70), water::LABELS[2], ""),
                     r(WCFG + 3, Kind::Edit(70), water::LABELS[3], ""),
                     r(WCFG + 4, Kind::Edit(70), water::LABELS[4], ""),
-                    r(WDRANK, Kind::Btn, "I &drank a glass", "Today"),
+                    r(WDRANK, Kind::Btn, "I drank a glass", "Today"),
                 ],
             },
             Card {
@@ -296,13 +285,13 @@ const PAGES: &[Page] = &[
                     r(PCFG + 1, Kind::Edit(70), pomo::LABELS[1], ""),
                     r(PCFG + 2, Kind::Edit(70), pomo::LABELS[2], ""),
                     r(PCFG + 3, Kind::Edit(70), pomo::LABELS[3], ""),
-                    r(PSTART, Kind::Btn, "Start or pause &pomodoro", ""),
+                    r(PSTART, Kind::Btn, "Start or pause pomodoro", ""),
                     r(PSKIP, Kind::Btn, "Skip to the next phase", ""),
                 ],
             },
             Card {
                 label: "Shelf",
-                rows: &[r(SHELF, Kind::Edit(70), "Shel&f size", "Entries kept")],
+                rows: &[r(SHELF, Kind::Edit(70), "Shelf size", "Entries kept")],
             },
         ],
     },
@@ -312,26 +301,21 @@ const PAGES: &[Page] = &[
             Card {
                 label: "Dock buttons",
                 rows: &[
-                    r(DBTN, C, "Start butto&n", ""),
-                    r(DBTN + 1, C, "Searc&h button", ""),
-                    r(DBTN + 2, C, "Task Vie&w button", ""),
-                    r(DBTN + 3, C, "Minimized apps &list", ""),
-                    r(DBTN + 4, C, "Show deskto&p strip", ""),
+                    r(DBTN, C, "Start button", ""),
+                    r(DBTN + 1, C, "Search button", ""),
+                    r(DBTN + 2, C, "Task View button", ""),
+                    r(DBTN + 3, C, "Minimized apps list", ""),
+                    r(DBTN + 4, C, "Show desktop strip", ""),
                 ],
             },
             Card {
                 label: "Screen edges",
                 rows: &[
-                    r(
-                        EDGE_VOLUME,
-                        C,
-                        "&Volume slider on the right screen edge",
-                        "",
-                    ),
+                    r(EDGE_VOLUME, C, "Volume slider on the right screen edge", ""),
                     r(
                         EDGE_BRIGHTNESS,
                         C,
-                        "&Brightness slider on the left screen edge",
+                        "Brightness slider on the left screen edge",
                         "",
                     ),
                 ],
@@ -340,8 +324,8 @@ const PAGES: &[Page] = &[
                 label: "Pinned apps",
                 rows: &[
                     r(PIN, Kind::Combo(200), "Pinned apps", ""),
-                    r(EARLIER, Kind::Btn, "Move pin &earlier", ""),
-                    r(LATER, Kind::Btn, "Move pin la&ter", ""),
+                    r(EARLIER, Kind::Btn, "Move pin earlier", ""),
+                    r(LATER, Kind::Btn, "Move pin later", ""),
                 ],
             },
         ],
@@ -352,8 +336,8 @@ const PAGES: &[Page] = &[
             Card {
                 label: "Location",
                 rows: &[
-                    r(DETECT, C, "Detect location a&utomatically", ""),
-                    r(CITY, Kind::Edit(200), "Weather c&ity", "Empty is none"),
+                    r(DETECT, C, "Detect location automatically", ""),
+                    r(CITY, Kind::Edit(200), "Weather city", "Empty is none"),
                 ],
             },
             Card {
@@ -368,13 +352,13 @@ const PAGES: &[Page] = &[
             Card {
                 label: "Reminders",
                 rows: &[
-                    r(PRAYER, C, "Prayer &reminders", ""),
+                    r(PRAYER, C, "Prayer reminders", ""),
                     r(PMETHOD, Kind::Combo(230), "Prayer method", ""),
                     r(PLEAD, Kind::Combo(170), "Heads-up before the prayer", ""),
                     r(
                         PPAUSE,
                         C,
-                        "Pause &media at prayer time",
+                        "Pause media at prayer time",
                         "Pauses a playing player (Media tab on), never resumes",
                     ),
                 ],
@@ -413,11 +397,11 @@ const PAGES: &[Page] = &[
                 label: "Sound",
                 rows: &[
                     r(PSOUND, Kind::Combo(230), "Prayer sound", ""),
-                    r(PBROWSE, Kind::Btn, "Bro&wse...", "Choose a sound file"),
+                    r(PBROWSE, Kind::Btn, "Browse...", "Choose a sound file"),
                     r(
                         PTEST,
                         Kind::Btn,
-                        "Te&st sound",
+                        "Test sound",
                         "Plays even when Reminder sounds is off",
                     ),
                 ],
@@ -462,7 +446,7 @@ const PAGES: &[Page] = &[
                 rows: &[r(
                     DIAGNOSTICS,
                     Kind::Edit(220),
-                    "Dia&gnostics report file",
+                    "Diagnostics report file",
                     "Empty is off",
                 )],
             },
@@ -471,7 +455,7 @@ const PAGES: &[Page] = &[
                 rows: &[r(
                     RESET,
                     Kind::Btn,
-                    "&Reset to defaults",
+                    "Reset to defaults",
                     "Every setting returns to its default",
                 )],
             },
@@ -538,8 +522,6 @@ pub struct SettingsWindow {
     drank: bool,
     /// A Pomodoro request: false start or pause, true skip.
     pomo: Option<bool>,
-    /// A keyboard entry request: false the notch, true the dock.
-    focus: Option<bool>,
     return_to: Option<WindowKey>,
     closed: bool,
 }
@@ -806,22 +788,6 @@ fn draw_side(item: &DRAWITEMSTRUCT, p: &Paint) {
         if item.itemState.0 & ODS_SELECTED.0 != 0 {
             round(dc, cell, px(8), p.pal.sel, p.pal.sel);
         }
-        if item.itemState.0 & ODS_FOCUS.0 != 0 {
-            // A 2 px accent ring (two nested outlines), not a fill: focus reads differently from selection.
-            let fill = if item.itemState.0 & ODS_SELECTED.0 != 0 {
-                p.pal.sel
-            } else {
-                p.pal.side
-            };
-            round(dc, cell, px(8), fill, p.pal.accent);
-            let inner = RECT {
-                left: cell.left + 1,
-                top: cell.top + 1,
-                right: cell.right - 1,
-                bottom: cell.bottom - 1,
-            };
-            round(dc, inner, px(7), HOLLOW, p.pal.accent);
-        }
         let (colour, glyph) = TILES[item.itemID as usize % 8];
         round(dc, tile, px(5), colour, colour);
         SetBkMode(dc, TRANSPARENT);
@@ -863,8 +829,8 @@ fn is_toggle(h: HWND) -> bool {
     (unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32) & 0xf == BS_AUTOCHECKBOX as u32
 }
 
-/// A checkbox drawn as a switch (the control stays a native checkbox: state, tab stop, mnemonic, UIA role):
-/// the title on the left, a pill with a thumb on the right, a two-line accent ring while it has focus.
+/// A checkbox drawn as a switch (the control stays a native checkbox for its state and clicks): the title on
+/// the left, a pill with a thumb on the right.
 fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
     let px = |v: i32| (v as f64 * p.scale).round() as i32;
     let (dc, r, h) = (note.hdc, note.rc, note.hdr.hwndFrom);
@@ -934,16 +900,6 @@ fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
         SetBkMode(dc, TRANSPARENT);
         SelectObject(dc, p.font.into());
         write(dc, &text(h, 256), title, p.pal.text, DT_LEFT);
-        if note.uItemState.0 & CDIS_FOCUS.0 != 0 {
-            round(dc, r, px(8), HOLLOW, p.pal.accent);
-            let inner = RECT {
-                left: r.left + 1,
-                top: r.top + 1,
-                right: r.right - 1,
-                bottom: r.bottom - 1,
-            };
-            round(dc, inner, px(8), HOLLOW, p.pal.accent);
-        }
     }
 }
 
@@ -995,16 +951,6 @@ fn draw_tile(note: &NMCUSTOMDRAW, p: &Paint) {
                 };
                 write(dc, line, at, ink, DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
             }
-        }
-        if note.uItemState.0 & CDIS_FOCUS.0 != 0 {
-            let inner = RECT {
-                left: r.left + 2,
-                top: r.top + 2,
-                right: r.right - 2,
-                bottom: r.bottom - 2,
-            };
-            round(dc, r, px(8), HOLLOW, p.pal.accent);
-            round(dc, inner, px(7), HOLLOW, p.pal.accent);
         }
     }
 }
@@ -1217,7 +1163,6 @@ impl SettingsWindow {
             start: None,
             drank: false,
             pomo: None,
-            focus: None,
             return_to: foreground_key(),
             closed: false,
         };
@@ -1230,9 +1175,7 @@ impl SettingsWindow {
         unsafe {
             SetWindowTextW(window, w!("ROQA settings"))?;
             let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
-            if SetForegroundWindow(window).as_bool() {
-                SetFocus(Some(this.side))?;
-            }
+            let _ = SetForegroundWindow(window);
         }
         Ok(this)
     }
@@ -1281,7 +1224,7 @@ impl SettingsWindow {
         self.move_pin.take()
     }
 
-    /// One control row: the label before its control and the caption after it keep the tab and reading order.
+    /// One control row: the label before its control and the caption after it.
     fn add(
         &self,
         id: usize,
@@ -1292,7 +1235,7 @@ impl SettingsWindow {
         card: usize,
     ) -> Result<Item> {
         let window = self.window;
-        let (tab, clip, flat) = (WS_TABSTOP.0, WS_CLIPSIBLINGS.0, WINDOW_EX_STYLE(0));
+        let (clip, flat) = (WS_CLIPSIBLINGS.0, WINDOW_EX_STYLE(0));
         let stat = |text: &str, id: usize| {
             control(window, w!("Static"), text, id, clip, WS_EX_NOPARENTNOTIFY)
         };
@@ -1305,12 +1248,7 @@ impl SettingsWindow {
                 w!("Button"),
                 title,
                 id,
-                BS_AUTOCHECKBOX as u32
-                    | tab
-                    | clip
-                    | if tall { BS_TOP as u32 } else { 0 }
-                    // Arrow keys move among the monitor tiles only.
-                    | if matches!(id, MONITOR | DESKTOP) { WS_GROUP.0 } else { 0 },
+                BS_AUTOCHECKBOX as u32 | clip | if tall { BS_TOP as u32 } else { 0 },
                 flat,
             )?,
             Kind::Combo(_) => {
@@ -1320,7 +1258,7 @@ impl SettingsWindow {
                     w!("ComboBox"),
                     "",
                     id,
-                    CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | tab | clip,
+                    CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | clip,
                     flat,
                 )?
             }
@@ -1341,7 +1279,7 @@ impl SettingsWindow {
                     w!("Edit"),
                     initial,
                     id,
-                    ES_AUTOHSCROLL as u32 | tab | clip | extra,
+                    ES_AUTOHSCROLL as u32 | clip | extra,
                     WS_EX_CLIENTEDGE,
                 )?
             }
@@ -1349,7 +1287,7 @@ impl SettingsWindow {
                 if !caption.is_empty() {
                     label = stat(caption, LABEL)?;
                 }
-                control(window, w!("Button"), title, id, tab | clip, flat)?
+                control(window, w!("Button"), title, id, clip, flat)?
             }
             Kind::Note => {
                 label = stat(title, LABEL)?;
@@ -1385,7 +1323,7 @@ impl SettingsWindow {
         })
     }
 
-    /// The tile's accessible name (and what it draws): "Display 1, primary, 1920 by 1080 at 125%, ROQA on".
+    /// The tile's text (what it draws): "Display 1, primary, 1920 by 1080 at 125%, ROQA on".
     fn tile_name(&self, index: usize, on: bool) -> String {
         let m = &self.monitors[index];
         format!(
@@ -1417,52 +1355,29 @@ impl SettingsWindow {
         Ok(item)
     }
 
-    /// Replaces the monitor checkboxes after the monitor list changed; focus stays in a live control.
+    /// Replaces the monitor checkboxes after the monitor list changed.
     pub fn refresh_monitors(&mut self, monitors: &[Monitor]) -> Result<()> {
         if self.monitors.iter().eq(monitors.iter().take(MAX_OFF)) {
             return Ok(());
         }
         self.set_monitors(monitors);
-        // SAFETY: own controls and current thread focus; no foreground activation.
-        let focus = unsafe { GetFocus() };
         let is_monitor = |i: &Item| (MONITOR..MONITOR + MAX_OFF).contains(&i.id);
-        if self.items.iter().any(|i| is_monitor(i) && i.h == focus) {
-            // SAFETY: our own sidebar list.
-            unsafe { SetFocus(Some(self.side))? };
-        }
         for item in self.items.iter().filter(|i| is_monitor(i)) {
             // SAFETY: owned monitor checkbox, no retained references.
             unsafe { DestroyWindow(item.h)? };
         }
         self.items.retain(|i| !is_monitor(i));
-        // Tab order follows the screen: each new checkbox goes right after the previous one.
         let at = self
             .items
             .iter()
             .position(|i| i.id == NOTCH)
             .map_or(0, |i| i + 1);
-        let mut previous = self
-            .items
-            .get(at.wrapping_sub(1))
-            .map_or(HWND::default(), |i| i.h);
         for index in 0..self.devices.len() {
             let item = self.monitor_item(index)?;
-            // SAFETY: both are our own live children; this only reorders them, no move, size or activation.
-            unsafe {
-                SetWindowPos(
-                    item.h,
-                    Some(previous),
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                )?;
-                if self.page != 0 {
-                    let _ = ShowWindow(item.h, SW_HIDE);
-                }
+            if self.page != 0 {
+                // SAFETY: our own live child.
+                let _ = unsafe { ShowWindow(item.h, SW_HIDE) };
             }
-            previous = item.h;
             self.items.insert(at + index, item);
         }
         let font = self.font.as_ref().map(|f| f.handle);
@@ -1480,7 +1395,7 @@ impl SettingsWindow {
         self.layout()
     }
 
-    /// Creates the controls in tab order: the sidebar, each page's rows top to bottom, then the footer.
+    /// Creates the controls: the sidebar, each page's rows top to bottom, then the footer.
     fn build(&mut self) -> Result<()> {
         let window = self.window;
         self.side = control(
@@ -1488,8 +1403,7 @@ impl SettingsWindow {
             w!("ListBox"),
             "",
             SIDE,
-            (LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT) as u32
-                | WS_TABSTOP.0,
+            (LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT) as u32,
             WINDOW_EX_STYLE(0),
         )?;
         for page in PAGES {
@@ -1533,9 +1447,9 @@ impl SettingsWindow {
         self.close = control(
             window,
             w!("Button"),
-            "&Close",
+            "Close",
             CLOSE,
-            WS_TABSTOP.0 | WS_CLIPSIBLINGS.0,
+            WS_CLIPSIBLINGS.0,
             WINDOW_EX_STYLE(0),
         )?;
         for item in &self.items {
@@ -1551,7 +1465,7 @@ impl SettingsWindow {
         Ok(())
     }
 
-    /// Shows page `page`: only its controls are visible (hidden ones leave the tab order), scrolled to the top.
+    /// Shows page `page`: only its controls are visible (hidden ones stay out of the way), scrolled to the top.
     fn show_page(&mut self, page: usize) -> Result<()> {
         self.page = page.min(PAGES.len() - 1);
         self.scroll = 0;
@@ -1765,10 +1679,6 @@ impl SettingsWindow {
         self.pomo.take()
     }
 
-    pub fn take_focus(&mut self) -> Option<bool> {
-        self.focus.take()
-    }
-
     /// The user pressed "I drank a glass".
     pub fn take_drank(&mut self) -> bool {
         std::mem::take(&mut self.drank)
@@ -1814,9 +1724,6 @@ impl SettingsWindow {
                         }
                     }
                     (WDRANK, _) if notification == BN_CLICKED => self.drank = true,
-                    (KEYFOCUS | KEYDOCK, _) if notification == BN_CLICKED => {
-                        self.focus = Some(id == KEYDOCK)
-                    }
                     (PSTART | PSKIP, _) if notification == BN_CLICKED => {
                         self.pomo = Some(id == PSKIP)
                     }
@@ -1855,36 +1762,13 @@ impl SettingsWindow {
         self.closed
     }
 
-    pub fn keyboard(&self, message: &MSG) -> bool {
-        // Enter toggles a focused monitor tile like Space does (it would otherwise press the default button).
-        // SAFETY: scalar queries and a click on our own live tile.
-        unsafe {
-            if message.message == WM_KEYDOWN
-                && message.wParam.0 == 0x0d
-                && IsChild(self.window, message.hwnd).as_bool()
-                && is_tile(message.hwnd)
-            {
-                SendMessageW(message.hwnd, BM_CLICK, None, None);
-                return true;
-            }
-        }
-        // SAFETY: no Rust state is exposed to the reentrant dialog procedure; it posts scalar actions only.
-        unsafe {
-            let handled = IsDialogMessageW(self.window, message).as_bool();
-            if handled {
-                let _ = PostMessageW(Some(self.window), SCROLL, WPARAM(9), LPARAM(0));
-            }
-            handled
-        }
-    }
-
     fn scroll_message(&mut self, action: usize) -> Result<()> {
         let mut scroll = SCROLLINFO {
             cbSize: size_of::<SCROLLINFO>() as u32,
             fMask: SIF_ALL,
             ..Default::default()
         };
-        // SAFETY: queries our own scroll bar and focus rectangle; no callbacks into Rust state.
+        // SAFETY: queries our own scroll bar; no callbacks into Rust state.
         let next = unsafe {
             GetScrollInfo(self.window, SB_VERT, &mut scroll)?;
             match action as i32 {
@@ -1895,24 +1779,6 @@ impl SettingsWindow {
                 4 | 5 => scroll.nTrackPos,
                 6 => 0,
                 7 => self.scroll_max,
-                9 => {
-                    let focus = GetFocus();
-                    let mut origin = POINT::default();
-                    let mut rect = RECT::default();
-                    if !IsChild(self.window, focus).as_bool()
-                        || focus == self.side
-                        || !ClientToScreen(self.window, &mut origin).as_bool()
-                    {
-                        return Ok(());
-                    }
-                    GetWindowRect(focus, &mut rect)?;
-                    focus_scroll(
-                        self.scroll,
-                        rect.top - origin.y,
-                        rect.bottom - origin.y,
-                        scroll.nPage as i32,
-                    )
-                }
                 _ => return Ok(()),
             }
         }
@@ -2356,28 +2222,10 @@ fn parse_shift(text: &str, old: i8) -> (i8, bool) {
     }
 }
 
-fn focus_scroll(scroll: i32, top: i32, bottom: i32, viewport: i32) -> i32 {
-    if top < 0 {
-        scroll + top
-    } else if bottom > viewport {
-        scroll + bottom - viewport
-    } else {
-        scroll
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{dock::Button, tabs::Tab};
-
-    #[test]
-    fn keyboard_focus_scrolls_both_ends_into_the_viewport() {
-        assert_eq!(focus_scroll(100, -20, 4, 600), 80);
-        assert_eq!(focus_scroll(100, 590, 618, 600), 118);
-        assert_eq!(focus_scroll(100, 12, 40, 600), 100);
-        assert_eq!(focus_scroll(0, 1190, 1218, 600), 618);
-    }
 
     #[test]
     fn a_typed_shift_is_checked_and_a_bad_one_is_reported() {

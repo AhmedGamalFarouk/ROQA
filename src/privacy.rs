@@ -32,18 +32,6 @@ pub struct Use {
     pub cam: bool,
 }
 
-impl Use {
-    /// The UI Automation text; nothing while both are idle.
-    pub fn text(self) -> Option<&'static str> {
-        match (self.mic, self.cam) {
-            (true, true) => Some("Microphone in use, camera in use"),
-            (true, false) => Some("Microphone in use"),
-            (false, true) => Some("Camera in use"),
-            (false, false) => None,
-        }
-    }
-}
-
 const LEVELS: u8 = 3;
 const STEP: Duration = Duration::from_millis(60);
 
@@ -56,9 +44,6 @@ pub struct Dots {
 }
 
 impl Dots {
-    pub fn now(&self) -> Use {
-        self.target
-    }
     /// Sets what is in use; true when the dots need a repaint now.
     pub fn set(&mut self, target: Use, now: Instant) -> bool {
         if target == self.target {
@@ -251,15 +236,6 @@ mod tests {
         assert!(in_use(133_800_000_000_000_000, 0));
         assert!(!in_use(133_800_000_000_000_000, 133_800_100_000_000_000));
         assert!(!in_use(0, 133_800_100_000_000_000));
-    }
-
-    #[test]
-    fn text_names_the_devices_in_use_only() {
-        let on = |mic, cam| Use { mic, cam }.text();
-        assert_eq!(on(false, false), None);
-        assert_eq!(on(true, false), Some("Microphone in use"));
-        assert_eq!(on(false, true), Some("Camera in use"));
-        assert!(on(true, true).is_some_and(|t| t.contains("Microphone") && t.contains("camera")));
     }
 
     #[test]

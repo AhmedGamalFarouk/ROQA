@@ -41,7 +41,7 @@ pub const REPOSITION: u32 = WM_APP + 1;
 pub const CLOSE_SURFACE: u32 = WM_APP + 2;
 #[cfg(debug_assertions)]
 pub const PANIC_PROBE: u32 = WM_APP + 3;
-/// Posted when a surface loses the foreground; only a keyboard-focused notch ever has it.
+/// Posted when a window loses the foreground; only an open menu (the one window that takes it) ever has it.
 pub const DEACTIVATED: u32 = WM_APP + 6;
 /// Posted on a power-status change (plugged in, unplugged, low battery); the host reads the status.
 pub const POWER_STATUS: u32 = WM_APP + 7;
@@ -150,7 +150,7 @@ impl NativeWindow {
             title,
         )
     }
-    /// A hidden composited popup that can take the foreground (for the dock menu's keyboard).
+    /// A hidden composited popup that can take the foreground (for the dock menu, which ends when it loses it).
     pub fn create_menu(bounds: Bounds, title: &str) -> Result<Self> {
         let title = HSTRING::from(title);
         Self::create_styled(
@@ -183,7 +183,7 @@ impl NativeWindow {
             Ok(Self(hwnd, None))
         }
     }
-    /// A hidden topmost popup that never takes focus, for a DWM thumbnail; its title is its UIA name.
+    /// A hidden topmost popup that never takes focus, for a DWM thumbnail.
     pub fn create_preview(title: &str) -> Result<Self> {
         let title = HSTRING::from(title);
         // SAFETY: registered class; no retained user pointers; the title outlives the call.
@@ -242,7 +242,7 @@ impl NativeWindow {
         }
     }
     pub fn hide(&self) {
-        // SAFETY: this owned HWND is live; hiding keeps it, its canvas and its UIA provider alive.
+        // SAFETY: this owned HWND is live; hiding keeps it and its canvas alive.
         unsafe {
             let _ = ShowWindow(self.0, SW_HIDE);
         }
@@ -545,8 +545,6 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
                 let _ = PostMessageW(Some(hwnd), CLOSE_SURFACE, WPARAM(0), LPARAM(0));
                 LRESULT(0)
             }
-            WM_GETOBJECT => crate::dock_uia::get_object(hwnd, wparam, lparam)
-                .unwrap_or_else(|| DefWindowProcW(hwnd, message, wparam, lparam)),
             WM_ACTIVATE => {
                 if wparam.0 & 0xffff == WA_INACTIVE as usize {
                     let _ = PostMessageW(Some(hwnd), DEACTIVATED, WPARAM(0), LPARAM(0));
