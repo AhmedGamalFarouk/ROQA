@@ -996,3 +996,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/f1-user-feedback`; [packet](features-f1.md). Occasional + wake eyes, volume drag/wheel/thumb, app menu + cog for Settings, file drag opens Shelf, edge sliders diagnosed (off by default, Settings unreachable). No native/GUI run.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 273 tests, locked release); 1,082,880 B, ratchet within 2% (baseline unchanged); SHA `57874520314E2CF89EAC2F354E127FD36614936B73B30E3DD6A379534F1087DC`.
 - **NOT RUN:** all drawing, input, UIA, edge hover, wake on lock/display-on; eased volume animation deferred; reviews paused (REVIEW NOT RUN).
+
+## F2 fixes (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/f2-prayer`; [packet](features-f2.md). Eased notch volume fill (120 ms, no timer when settled), wake on unlock/display-on, settings cog as a UIA Button and keyboard stop. No native/GUI run.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 275 tests, locked release); 1,079,808 B, ratchet within 2% (baseline unchanged); SHA `D7847DDBCAD2D0E34EB86AEA4D68B074F87D751AAC443AE73BFA9F2A4DD24EB1`.
+- **NOT RUN:** drawing, real unlock/display-on, Narrator/keyboard on the cog; reviews paused (REVIEW NOT RUN).

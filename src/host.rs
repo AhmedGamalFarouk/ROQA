@@ -248,6 +248,8 @@ struct Surface {
     hang: Hang,
     /// Notch: the pointer on the volume bar (hover, and a captured drag).
     grip: Grip,
+    /// Notch: the volume bar's drawn fill (percent), easing toward the real level; a drag sets it at once.
+    volume_fill: Tween,
 }
 impl Surface {
     /// Ends a volume-bar drag: the thumb shrinks and the capture goes.
@@ -273,6 +275,7 @@ impl Drop for Surface {
     }
 }
 /// State only one surface kind needs.
+#[allow(clippy::large_enum_variant)] // one value per surface, never moved in bulk
 enum Role {
     /// UIA root and shared state, the media control with keyboard focus, pointer inside the hot
     /// band (not its shadow), the instant hover intent opens the notch, and the window region last
@@ -359,6 +362,7 @@ impl Surface {
             repaint: Repaint::Nothing,
             hang: Hang::rest(),
             grip: Grip::default(),
+            volume_fill: Tween::rest(0.0),
         })
     }
     /// The handle opens at once for the pointer or a focused tab and closes `tabs::COLLAPSE_DELAY` after
@@ -472,9 +476,9 @@ impl Surface {
                 self.hover_dock(None, false);
             } else {
                 self.set_notch_hover(false);
-                let tab_focus = self
-                    .focused()
-                    .is_some_and(|focus| focus.control >= notch_uia::TAB_BASE);
+                let tab_focus = self.focused().is_some_and(|focus| {
+                    (notch_uia::TAB_BASE..notch_uia::GEAR).contains(&focus.control)
+                });
                 self.set_rail(tab_focus, Instant::now());
             }
         }
@@ -619,6 +623,14 @@ impl Surface {
             .then(|| timers.view(now))
             .flatten();
         let notice = power.text();
+        let level = audio.level().map_or(0.0, |level| f32::from(level.percent));
+        if self.grip.drag {
+            self.volume_fill = Tween::rest(level); // the thumb follows the pointer without lag
+        } else {
+            self.volume_fill
+                .retarget(level, VOLUME_EASE, motion::EASE_OUT);
+        }
+        let volume_fill = self.volume_fill.value(now);
         // Only a revealed panel row reads the time; a collapsed notch draws no progress.
         self.played = track
             .filter(|_| motion::reveal(progress) > 0.0)
@@ -694,6 +706,7 @@ impl Surface {
             }),
             eyes: pages.eyes.and_then(|eyes| eyes.frame()),
             grip: self.grip,
+            volume_fill,
             weather: (page == Tab::Weather).then_some(&pages.weather),
         };
         shadow.paint(&scene, self.window.0)?;
@@ -757,7 +770,10 @@ impl Surface {
             (state.focus, state.open) = (Some(control), true);
         }
         // A focused tab holds the handle open, as the pointer does.
-        self.set_rail(control >= notch_uia::TAB_BASE, Instant::now());
+        self.set_rail(
+            (notch_uia::TAB_BASE..notch_uia::GEAR).contains(&control),
+            Instant::now(),
+        );
     }
     /// Ends keyboard focus, closing the panel unless the pointer still holds it.
     fn blur(&mut self) -> Option<Focus> {
@@ -940,6 +956,8 @@ fn refocus<const N: usize>(enabled: [bool; N], control: usize, replaced: bool) -
     }
     step(enabled, Some(control), true).map_or(Refocus::Release, Refocus::Move)
 }
+/// The notch volume bar eases to a new level over this long.
+const VOLUME_EASE: Duration = Duration::from_millis(120);
 /// Transient topology reads are retried this often, at most `TOPOLOGY_RETRIES` times per change.
 const TOPOLOGY_RETRY: Duration = Duration::from_millis(250);
 const TOPOLOGY_RETRIES: u32 = 8;
@@ -1768,6 +1786,7 @@ impl Desktop {
                 }
                 surface.live = surface.motion.running(now)
                     || surface.hang.tween.running(now)
+                    || surface.volume_fill.running(now)
                     || match &surface.role {
                         Role::Notch { intent, .. } => intent.is_some(),
                         Role::Dock { slots, .. } => slots.iter().any(|tween| tween.running(now)),
@@ -2608,11 +2627,15 @@ impl Desktop {
     }
     /// Presses a shown media control or the mute toggle.
     fn press(&mut self, control: usize) {
-        if let Some(position) = control.checked_sub(notch_uia::TAB_BASE) {
+        if control == notch_uia::GEAR {
+            if let Err(error) = self.open_settings() {
+                eprintln!("Settings: {error}");
+            }
+        } else if let Some(position) = control.checked_sub(notch_uia::TAB_BASE) {
             if let Some(&tab) = self.pages.tabs.visible().as_slice().get(position) {
                 self.select_tab(tab);
             }
-        } else if control >= notch_uia::SHELF_BASE {
+        } else if (notch_uia::SHELF_BASE..notch_uia::TAB_BASE).contains(&control) {
             self.open_shelf(control - notch_uia::SHELF_BASE, false);
         } else if control != audio::MUTE {
             self.media.command(control);
@@ -2622,10 +2645,10 @@ impl Desktop {
     }
     /// The notch controls that take focus and presses: on the Media page the player's three, then mute while
     /// a default render endpoint is bound; on the Shelf page its entries; and the tabs, when there is a handle.
-    fn enabled(&self) -> [bool; notch_uia::TAB_BASE + 5] {
+    fn enabled(&self) -> [bool; notch_uia::GEAR + 1] {
         let track = self.pages.track(&self.media);
         let page = self.pages.page(track.is_some());
-        let mut enabled = [false; notch_uia::TAB_BASE + 5];
+        let mut enabled = [false; notch_uia::GEAR + 1];
         if let Some(track) = track.filter(|_| page == Tab::Media) {
             let [previous, play_pause, next] = track.controls;
             let mute = self.audio.level().is_some();
@@ -2642,6 +2665,7 @@ impl Desktop {
                 enabled[notch_uia::TAB_BASE + at] = true;
             }
         }
+        enabled[notch_uia::GEAR] = true;
         enabled
     }
     /// A UIA client focused a media control, or the notch itself (`notch_uia::FIRST`): the notch
@@ -2712,7 +2736,7 @@ impl Desktop {
             VK_RETURN | VK_SPACE => {
                 // Held keys repeat; one press is one command.
                 if message.lParam.0 & (1 << 30) == 0 {
-                    if ctrl && control >= notch_uia::SHELF_BASE {
+                    if ctrl && (notch_uia::SHELF_BASE..notch_uia::TAB_BASE).contains(&control) {
                         self.open_shelf(control - notch_uia::SHELF_BASE, true);
                     } else {
                         self.press(control);
@@ -2721,7 +2745,7 @@ impl Desktop {
                 return true;
             }
             windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE
-                if control >= notch_uia::SHELF_BASE =>
+                if (notch_uia::SHELF_BASE..notch_uia::TAB_BASE).contains(&control) =>
             {
                 if let Some(index) = self.shelf.shelf.absolute(control - notch_uia::SHELF_BASE) {
                     self.change_shelf(|shelf| shelf.remove(index));
@@ -2788,6 +2812,15 @@ impl Desktop {
             if self.power.update(power::Raw::read(), Instant::now()) {
                 self.open_notches();
                 self.request_notches(Repaint::Full, |_| true);
+            }
+            return Ok(());
+        }
+        if message.message == native_window::WAKE {
+            native_window::wake_read();
+            let now = Instant::now();
+            if let Some(eyes) = &mut self.pages.eyes {
+                eyes.wake(now);
+                self.request_notches(Repaint::Full, |s| !s.live && s.motion.value(now) < 0.1);
             }
             return Ok(());
         }
@@ -2883,9 +2916,9 @@ impl Desktop {
                     let on_rail = rail.is_some_and(|rail| {
                         layout::rail_hit(width, surface.dpi, progress, media, rail, (x, y))
                     });
-                    let tab_focus = surface
-                        .focused()
-                        .is_some_and(|focus| focus.control >= notch_uia::TAB_BASE);
+                    let tab_focus = surface.focused().is_some_and(|focus| {
+                        (notch_uia::TAB_BASE..notch_uia::GEAR).contains(&focus.control)
+                    });
                     surface.set_rail(on_rail || tab_focus, now);
                     self.pages.touch();
                     if volume_ui {

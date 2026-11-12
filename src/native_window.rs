@@ -9,7 +9,7 @@ use std::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use windows::Win32::{
-    Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Foundation::{E_FAIL, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
     Graphics::Gdi::{
         DeleteObject, EnumDisplayMonitors, ExtCreateRegion, GetMonitorInfoW, HDC, HMONITOR,
@@ -17,7 +17,18 @@ use windows::Win32::{
         MonitorFromPoint, MonitorFromWindow, RDH_RECTANGLES, RGNDATA, RGNDATAHEADER, SetWindowRgn,
         ValidateRect,
     },
-    System::LibraryLoader::GetModuleHandleW,
+    System::{
+        LibraryLoader::GetModuleHandleW,
+        Power::{
+            HPOWERNOTIFY, POWERBROADCAST_SETTING, RegisterPowerSettingNotification,
+            UnregisterPowerSettingNotification,
+        },
+        RemoteDesktop::{
+            NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification,
+            WTSUnRegisterSessionNotification,
+        },
+        SystemServices::GUID_CONSOLE_DISPLAY_STATE,
+    },
     UI::{
         HiDpi::GetDpiForWindow,
         Shell::{QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState},
@@ -45,6 +56,23 @@ fn claim(flag: &AtomicBool) -> bool {
 /// The host is about to read the power status: the next broadcast posts again.
 pub fn power_read() {
     POWER_PENDING.store(false, Ordering::Release);
+}
+/// Posted (once until read) when the session unlocks or the display turns on: the mascot wakes.
+pub const WAKE: u32 = WM_APP + 8;
+static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
+/// The host is about to handle a `WAKE`: the next event posts again.
+pub fn wake_read() {
+    WAKE_PENDING.store(false, Ordering::Release);
+}
+/// `WM_WTSSESSION_CHANGE` unlock, or a console-display-state setting that reads "on" (1).
+fn wakes(message: u32, wparam: usize, display: Option<(windows::core::GUID, u8)>) -> bool {
+    match message {
+        WM_WTSSESSION_CHANGE => wparam == WTS_SESSION_UNLOCK as usize,
+        WM_POWERBROADCAST => {
+            display.is_some_and(|(guid, on)| guid == GUID_CONSOLE_DISPLAY_STATE && on == 1)
+        }
+        _ => false,
+    }
 }
 pub const CLASS: windows::core::PCWSTR = w!("ROQA.NativeSurface.1");
 /// Explorer broadcasts this registered message to every top-level window when it (re)creates the
@@ -87,14 +115,33 @@ impl Drop for WindowClass {
     }
 }
 
-pub struct NativeWindow(pub HWND);
+/// The window and, for a notch, its display-state notification (unlock is a session notification, released by Drop).
+pub struct NativeWindow(pub HWND, Option<HPOWERNOTIFY>);
 impl NativeWindow {
     pub fn create(bounds: Bounds, kind: SurfaceKind) -> Result<Self> {
         let title = match kind {
             SurfaceKind::Notch => w!("ROQA Notch"),
             SurfaceKind::Dock => w!("ROQA Dock"),
         };
-        Self::create_hidden(bounds, title)
+        let mut window = Self::create_hidden(bounds, title)?;
+        if kind == SurfaceKind::Notch {
+            window.watch_wake();
+        }
+        Ok(window)
+    }
+    /// Asks Windows to tell this window about a session unlock and the display coming on (no polling). A
+    /// failed registration only loses the wake show.
+    fn watch_wake(&mut self) {
+        // SAFETY: our own live HWND; the registrations end in Drop, before the window is destroyed.
+        unsafe {
+            let _ = WTSRegisterSessionNotification(self.0, NOTIFY_FOR_THIS_SESSION);
+            self.1 = RegisterPowerSettingNotification(
+                HANDLE(self.0.0),
+                &GUID_CONSOLE_DISPLAY_STATE,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            )
+            .ok();
+        }
     }
     pub fn create_hidden(bounds: Bounds, title: windows::core::PCWSTR) -> Result<Self> {
         Self::create_styled(
@@ -133,7 +180,7 @@ impl NativeWindow {
                 Some(HINSTANCE(GetModuleHandleW(None)?.0)),
                 None,
             )?;
-            Ok(Self(hwnd))
+            Ok(Self(hwnd, None))
         }
     }
     /// A hidden topmost popup that never takes focus, for a DWM thumbnail; its title is its UIA name.
@@ -155,7 +202,7 @@ impl NativeWindow {
                 Some(HINSTANCE(GetModuleHandleW(None)?.0)),
                 None,
             )?;
-            Ok(Self(hwnd))
+            Ok(Self(hwnd, None))
         }
     }
     /// A layered transparent HWND lets input reach windows in other processes, unlike HTTRANSPARENT.
@@ -250,6 +297,10 @@ impl Drop for NativeWindow {
     fn drop(&mut self) {
         // SAFETY: sole owner destroys its HWND on its creating thread, after composition teardown.
         unsafe {
+            if let Some(handle) = self.1.take() {
+                let _ = UnregisterPowerSettingNotification(handle);
+                let _ = WTSUnRegisterSessionNotification(self.0);
+            }
             if let Err(error) = DestroyWindow(self.0) {
                 eprintln!("Window cleanup: {error}");
             }
@@ -457,6 +508,19 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
             }
             return LRESULT(1); // TRUE grants the broadcast
         }
+        let display = (message == WM_POWERBROADCAST
+            && wparam.0 == PBT_POWERSETTINGCHANGE as usize
+            && lparam.0 != 0)
+            .then(|| {
+                let setting = &*(lparam.0 as *const POWERBROADCAST_SETTING);
+                (setting.PowerSetting, setting.Data[0])
+            });
+        if wakes(message, wparam.0, display) {
+            if claim(&WAKE_PENDING) && PostMessageW(None, WAKE, WPARAM(0), LPARAM(0)).is_err() {
+                WAKE_PENDING.store(false, Ordering::Release);
+            }
+            return LRESULT(isize::from(message == WM_POWERBROADCAST));
+        }
         if let Some(reconnect) =
             repositions(message, wparam, TASKBAR_CREATED.load(Ordering::Relaxed))
         {
@@ -524,6 +588,25 @@ mod tests {
         // After the host reads, the next change posts again, once.
         pending.store(false, Ordering::Release);
         assert!(claim(&pending) && !claim(&pending));
+    }
+
+    #[test]
+    fn unlock_and_display_on_wake_and_nothing_else_does() {
+        let on = |v| Some((GUID_CONSOLE_DISPLAY_STATE, v));
+        assert!(wakes(
+            WM_WTSSESSION_CHANGE,
+            WTS_SESSION_UNLOCK as usize,
+            None
+        ));
+        assert!(!wakes(WM_WTSSESSION_CHANGE, 7, None)); // lock
+        assert!(wakes(WM_POWERBROADCAST, 0, on(1)));
+        assert!(!wakes(WM_POWERBROADCAST, 0, on(0)) && !wakes(WM_POWERBROADCAST, 0, on(2)));
+        assert!(!wakes(
+            WM_POWERBROADCAST,
+            0,
+            Some((windows::core::GUID::zeroed(), 1))
+        ));
+        assert!(!wakes(WM_NULL, 0, None));
     }
 
     #[test]

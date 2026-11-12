@@ -180,6 +180,8 @@ pub struct NotchScene<'a> {
     pub eyes: Option<Frame>,
     /// The volume bar's pointer state: the thumb grows on hover and press, and a press shows the percent.
     pub grip: Grip,
+    /// The volume bar's drawn fill in percent: it eases toward `volume`'s percent.
+    pub volume_fill: f32,
     /// The Weather page's text and pictures; `Some` only while that page shows.
     pub weather: Option<&'a crate::weather::View>,
 }
@@ -761,12 +763,33 @@ fn settings_button(
     if reveal <= 0.0 {
         return Ok(());
     }
+    let scale = scene.dpi as f32 / 96.0;
     let gear = layout::gear(scene.dpi, scene.track.is_some());
     let square = pixel_square(
         body.left + gear.x as f32,
         body.top + gear.y as f32,
         gear.width as f32,
     );
+    if scene.focus == Some(crate::notch_uia::GEAR) {
+        let out = (FOCUS_GAP + FOCUS_STROKE / 2.0) * scale;
+        let ring = D2D_RECT_F {
+            left: square.left - out,
+            top: square.top - out,
+            right: square.right + out,
+            bottom: square.bottom + out,
+        };
+        // SAFETY: a brush and an outline drawn on the frame's own device context.
+        unsafe {
+            let brush =
+                context.CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(reveal)), None)?;
+            context.DrawRoundedRectangle(
+                &rounded(ring, 8.0 * scale),
+                &brush,
+                FOCUS_STROKE * scale,
+                None,
+            );
+        }
+    }
     fill_glyph(
         context,
         square,
@@ -1475,7 +1498,7 @@ fn volume_bar(scene: &NotchScene, body: &D2D_RECT_F) -> Option<VolumeBar> {
     let radius = THUMB[usize::from(scene.grip.hover) + usize::from(scene.grip.drag)]
         * scene.dpi as f32
         / 96.0;
-    let filled = (bar.width as f32 * f32::from(percent) / 100.0).round();
+    let filled = (bar.width as f32 * scene.volume_fill.clamp(0.0, 100.0) / 100.0).round();
     let rect = |width: f32| {
         rounded(
             D2D_RECT_F {
@@ -2309,6 +2332,7 @@ mod media_tests {
             rail: None,
             eyes: None,
             grip: Grip::default(),
+            volume_fill: volume.map_or(0.0, |level| f32::from(level.percent)),
             weather: None,
         };
         let clock = clock_width(time, progress, dpi);
@@ -2342,6 +2366,7 @@ mod media_tests {
                 rail: None,
                 eyes: None,
                 grip: Grip::default(),
+                volume_fill: 0.0,
                 weather: None,
             };
             let clock = clock_width("9:50 pm", progress, 96);
@@ -2605,6 +2630,7 @@ mod media_tests {
                 rail: None,
                 eyes: None,
                 grip: Grip::default(),
+                volume_fill: 0.0,
                 weather: None,
             };
             meter_bars(&scene, &body(96, progress))
@@ -2660,6 +2686,7 @@ mod media_tests {
                     rail: None,
                     eyes: None,
                     grip: Grip::default(),
+                    volume_fill: 0.0,
                     weather: None,
                 };
                 let (bars, _) = meter_bars(&scene, &body(dpi, 1.0)).unwrap();
@@ -2703,6 +2730,7 @@ mod media_tests {
             rail: None,
             eyes: None,
             grip: Grip::default(),
+            volume_fill: 0.0,
             weather: None,
         };
         let radius = |scene: &NotchScene| volume_bar(scene, &body(96, 1.0)).unwrap().thumb.2;

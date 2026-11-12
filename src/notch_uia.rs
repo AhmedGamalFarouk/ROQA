@@ -37,6 +37,8 @@ pub const SHELF_BASE: usize = 4;
 /// Element ids of the tab items start here, after the shelf's `shelf::VISIBLE` entries; id `TAB_BASE + n` is
 /// the n-th shown tab.
 pub const TAB_BASE: usize = SHELF_BASE + crate::shelf::VISIBLE;
+/// The settings cog's element id, after the (at most five) tabs: a Button named "Settings".
+pub const GEAR: usize = TAB_BASE + 5;
 
 #[derive(Default)]
 pub struct State {
@@ -108,11 +110,15 @@ fn ids(state: &State) -> Vec<usize> {
     (0..state.controls.len())
         .chain(SHELF_BASE..SHELF_BASE + state.shelf.len())
         .chain(TAB_BASE..TAB_BASE + state.tabs.len())
+        .chain(std::iter::once(GEAR))
         .collect()
 }
 
 /// The name and enabled state of element `id`. Shelf entries and tabs are always enabled.
 fn entry(state: &State, id: usize) -> Option<(String, bool)> {
+    if id == GEAR {
+        return Some(("Settings".to_owned(), true));
+    }
     if let Some(n) = id.checked_sub(TAB_BASE) {
         return state.tabs.get(n).map(|name| (name.clone(), true));
     }
@@ -368,7 +374,8 @@ impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
             .or_else(|| {
                 layout::rail_tab_at(width, dpi, 1.0, track, handle, (x, y))
                     .map(|tab| TAB_BASE + tab)
-            });
+            })
+            .or_else(|| layout::gear_at(width, dpi, 1.0, track, x, y).then_some(GEAR));
         match control {
             Some(id) if open => self.item(id),
             _ => Ok(self.to_interface()),
@@ -464,8 +471,12 @@ impl IRawElementProviderSimple_Impl for Item_Impl {
             "RoqaTab2",
             "RoqaTab3",
             "RoqaTab4",
+            "RoqaSettings",
         ];
-        let tab = self.index.checked_sub(TAB_BASE);
+        let tab = self
+            .index
+            .checked_sub(TAB_BASE)
+            .filter(|_| self.index < GEAR);
         Ok(match property {
             UIA_ControlTypePropertyId if tab.is_some() => variant_i32(UIA_TabItemControlTypeId.0),
             UIA_ControlTypePropertyId => variant_i32(UIA_ButtonControlTypeId.0),
@@ -533,6 +544,20 @@ impl IRawElementProviderFragment_Impl for Item_Impl {
                 state.active_tab,
             )
         })?;
+        if self.index == GEAR {
+            if !open {
+                return Ok(UiaRect::default());
+            }
+            let (rect, gear) = (window_rect(hwnd)?, layout::gear(dpi, media));
+            let body =
+                layout::notch_body(rect.right - rect.left, dpi, layout::notch_shape(1.0, media));
+            return Ok(UiaRect {
+                left: f64::from(rect.left + body.left + gear.x),
+                top: f64::from(rect.top + gear.y),
+                width: f64::from(gear.width),
+                height: f64::from(gear.height),
+            });
+        }
         if let Some(tab) = self.index.checked_sub(TAB_BASE) {
             // The open handle's button; a closed panel draws none (offscreen, and Invoke still works).
             if !open {
@@ -608,6 +633,13 @@ impl IInvokeProvider_Impl for Item_Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_settings_cog_is_the_last_named_button() {
+        let state = State::default();
+        assert_eq!(ids(&state), [GEAR]);
+        assert_eq!(entry(&state, GEAR), Some(("Settings".to_owned(), true)));
+    }
 
     #[test]
     fn the_root_name_carries_the_status_line_only_when_there_is_one() {
@@ -686,7 +718,13 @@ mod tests {
                 let simple: IRawElementProviderSimple = child.cast().unwrap();
                 assert!(simple.GetPropertyValue(UIA_NamePropertyId).is_ok());
                 state.lock().unwrap().controls = hidden.shown().map(controls).unwrap_or_default();
-                assert!(fragment.Navigate(NavigateDirection_FirstChild).is_err());
+                // Only the settings cog is left: the media children are gone.
+                let first = fragment.Navigate(NavigateDirection_FirstChild).unwrap();
+                let first: IRawElementProviderSimple = first.cast().unwrap();
+                assert_eq!(
+                    first.GetPropertyValue(UIA_NamePropertyId).unwrap(),
+                    variant_text("Settings")
+                );
                 assert_eq!(
                     simple
                         .GetPropertyValue(UIA_IsKeyboardFocusablePropertyId)
@@ -703,10 +741,6 @@ mod tests {
                         .unwrap_err()
                         .code(),
                     not_available().code()
-                );
-                assert_eq!(
-                    fragment.SetFocus().unwrap_err().code(),
-                    not_enabled().code()
                 );
             }
         }

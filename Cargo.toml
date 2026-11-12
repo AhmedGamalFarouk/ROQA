@@ -58,6 +58,9 @@ windows = { version = "=0.62.2", features = [
     "Win32_Devices_Display",
     # WinHTTP: the Open-Meteo requests, through the OS TLS stack (features W1).
     "Win32_Networking_WinHttp",
+    # Session unlock notification: the mascot wakes (F2); MCI plays the prayer sound (P1).
+    "Win32_System_RemoteDesktop",
+    "Win32_Media_Multimedia",
     "Win32_UI_Accessibility",
     "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",
