@@ -49,22 +49,33 @@ pub enum Curve {
 
 /// Notch open, tuned to the live Nusa capture: ~7 % overshoot peaking near 230 ms (docs/design).
 pub const OPEN: Curve = Curve::Spring {
-    damping: 0.65,
-    frequency: 18.0,
+    damping: 0.66,
+    frequency: 19.0,
 };
-/// Notch close: quicker spring that dips ~9 % below the pill before settling, as observed.
+/// Notch close: a spring that dips ~7 % below the pill before settling (U3: calmer than the observed 9 %).
 pub const CLOSE: Curve = Curve::Spring {
-    damping: 0.61,
-    frequency: 16.0,
+    damping: 0.64,
+    frequency: 17.0,
 };
 /// Small state feedback (dock hover, hover-intent swell).
 pub const EASE_OUT: Curve = Curve::Bezier(0.2, 0.9, 0.3, 1.0);
+/// Dock hover pop: rises about 10 % past its rest and settles.
+pub const POP: Curve = Curve::Bezier(0.25, 1.6, 0.4, 1.0);
+/// A tab switch (slide and fade) and a notice's entry.
+pub const PAGE_TIME: Duration = Duration::from_millis(240);
 pub const OPEN_TIME: Duration = Duration::from_millis(500);
 pub const CLOSE_TIME: Duration = Duration::from_millis(560);
 /// Hover intent: the pill swells slightly at once, then opens only if the pointer stays this long.
 pub const INTENT_TIME: Duration = Duration::from_millis(320);
 pub const HOVER_IN_TIME: Duration = Duration::from_millis(160);
 pub const HOVER_OUT_TIME: Duration = Duration::from_millis(180);
+
+/// The slide direction (+1 towards a later tab, -1 an earlier one) of a switch to `page` from `last` while
+/// the panel is `open`; none when the page is unchanged or the panel is not open, so an idle notch starts no
+/// frames.
+pub fn page_switch(last: usize, page: usize, open: bool) -> Option<f32> {
+    (open && page != last).then(|| if page > last { 1.0 } else { -1.0 })
+}
 
 /// Smoothstep of `t` clamped to 0..1: soft start and end for progress-derived fades and reaches.
 pub fn smooth(t: f32) -> f32 {
@@ -207,9 +218,28 @@ mod tests {
         let open = peak(OPEN, OPEN_TIME);
         assert!(open > 1.05 && open < 1.09, "open overshoot {open}");
         let close = peak(CLOSE, CLOSE_TIME);
-        assert!(close > 1.07 && close < 1.11, "close undershoot {close}");
+        assert!(close > 1.05 && close < 1.10, "close undershoot {close}");
+        let pop = peak(POP, HOVER_IN_TIME);
+        assert!(pop > 1.03 && pop < 1.2, "hover pop {pop}");
+        assert!((samples(POP, HOVER_IN_TIME)[200] - 1.0).abs() < 0.01);
         let ease = samples(EASE_OUT, HOVER_IN_TIME);
         assert!(ease.windows(2).all(|pair| pair[1] >= pair[0] - 1e-5) && ease[100] > 0.8);
+    }
+
+    #[test]
+    fn an_idle_notch_starts_no_frames() {
+        // Same page, or a closed panel: no switch, so nothing sets a surface live.
+        assert_eq!(page_switch(2, 2, true), None);
+        assert_eq!(page_switch(0, 3, false), None);
+        assert_eq!(
+            (page_switch(1, 3, true), page_switch(3, 1, true)),
+            (Some(1.0), Some(-1.0))
+        );
+        // A settled tween is not running and a switch's tween stops at its end.
+        let mut tween = Tween::rest(1.0);
+        assert!(!tween.running(Instant::now()));
+        tween.retarget(0.0, Duration::ZERO, EASE_OUT);
+        assert!(!tween.running(Instant::now()));
     }
 
     #[test]

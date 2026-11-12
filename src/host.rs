@@ -9,7 +9,8 @@ use crate::{
     edge::{self, Edges},
     eyes::{self, Eyes},
     graphics::{
-        COVER_DIPS, Canvas, DockScene, DockSlot, Graphics, Grip, NotchScene, RailScene, ShelfSlot,
+        COVER_DIPS, Canvas, DockScene, DockSlot, Fx, Graphics, Grip, NotchScene, RailScene,
+        ShelfSlot,
     },
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
@@ -284,6 +285,13 @@ struct Surface {
     grip: Grip,
     /// Notch: the volume bar's drawn fill (percent), easing toward the real level; a drag sets it at once.
     volume_fill: Tween,
+    /// Notch: the page last drawn (its tab index), the slide and fade of a switch to the current one (1 at
+    /// rest) and its direction, and the notice's entry with whether one showed.
+    page_at: usize,
+    page_dir: f32,
+    page_fx: Tween,
+    notice_fx: Tween,
+    notice_on: bool,
     /// Dock: floating or attached to the bottom edge, and which taskbar buttons it shows.
     dock_style: DockStyle,
     dock_buttons: Buttons,
@@ -416,6 +424,11 @@ impl Surface {
             hang: Hang::rest(),
             grip: Grip::default(),
             volume_fill: Tween::rest(0.0),
+            page_at: 0,
+            page_dir: 1.0,
+            page_fx: Tween::rest(1.0),
+            notice_fx: Tween::rest(1.0),
+            notice_on: false,
             overlay: false,
             dock_style,
             dock_buttons,
@@ -710,6 +723,26 @@ impl Surface {
             .then(|| timers.view(now))
             .flatten();
         let notice = power.text();
+        // A switch of page while the panel is open slides and fades the new one in; a notice eases in.
+        if let Some(dir) = motion::page_switch(self.page_at, page.index(), progress > 0.9)
+            && self.visible
+        {
+            self.page_dir = dir;
+            self.page_fx = Tween::rest(0.0);
+            self.page_fx
+                .retarget(1.0, motion::PAGE_TIME, motion::EASE_OUT);
+            self.live = true;
+        }
+        self.page_at = page.index();
+        if notice.is_some() != self.notice_on {
+            self.notice_on = !self.notice_on;
+            if self.notice_on && self.visible {
+                self.notice_fx = Tween::rest(0.0);
+                self.notice_fx
+                    .retarget(1.0, motion::PAGE_TIME, motion::EASE_OUT);
+                self.live = true;
+            }
+        }
         let level = audio.level().map_or(0.0, |level| f32::from(level.percent));
         if self.grip.drag {
             self.volume_fill = Tween::rest(level); // the thumb follows the pointer without lag
@@ -807,6 +840,11 @@ impl Surface {
             weather: (page == Tab::Weather).then_some(&pages.weather),
             prayer: (page == Tab::Prayer).then_some(&pages.prayer),
             limits: (page == Tab::Limits).then_some(&pages.limits),
+            fx: Fx {
+                page: self.page_fx.value(now),
+                dir: self.page_dir,
+                notice: self.notice_fx.value(now),
+            },
         };
         shadow.paint(&scene, self.window.0)?;
         let status = track.is_none().then(|| media.view().status()).flatten();
@@ -969,17 +1007,17 @@ impl Surface {
         let Role::Dock { hover, slots, .. } = &mut self.role else {
             return;
         };
-        let ease = |tween: &mut Tween, on: bool| {
+        let ease = |tween: &mut Tween, on: bool, curve| {
             let (target, duration) = if on {
                 (1.0, motion::HOVER_IN_TIME)
             } else {
                 (0.0, motion::HOVER_OUT_TIME)
             };
-            tween.retarget(target, duration, motion::EASE_OUT);
+            tween.retarget(target, duration, curve);
         };
-        ease(&mut self.motion, inside);
+        ease(&mut self.motion, inside, motion::EASE_OUT);
         for (index, tween) in slots.iter_mut().enumerate() {
-            ease(tween, slot == Some(index));
+            ease(tween, slot == Some(index), motion::POP);
         }
         *hover = slot;
         self.live = true;
@@ -2323,6 +2361,8 @@ impl Desktop {
                 surface.live = surface.motion.running(now)
                     || surface.hang.tween.running(now)
                     || surface.volume_fill.running(now)
+                    || surface.page_fx.running(now)
+                    || surface.notice_fx.running(now)
                     || surface.slide.running(now)
                     || match &surface.role {
                         Role::Notch { intent, .. } => intent.is_some(),

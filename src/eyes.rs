@@ -114,23 +114,28 @@ type Step = (f32, f32, bool, Pose, u64);
 const R: Pose = Pose::Rest;
 const SQ: Pose = Pose::Squash;
 const ST: Pose = Pose::Stretch;
-/// The last step of every show is the resting one: it ends the show.
-const BLINK: [Step; 8] = [
+/// A blink anticipates with a stretch, squashes and overshoots back (U3). The last step of every show is the
+/// resting one: it ends the show.
+const BLINK: [Step; 10] = [
     (0.3, 0.0, false, R, 60),
     (0.7, 0.0, false, R, 60),
     (1.0, 0.0, false, R, 450),
-    (1.0, 0.0, false, SQ, 120),
+    (1.0, 0.0, false, ST, 50),
+    (1.0, 0.0, false, SQ, 90),
+    (1.0, 0.0, false, ST, 60),
     (1.0, 0.0, false, R, 450),
     (0.7, 0.0, false, R, 60),
     (0.3, 0.0, false, R, 60),
     (0.0, 0.0, false, R, 0),
 ];
-const LOOK: [Step; 9] = [
+const LOOK: [Step; 11] = [
     (0.3, 0.0, false, R, 60),
     (0.7, 0.0, false, R, 60),
     (1.0, -3.0, false, R, 350),
     (1.0, 3.0, false, R, 350),
-    (1.0, 0.0, false, SQ, 120),
+    (1.0, 0.0, false, ST, 50),
+    (1.0, 0.0, false, SQ, 90),
+    (1.0, 0.0, false, ST, 60),
     (1.0, 0.0, false, R, 250),
     (0.6, 0.0, false, R, 60),
     (0.3, 0.0, false, R, 60),

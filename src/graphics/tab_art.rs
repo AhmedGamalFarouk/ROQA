@@ -247,6 +247,15 @@ pub(super) fn page(
         designator,
         align,
     };
+    // A tab switch slides the page in from the side it came from: the title and clock first, the content a
+    // beat later (the stagger).
+    let slide = |lag: f32| {
+        let t = ((scene.fx.page - lag) / (1.0 - lag)).clamp(0.0, 1.0);
+        let offset = scene.fx.dir * 18.0 * scale * (1.0 - motion::smooth(t));
+        // SAFETY: a transform on the frame's live context; the notch resets it after the page.
+        unsafe { context.SetTransform(&Matrix3x2::translation(offset, 0.0)) };
+    };
+    slide(0.0);
     let title = match scene.weather.filter(|_| scene.tab == Tab::Weather) {
         Some(view) => view.title.as_str(),
         None => scene.tab.name(),
@@ -277,6 +286,7 @@ pub(super) fn page(
         rect(layout::page_clock(media, scene.dpi)),
         ink(0.6),
     )?;
+    slide(0.25);
     match scene.tab {
         Tab::Timer => match scene.timer.filter(|view| !view.done) {
             Some(view) => draw_text(

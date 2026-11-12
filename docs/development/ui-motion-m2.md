@@ -12,3 +12,18 @@ Source: `docs/development/ui-council-fixes.md` (root, untracked), `ui-council-u2
 - **Picker icon:** a new `Glyph::Apps` (3 x 3 small squares) replaces the Start panes on the dock picker slot.
 - **Glass ears:** the glass layers of the notch body span the flared ears too, so they get the body's sheen instead of a clamped gradient edge. UNVERIFIED by eye (no native run).
 - **Not done:** edge slider resting value/label (not cheap: the sliders are passive windows with no resting-state paint path; left out).
+
+## Package B: motion (M2)
+
+One motion clock (`motion.rs`: `Tween`, `Curve`, `paced`), so animspeed (Fast) shortens every new animation too. Frames run only while a tween runs (`Surface::live` in `Desktop::animate`); nothing starts one at rest. Reduced motion: unchanged by decision 2026-11-09 (the Windows "Animation effects" setting is not consulted; the Settings animation speed is).
+
+- **Open/close easing:** open spring 0.66 / 19 (was 0.65 / 18: about 6.3 % overshoot, peak near 220 ms, was 230); close 0.64 / 17 (was 0.61 / 16: dips about 7 % below the pill, was 9 %). Test bound for the close dip widened to 1.05 to 1.10. Tuned by numbers, NOT judged natively.
+- **Tab switch:** while the panel is open, a switch of page slides the new page in 18 DIP from the side of travel (later tab from the right) and fades it in over 240 ms (`motion::page_switch`, `Surface::page_fx`, `Fx` in the scene, one `tab_art::faded` layer). Stagger: the title and clock lead, the content starts 25 % later. Closed or opening panels start nothing (the open reveal already fades the page).
+- **Content cross-fade:** the page fade-in covers the shelf, timer, prayer, weather and limits content together. NOT done: a fade-out of the leaving page (its data is not kept) and fades for data that changes inside a page.
+- **Notice:** the power/prayer notice rises 5 DIP and fades in (`Fx::notice`, `Surface::notice_fx`). NOT done: an exit animation (the text is gone when the notice ends).
+- **Dock hover:** the hovered icon rises 4 DIP (was 3) and grows up to 10 % in whole pixels, on a new `POP` curve with about 10 % overshoot; the bar fill keeps the plain ease-out.
+- **Eyes:** blink and look shows anticipate with a 50 ms stretch, squash for 90 ms and overshoot back with a 60 ms stretch (two more paints per show, same deadlines).
+- **Settings toggle:** the thumb slides over 150 ms (`draw_toggle`: state and start tick kept in a window property; the toggle invalidates itself only while sliding, no timer). NOT done: the Settings page transition (the page is a GDI child set; a cross-fade needs a second surface), the focus-ring fade (keyboard work, out of scope by the K1 decision).
+- **Idle proof:** `motion::tests::an_idle_notch_starts_no_frames` (same page or closed panel start no switch; a settled tween is not running); the existing `Desktop::animate` rule (live only while a tween runs) is unchanged.
+
+NOT RUN: native/GUI. Feel, timing and the slide distance need a desktop-free native look.

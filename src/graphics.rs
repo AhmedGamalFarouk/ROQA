@@ -160,6 +160,23 @@ pub struct DockScene<'a> {
     pub slide: i32,
 }
 
+/// Transitions in flight, each 0 to 1 and 1 at rest: the page slide and fade (`dir` is +1 when it comes from the
+/// right) and the power notice's entry.
+#[derive(Clone, Copy)]
+pub struct Fx {
+    pub page: f32,
+    pub dir: f32,
+    pub notice: f32,
+}
+impl Fx {
+    #[cfg(test)]
+    pub const REST: Fx = Fx {
+        page: 1.0,
+        dir: 1.0,
+        notice: 1.0,
+    };
+}
+
 pub struct NotchScene<'a> {
     pub time: &'a str,
     pub date: &'a str,
@@ -202,6 +219,7 @@ pub struct NotchScene<'a> {
     pub prayer: Option<&'a crate::prayer_tab::View>,
     /// The Limits page's rows; `Some` only while that page shows.
     pub limits: Option<&'a crate::limits::View>,
+    pub fx: Fx,
 }
 
 /// The tab handle: its geometry, the shown tabs in order and the one position with keyboard focus.
@@ -223,7 +241,7 @@ pub struct ShelfSlot<'a> {
 }
 
 /// Dock material (docs/design/roqa-visual-spec.md, colours from the theme): bar, ink-alpha hover fill, whole-pixel icon lift.
-const ICON_LIFT_DIPS: f32 = 3.0;
+const ICON_LIFT_DIPS: f32 = 4.0;
 const TEXT_FONT: PCWSTR = w!("Segoe UI Variable Text");
 const DISPLAY_FONT: PCWSTR = w!("Segoe UI Variable Display");
 /// The time's digits lead; "pm" and similar designators sit smaller beside them.
@@ -888,7 +906,11 @@ fn notch_text(
         tab_art::faded(context, 1.0 - reveal, || {
             media_page(context, scene, body, scale, art, status, p)
         })?;
-        tab_art::page(context, scene, body, scale, reveal, p)?;
+        tab_art::faded(context, scene.fx.page, || {
+            tab_art::page(context, scene, body, scale, reveal, p)
+        })?;
+        // SAFETY: the page may have left a slide transform on the live context.
+        unsafe { context.SetTransform(&Matrix3x2::identity()) };
     }
     settings_button(context, scene, body, p)
 }
@@ -1074,7 +1096,8 @@ fn notice_text(
     let media = scene.track.is_some();
     let slot = layout::power_notice(media, scene.dpi);
     let left = body.left + slot.x as f32;
-    let top = body.top + slot.y as f32;
+    // The notice rises 5 DIP into place as it fades in.
+    let top = body.top + slot.y as f32 + (1.0 - scene.fx.notice) * 5.0 * scale;
     let font = Font {
         family: TEXT_FONT,
         size: 11.0 * scale,
@@ -1097,7 +1120,7 @@ fn notice_text(
         text,
         &font,
         rect,
-        with_alpha(p.ink, p.ink_alpha(0.85 * reveal)),
+        with_alpha(p.ink, p.ink_alpha(0.85 * reveal * scene.fx.notice)),
     )
 }
 
@@ -2182,7 +2205,8 @@ fn draw_slot(
     px: &dyn Fn(i32) -> f32,
     p: &Palette,
 ) -> Result<()> {
-    let size = px(dock::ICON_DIPS);
+    // The hovered icon also grows by up to 10 % (whole pixels), with the lift.
+    let size = (px(dock::ICON_DIPS) * (1.0 + 0.1 * slot.hover)).round();
     // Whole-pixel lift keeps shell icon bitmaps unresampled (crisp) on every frame.
     let lift = (ICON_LIFT_DIPS * dpi as f32 / 96.0 * slot.hover).round();
     let center_x = (cell.left + cell.right) / 2.0;
@@ -2595,6 +2619,7 @@ mod media_tests {
             weather: None,
             prayer: None,
             limits: None,
+            fx: Fx::REST,
         };
         let clock = clock_width(time, progress, dpi);
         media_plan(&scene, scene.track.unwrap(), &body(dpi, progress), clock)
@@ -2632,6 +2657,7 @@ mod media_tests {
                 weather: None,
                 prayer: None,
                 limits: None,
+                fx: Fx::REST,
             };
             let clock = clock_width("9:50 pm", progress, 96);
             let plan = media_plan(&scene, scene.track.unwrap(), &body(96, progress), clock);
@@ -2899,6 +2925,7 @@ mod media_tests {
                 weather: None,
                 prayer: None,
                 limits: None,
+                fx: Fx::REST,
             };
             meter_bars(&scene, &body(96, progress))
         };
@@ -2958,6 +2985,7 @@ mod media_tests {
                     weather: None,
                     prayer: None,
                     limits: None,
+                    fx: Fx::REST,
                 };
                 let (bars, _) = meter_bars(&scene, &body(dpi, 1.0)).unwrap();
                 for bar in bars {
@@ -3005,6 +3033,7 @@ mod media_tests {
             weather: None,
             prayer: None,
             limits: None,
+            fx: Fx::REST,
         };
         let radius = |scene: &NotchScene| volume_bar(scene, &body(96, 1.0)).unwrap().thumb.2;
         let rest = radius(&scene);

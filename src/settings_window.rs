@@ -27,12 +27,15 @@ use crate::{
 use std::cell::RefCell;
 use windows::{
     Win32::{
-        Foundation::{COLORREF, HWND, LPARAM, POINT, RECT, WPARAM},
+        Foundation::{COLORREF, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM},
         Graphics::{
             Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
             Gdi::*,
         },
-        System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
+        System::{
+            Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
+            SystemInformation::GetTickCount64,
+        },
         UI::{
             Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
             Controls::*,
@@ -880,10 +883,36 @@ fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
         right: r.right,
         bottom: mid + px(11),
     };
-    let thumb = if on {
-        pill.right - px(20)
-    } else {
-        pill.left + px(2)
+    let (off_at, on_at) = (pill.left + px(2), pill.right - px(20));
+    // The thumb slides 150 ms when the state changes: the control remembers (state, start tick) in a window
+    // property, and while it moves the toggle invalidates itself, so nothing runs once it settles.
+    let thumb = {
+        let key = w!("roqa.slide");
+        // SAFETY: a property of this live child and the tick count; no pointers are involved.
+        let (state, now) = (unsafe { GetPropW(h, key) }.0 as u64, unsafe {
+            GetTickCount64()
+        });
+        let (first, raw) = (state == 0, state.wrapping_sub(2));
+        let (mut since, flipped) = (raw >> 1, !first && (raw & 1 == 1) != on);
+        if first || flipped {
+            // First sight settles at once (since 0); a flip starts now. Stored plus 2 so it is never 0.
+            since = if first { 0 } else { now };
+            // SAFETY: the value is a plain number stored as the property handle.
+            let _ = unsafe {
+                SetPropW(
+                    h,
+                    key,
+                    Some(HANDLE((((since << 1) | u64::from(on)) + 2) as *mut _)),
+                )
+            };
+        }
+        let t = (now.saturating_sub(since) as f32 / 150.0).min(1.0);
+        if t < 1.0 {
+            // SAFETY: the child repaints itself once more.
+            let _ = unsafe { InvalidateRect(Some(h), None, false) };
+        }
+        let (from, to) = if on { (off_at, on_at) } else { (on_at, off_at) };
+        from + ((to - from) as f32 * crate::motion::smooth(t)).round() as i32
     };
     let title = RECT {
         right: pill.left - px(8),

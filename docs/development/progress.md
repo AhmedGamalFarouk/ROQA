@@ -1154,3 +1154,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u3-motion`; [packet](ui-motion-m2.md). Limits 17 DIP rows, 10.5 pt text and adaptive panel height; Timer presets 5/10/15/25; "Set city" button; active tab named on the handle (draw only) with a taller target; attached dock full-width; Apps picker glyph; glass ears span. No keyboard/UIA work (K1 removes it).
 - **Checks:** verify.ps1 PASS (fmt/clippy, 369 tests, locked release); 1,147,392 B (+5,120 vs 1,142,272). Baseline raised once to 1,152,000 B (limit 1,175,040), approved by Ahmed 2026-11-13; U3 cap stays about 1,152,000 B.
 - **NOT RUN:** native/GUI (text fit, glass ears, dock bar unverified by eye); reviews paused (REVIEW NOT RUN). Not done: edge slider resting label.
+
+## U3-B Motion (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u3-motion`; [packet](ui-motion-m2.md). Retuned open/close springs; tab-switch slide + fade with stagger; notice enter; dock hover lift + magnify on a pop curve; blink/look squash polish; Settings toggle thumb slide. One clock (`motion.rs`), frames only while a tween runs, no timers or threads added.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 370 tests incl. `an_idle_notch_starts_no_frames`, locked release); 1,150,976 B (+3,584 vs 1,147,392); baseline 1,152,000 B, limit 1,175,040.
+- **NOT RUN:** native/GUI (feel unverified; Chief to request a desktop-free look); reviews paused (REVIEW NOT RUN). Not done: leaving-page fade, notice exit, Settings page transition, focus-ring fade (K1 scope).
