@@ -21,6 +21,8 @@ const CLOCK_SLACK: u64 = 2;
 struct Timer {
     deadline: Instant,
     expiry: u64,
+    /// A Pomodoro phase's name (not stored: after a restart it is a plain timer).
+    tag: Option<&'static str>,
 }
 
 /// Running timers, soonest first, and the end of the last completion's alert, if one is showing.
@@ -28,6 +30,7 @@ struct Timer {
 pub struct Timers {
     list: Vec<Timer>,
     alert: Option<Instant>,
+    pomo_done: bool,
 }
 
 /// What the notch shows and UI Automation says for one paint.
@@ -82,22 +85,42 @@ impl Timers {
                     .checked_sub(wall)
                     .filter(|left| (1..=MAX_SECONDS).contains(left))?;
                 let deadline = now + Duration::from_secs(left);
-                Some(Timer { deadline, expiry })
+                Some(Timer {
+                    deadline,
+                    expiry,
+                    tag: None,
+                })
             })
             .take(MAX)
             .collect();
         crate::sort::by(&mut list, |a, b| a.deadline.cmp(&b.deadline));
-        Self { list, alert: None }
+        Self {
+            list,
+            alert: None,
+            pomo_done: false,
+        }
     }
 
     /// Starts a countdown; false when it is out of range or `MAX` are already running.
     pub fn start(&mut self, seconds: u64, wall: u64, now: Instant) -> bool {
+        self.start_as(seconds, wall, now, None)
+    }
+
+    /// `start`, naming the countdown (a Pomodoro phase).
+    pub fn start_as(
+        &mut self,
+        seconds: u64,
+        wall: u64,
+        now: Instant,
+        tag: Option<&'static str>,
+    ) -> bool {
         if !(1..=MAX_SECONDS).contains(&seconds) || self.list.len() >= MAX {
             return false;
         }
         self.list.push(Timer {
             deadline: now + Duration::from_secs(seconds),
             expiry: wall.saturating_add(seconds),
+            tag,
         });
         crate::sort::by(&mut self.list, |a, b| a.deadline.cmp(&b.deadline));
         true
@@ -119,12 +142,27 @@ impl Timers {
     /// Removes timers whose deadline passed and starts the alert; true exactly once per completion.
     pub fn take_done(&mut self, now: Instant) -> bool {
         let before = self.list.len();
+        self.pomo_done |= self
+            .list
+            .iter()
+            .any(|timer| timer.tag.is_some() && timer.deadline <= now);
         self.list.retain(|timer| timer.deadline > now);
         let done = self.list.len() < before;
         if done {
             self.alert = Some(now + ALERT);
         }
         done
+    }
+
+    /// True once after a Pomodoro phase ran out (`take_done` saw it).
+    pub fn take_pomo_done(&mut self) -> bool {
+        std::mem::take(&mut self.pomo_done)
+    }
+
+    /// Stops the Pomodoro countdown and returns the seconds it had left.
+    pub fn stop_pomo(&mut self, now: Instant) -> Option<u64> {
+        let at = self.list.iter().position(|timer| timer.tag.is_some())?;
+        Some(secs_left(self.list.remove(at).deadline, now).max(1))
     }
 
     /// A completion's alert is showing (the mascot is surprised while it does).
@@ -179,7 +217,9 @@ impl Timers {
             .into_iter()
             .collect();
         names.extend(left.iter().enumerate().map(|(index, secs)| {
-            let which = if left.len() > 1 {
+            let which = if let Some(tag) = self.list[index].tag {
+                tag.to_owned()
+            } else if left.len() > 1 {
                 format!("Timer {}", index + 1)
             } else {
                 "Timer".to_owned()
@@ -233,6 +273,28 @@ mod tests {
             timers.alert.is_none(),
             "nothing is announced after a restart"
         );
+    }
+
+    #[test]
+    fn a_tagged_phase_is_named_paused_with_its_remainder_and_reported_once_when_done() {
+        let now = Instant::now();
+        let mut timers = Timers::default();
+        assert!(timers.start_as(600, WALL, now, Some("Focus")));
+        assert!(timers.start(900, WALL, now));
+        assert_eq!(
+            timers.view(now).unwrap().name,
+            "Focus, 10:00 remaining; Timer 2, 15:00 remaining"
+        );
+        // Pausing removes only the tagged one and keeps what was left.
+        assert_eq!(timers.stop_pomo(now + secs(100)), Some(500));
+        assert_eq!(timers.stop_pomo(now), None);
+        assert_eq!(timers.list.len(), 1);
+        assert!(timers.start_as(5, WALL, now, Some("Short break")));
+        assert!(!timers.take_pomo_done());
+        assert!(timers.take_done(now + secs(6)));
+        assert!(timers.take_pomo_done() && !timers.take_pomo_done());
+        // An ordinary timer finishing is not a phase.
+        assert!(timers.take_done(now + secs(901)) && !timers.take_pomo_done());
     }
 
     #[test]

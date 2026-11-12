@@ -4,6 +4,7 @@
 use crate::{
     dock::{Button, Buttons},
     layout::{DockStyle, SurfaceKind},
+    pomo,
     prayer::Method,
     prayer_tab::LEADS,
     shelf,
@@ -85,6 +86,8 @@ pub struct Settings {
     /// Water reminders (off by default) and their goal, glass, hours and interval (`water::Config`).
     pub water: bool,
     pub water_cfg: water::Config,
+    /// Pomodoro focus, short and long break minutes and sessions per round (`pomo::Config`).
+    pub pomo_cfg: pomo::Config,
 }
 
 impl Default for Settings {
@@ -125,6 +128,7 @@ impl Default for Settings {
             prayer_shift: [0; 5],
             water: false,
             water_cfg: water::DEFAULT,
+            pomo_cfg: pomo::DEFAULT,
         }
     }
 }
@@ -167,6 +171,7 @@ impl Settings {
             self.notch_size = 0;
         }
         water::clamp(&mut self.water_cfg);
+        pomo::clamp(&mut self.pomo_cfg);
         for minutes in &mut self.prayer_shift {
             *minutes = (*minutes).clamp(-MAX_SHIFT, MAX_SHIFT);
         }
@@ -270,6 +275,13 @@ impl Settings {
                     .map(|v| self.water_cfg = v)
                     .is_some()
             }
+            "pcfg" => {
+                let v: Result<Vec<u16>, _> = value.split(',').map(str::parse).collect();
+                v.ok()
+                    .and_then(|v| pomo::Config::try_from(v).ok())
+                    .map(|v| self.pomo_cfg = v)
+                    .is_some()
+            }
             "limgroup" => value.parse().map(|v| self.limits_group = v).is_ok(),
             "plead" => value.parse().map(|v| self.prayer_lead = v).is_ok(),
             "psound" if !value.is_empty() => {
@@ -361,6 +373,7 @@ notchsize={}
 pshift={a},{b},{c},{d},{e}
 water={}
 wcfg={},{},{},{},{}
+pcfg={},{},{},{}
 ",
             u8::from(self.hide_fullscreen),
             u8::from(self.reminder_sounds),
@@ -374,6 +387,10 @@ wcfg={},{},{},{},{}
             self.water_cfg[2],
             self.water_cfg[3],
             self.water_cfg[4],
+            self.pomo_cfg[0],
+            self.pomo_cfg[1],
+            self.pomo_cfg[2],
+            self.pomo_cfg[3],
         ));
         if !self.prayer_sound.is_empty() && one_line(&&self.prayer_sound) {
             out.push_str(&format!(
@@ -499,6 +516,7 @@ mod tests {
             notch_size: 120,
             prayer_shift: [-99, 0, 99, 5, -5],
             water_cfg: [0, 5, 30, 0, 1],
+            pomo_cfg: [0, 99, 0, 99],
             ..Settings::default()
         }
         .clamped();
@@ -507,6 +525,7 @@ mod tests {
             (0, [-30, 0, 30, 5, -5])
         );
         assert_eq!(wild.water_cfg, [1, 50, 23, 24, 10]);
+        assert_eq!(wild.pomo_cfg, [1, 60, 1, 12]);
         assert_eq!(
             (
                 wild.prayer_lead,
@@ -587,6 +606,7 @@ mod tests {
             prayer_shift: [-5, 0, 7, 30, -30],
             water: true,
             water_cfg: [6, 300, 8, 20, 45],
+            pomo_cfg: [50, 10, 30, 3],
             ..Settings::default()
         };
         let mut text = String::new();
@@ -601,6 +621,7 @@ mod tests {
             "pshift=-5,0,7,30,-30",
             "water=1",
             "wcfg=6,300,8,20,45",
+            "pcfg=50,10,30,3",
         ] {
             assert!(text.lines().any(|l| l == line), "{line}");
         }
@@ -620,6 +641,7 @@ mod tests {
             ("pshift", "1,2,3,4,5,6"),
             ("pshift", "a,b,c,d,e"),
             ("wcfg", "1,2,3"),
+            ("pcfg", "1,2,3"),
             ("wcfg", "1,2,3,4,x"),
             ("water", "yes"),
             ("notchsize", "big"),

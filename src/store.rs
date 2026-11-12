@@ -303,6 +303,7 @@ mod tests {
                 eyes: false,
                 water: true,
                 water_cfg: [6, 300, 8, 20, 45],
+                pomo_cfg: [50, 10, 30, 3],
                 ..Settings::default()
             },
             last_tab: Tab::Shelf,

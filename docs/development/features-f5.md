@@ -21,3 +21,13 @@ Branch `feat/f5-features` from main 4a93cad. Size budget: baseline 1,121,280 B, 
 - Host: `refresh_water` keeps one `water_due` deadline in the existing wait minimum (INFINITE while off); a due slot shows the notch notice "Time for water: 3 of 8 glasses (750 ml)" through the new shared `show_notice` (extracted from `fire_prayer`) and the shared `chime()` (gated by Reminder sounds); silent once the goal is met. The deadline is recomputed after any settings change and on a clock change. "I drank a glass" is a Settings button; progress shows beside it.
 - Size 1,125,888 -> 1,131,520 B (+5,632). 366 tests.
 - NOT RUN: native (notice, Settings rows, button, midnight). Not built: progress inside the Timer tab panel, an "I drank" action on the notch itself.
+
+## P4 Pomodoro (Settings > Notch > Pomodoro; runs in the Timer tab)
+- New `pomo.rs` (pure): `Config` [focus, short, long minutes, sessions per round] (default 25/5/15/4, clamped), `Phase`, `Pomo::advance` (focus -> short break, or long after every Nth session; break -> focus). 2 tests.
+- Each phase is an ordinary countdown in `timer.rs` with a `tag` (phase name): same deadline machinery, store expiry, notch pill/panel and UIA name ("Focus, 24:10 remaining"), completion alert and chime (`timer_beeps`, so the Reminder sounds gate applies). `take_pomo_done`, `stop_pomo` (pause keeps the remainder), `start_as` added; 1 test. A tagged timer restored after a restart is a plain timer.
+- Host: when a tagged phase ends the next starts by itself with a notice ("Focus done. Short break: 5 min."); Settings buttons "Start or pause pomodoro" and "Skip to the next phase" (needs the Timer tab on). Keys `pcfg=25,5,15,4`; old files load the defaults.
+- Size 1,131,520 -> 1,137,152 B (+5,632). 369 tests.
+- NOT RUN: native. Not built: start/pause/skip controls on the notch itself (Settings only); the round position is not stored across a restart.
+
+## P5 skipped
+Segmented control, stepper and theme tiles not started: ~6.5 KB of the 22 KB budget was left after P4 (limit 1,143,705 B), too little for three owner-drawn control kinds without tripping the ratchet. Native drop-downs stay.

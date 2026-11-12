@@ -13,6 +13,7 @@ use crate::{
         ACTION, CLOSE, DIALOG_STYLE, RELAYOUT, SCROLL, control, dialog_proc, empty_dialog, wide,
     },
     picker_font::PickerFont,
+    pomo,
     prayer::Method,
     prayer_os,
     prayer_tab::{self, LEADS, SILENT},
@@ -99,6 +100,10 @@ const PPAUSE: usize = 180;
 const WATER: usize = 181;
 const WCFG: usize = 182;
 const WDRANK: usize = 187;
+/// Pomodoro: the four numbers (`pomo::Config` order), start or pause, skip.
+const PCFG: usize = 188;
+const PSTART: usize = 192;
+const PSKIP: usize = 193;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_CENTERIMAGE | SS_NOTIFY`: the footer strip centres its text and takes clicks, so scrolled rows cannot be hit under it.
@@ -269,6 +274,17 @@ const PAGES: &[Page] = &[
                     r(WCFG + 3, Kind::Edit(70), water::LABELS[3], ""),
                     r(WCFG + 4, Kind::Edit(70), water::LABELS[4], ""),
                     r(WDRANK, Kind::Btn, "I &drank a glass", "Today"),
+                ],
+            },
+            Card {
+                label: "Pomodoro",
+                rows: &[
+                    r(PCFG, Kind::Edit(70), pomo::LABELS[0], ""),
+                    r(PCFG + 1, Kind::Edit(70), pomo::LABELS[1], ""),
+                    r(PCFG + 2, Kind::Edit(70), pomo::LABELS[2], ""),
+                    r(PCFG + 3, Kind::Edit(70), pomo::LABELS[3], ""),
+                    r(PSTART, Kind::Btn, "Start or pause &pomodoro", ""),
+                    r(PSKIP, Kind::Btn, "Skip to the next phase", ""),
                 ],
             },
             Card {
@@ -499,6 +515,8 @@ pub struct SettingsWindow {
     change: Option<Settings>,
     start: Option<u64>,
     drank: bool,
+    /// A Pomodoro request: false start or pause, true skip.
+    pomo: Option<bool>,
     return_to: Option<WindowKey>,
     closed: bool,
 }
@@ -1111,6 +1129,7 @@ impl SettingsWindow {
             change: None,
             start: None,
             drank: false,
+            pomo: None,
             return_to: foreground_key(),
             closed: false,
         };
@@ -1220,7 +1239,7 @@ impl SettingsWindow {
             Kind::Edit(_) => {
                 label = stat(title, LABEL)?;
                 let extra = match id {
-                    SHELF | WCFG..=186 => ES_NUMBER as u32,
+                    SHELF | WCFG..=186 | PCFG..=191 => ES_NUMBER as u32,
                     LIMSNIP => ES_READONLY as u32,
                     _ => 0,
                 };
@@ -1255,7 +1274,7 @@ impl SettingsWindow {
         let limit = match id {
             SHELF => 3,
             CITY => MAX_CITY,
-            PSHIFT..=174 | WCFG..=186 => 4,
+            PSHIFT..=174 | WCFG..=186 | PCFG..=191 => 4,
             DIAGNOSTICS => MAX_PATH,
             TIMER => 8,
             _ => 0,
@@ -1505,6 +1524,7 @@ impl SettingsWindow {
                             set_text(h, &settings.prayer_shift[item.id - PSHIFT].to_string())
                         }
                         WCFG..=186 => set_text(h, &settings.water_cfg[item.id - WCFG].to_string()),
+                        PCFG..=191 => set_text(h, &settings.pomo_cfg[item.id - PCFG].to_string()),
                         CITY => set_text(h, &settings.city),
                         DIAGNOSTICS => set_text(h, settings.diagnostics.as_deref().unwrap_or("")),
                         _ => Ok(()),
@@ -1601,6 +1621,10 @@ impl SettingsWindow {
                 Kind::Edit(_) => match item.id {
                     SHELF => next.shelf_cap = text(h, 3).trim().parse().unwrap_or(next.shelf_cap),
                     CITY => next.city = text(h, MAX_CITY),
+                    PCFG..=191 => {
+                        let slot = &mut next.pomo_cfg[item.id - PCFG];
+                        *slot = text(h, 4).trim().parse().unwrap_or(*slot);
+                    }
                     WCFG..=186 => {
                         let slot = &mut next.water_cfg[item.id - WCFG];
                         *slot = text(h, 4).trim().parse().unwrap_or(*slot);
@@ -1649,6 +1673,10 @@ impl SettingsWindow {
         self.change.take()
     }
 
+    pub fn take_pomo(&mut self) -> Option<bool> {
+        self.pomo.take()
+    }
+
     /// The user pressed "I drank a glass".
     pub fn take_drank(&mut self) -> bool {
         std::mem::take(&mut self.drank)
@@ -1694,6 +1722,9 @@ impl SettingsWindow {
                         }
                     }
                     (WDRANK, _) if notification == BN_CLICKED => self.drank = true,
+                    (PSTART | PSKIP, _) if notification == BN_CLICKED => {
+                        self.pomo = Some(id == PSKIP)
+                    }
                     (START, _) if notification == BN_CLICKED => {
                         match parse_timer(&text(self.h(TIMER), 8)) {
                             Some(seconds) => self.start = Some(seconds),

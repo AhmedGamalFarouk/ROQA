@@ -22,6 +22,7 @@ use crate::{
     notch_uia,
     picker::Picker,
     pins::Pins,
+    pomo,
     power::{self, Power},
     prayer_os, prayer_tab, preview, privacy,
     settings::{self, Settings},
@@ -1378,6 +1379,7 @@ struct Desktop {
     prayer: PrayerRun,
     /// When the next water reminder is due; `None` until `refresh_water` computes it.
     water_due: Option<Instant>,
+    pomo: pomo::Pomo,
 }
 /// The reminder schedule for the day, the last pass it was checked at, and the MCI sound while one plays.
 #[derive(Default)]
@@ -1496,6 +1498,7 @@ impl Desktop {
             limits_open: false,
             prayer: PrayerRun::default(),
             water_due: None,
+            pomo: pomo::Pomo::default(),
         };
         if desktop.settings.notch {
             desktop.show(SurfaceKind::Notch)?;
@@ -1709,6 +1712,13 @@ impl Desktop {
             self.timers
                 .write_to(&mut self.store, &mut self.pending, now);
             self.complete_timer();
+            if self.timers.take_pomo_done() {
+                // The next phase follows by itself; Start or pause stops the round.
+                let finished = self.pomo.phase.label();
+                self.pomo.advance(&self.settings.pomo_cfg);
+                let status = self.pomo_start(now);
+                self.show_notice(format!("{finished} done. {status}"), now);
+            }
             self.request_notches(Repaint::Full, |_| true);
         }
         if self.timers.alert_over(now) {
@@ -2368,12 +2378,13 @@ impl Desktop {
         let Some(window) = &mut self.settings_window else {
             return Ok(());
         };
-        let (change, start, movement, sound, drank) = (
+        let (change, start, movement, sound, drank, pomo) = (
             window.take_change(),
             window.take_start(),
             window.take_move(),
             window.take_sound_action(),
             window.take_drank(),
+            window.take_pomo(),
         );
         match sound {
             Some(SoundAction::Browse) => {
@@ -2410,6 +2421,16 @@ impl Desktop {
         }
         if drank {
             self.water_drink();
+        }
+        if let Some(skip) = pomo {
+            let status = if self.pages.tabs.on(Tab::Timer) {
+                self.pomo_act(skip)
+            } else {
+                "Switch the Timer tab on to use the Pomodoro.".to_owned()
+            };
+            if let Some(window) = &self.settings_window {
+                let _ = window.say(&status);
+            }
         }
         self.sync_water();
         if let Some(seconds) = start {
@@ -2560,6 +2581,41 @@ impl Desktop {
         Ok(())
     }
     /// Starts a countdown the user asked for in the settings window; the text is the window's status line.
+    /// Starts the current Pomodoro phase (or resumes a paused one) as a tagged timer.
+    fn pomo_start(&mut self, now: Instant) -> String {
+        let seconds = self
+            .pomo
+            .left
+            .take()
+            .unwrap_or_else(|| self.pomo.secs(&self.settings.pomo_cfg));
+        let label = self.pomo.phase.label();
+        if !self
+            .timers
+            .start_as(seconds, timer::wall_now(), now, Some(label))
+        {
+            self.pomo.left = Some(seconds);
+            return format!("{} timers are already running.", timer::MAX);
+        }
+        self.timers
+            .write_to(&mut self.store, &mut self.pending, now);
+        self.request_notches(Repaint::Full, |_| true);
+        format!("{label}: {} min.", seconds.div_ceil(60))
+    }
+    /// Start or pause (false) or skip (true) from Settings; returns what to tell the user.
+    fn pomo_act(&mut self, skip: bool) -> String {
+        let now = Instant::now();
+        let left = self.timers.stop_pomo(now);
+        if skip {
+            self.pomo.advance(&self.settings.pomo_cfg);
+        } else if left.is_some() {
+            self.pomo.left = left;
+            self.timers
+                .write_to(&mut self.store, &mut self.pending, now);
+            self.request_notches(Repaint::Full, |_| true);
+            return "Pomodoro paused.".to_owned();
+        }
+        self.pomo_start(now)
+    }
     fn start_timer(&mut self, seconds: u64) -> String {
         let now = Instant::now();
         if !self.timers.start(seconds, timer::wall_now(), now) {

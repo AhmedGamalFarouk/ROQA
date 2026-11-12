@@ -1106,3 +1106,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/f5-features`; [packet](features-f5.md). Off by default; one deadline in the event loop, notch notice, "I drank" button, store progress that resets by day; pure `water.rs` schedule.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 366 tests, locked release); 1,131,520 B, within 2% (baseline unchanged); SHA `4901436EAE48EC96531CC4596F840E413728EF04C201657F77DF387BC817D521`.
 - **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN).
+
+## F5-P4 pomodoro (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/f5-features`; [packet](features-f5.md). Focus/short/long phases as tagged timers (existing deadline, store, notch view, chime); auto-advance, Settings start/pause/skip; P5 controls skipped for size.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 369 tests, locked release); 1,137,152 B, within 2% (limit 1,143,705; baseline unchanged); SHA `36FCCC210A2A66028253A3E011749603D9D7F0B58E01778880662FE348887641`.
+- **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN).

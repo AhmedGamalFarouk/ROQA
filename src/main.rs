@@ -37,6 +37,7 @@ mod picker;
 mod picker_font;
 mod pins;
 mod policy_config;
+mod pomo;
 mod power;
 mod prayer;
 mod prayer_os;
