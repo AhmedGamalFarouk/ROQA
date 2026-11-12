@@ -172,8 +172,9 @@ impl Catalog {
                         let _ =
                             unsafe { PostThreadMessageW(target, COMPLETE, WPARAM(0), LPARAM(0)) };
                     }
+                    drop(source); // its virtual-desktop manager is a COM object
                     if com {
-                        // SAFETY: balances the successful initialization above; source state holds no COM objects.
+                        // SAFETY: balances the successful initialization above; the source's COM object is released.
                         unsafe { CoUninitialize() };
                     }
                 })

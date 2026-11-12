@@ -23,6 +23,8 @@ pub struct WindowRecord {
     pub executable: Option<String>,
     pub minimized: bool,
     pub foreground: bool,
+    /// False for a window the shell cloaked because it lives on another virtual desktop.
+    pub current_desktop: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -116,6 +118,7 @@ mod tests {
             executable: None,
             minimized: false,
             foreground: false,
+            current_desktop: true,
         }
     }
     fn snapshot(generation: u64, windows: Vec<WindowRecord>) -> Snapshot {

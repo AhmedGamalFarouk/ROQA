@@ -24,7 +24,7 @@ use windows::Win32::{
         WindowsAndMessaging::*,
     },
 };
-use windows::core::{BOOL, Error, Result, w};
+use windows::core::{BOOL, Error, HSTRING, Result, w};
 
 pub const REPOSITION: u32 = WM_APP + 1;
 pub const CLOSE_SURFACE: u32 = WM_APP + 2;
@@ -96,6 +96,28 @@ impl NativeWindow {
                 bounds.y,
                 bounds.width,
                 bounds.height,
+                None,
+                None,
+                Some(HINSTANCE(GetModuleHandleW(None)?.0)),
+                None,
+            )?;
+            Ok(Self(hwnd))
+        }
+    }
+    /// A hidden topmost popup that never takes focus, for a DWM thumbnail; its title is its UIA name.
+    pub fn create_preview(title: &str) -> Result<Self> {
+        let title = HSTRING::from(title);
+        // SAFETY: registered class; no retained user pointers; the title outlives the call.
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                CLASS,
+                &title,
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
                 None,
                 None,
                 Some(HINSTANCE(GetModuleHandleW(None)?.0)),

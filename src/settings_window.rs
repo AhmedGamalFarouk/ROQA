@@ -34,6 +34,7 @@ const LATER: usize = 142;
 const DOCK: usize = 100;
 const NOTCH: usize = 101;
 const SOUND: usize = 102;
+const DESKTOP: usize = 111;
 const SHELF: usize = 103;
 const THEME: usize = 110;
 const DIAGNOSTICS: usize = 104;
@@ -57,6 +58,8 @@ pub struct SettingsWindow {
     dock: HWND,
     notch: HWND,
     sound: HWND,
+    /// "Show only windows on this desktop".
+    desktop: HWND,
     /// Drop-down list of `Theme::ALL`, in that order.
     theme: HWND,
     /// One checkbox per connected monitor (at most `MAX_OFF`), named by its GDI device.
@@ -119,6 +122,7 @@ impl SettingsWindow {
             dock: HWND::default(),
             notch: HWND::default(),
             sound: HWND::default(),
+            desktop: HWND::default(),
             theme: HWND::default(),
             monitors: Vec::new(),
             shelf: HWND::default(),
@@ -274,6 +278,14 @@ impl SettingsWindow {
             check,
             flat,
         )?;
+        self.desktop = control(
+            window,
+            w!("Button"),
+            "Show only windows on this &desktop",
+            DESKTOP,
+            check,
+            flat,
+        )?;
         let theme_label = label("T&heme")?;
         self.theme = control(
             window,
@@ -367,7 +379,14 @@ impl SettingsWindow {
     }
 
     fn children(&self) -> Vec<HWND> {
-        let mut all = vec![self.dock, self.notch, self.sound, self.theme, self.shelf];
+        let mut all = vec![
+            self.dock,
+            self.notch,
+            self.sound,
+            self.desktop,
+            self.theme,
+            self.shelf,
+        ];
         all.extend([self.pin_label, self.pins, self.earlier, self.later]);
         all.extend(self.monitors.iter().map(|(handle, _)| *handle));
         all.extend([self.diagnostics, self.timer, self.status]);
@@ -380,6 +399,7 @@ impl SettingsWindow {
         set_checked(self.dock, settings.dock);
         set_checked(self.notch, settings.notch);
         set_checked(self.sound, settings.timer_sound);
+        set_checked(self.desktop, settings.desktop_only);
         let index = Theme::ALL
             .iter()
             .position(|t| *t == settings.theme)
@@ -405,6 +425,7 @@ impl SettingsWindow {
         next.dock = checked(self.dock);
         next.notch = checked(self.notch);
         next.timer_sound = checked(self.sound);
+        next.desktop_only = checked(self.desktop);
         // SAFETY: scalar query of our own combo box; -1 (nothing chosen) keeps the current theme.
         let chosen = unsafe { SendMessageW(self.theme, CB_GETCURSEL, None, None) }.0;
         next.theme = usize::try_from(chosen)
@@ -463,7 +484,9 @@ impl SettingsWindow {
                 let notification = (message.wParam.0 >> 16) as u32;
                 let monitor = (MONITOR..MONITOR + self.monitors.len()).contains(&id);
                 match id {
-                    DOCK | NOTCH | SOUND if notification == BN_CLICKED => self.commit()?,
+                    DOCK | NOTCH | SOUND | DESKTOP if notification == BN_CLICKED => {
+                        self.commit()?
+                    }
                     EARLIER | LATER if notification == BN_CLICKED => {
                         // SAFETY: scalar selection query of our own native combo.
                         let index = unsafe { SendMessageW(self.pins, CB_GETCURSEL, None, None) }.0;
@@ -538,7 +561,7 @@ impl SettingsWindow {
     fn position(&self, scale: f64, dpi: u32, work: Bounds) -> Result<()> {
         let px = |value: f64| (value * scale).round() as i32;
         // Row heights in DIPs, top to bottom: one list gives both the window height and every control's top.
-        let mut heights = vec![24.0; 3 + self.monitors.len()]; // dock, notch, monitors, sound
+        let mut heights = vec![24.0; 4 + self.monitors.len()]; // dock, notch, monitors, sound, desktop
         // theme, shelf, diagnostics label and edit, timer label and row, status, pins, buttons
         heights.extend([28.0, 28.0, 20.0, 28.0, 20.0, 28.0, 42.0, 28.0, 28.0]);
         let tops: Vec<i32> = heights
@@ -580,11 +603,12 @@ impl SettingsWindow {
             let margin = px(16.0);
             let inner = (client.right - margin * 2).max(1);
             let half = |units: f64| px(units).min(inner);
-            let after = 2 + self.monitors.len(); // the sound checkbox
+            let after = 3 + self.monitors.len(); // the desktop checkbox
             let mut places = vec![
                 (self.dock, margin, tops[0], inner, px(24.0)),
                 (self.notch, margin, tops[1], inner, px(24.0)),
-                (self.sound, margin, tops[after], inner, px(24.0)),
+                (self.sound, margin, tops[after - 1], inner, px(24.0)),
+                (self.desktop, margin, tops[after], inner, px(24.0)),
             ];
             for (index, (handle, _)) in self.monitors.iter().enumerate() {
                 places.push((*handle, margin, tops[2 + index], inner, px(24.0)));

@@ -921,3 +921,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Checks:** verify.ps1 PASS (fmt/clippy, 192 tests, locked release); 815,616 B (+1.46% vs baseline, ratchet PASS, baseline unchanged), SHA `8AEF5ABA335AFC3E523D0788E61CA6C2898532FD219F6B5F706ED327DE47C1A9`.
 - **Also:** AGENTS.md "Feature pipeline" section and `features-queue.md`.
 - **NOT RUN:** real plug/unplug, low/critical, UIA announcement, runtime accent change, text fit; reviews paused (REVIEW NOT RUN).
+
+## Features B2: dock hover thumbnails, virtual-desktop filter (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/features-b2`; [packet](features-b2.md), [queue](features-queue.md). No native/GUI run.
+- **Thumbnail:** 400 ms rest on a dock slot -> `DwmRegisterThumbnail` popup of the group's most recent window above the dock (foreground, else z-order top); one host deadline, no capture; ends on leave, slot change, click, full screen or window close; UIA name "Preview, <app>".
+- **Filter:** setting "Show only windows on this desktop" (default off) via `IVirtualDesktopManager`, created once on the catalog worker; pins stay. Behaviour change: with it off, other desktops' windows are now listed (cloaked ones were dropped before).
+- **Checks:** verify.ps1 PASS (fmt/clippy, 197 tests, locked release); 821,248 B, ratchet tripped (+2.16%), baseline raised to 821248; SHA `ED47ABD72B9E2AC79C8C5A47277F3CFA3EAF95424D57B6014BD37B144314C20A`.
+- **NOT RUN:** real hover/DWM drawing, UIA read, DPI placement, desktop switch; reviews paused (REVIEW NOT RUN).

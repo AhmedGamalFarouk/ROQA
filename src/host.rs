@@ -15,6 +15,7 @@ use crate::{
     picker::Picker,
     pins::Pins,
     power::{self, Power},
+    preview,
     settings::{self, Settings},
     settings_window::SettingsWindow,
     shelf::{self, Check, Shelf},
@@ -960,6 +961,9 @@ struct Desktop {
     timer_shown: String,
     /// The power pill: set by `message` on a status change, ended by `refresh_power`'s deadline.
     power: Power,
+    /// Dock hover thumbnails: the pointer's rest on a slot, and the popup while one shows.
+    preview: preview::Intent,
+    popup: Option<preview::Popup>,
 }
 impl Desktop {
     fn create(_probe: &Probe) -> Result<Self> {
@@ -1030,6 +1034,8 @@ impl Desktop {
             timers,
             timer_shown: String::new(),
             power: Power::new(power::Raw::read()),
+            preview: preview::Intent::default(),
+            popup: None,
         };
         if desktop.settings.notch {
             desktop.show(SurfaceKind::Notch)?;
@@ -1269,6 +1275,67 @@ impl Desktop {
             .deadline()
             .map_or(INFINITE, |due| milliseconds_until(due, now))
     }
+    /// Follows the pointer on the dock: after `preview::DELAY` on one slot with windows, shows a DWM
+    /// thumbnail of the group's most recent window above it. It ends on leave, a slot change, a click, a
+    /// hidden dock (full screen) or the window closing. The only wait is the delay's deadline, returned
+    /// here (`INFINITE` otherwise); no thread or timer, and with nothing hovered the pass is a short scan.
+    #[inline(never)]
+    fn refresh_preview(&mut self) -> u32 {
+        let now = Instant::now();
+        let hovered = self
+            .surfaces
+            .iter()
+            .enumerate()
+            .find_map(|(index, surface)| match surface.role {
+                // Slot 0 is the picker; a pinned app that is not running has nothing to show.
+                Role::Dock {
+                    hover: Some(slot @ 1..),
+                    ..
+                } if surface.visible => self
+                    .dock_items
+                    .get(slot - 1)
+                    .filter(|item| !item.windows.is_empty())
+                    .map(|item| (index, slot, item)),
+                _ => None,
+            });
+        let spot = hovered.map(|(index, slot, _)| (self.surfaces[index].window.0.0 as usize, slot));
+        let ended = self.preview.point(spot, now);
+        let stale = self.popup.as_ref().is_some_and(|popup| {
+            !hovered.is_some_and(|(_, _, item)| item.windows.contains(&popup.target))
+        });
+        if ended || stale {
+            self.popup = None;
+            if !ended {
+                self.preview.dismiss(); // the window went away under a resting pointer
+            }
+        }
+        if self.preview.take_due(now).is_some() {
+            let shown = hovered.and_then(|(index, slot, item)| {
+                let dock = &self.surfaces[index];
+                let work = self
+                    .monitors
+                    .iter()
+                    .find(|m| m.device == dock.monitor)?
+                    .work;
+                let app = crate::pins::display_name(&item.identity);
+                preview::Popup::show(&item.windows, &app, slot, dock.bounds, work, dock.dpi).ok()
+            });
+            match shown {
+                Some(popup) => self.popup = Some(popup),
+                None => {
+                    self.preview.dismiss();
+                }
+            }
+        }
+        self.preview
+            .deadline()
+            .map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+    /// A click on the dock ends the preview; it stays away until the pointer moves to another slot.
+    fn dismiss_preview(&mut self) {
+        self.popup = None;
+        self.preview.dismiss();
+    }
     /// A timer finished: every visible notch opens (once, however many finished together) and the
     /// system sound plays if enabled. No toast: notification packaging is M6.
     fn complete_timer(&mut self) {
@@ -1400,6 +1467,9 @@ impl Desktop {
         }
         let old = std::mem::replace(&mut self.settings, next);
         let restyle = old.theme != self.settings.theme;
+        if old.desktop_only != self.settings.desktop_only {
+            self.dock_generation = None; // the dock is rebuilt on the next pass
+        }
         let (create, destroy) = settings::surface_diff(&old, &self.settings, &devices);
         for kind in [SurfaceKind::Notch, SurfaceKind::Dock] {
             match (old.kind_on(kind), self.settings.kind_on(kind)) {
@@ -1472,7 +1542,7 @@ impl Desktop {
         }
         if self.dock_generation != Some(model.generation) {
             self.dock_generation = Some(model.generation);
-            let items = dock::items_with_pins(model, &self.pins);
+            let items = dock::items_with_pins(model, &self.pins, self.settings.desktop_only);
             let changed = items != self.dock_items;
             self.dock_names = dock::names(&items, model);
             for dock in self
@@ -2297,7 +2367,8 @@ impl Desktop {
             .min(self.refresh_progress()?)
             .min(self.refresh_meter()?)
             .min(self.refresh_timers())
-            .min(self.refresh_power());
+            .min(self.refresh_power())
+            .min(self.refresh_preview());
         self.paint_requested()?;
         if let Some(picker) = &mut self.picker {
             picker.synchronize(model)?;
@@ -2556,6 +2627,13 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             }
             if catalog.message(&message)? {
                 continue;
+            }
+            if matches!(
+                message.message,
+                WM_LBUTTONDOWN | WM_RBUTTONDOWN | dock_uia::INVOKE
+            ) && desktop.dock_at(message.hwnd).is_some()
+            {
+                desktop.dismiss_preview();
             }
             if message.message == WM_LBUTTONUP && desktop.dock_at(message.hwnd).is_some() {
                 if !desktop.end_drag(message.hwnd, message.lParam) {

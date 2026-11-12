@@ -7,7 +7,7 @@ Workers tick an item off (`[x]`) in the batch that lands it. One batch per worke
 
 ## Queue
 - [x] B1: power/battery pill and system accent colour ([packet](features-b1.md)).
-- [ ] B2: DWM hover thumbnails on dock slots, plus a virtual-desktop filter
+- [x] B2: DWM hover thumbnails on dock slots, plus a virtual-desktop filter ([packet](features-b2.md)).
       (`IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop`).
 - [ ] B3: a non-modal dock context menu (close window, new instance, pin/unpin).
 - [ ] B4: picker as command palette (installed apps from Start menu shortcuts, inline math).

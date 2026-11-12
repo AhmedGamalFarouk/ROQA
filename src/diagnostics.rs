@@ -258,6 +258,7 @@ mod tests {
             executable: Some("c:\\users\\bob\\private.exe".into()),
             minimized: false,
             foreground: true,
+            current_desktop: true,
         };
         WindowModel {
             generation: 3,

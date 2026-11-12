@@ -27,10 +27,15 @@ pub struct DockItem {
     pub active: bool,
 }
 
-/// One item per real catalog group, in stable identity order. No placeholder rows.
-pub fn items(model: &WindowModel) -> Vec<DockItem> {
+/// One item per real catalog group, in stable identity order. No placeholder rows. With `desktop_only`, a
+/// window on another virtual desktop does not count (and a group with no other window disappears).
+pub fn items(model: &WindowModel, desktop_only: bool) -> Vec<DockItem> {
     let mut items: Vec<DockItem> = Vec::new();
-    let mut windows: Vec<_> = model.windows.iter().collect();
+    let mut windows: Vec<_> = model
+        .windows
+        .iter()
+        .filter(|window| window.current_desktop || !desktop_only)
+        .collect();
     windows.sort_by(|a, b| (&a.identity, a.key).cmp(&(&b.identity, b.key)));
     for window in windows {
         match items.last_mut() {
@@ -54,9 +59,10 @@ pub fn items(model: &WindowModel) -> Vec<DockItem> {
 
 /// Pins first, in pin order (running group or a launcher with no windows), then unpinned groups in `items` order.
 /// An `Executable` pin also claims a group whose AUMID identity has the same exe, so a pin survives that upgrade.
-/// With no pins this equals `items(model)`.
-pub fn items_with_pins(model: &WindowModel, pins: &Pins) -> Vec<DockItem> {
-    let mut running: Vec<Option<DockItem>> = items(model).into_iter().map(Some).collect();
+/// With no pins this equals `items(model, desktop_only)`. A pin with no window left on this desktop stays, as a launcher.
+pub fn items_with_pins(model: &WindowModel, pins: &Pins, desktop_only: bool) -> Vec<DockItem> {
+    let mut running: Vec<Option<DockItem>> =
+        items(model, desktop_only).into_iter().map(Some).collect();
     let find = |running: &[Option<DockItem>], matches: &dyn Fn(&DockItem) -> bool| {
         running
             .iter()
@@ -297,6 +303,7 @@ mod tests {
             executable: Some(format!("c:\\{handle}.exe")),
             minimized: false,
             foreground,
+            current_desktop: true,
         }
     }
     fn key(handle: usize) -> WindowKey {
@@ -320,13 +327,13 @@ mod tests {
             ],
             incomplete: None,
         };
-        let items = items(&model);
+        let items = items(&model, false);
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].identity, app);
         assert_eq!(items[1].windows, vec![key(5), key(9)]);
         assert!(items[1].active && !items[0].active);
         assert_eq!(items[2].identity, Identity::Unavailable(7));
-        assert!(super::items(&WindowModel::default()).is_empty());
+        assert!(super::items(&WindowModel::default(), false).is_empty());
         assert_eq!(
             names(&items, &model),
             vec!["All windows", "w3", "w5, 2 windows, active", "w7"]
@@ -357,8 +364,11 @@ mod tests {
     #[test]
     fn empty_pins_equal_todays_items() {
         let model = sample_model();
-        assert_eq!(items_with_pins(&model, &Pins::default()), items(&model));
-        assert!(items_with_pins(&WindowModel::default(), &Pins::default()).is_empty());
+        assert_eq!(
+            items_with_pins(&model, &Pins::default(), false),
+            items(&model, false)
+        );
+        assert!(items_with_pins(&WindowModel::default(), &Pins::default(), false).is_empty());
     }
 
     #[test]
@@ -370,7 +380,7 @@ mod tests {
             missing.clone(),                          // pinned only
             Identity::Application("Contoso.Mail".into()),
         ];
-        let merged = items_with_pins(&model, &pins_of(&pinned));
+        let merged = items_with_pins(&model, &pins_of(&pinned), false);
         let ids: Vec<_> = merged.iter().map(|i| i.identity.clone()).collect();
         // Pin order, then unpinned running (5.exe, Unavailable) in the old identity order.
         assert_eq!(
@@ -388,10 +398,10 @@ mod tests {
         assert_eq!(merged[1].executable.as_deref(), Some("c:\\gone.exe"));
         assert!(merged[2].active);
         // Stable: the same inputs give the same order, and a window churn does not reorder pins.
-        assert_eq!(merged, items_with_pins(&model, &pins_of(&pinned)));
+        assert_eq!(merged, items_with_pins(&model, &pins_of(&pinned), false));
         let mut fewer = sample_model();
         fewer.windows.retain(|w| w.key != key(9));
-        let ids: Vec<_> = items_with_pins(&fewer, &pins_of(&pinned))
+        let ids: Vec<_> = items_with_pins(&fewer, &pins_of(&pinned), false)
             .iter()
             .map(|i| i.identity.clone())
             .collect();
@@ -408,6 +418,7 @@ mod tests {
         let merged = items_with_pins(
             &model,
             &pins_of(&[Identity::Executable("C:\\Vendor.exe".into())]),
+            false,
         );
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].windows, vec![key(4)]);
@@ -418,10 +429,50 @@ mod tests {
             false,
         ));
         let pins = pins_of(&[Identity::Executable("c:\\vendor.exe".into())]);
-        let merged = items_with_pins(&model, &pins);
+        let merged = items_with_pins(&model, &pins, false);
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].windows, vec![key(6)]);
         assert_eq!(merged[1].windows, vec![key(4)]);
+    }
+
+    #[test]
+    fn desktop_filter_drops_other_desktop_windows_but_keeps_pins() {
+        let mut model = sample_model();
+        // 9.exe (pinned) and 5.exe live only on another desktop; Mail (3) and 7 are here.
+        for window in &mut model.windows {
+            window.current_desktop = !matches!(window.key.handle, 9 | 5);
+        }
+        let pin = Identity::Executable("c:\\9.exe".into());
+        let pins = pins_of(std::slice::from_ref(&pin));
+        let ids = |desktop_only| -> Vec<_> {
+            items_with_pins(&model, &pins, desktop_only)
+                .into_iter()
+                .map(|item| (item.identity, item.windows.len()))
+                .collect()
+        };
+        // Off: everything, pin first. On: the pin stays as a launcher (no windows), 5.exe is gone.
+        assert_eq!(ids(false).len(), 4);
+        assert_eq!(
+            ids(true),
+            [
+                (pin, 0),
+                (Identity::Application("Contoso.Mail".into()), 1),
+                (Identity::Unavailable(7), 1)
+            ]
+        );
+        // A group keeps the windows that are here: only the other desktop's one leaves.
+        model.windows.push(record(
+            8,
+            Identity::Application("Contoso.Mail".into()),
+            false,
+        ));
+        model.windows[4].current_desktop = false;
+        let mail = items(&model, true)
+            .into_iter()
+            .find(|item| item.identity == Identity::Application("Contoso.Mail".into()))
+            .unwrap();
+        assert_eq!(mail.windows, vec![key(3)]);
+        assert_eq!(items(&model, false).len(), 4);
     }
 
     #[test]
@@ -431,7 +482,7 @@ mod tests {
             Identity::Executable("c:\\tools\\edit.exe".into()),
         ]);
         let model = WindowModel::default();
-        let merged = items_with_pins(&model, &pins);
+        let merged = items_with_pins(&model, &pins, false);
         assert_eq!(
             names(&merged, &model),
             [

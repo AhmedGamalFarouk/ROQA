@@ -11,17 +11,24 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{HWND, LPARAM},
-        Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
+        Graphics::Dwm::{DWM_CLOAKED_SHELL, DWMWA_CLOAKED, DwmGetWindowAttribute},
         Storage::EnhancedStorage::PKEY_AppUserModel_ID,
         System::{
-            Com::StructuredStorage::{PropVariantClear, PropVariantToBSTR},
+            Com::{
+                CLSCTX_ALL, CoCreateInstance,
+                StructuredStorage::{PropVariantClear, PropVariantToBSTR},
+            },
             Threading::{
                 GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32,
                 PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
             },
         },
         UI::{
-            Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
+            Shell::{
+                IVirtualDesktopManager,
+                PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
+                VirtualDesktopManager,
+            },
             WindowsAndMessaging::*,
         },
     },
@@ -47,7 +54,31 @@ unsafe extern "system" fn enumerate(hwnd: HWND, parameter: LPARAM) -> BOOL {
     BOOL(1)
 }
 
-fn full_scan(generation: u64, cancel: &AtomicBool) -> Snapshot {
+/// The shell's virtual-desktop manager: created once, on the first shell-cloaked window; `None` until then.
+type Desktops = Option<IVirtualDesktopManager>;
+
+/// Whether a window the shell cloaked is on another virtual desktop (not merely suspended on this one). A
+/// failed call drops the manager so Explorer's next incarnation gets a fresh one; the window stays omitted.
+fn on_other_desktop(desktops: &mut Desktops, hwnd: HWND) -> bool {
+    // SAFETY: free-threaded shell COM object owned by this worker; scalar HWND argument.
+    unsafe {
+        if desktops.is_none() {
+            *desktops = CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_ALL).ok();
+        }
+        let Some(manager) = desktops.as_ref() else {
+            return false;
+        };
+        match manager.IsWindowOnCurrentVirtualDesktop(hwnd) {
+            Ok(current) => !current.as_bool(),
+            Err(_) => {
+                *desktops = None;
+                false
+            }
+        }
+    }
+}
+
+fn full_scan(generation: u64, cancel: &AtomicBool, desktops: &mut Desktops) -> Snapshot {
     let started = Instant::now();
     let mut state = Enumeration {
         handles: Vec::new(),
@@ -83,6 +114,7 @@ fn full_scan(generation: u64, cancel: &AtomicBool) -> Snapshot {
             own_process,
             foreground,
             &mut executables,
+            desktops,
         ) {
             snapshot.windows.push(window);
         }
@@ -98,6 +130,7 @@ fn inspect(
     own_process: u32,
     foreground: HWND,
     executables: &mut BTreeMap<u32, Option<String>>,
+    desktops: &mut Desktops,
 ) -> Option<WindowRecord> {
     // SAFETY: only documented, non-message metadata queries against possibly transient foreign HWNDs.
     // Every failed/destroyed window is skipped, never dereferenced. Own HWNDs are excluded before text queries.
@@ -128,8 +161,13 @@ fn inspect(
             size_of::<u32>() as u32,
         )
         .is_err()
-            || cloaked != 0
         {
+            return None;
+        }
+        // A window on another virtual desktop is cloaked by the shell: it stays, flagged (the dock may filter
+        // it). Any other cloak (a suspended app, a hidden frame) still omits it.
+        let elsewhere = cloaked == DWM_CLOAKED_SHELL && on_other_desktop(desktops, hwnd);
+        if cloaked != 0 && !elsewhere {
             return None;
         }
         // Windows' "Not Responding" ghost duplicates a hung window; the taskbar shows one button, so do we.
@@ -169,6 +207,7 @@ fn inspect(
             executable,
             minimized: IsIconic(hwnd).as_bool(),
             foreground: hwnd == foreground,
+            current_desktop: !elsewhere,
         })
     }
 }
@@ -212,6 +251,7 @@ pub struct SourceState {
     windows: BTreeMap<usize, WindowRecord>,
     stats: SourceStats,
     needs_full: bool,
+    desktops: Desktops,
 }
 impl SourceState {
     pub fn reconcile(
@@ -222,7 +262,7 @@ impl SourceState {
         cancel: &AtomicBool,
     ) -> Snapshot {
         if full || self.needs_full {
-            let mut snapshot = full_scan(generation, cancel);
+            let mut snapshot = full_scan(generation, cancel, &mut self.desktops);
             self.stats.full_scans += 1;
             self.stats.inspected += snapshot.stats.inspected;
             self.needs_full = !snapshot.complete;
@@ -256,6 +296,7 @@ impl SourceState {
                 own_process,
                 foreground,
                 &mut executables,
+                &mut self.desktops,
             ) {
                 if !self.windows.contains_key(&handle) && self.windows.len() == MAX_WINDOWS {
                     complete = false;
