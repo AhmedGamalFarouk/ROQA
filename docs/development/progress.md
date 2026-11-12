@@ -1100,3 +1100,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/f5-features`; [packet](features-f5.md). Dock slides down 180 ms before its window hides (full-screen path); frame loop only, region/UIA follow the offset.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 362 tests, locked release); 1,125,888 B, within 2% (baseline unchanged); SHA `9DAE54E599731B98400A0556C806004DCFA1A61B7422F63B0BFF27F472754995`.
 - **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN).
+
+## F5-P3 water reminder (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `feat/f5-features`; [packet](features-f5.md). Off by default; one deadline in the event loop, notch notice, "I drank" button, store progress that resets by day; pure `water.rs` schedule.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 366 tests, locked release); 1,131,520 B, within 2% (baseline unchanged); SHA `4901436EAE48EC96531CC4596F840E413728EF04C201657F77DF387BC817D521`.
+- **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN).

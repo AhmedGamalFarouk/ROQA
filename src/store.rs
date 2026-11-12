@@ -37,6 +37,8 @@ pub struct Store {
     /// The weather place and the last report (features W1): shown at once on the next start.
     pub place: Option<Place>,
     pub report: Option<Report>,
+    /// Water progress: the local day (`prayer_tab::day_number`) and the glasses drunk on it.
+    pub water: (i64, u8),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -166,6 +168,13 @@ fn parse(text: &str) -> Option<Store> {
                     .filter(|tab| tab.available())
                     .unwrap_or_default();
             }
+            Some(("wdrank", value)) => {
+                if let Some((day, n)) = value.split_once(',')
+                    && let (Ok(day), Ok(n)) = (day.parse(), n.parse())
+                {
+                    store.water = (day, n);
+                }
+            }
             Some(("wxplace", value)) => store.place = Place::from_line(value),
             Some(("wxdata", value)) => store.report = Report::from_line(value),
             Some((key, value)) if store.settings.set(key, value) => {}
@@ -207,6 +216,9 @@ impl Store {
             out.push_str(&format!("timer={expiry}\n"));
         }
         out.push_str(&format!("lasttab={}\n", self.last_tab.key()));
+        if self.water.1 > 0 {
+            out.push_str(&format!("wdrank={},{}\n", self.water.0, self.water.1));
+        }
         // A report goes with its place only: a stray one would be shown under the wrong name.
         if let Some(place) = &self.place {
             out.push_str(&format!("wxplace={}\n", place.to_line()));
@@ -289,6 +301,8 @@ mod tests {
                 // A tab switched off and the mascot off survive a restart.
                 tabs: [true, true, true, false, true, true],
                 eyes: false,
+                water: true,
+                water_cfg: [6, 300, 8, 20, 45],
                 ..Settings::default()
             },
             last_tab: Tab::Shelf,
@@ -310,6 +324,7 @@ mod tests {
                     code: 1,
                 }],
             }),
+            water: (20_400, 3),
         }
     }
 
@@ -361,6 +376,7 @@ mod tests {
                 last_tab: Tab::Media,
                 place: None,
                 report: None,
+                water: (0, 0), // junk progress lines are skipped
             })
         );
         assert_eq!(

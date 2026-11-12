@@ -35,6 +35,7 @@ use crate::{
     theme::Palette,
     timer::{self, Timers},
     topology::{self, Monitor},
+    water,
     weather::{self, Feed},
     weather_os,
     window_catalog::Catalog,
@@ -1375,6 +1376,8 @@ struct Desktop {
     limits_open: bool,
     /// The prayer reminders' schedule and sound (features P1).
     prayer: PrayerRun,
+    /// When the next water reminder is due; `None` until `refresh_water` computes it.
+    water_due: Option<Instant>,
 }
 /// The reminder schedule for the day, the last pass it was checked at, and the MCI sound while one plays.
 #[derive(Default)]
@@ -1397,6 +1400,13 @@ struct PrayerRun {
 }
 /// How long a prayer reminder holds the notch open.
 const PRAYER_NOTICE: Duration = Duration::from_secs(8);
+/// The system sound for a finished timer or a due reminder (callers check the sound settings).
+fn chime() {
+    // SAFETY: plays the user's own default sound asynchronously; no pointers.
+    unsafe {
+        let _ = MessageBeep(MB_ICONASTERISK);
+    }
+}
 impl Desktop {
     fn create(_probe: &Probe) -> Result<Self> {
         let monitors = topology::settle(native_window::monitors()?)
@@ -1485,6 +1495,7 @@ impl Desktop {
             limits_io: limits_os::Io::new(),
             limits_open: false,
             prayer: PrayerRun::default(),
+            water_due: None,
         };
         if desktop.settings.notch {
             desktop.show(SurfaceKind::Notch)?;
@@ -1965,8 +1976,12 @@ impl Desktop {
             self.media.command(crate::media::PLAY_PAUSE);
         }
         self.prayer.adhan_until = Some(now + PRAYER_NOTICE);
-        self.power
-            .announce(prayer_tab::notice(event), now, PRAYER_NOTICE);
+        self.show_notice(prayer_tab::notice(event), now);
+    }
+    /// Expands every notch with `text` for `PRAYER_NOTICE`; on a monitor a full-screen app covers it appears
+    /// over the app (topmost, never activated) and hides again once retracted.
+    fn show_notice(&mut self, text: String, now: Instant) {
+        self.power.announce(text, now, PRAYER_NOTICE);
         for surface in &mut self.surfaces {
             if surface.kind() == SurfaceKind::Notch && !surface.visible {
                 // Painted before it shows, as when a full-screen app ends.
@@ -1987,6 +2002,50 @@ impl Desktop {
         }
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
+    }
+    /// Water reminders (F5): one deadline to the next slot, none while the switch is off. A due slot shows
+    /// the progress notice (silent once the goal is met) and the next deadline is computed from the clock.
+    #[inline(never)]
+    fn refresh_water(&mut self) -> u32 {
+        if !self.settings.water {
+            self.water_due = None;
+            return INFINITE;
+        }
+        let now = Instant::now();
+        let cfg = self.settings.water_cfg;
+        if self.water_due.is_some_and(|due| now >= due) {
+            self.water_due = None;
+            let drank = self.water_today();
+            if drank < cfg[0] as u8 {
+                if self.settings.reminder_plays() {
+                    chime();
+                }
+                self.show_notice(format!("Time for water: {}", water::text(drank, &cfg)), now);
+            }
+        }
+        // One second past the clock, so a wake a hair before the slot cannot fire it twice.
+        let due = *self.water_due.get_or_insert_with(|| {
+            let secs = prayer_os::local_now().secs as u32 + 1;
+            now + Duration::from_secs(water::wait_secs(secs, &cfg).into())
+        });
+        milliseconds_until(due, now)
+    }
+    fn water_today(&self) -> u8 {
+        water::today(
+            self.store.water,
+            prayer_tab::day_number(prayer_os::local_now().ymd),
+        )
+    }
+    /// "I drank a glass": today's count goes up and is stored.
+    fn water_drink(&mut self) {
+        let day = prayer_tab::day_number(prayer_os::local_now().ymd);
+        self.store.water = (day, self.water_today().saturating_add(1));
+        self.pending.mark(Instant::now());
+    }
+    fn sync_water(&self) {
+        if let Some(window) = &self.settings_window {
+            window.set_water(&water::text(self.water_today(), &self.settings.water_cfg));
+        }
     }
     /// Plays the chosen sound (none when silent or no default exists); false when nothing played.
     fn play_prayer_sound(&mut self, now: Instant) -> bool {
@@ -2208,10 +2267,7 @@ impl Desktop {
         }
         self.open_notches();
         if self.settings.timer_beeps() {
-            // SAFETY: plays the user's own default sound asynchronously; no pointers.
-            unsafe {
-                let _ = MessageBeep(MB_ICONASTERISK);
-            }
+            chime();
         }
     }
     /// Paints one frame of each running animation; returns true while any still runs.
@@ -2290,6 +2346,7 @@ impl Desktop {
             self.text_factor,
         )?);
         self.sync_settings_pins(0);
+        self.sync_water();
         Ok(())
     }
     fn sync_settings_pins(&self, selected: usize) {
@@ -2311,11 +2368,12 @@ impl Desktop {
         let Some(window) = &mut self.settings_window else {
             return Ok(());
         };
-        let (change, start, movement, sound) = (
+        let (change, start, movement, sound, drank) = (
             window.take_change(),
             window.take_start(),
             window.take_move(),
             window.take_sound_action(),
+            window.take_drank(),
         );
         match sound {
             Some(SoundAction::Browse) => {
@@ -2350,6 +2408,10 @@ impl Desktop {
         if let Some(next) = change {
             self.apply_settings(next, catalog)?;
         }
+        if drank {
+            self.water_drink();
+        }
+        self.sync_water();
         if let Some(seconds) = start {
             let status = if self.pages.tabs.on(Tab::Timer) {
                 self.start_timer(seconds)
@@ -2392,6 +2454,7 @@ impl Desktop {
         }
         let old = std::mem::replace(&mut self.settings, next);
         self.settings.apply_globals();
+        self.water_due = None; // the schedule follows the new hours
         // A new theme or pill size is fixed when a surface is created, so both rebuild the surfaces.
         let restyle =
             old.theme != self.settings.theme || old.notch_size != self.settings.notch_size;
@@ -3622,6 +3685,7 @@ impl Desktop {
             // A clock, time-zone or locale change, or a resume, can alter the text before the deadline.
             self.clock_due = Instant::now();
             self.prayer.key = None; // the day's times are computed again
+            self.water_due = None;
             self.pages.prayer_key = None;
             // Countdowns keep their remaining time; only their stored wall-clock expiry moves.
             let now = Instant::now();
@@ -3990,7 +4054,8 @@ impl Desktop {
             .min(self.refresh_rails())
             .min(self.refresh_eyes())
             .min(self.refresh_privacy())
-            .min(self.refresh_prayer());
+            .min(self.refresh_prayer())
+            .min(self.refresh_water());
         self.refresh_menu();
         self.paint_requested()?;
         if let Some(picker) = &mut self.picker {

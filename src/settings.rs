@@ -9,7 +9,7 @@ use crate::{
     shelf,
     tabs::{Flags, Tab},
     theme::Theme,
-    timer,
+    timer, water,
     weather::{MAX_CITY, Units},
 };
 
@@ -82,6 +82,9 @@ pub struct Settings {
     pub prayer_pause: bool,
     /// Minutes added to Fajr, Dhuhr, Asr, Maghrib and Isha.
     pub prayer_shift: [i8; 5],
+    /// Water reminders (off by default) and their goal, glass, hours and interval (`water::Config`).
+    pub water: bool,
+    pub water_cfg: water::Config,
 }
 
 impl Default for Settings {
@@ -120,6 +123,8 @@ impl Default for Settings {
             reminder_sounds: true,
             prayer_pause: false,
             prayer_shift: [0; 5],
+            water: false,
+            water_cfg: water::DEFAULT,
         }
     }
 }
@@ -161,6 +166,7 @@ impl Settings {
         if !NOTCH_SIZES.contains(&self.notch_size) {
             self.notch_size = 0;
         }
+        water::clamp(&mut self.water_cfg);
         for minutes in &mut self.prayer_shift {
             *minutes = (*minutes).clamp(-MAX_SHIFT, MAX_SHIFT);
         }
@@ -256,6 +262,14 @@ impl Settings {
                     .map(|v| self.prayer_shift = v)
                     .is_some()
             }
+            "water" => flag(value).map(|v| self.water = v).is_some(),
+            "wcfg" => {
+                let v: Result<Vec<u16>, _> = value.split(',').map(str::parse).collect();
+                v.ok()
+                    .and_then(|v| water::Config::try_from(v).ok())
+                    .map(|v| self.water_cfg = v)
+                    .is_some()
+            }
             "limgroup" => value.parse().map(|v| self.limits_group = v).is_ok(),
             "plead" => value.parse().map(|v| self.prayer_lead = v).is_ok(),
             "psound" if !value.is_empty() => {
@@ -345,6 +359,8 @@ notchopen={}
 animspeed={}
 notchsize={}
 pshift={a},{b},{c},{d},{e}
+water={}
+wcfg={},{},{},{},{}
 ",
             u8::from(self.hide_fullscreen),
             u8::from(self.reminder_sounds),
@@ -352,6 +368,12 @@ pshift={a},{b},{c},{d},{e}
             ["hover", "click"][usize::from(self.open_click)],
             ["normal", "fast"][usize::from(self.anim_fast)],
             self.notch_size,
+            u8::from(self.water),
+            self.water_cfg[0],
+            self.water_cfg[1],
+            self.water_cfg[2],
+            self.water_cfg[3],
+            self.water_cfg[4],
         ));
         if !self.prayer_sound.is_empty() && one_line(&&self.prayer_sound) {
             out.push_str(&format!(
@@ -476,6 +498,7 @@ mod tests {
             limits_group: 9,
             notch_size: 120,
             prayer_shift: [-99, 0, 99, 5, -5],
+            water_cfg: [0, 5, 30, 0, 1],
             ..Settings::default()
         }
         .clamped();
@@ -483,6 +506,7 @@ mod tests {
             (wild.notch_size, wild.prayer_shift),
             (0, [-30, 0, 30, 5, -5])
         );
+        assert_eq!(wild.water_cfg, [1, 50, 23, 24, 10]);
         assert_eq!(
             (
                 wild.prayer_lead,
@@ -534,6 +558,10 @@ mod tests {
         let d = Settings::default();
         assert!(d.hide_fullscreen && d.reminder_sounds && !d.open_click && !d.anim_fast);
         assert!(!d.prayer_pause && d.notch_size == 0 && d.prayer_shift == [0; 5]);
+        assert!(
+            !d.water && d.water_cfg == water::DEFAULT,
+            "water is off until switched on"
+        );
         assert_eq!(d.shift6(), [0; 6]);
         // An old store holds none of the new keys: loading it leaves every default.
         let mut old = Settings::default();
@@ -557,6 +585,8 @@ mod tests {
             reminder_sounds: false,
             prayer_pause: true,
             prayer_shift: [-5, 0, 7, 30, -30],
+            water: true,
+            water_cfg: [6, 300, 8, 20, 45],
             ..Settings::default()
         };
         let mut text = String::new();
@@ -569,6 +599,8 @@ mod tests {
             "rsounds=0",
             "ppause=1",
             "pshift=-5,0,7,30,-30",
+            "water=1",
+            "wcfg=6,300,8,20,45",
         ] {
             assert!(text.lines().any(|l| l == line), "{line}");
         }
@@ -587,6 +619,9 @@ mod tests {
             ("pshift", "1,x,3,4,5"),
             ("pshift", "1,2,3,4,5,6"),
             ("pshift", "a,b,c,d,e"),
+            ("wcfg", "1,2,3"),
+            ("wcfg", "1,2,3,4,x"),
+            ("water", "yes"),
             ("notchsize", "big"),
             ("fshide", "2"),
         ] {

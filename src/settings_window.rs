@@ -19,6 +19,7 @@ use crate::{
     settings::{MAX_OFF, MAX_PATH, MAX_SHIFT, NOTCH_SIZES, Settings, parse_timer},
     theme::Theme,
     topology::{self, Monitor},
+    water,
     weather::{MAX_CITY, Units},
     window_model::WindowKey,
 };
@@ -94,6 +95,10 @@ const ANIM: usize = 177;
 const FSHIDE: usize = 178;
 const RSOUNDS: usize = 179;
 const PPAUSE: usize = 180;
+/// Water reminders: the switch, the five numbers (`water::Config` order) and the "I drank" button.
+const WATER: usize = 181;
+const WCFG: usize = 182;
+const WDRANK: usize = 187;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_CENTERIMAGE | SS_NOTIFY`: the footer strip centres its text and takes clicks, so scrolled rows cannot be hit under it.
@@ -247,6 +252,23 @@ const PAGES: &[Page] = &[
                         "Minutes, m:ss or h:mm:ss",
                     ),
                     r(START, Kind::Btn, "St&art timer", ""),
+                ],
+            },
+            Card {
+                label: "Water",
+                rows: &[
+                    r(
+                        WATER,
+                        C,
+                        "Water remi&nders",
+                        "A reminder to drink during the active hours",
+                    ),
+                    r(WCFG, Kind::Edit(70), water::LABELS[0], ""),
+                    r(WCFG + 1, Kind::Edit(70), water::LABELS[1], ""),
+                    r(WCFG + 2, Kind::Edit(70), water::LABELS[2], ""),
+                    r(WCFG + 3, Kind::Edit(70), water::LABELS[3], ""),
+                    r(WCFG + 4, Kind::Edit(70), water::LABELS[4], ""),
+                    r(WDRANK, Kind::Btn, "I &drank a glass", "Today"),
                 ],
             },
             Card {
@@ -476,6 +498,7 @@ pub struct SettingsWindow {
     current: Settings,
     change: Option<Settings>,
     start: Option<u64>,
+    drank: bool,
     return_to: Option<WindowKey>,
     closed: bool,
 }
@@ -1016,6 +1039,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         FSHIDE => &mut s.hide_fullscreen,
         RSOUNDS => &mut s.reminder_sounds,
         PPAUSE => &mut s.prayer_pause,
+        WATER => &mut s.water,
         TAB..=159 if id - TAB < 6 => &mut s.tabs[id - TAB],
         DBTN..=134 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,
@@ -1086,6 +1110,7 @@ impl SettingsWindow {
             current: current.clone(),
             change: None,
             start: None,
+            drank: false,
             return_to: foreground_key(),
             closed: false,
         };
@@ -1195,7 +1220,7 @@ impl SettingsWindow {
             Kind::Edit(_) => {
                 label = stat(title, LABEL)?;
                 let extra = match id {
-                    SHELF => ES_NUMBER as u32,
+                    SHELF | WCFG..=186 => ES_NUMBER as u32,
                     LIMSNIP => ES_READONLY as u32,
                     _ => 0,
                 };
@@ -1230,7 +1255,7 @@ impl SettingsWindow {
         let limit = match id {
             SHELF => 3,
             CITY => MAX_CITY,
-            PSHIFT..=174 => 4,
+            PSHIFT..=174 | WCFG..=186 => 4,
             DIAGNOSTICS => MAX_PATH,
             TIMER => 8,
             _ => 0,
@@ -1479,6 +1504,7 @@ impl SettingsWindow {
                         PSHIFT..=174 => {
                             set_text(h, &settings.prayer_shift[item.id - PSHIFT].to_string())
                         }
+                        WCFG..=186 => set_text(h, &settings.water_cfg[item.id - WCFG].to_string()),
                         CITY => set_text(h, &settings.city),
                         DIAGNOSTICS => set_text(h, settings.diagnostics.as_deref().unwrap_or("")),
                         _ => Ok(()),
@@ -1575,6 +1601,10 @@ impl SettingsWindow {
                 Kind::Edit(_) => match item.id {
                     SHELF => next.shelf_cap = text(h, 3).trim().parse().unwrap_or(next.shelf_cap),
                     CITY => next.city = text(h, MAX_CITY),
+                    WCFG..=186 => {
+                        let slot = &mut next.water_cfg[item.id - WCFG];
+                        *slot = text(h, 4).trim().parse().unwrap_or(*slot);
+                    }
                     PSHIFT..=174 => {
                         let slot = &mut next.prayer_shift[item.id - PSHIFT];
                         let (minutes, valid) = parse_shift(&text(h, 4), *slot);
@@ -1619,6 +1649,18 @@ impl SettingsWindow {
         self.change.take()
     }
 
+    /// The user pressed "I drank a glass".
+    pub fn take_drank(&mut self) -> bool {
+        std::mem::take(&mut self.drank)
+    }
+
+    /// Today's water progress, shown beside the button.
+    pub fn set_water(&self, progress: &str) {
+        if let Some(item) = self.items.iter().find(|i| i.id == WDRANK) {
+            let _ = set_text(item.label, progress);
+        }
+    }
+
     /// A timer length in seconds the user asked to start.
     pub fn take_start(&mut self) -> Option<u64> {
         self.start.take()
@@ -1651,6 +1693,7 @@ impl SettingsWindow {
                             self.move_pin = Some((index, id == LATER));
                         }
                     }
+                    (WDRANK, _) if notification == BN_CLICKED => self.drank = true,
                     (START, _) if notification == BN_CLICKED => {
                         match parse_timer(&text(self.h(TIMER), 8)) {
                             Some(seconds) => self.start = Some(seconds),

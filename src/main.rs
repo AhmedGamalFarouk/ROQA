@@ -54,6 +54,7 @@ mod text_settings;
 mod theme;
 mod timer;
 mod topology;
+mod water;
 mod weather;
 mod weather_os;
 mod window_catalog;
