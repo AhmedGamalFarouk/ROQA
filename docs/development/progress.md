@@ -952,3 +952,11 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Checks:** verify.ps1 PASS (fmt/clippy, 224 tests, locked release); 921,600 B, delta 0 B (dead code stripped); SHA `2A1C87D2D64BCD3140D3AA1CC32F53D7A458E7DD87152B44FBB8B5A4EBC7B7D9`.
 - **Reference:** Aladhan API, 2026-11-12, within 2 min (Cairo, Mecca, London, New York, London high latitude); London Asr 136 s off, bounded at 3 min.
 - **NOT RUN:** official timetables (UNVERIFIED), wiring; reviews paused (REVIEW NOT RUN).
+
+## M5 native run 2 (2026-11-12 Africa/Cairo)
+
+- **Scope:** branch `test/native-7`, candidate `6292169`; [results](m5-results-2.md). Doc only, no source change.
+- **Suites:** picker 226, catalog 67, packaged-hung 16 checks PASS; `topology-check` FAIL (10 of 6 surfaces, likely edge sliders vs a stale script count); `smoke.ps1` NOT RUN (media session).
+- **Idle 15 min (2 monitors):** private 22,519,808 B, 0.243 ms/s, 3.21 switches/s, 30 paints, handles 532, GDI 40, USER 27, threads 19; start-warm 21,827,584 B.
+- **Gates:** private bytes and static CPU PASS (1 run); paints, 3-monitor INCONCLUSIVE; SHA `3CE3511F4398CEA1D674CB7854DE97FF5E236D65A5AC40835E0E58DF53FC757A`.
+- **NOT RUN:** Nectar/Nusa, churn, cold start, input p95, expanded media; reviews paused (REVIEW NOT RUN).
