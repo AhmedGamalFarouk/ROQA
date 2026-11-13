@@ -1239,3 +1239,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u7-climb`; [packet](ui-council-u7.md). Every notice grows the panel for a padded row (Limits included, window 164 -> 192 DIP); Pomodoro actions/presets clear a stale notice; glass rail opaque; Light rail hairline.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 367 tests, locked release); 1,050,624 B (-512 vs 1,051,136); baseline 1,152,000 B, limit 1,175,040 unchanged.
 - **NOT RUN:** native/GUI (Chief capture; Limits notice row, rail opacity and hairline unverified by eye); reviews paused (REVIEW NOT RUN).
+
+## U7-B Settings polish (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u7-climb`; [packet](ui-council-u7.md). About "Empty = off" and "Antigravity models" no longer wrap; non-scrolling Settings pages hide the scroll bar (width still reserved); statusline end-ellipsis skipped (not cheap).
+- **Checks:** verify.ps1 PASS (fmt/clippy, 367 tests, locked release); 1,050,624 B (+0 vs 1,050,624); baseline 1,152,000 B, limit 1,175,040 unchanged.
+- **NOT RUN:** native/GUI (Chief capture; gutter/scroll bar hide unverified by eye); reviews paused (REVIEW NOT RUN).

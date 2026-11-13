@@ -425,12 +425,7 @@ const PAGES: &[Page] = &[
             },
             Card {
                 label: "Display",
-                rows: &[r(
-                    LIMGROUP,
-                    Kind::Combo(240),
-                    "Antigravity limits to show",
-                    "",
-                )],
+                rows: &[r(LIMGROUP, Kind::Combo(240), "Antigravity models", "")],
             },
             Card {
                 label: "Claude Code",
@@ -455,7 +450,7 @@ const PAGES: &[Page] = &[
                     DIAGNOSTICS,
                     Kind::Edit(220),
                     "Report file",
-                    "Diagnostics; empty is off",
+                    "Empty = off",
                 )],
             },
             Card {
@@ -1937,14 +1932,23 @@ impl SettingsWindow {
         let mut client = RECT::default();
         // SAFETY: our own live window.
         unsafe { GetClientRect(self.window, &mut client)? };
-        let (mut geometry, content) = self.place(scale, client, handle)?;
+        // The bar's width stays reserved (content and Close never move between pages); a page that does not
+        // scroll hides the bar itself, leaving an empty gutter instead of a greyed track.
+        // SAFETY: a plain system-metric query.
+        let bar = unsafe { GetSystemMetrics(SM_CXVSCROLL) };
+        let beside = |client: RECT, scrolls: bool| RECT {
+            right: client.right - if scrolls { 0 } else { bar },
+            ..client
+        };
+        let before = beside(client, self.scroll_max > 0).right;
+        let (mut geometry, content) =
+            self.place(scale, beside(client, self.scroll_max > 0), handle)?;
         let view = (client.bottom - px(FOOT)).max(1);
         self.scroll_max = (content - view).max(0);
         let clamped = self.scroll.clamp(0, self.scroll_max);
         let info = SCROLLINFO {
             cbSize: size_of::<SCROLLINFO>() as u32,
-            // DISABLENOSCROLL keeps the bar (greyed) on short pages, so the content width and Close never move.
-            fMask: SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL,
+            fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
             nMin: 0,
             nMax: content - 1,
             nPage: view as u32,
@@ -1954,8 +1958,8 @@ impl SettingsWindow {
         // SAFETY: our own live window and children.
         unsafe {
             SetScrollInfo(self.window, SB_VERT, &info, true);
-            let before = client.right;
             GetClientRect(self.window, &mut client)?;
+            client = beside(client, self.scroll_max > 0);
             // A scroll bar appearing or a clamped position changes the geometry once more.
             if client.right != before || clamped != self.scroll {
                 self.scroll = clamped;
