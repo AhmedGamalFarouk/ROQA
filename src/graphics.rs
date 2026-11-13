@@ -2122,6 +2122,23 @@ fn attached_outline(
     }
 }
 
+/// The hovered icon's side and lift in device pixels: it grows by up to 10 % and rises `ICON_LIFT_DIPS`. Both
+/// move smoothly while the hover animates (whole pixels would show the 5 px of travel in a handful of steps
+/// bunched in the middle of the curve) and snap to whole pixels at rest, which keeps shell icon bitmaps crisp.
+fn icon_metrics(hover: f32, icon: f32, dpi: u32) -> (f32, f32) {
+    let settle = |value: f32| {
+        if hover == 0.0 || hover == 1.0 {
+            value.round()
+        } else {
+            value
+        }
+    };
+    (
+        settle(icon * (1.0 + 0.1 * hover)),
+        settle(ICON_LIFT_DIPS * dpi as f32 / 96.0 * hover),
+    )
+}
+
 fn draw_slot(
     context: &ID2D1DeviceContext,
     cell: &D2D_RECT_F,
@@ -2130,10 +2147,7 @@ fn draw_slot(
     px: &dyn Fn(i32) -> f32,
     p: &Palette,
 ) -> Result<()> {
-    // The hovered icon also grows by up to 10 % (whole pixels), with the lift.
-    let size = (px(dock::ICON_DIPS) * (1.0 + 0.1 * slot.hover)).round();
-    // Whole-pixel lift keeps shell icon bitmaps unresampled (crisp) on every frame.
-    let lift = (ICON_LIFT_DIPS * dpi as f32 / 96.0 * slot.hover).round();
+    let (size, lift) = icon_metrics(slot.hover, px(dock::ICON_DIPS), dpi);
     let center_x = (cell.left + cell.right) / 2.0;
     let center_y = (cell.top + cell.bottom) / 2.0 - lift;
     let frame = D2D_RECT_F {
@@ -3227,5 +3241,25 @@ mod tests {
             vec![(5, 2)]
         );
         assert_eq!(ranges(""), vec![]);
+    }
+
+    #[test]
+    fn the_hovered_icon_moves_smoothly_and_rests_on_whole_pixels() {
+        use super::icon_metrics;
+        // 125 %: icon 50 px, lift 6.25 px at full hover.
+        assert_eq!(icon_metrics(0.0, 50.0, 120), (50.0, 0.0));
+        assert_eq!(icon_metrics(1.0, 50.0, 120), (55.0, 6.0));
+        let steps: Vec<(f32, f32)> = (1..100)
+            .map(|i| icon_metrics(i as f32 / 100.0, 50.0, 120))
+            .collect();
+        // Mid-animation values are not rounded, and each hundredth of the travel moves them a little.
+        assert!(
+            steps
+                .iter()
+                .any(|&(size, lift)| size.fract() != 0.0 && lift.fract() != 0.0)
+        );
+        assert!(steps.windows(2).all(|w| w[1].0 > w[0].0 && w[1].1 > w[0].1));
+        // The overshoot goes past rest and the next frame comes back to it.
+        assert!(icon_metrics(1.02, 50.0, 120).1 > 6.25);
     }
 }

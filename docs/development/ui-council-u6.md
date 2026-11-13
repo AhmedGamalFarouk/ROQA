@@ -20,3 +20,8 @@ Native/GUI NOT RUN; the Chief's capture worker verifies by eye. Reviews paused.
 ## U6-D Light accent (defect 4)
 
 - Light now takes the system accent where it reads, deepened a fifth (`theme::deepen`; blue 0,120,215 becomes 0,96,172, contrast >= 3 against the body checked like the other themes), so the selected tab and the next-prayer chip are an accent wash with dark accent text, like Classic and Midnight; a pale accent still falls back to ink. Test `the_accent_colours_fills_and_rings_only_where_it_reads` updated.
+
+## U6-E Dock hover (defect 5)
+
+- Cause, from the numbers rather than the curve alone: the lift (5 DIP) and growth (10 %) were rounded to whole pixels every frame, so they showed only as ~10 one-pixel steps, and with the steep middle of the old POP curve (10 % to 90 % in 94 ms of 260) all of them fell inside ~100 ms; the first frame also timed its tween from the mouse message, so a late first paint (icon upload) started already inside the curve.
+- Fix: `graphics::icon_metrics` moves size and lift smoothly while the hover animates and rounds only at rest (hover 0 or 1, keeps bitmaps crisp); `motion::POP` is now Bezier(0.3, 0.1, 0.55, 1.15) (5 % at ~22 ms, 95 % at ~190 ms, <= ~10 % of the travel per 16 ms frame, ~1.5 % overshoot); `Surface::paint_dock` restarts the running hover tweens' clocks at the first frame after a hover change (`Tween::restart`, settled tweens untouched), so that frame shows the rest value. Tests: `the_dock_pop_moves_visibly_across_most_of_its_duration`, `a_restarted_tween_shows_its_rest_value_on_the_first_frame`, `the_hovered_icon_moves_smoothly_and_rests_on_whole_pixels`.

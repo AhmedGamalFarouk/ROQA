@@ -292,6 +292,8 @@ struct Surface {
     page_fx: Tween,
     notice_fx: Tween,
     notice_on: bool,
+    /// Dock: a hover change has not been painted yet (`paint_dock` starts its clocks).
+    hover_unpainted: bool,
     /// Dock: floating or attached to the bottom edge, and which taskbar buttons it shows.
     dock_style: DockStyle,
     dock_buttons: Buttons,
@@ -408,6 +410,7 @@ impl Surface {
             page_fx: Tween::rest(1.0),
             notice_fx: Tween::rest(1.0),
             notice_on: false,
+            hover_unpainted: false,
             overlay: false,
             dock_style,
             dock_buttons,
@@ -754,13 +757,23 @@ impl Surface {
             ease(tween, slot == Some(index), motion::POP);
         }
         *hover = slot;
+        self.hover_unpainted = true;
         self.live = true;
     }
-    fn paint_dock(&self, items: &[DockItem], icons: &[Option<Arc<IconPixels>>]) -> Result<()> {
+    fn paint_dock(&mut self, items: &[DockItem], icons: &[Option<Arc<IconPixels>>]) -> Result<()> {
+        let now = Instant::now();
+        // A hover began at a mouse message; its first frame comes later. Start the clocks here so that frame
+        // shows the rest value and the motion keeps its whole duration.
+        if self.hover_unpainted {
+            self.hover_unpainted = false;
+            self.motion.restart(now);
+            if let Role::Dock { slots, .. } = &mut self.role {
+                slots.iter_mut().for_each(|tween| tween.restart(now));
+            }
+        }
         let Role::Dock { slots: tweens, .. } = &self.role else {
             return Ok(());
         };
-        let now = Instant::now();
         let count = items.len() + 1;
         let hover = |hit| {
             dock::cell_index(self.dock_buttons, count, hit)
@@ -1286,7 +1299,8 @@ impl Desktop {
             self.surfaces.push(surface);
             // Sized after the push: icons are extracted once, for the densest dock.
             let icons = self.dock_icons();
-            self.surfaces[self.surfaces.len() - 1].paint_dock(&self.dock_items, &icons)?;
+            let last = self.surfaces.len() - 1;
+            self.surfaces[last].paint_dock(&self.dock_items, &icons)?;
         }
         // Shown after its first paint, and never on the monitor a full-screen app covers.
         let visible = !self
@@ -2420,7 +2434,7 @@ impl Desktop {
         let icons = self.dock_icons();
         for dock in self
             .surfaces
-            .iter()
+            .iter_mut()
             .filter(|s| s.kind() == SurfaceKind::Dock && s.visible)
         {
             dock.paint_dock(&self.dock_items, &icons)?;
