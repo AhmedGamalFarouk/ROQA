@@ -2401,6 +2401,7 @@ impl Desktop {
 impl Drop for Desktop {
     fn drop(&mut self) {
         crate::hotkey::unregister_picker();
+        crate::hotkey::unregister_audio();
     }
 }
 
@@ -2653,6 +2654,15 @@ impl Desktop {
             None => pins.add(identity).is_ok(),
         });
     }
+    /// Middle-click on a dock slot launches a new instance when the app can be launched.
+    fn middle_click_slot(&self, slot: usize) {
+        if let Some(index) = slot.checked_sub(1)
+            && let Some(item) = self.dock_items.get(index)
+            && let Some(launch) = crate::pins::launch_target(&item.identity)
+        {
+            dock::launch(&launch);
+        }
+    }
     /// Right-click on a dock slot opens its menu above it (the picker slot has none). It needs the
     /// foreground for dismissal; if Windows refuses, no menu opens rather than one that
     /// a click elsewhere could never dismiss.
@@ -2820,7 +2830,7 @@ impl Desktop {
             return;
         };
         match item {
-            Item::Close => dock::close(&target.windows),
+            Item::Close | Item::CloseAll => dock::close(&target.windows),
             Item::NewInstance => {
                 if let Some(launch) = crate::pins::launch_target(&target.identity) {
                     dock::launch(&launch);
@@ -3864,8 +3874,13 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 return Ok(false);
             }
             if message.message == WM_HOTKEY {
-                if message.wParam.0 as i32 == crate::hotkey::HOTKEY_PICKER_ID {
+                let id = message.wParam.0 as i32;
+                if id == crate::hotkey::HOTKEY_PICKER_ID {
                     desktop.toggle_picker(catalog)?;
+                } else if id == crate::hotkey::HOTKEY_AUDIO_CYCLE_ID
+                    && let Some(name) = desktop.audio.cycle_device()
+                {
+                    desktop.show_notice(format!("Audio: {name}"), Instant::now());
                 }
                 continue;
             }
@@ -3875,8 +3890,10 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             if desktop.menu_message(&message) {
                 continue;
             }
-            if matches!(message.message, WM_LBUTTONDOWN | WM_RBUTTONDOWN)
-                && desktop.dock_at(message.hwnd).is_some()
+            if matches!(
+                message.message,
+                WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
+            ) && desktop.dock_at(message.hwnd).is_some()
             {
                 desktop.dismiss_preview();
             }
@@ -3886,6 +3903,18 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                         .dock_at(message.hwnd)
                         .and_then(|dock| dock.dock_hit(message.lParam, desktop.dock_slots()));
                     desktop.activate(message.hwnd, hit, catalog)?;
+                }
+                continue;
+            }
+            if message.message == WM_MBUTTONUP
+                && let Some(dock) = desktop.dock_at(message.hwnd)
+            {
+                if let Some(slot) = dock
+                    .dock_hit(message.lParam, desktop.dock_slots())
+                    .and_then(Hit::slot)
+                {
+                    desktop.dismiss_preview();
+                    desktop.middle_click_slot(slot);
                 }
                 continue;
             }

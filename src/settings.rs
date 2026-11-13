@@ -3,7 +3,7 @@
 
 use crate::{
     dock::{Button, Buttons},
-    hotkey::HotkeyCombo,
+    hotkey::{AudioHotkeyCombo, HotkeyCombo},
     layout::{DockStyle, SurfaceKind},
     pomo,
     prayer::Method,
@@ -95,6 +95,10 @@ pub struct Settings {
     pub hotkey_picker: bool,
     /// Which key combination triggers the picker (`hotkey::HotkeyCombo`).
     pub hotkey_combo: HotkeyCombo,
+    /// Opt-in global hotkey to cycle audio outputs; false (off) by default.
+    pub hotkey_audio: bool,
+    /// Which key combination cycles audio outputs (`hotkey::AudioHotkeyCombo`).
+    pub hotkey_audio_combo: AudioHotkeyCombo,
     /// Tint progress bars and highlights with Windows accent colour; false (off) by default.
     pub match_accent: bool,
 }
@@ -141,6 +145,8 @@ impl Default for Settings {
             pomo_cfg: pomo::DEFAULT,
             hotkey_picker: false,
             hotkey_combo: HotkeyCombo::AltSpace,
+            hotkey_audio: false,
+            hotkey_audio_combo: AudioHotkeyCombo::CtrlShiftA,
             match_accent: false,
         }
     }
@@ -235,6 +241,11 @@ impl Settings {
         } else {
             crate::hotkey::unregister_picker();
         }
+        if self.hotkey_audio {
+            crate::hotkey::register_audio(self.hotkey_audio_combo);
+        } else {
+            crate::hotkey::unregister_audio();
+        }
     }
 
     pub fn kind_on(&self, kind: SurfaceKind) -> bool {
@@ -257,6 +268,10 @@ impl Settings {
             "hkpicker" => flag(value).map(|v| self.hotkey_picker = v).is_some(),
             "hkcombo" => HotkeyCombo::from_key(value)
                 .map(|v| self.hotkey_combo = v)
+                .is_some(),
+            "hkaudio" => flag(value).map(|v| self.hotkey_audio = v).is_some(),
+            "hkaudiocombo" => AudioHotkeyCombo::from_key(value)
+                .map(|v| self.hotkey_audio_combo = v)
                 .is_some(),
             "sound" => flag(value).map(|v| self.timer_sound = v).is_some(),
             "desktop" => flag(value).map(|v| self.desktop_only = v).is_some(),
@@ -359,9 +374,11 @@ impl Settings {
             self.widgets.slot_right.key()
         ));
         out.push_str(&format!(
-            "hkpicker={}\nhkcombo={}\nmatchaccent={}\n",
+            "hkpicker={}\nhkcombo={}\nhkaudio={}\nhkaudiocombo={}\nmatchaccent={}\n",
             u8::from(self.hotkey_picker),
             self.hotkey_combo.key(),
+            u8::from(self.hotkey_audio),
+            self.hotkey_audio_combo.key(),
             u8::from(self.match_accent)
         ));
         let one_line = |v: &&String| !v.contains(['\n', '\r']);
@@ -548,6 +565,24 @@ mod tests {
         }
         assert_eq!(restored.hotkey_picker, settings.hotkey_picker);
         assert_eq!(restored.hotkey_combo, settings.hotkey_combo);
+
+        assert!(!settings.hotkey_audio);
+        assert_eq!(settings.hotkey_audio_combo, AudioHotkeyCombo::CtrlShiftA);
+        assert!(settings.set("hkaudio", "1"));
+        assert!(settings.set("hkaudiocombo", "alt_a"));
+        assert!(settings.hotkey_audio);
+        assert_eq!(settings.hotkey_audio_combo, AudioHotkeyCombo::AltA);
+
+        let mut lines2 = String::new();
+        settings.write_lines(&mut lines2);
+        let mut restored2 = Settings::default();
+        for line in lines2.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                restored2.set(key, value);
+            }
+        }
+        assert_eq!(restored2.hotkey_audio, settings.hotkey_audio);
+        assert_eq!(restored2.hotkey_audio_combo, settings.hotkey_audio_combo);
     }
 
     #[test]

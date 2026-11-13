@@ -29,6 +29,7 @@ use windows::{
 pub enum Item {
     NewInstance,
     Close,
+    CloseAll,
     Pin,
     Unpin,
     /// The app menu (right-click on the notch or the dock outside an app slot).
@@ -42,6 +43,7 @@ impl Item {
         match self {
             Item::NewInstance => "New instance",
             Item::Close => "Close window",
+            Item::CloseAll => "Close all windows",
             Item::Pin => "Pin to dock",
             Item::Unpin => "Unpin from dock",
             Item::Settings => "Settings",
@@ -59,8 +61,10 @@ pub fn items(item: &DockItem, pins: &Pins) -> Vec<Item> {
     if launchable {
         list.push(Item::NewInstance);
     }
-    if !item.windows.is_empty() {
-        list.push(Item::Close);
+    match item.windows.len() {
+        0 => {}
+        1 => list.push(Item::Close),
+        _ => list.push(Item::CloseAll),
     }
     if dock::pinned_as(item, pins).is_some() {
         list.push(Item::Unpin);
@@ -70,11 +74,19 @@ pub fn items(item: &DockItem, pins: &Pins) -> Vec<Item> {
     list
 }
 
+fn items_match(a: &[Item], b: &[Item]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| match (x, y) {
+            (Item::Close, Item::CloseAll) | (Item::CloseAll, Item::Close) => true,
+            (x, y) => x == y,
+        })
+}
+
 /// Whether a menu opened for `identity` with `shown` actions still describes `now`, the dock's item in
 /// that slot. False once the slot holds another app or its actions changed (its last window closed, a pin
 /// changed), which ends the menu.
 pub fn describes(identity: &Identity, shown: &[Item], now: Option<&DockItem>, pins: &Pins) -> bool {
-    now.is_some_and(|now| now.identity == *identity && items(now, pins) == shown)
+    now.is_some_and(|now| now.identity == *identity && items_match(shown, &items(now, pins)))
 }
 
 /// Where the menu window goes (physical pixels): centred over `slot_x`, its bottom edge on the dock's top
@@ -298,16 +310,22 @@ mod tests {
     fn actions_follow_what_the_slot_is() {
         let app = exe(r"c:\app.exe");
         let none = Pins::default();
-        // Running, unpinned: all three; close is offered because it has windows.
-        let running = dock_item(app.clone(), &[1, 2]);
+        // Running (2 windows), unpinned: CloseAll is offered because it has multiple windows.
+        let running2 = dock_item(app.clone(), &[1, 2]);
         assert_eq!(
-            items(&running, &none),
+            items(&running2, &none),
+            [Item::NewInstance, Item::CloseAll, Item::Pin]
+        );
+        // Running (1 window), unpinned: Close is offered.
+        let running1 = dock_item(app.clone(), &[1]);
+        assert_eq!(
+            items(&running1, &none),
             [Item::NewInstance, Item::Close, Item::Pin]
         );
-        // Running and pinned: Unpin replaces Pin.
+        // Running (2 windows) and pinned: Unpin replaces Pin.
         assert_eq!(
-            items(&running, &pinned(&app)),
-            [Item::NewInstance, Item::Close, Item::Unpin]
+            items(&running2, &pinned(&app)),
+            [Item::NewInstance, Item::CloseAll, Item::Unpin]
         );
         // A pinned app that is not running has no window to close.
         let idle = dock_item(app.clone(), &[]);

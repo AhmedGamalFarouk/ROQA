@@ -84,6 +84,18 @@ fn mark_current(found: Vec<(String, String)>, default: Option<&str>) -> Vec<Devi
         .collect()
 }
 
+/// Finds the index of the next device to cycle to.
+fn next_device_index(devices: &[Device]) -> Option<usize> {
+    if devices.is_empty() {
+        return None;
+    }
+    let current_index = devices.iter().position(|d| d.current);
+    Some(match current_index {
+        Some(idx) => (idx + 1) % devices.len(),
+        None => 0,
+    })
+}
+
 /// Shifts the oldest sample out and `peak`, clamped to 0..=1, in as the newest.
 fn push(peaks: &mut [f32; BARS], peak: f32) {
     peaks.rotate_left(1);
@@ -469,6 +481,24 @@ impl Audio {
                 .unwrap_or_default()
         }
     }
+    /// Cycles the default render endpoint to the next active device in the enumerated list.
+    /// Returns the friendly name of the newly chosen device, or `None` if no devices are available
+    /// or policy config failed.
+    pub fn cycle_device(&mut self) -> Option<String> {
+        if !self.started {
+            self.start();
+            self.refresh();
+        }
+        let devices = self.devices();
+        let next_index = next_device_index(&devices)?;
+        let target = &devices[next_index];
+        if let Err(error) = crate::policy_config::set_default(&target.id) {
+            eprintln!("Audio: cycle_device: {error}");
+            return None;
+        }
+        Some(target.name.clone())
+    }
+
     pub fn toggle_mute(&self) {
         if let (Some(endpoint), Some(level)) = (&self.endpoint, self.level) {
             // SAFETY: as in `set`.
@@ -649,6 +679,31 @@ mod tests {
         assert!(mark_current(Vec::new(), None).is_empty());
         // Without a started enumerator there is nothing to list.
         assert!(Audio::create().devices().is_empty());
+        assert_eq!(Audio::create().cycle_device(), None);
+    }
+
+    #[test]
+    fn next_device_index_cycles_correctly() {
+        assert_eq!(next_device_index(&[]), None);
+        let dev = |id: &str, current| Device {
+            id: id.into(),
+            name: id.into(),
+            current,
+        };
+        let single = [dev("1", true)];
+        assert_eq!(next_device_index(&single), Some(0));
+
+        let list = [dev("1", true), dev("2", false), dev("3", false)];
+        assert_eq!(next_device_index(&list), Some(1));
+
+        let list2 = [dev("1", false), dev("2", true), dev("3", false)];
+        assert_eq!(next_device_index(&list2), Some(2));
+
+        let list3 = [dev("1", false), dev("2", false), dev("3", true)];
+        assert_eq!(next_device_index(&list3), Some(0));
+
+        let none_current = [dev("1", false), dev("2", false)];
+        assert_eq!(next_device_index(&none_current), Some(0));
     }
 
     #[test]
