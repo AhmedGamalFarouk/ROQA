@@ -1,4 +1,4 @@
-﻿# Development ledger
+# Development ledger
 
 ## M0 / iteration 1
 
@@ -1263,4 +1263,10 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 
 - **Scope:** Week and Battery 2-up Widgets tab; slot choices persisted ([packet](features-modular-widgets.md)).
 - **Checks:** verify.ps1 PASS (fmt, clippy, 373 tests, release); 1,061,376 B, limit 1,175,040 B.
+- **NOT RUN:** native/GUI by user instruction; milestone reviews not run.
+
+## Global hotkeys (2026-11-13 Africa/Cairo)
+
+- **Scope:** Opt-in global hotkey (`RegisterHotKey`) to toggle/open the window picker; off by default; customizable hotkey combo in Settings General page (`Alt+Space`, `Ctrl+Space`, etc.); RAII unregistration on quit and drop; zero background threads/timers.
+- **Checks:** verify.ps1 PASS (fmt, clippy, 376 tests, release); 1,061,888 B (+512 vs 1,061,376 B), limit 1,175,040 B.
 - **NOT RUN:** native/GUI by user instruction; milestone reviews not run.

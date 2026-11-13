@@ -2375,6 +2375,22 @@ impl Desktop {
         self.picker = Some(Picker::create(catalog.model())?);
         Ok(())
     }
+    fn toggle_picker(&mut self, catalog: &Catalog) -> Result<()> {
+        if self.picker.take().is_some() {
+            Ok(())
+        } else {
+            self.open_picker(catalog)
+        }
+    }
+}
+
+impl Drop for Desktop {
+    fn drop(&mut self) {
+        crate::hotkey::unregister_picker();
+    }
+}
+
+impl Desktop {
     /// Moves, resizes and repaints every dock for the current style, buttons and slot count. Same slots in a
     /// new place or width: no new surface and no timer; hover restarts (cells moved).
     fn relayout_docks(&mut self) -> Result<()> {
@@ -3831,6 +3847,12 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                     ));
                 }
                 return Ok(false);
+            }
+            if message.message == WM_HOTKEY {
+                if message.wParam.0 as i32 == crate::hotkey::HOTKEY_PICKER_ID {
+                    desktop.toggle_picker(catalog)?;
+                }
+                continue;
             }
             if catalog.message(&message)? {
                 continue;

@@ -3,6 +3,7 @@
 
 use crate::{
     dock::{Button, Buttons},
+    hotkey::HotkeyCombo,
     layout::{DockStyle, SurfaceKind},
     pomo,
     prayer::Method,
@@ -90,6 +91,10 @@ pub struct Settings {
     pub water_cfg: water::Config,
     /// Pomodoro focus, short and long break minutes and sessions per round (`pomo::Config`).
     pub pomo_cfg: pomo::Config,
+    /// Opt-in global hotkey to open the window picker; false (off) by default.
+    pub hotkey_picker: bool,
+    /// Which key combination triggers the picker (`hotkey::HotkeyCombo`).
+    pub hotkey_combo: HotkeyCombo,
 }
 
 impl Default for Settings {
@@ -132,6 +137,8 @@ impl Default for Settings {
             water: false,
             water_cfg: water::DEFAULT,
             pomo_cfg: pomo::DEFAULT,
+            hotkey_picker: false,
+            hotkey_combo: HotkeyCombo::AltSpace,
         }
     }
 }
@@ -216,10 +223,15 @@ impl Settings {
         self.timer_sound && self.reminder_sounds
     }
 
-    /// Pushes the settings that live outside the host's own state: animation pace, click-to-open, pill size.
+    /// Pushes the settings that live outside the host's own state: animation pace, click-to-open, pill size, hotkey.
     pub fn apply_globals(&self) {
         crate::motion::configure(self.anim_fast, self.open_click);
         crate::layout::set_pill_percent(self.notch_size);
+        if self.hotkey_picker {
+            crate::hotkey::register_picker(self.hotkey_combo);
+        } else {
+            crate::hotkey::unregister_picker();
+        }
     }
 
     pub fn kind_on(&self, kind: SurfaceKind) -> bool {
@@ -238,6 +250,10 @@ impl Settings {
         match key {
             "dock" => flag(value).map(|v| self.dock = v).is_some(),
             "notch" => flag(value).map(|v| self.notch = v).is_some(),
+            "hkpicker" => flag(value).map(|v| self.hotkey_picker = v).is_some(),
+            "hkcombo" => HotkeyCombo::from_key(value)
+                .map(|v| self.hotkey_combo = v)
+                .is_some(),
             "sound" => flag(value).map(|v| self.timer_sound = v).is_some(),
             "desktop" => flag(value).map(|v| self.desktop_only = v).is_some(),
             "edgevol" => flag(value).map(|v| self.edge_volume = v).is_some(),
@@ -337,6 +353,11 @@ impl Settings {
             "widgetleft={}\nwidgetright={}\n",
             self.widgets.slot_left.key(),
             self.widgets.slot_right.key()
+        ));
+        out.push_str(&format!(
+            "hkpicker={}\nhkcombo={}\n",
+            u8::from(self.hotkey_picker),
+            self.hotkey_combo.key()
         ));
         let one_line = |v: &&String| !v.contains(['\n', '\r']);
         out.push_str(&format!(
@@ -500,6 +521,28 @@ mod tests {
             }
         }
         assert_eq!(restored.widgets, settings.widgets);
+    }
+
+    #[test]
+    fn hotkey_settings_round_trip() {
+        let mut settings = Settings::default();
+        assert!(!settings.hotkey_picker);
+        assert_eq!(settings.hotkey_combo, HotkeyCombo::AltSpace);
+        assert!(settings.set("hkpicker", "1"));
+        assert!(settings.set("hkcombo", "ctrl_space"));
+        assert!(settings.hotkey_picker);
+        assert_eq!(settings.hotkey_combo, HotkeyCombo::CtrlSpace);
+
+        let mut lines = String::new();
+        settings.write_lines(&mut lines);
+        let mut restored = Settings::default();
+        for line in lines.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                restored.set(key, value);
+            }
+        }
+        assert_eq!(restored.hotkey_picker, settings.hotkey_picker);
+        assert_eq!(restored.hotkey_combo, settings.hotkey_combo);
     }
 
     fn names(list: &[&str]) -> Vec<String> {
