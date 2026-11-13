@@ -82,11 +82,14 @@ fn tall(shape: NotchShape, notice_row: bool) -> NotchShape {
         } else {
             shape.height
         },
-        width: if page > 0.0 {
+        width: if page == 140.0 {
+            420.0
+        } else if page > 0.0 {
             MEDIA_EXPANDED.width
         } else {
             shape.width
         },
+        ears: if page == 140.0 { 10.0 } else { shape.ears },
         ..shape
     }
 }
@@ -119,7 +122,11 @@ pub fn notch_shape(progress: f32, media: bool) -> NotchShape {
     };
     let from = pill(from, to, PILL_PERCENT.load(Relaxed));
     NotchShape {
-        width: lerp(from.width, to.width, progress),
+        width: lerp(from.width, to.width, progress).min(if PAGE_HEIGHT.load(Relaxed) == 140 {
+            420.0
+        } else {
+            f32::MAX
+        }),
         height: lerp(from.height, to.height, progress),
         radius: lerp(from.radius, to.radius, settled),
         ears: lerp(from.ears, to.ears, settled),

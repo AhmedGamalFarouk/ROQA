@@ -1259,3 +1259,8 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Checks:** verify.ps1 PASS (fmt/clippy, 370 tests, locked release); 1,051,648 B (+512 vs 1,051,136); baseline 1,152,000 B, limit 1,175,040 unchanged.
 - **Audits:** registry clean (zero entries), tasks clean (zero tasks), services clean (zero services), native taskbar preserved.
 - **NOT RUN:** native/GUI runs (Chief confirmation required).
+## Modular widgets (2026-11-13 Africa/Cairo)
+
+- **Scope:** Week and Battery 2-up Widgets tab; slot choices persisted ([packet](features-modular-widgets.md)).
+- **Checks:** verify.ps1 PASS (fmt, clippy, 373 tests, release); 1,061,376 B, limit 1,175,040 B.
+- **NOT RUN:** native/GUI by user instruction; milestone reviews not run.

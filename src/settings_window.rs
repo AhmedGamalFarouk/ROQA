@@ -22,6 +22,7 @@ use crate::{
     topology::{self, Monitor},
     water,
     weather::{MAX_CITY, Units},
+    widgets::WidgetKind,
     window_model::WindowKey,
 };
 use std::cell::RefCell;
@@ -80,8 +81,8 @@ const MAP_H: i32 = 120;
 const DBTN: usize = 130;
 /// One checkbox per notch tab (`Tab::ALL` order), then the mascot eyes and the privacy dots.
 const TAB: usize = 150;
-const EYES: usize = TAB + 6;
-const PRIVACY: usize = TAB + 7;
+const EYES: usize = TAB + 7;
+const PRIVACY: usize = TAB + 8;
 const PRAYER: usize = 160;
 const PMETHOD: usize = 161;
 const PSOUND: usize = 162;
@@ -111,6 +112,8 @@ const PSTART: usize = 192;
 const PSKIP: usize = 193;
 /// The Limits page's "Copy" button for the statusline command.
 const LIMCOPY: usize = 194;
+const WLEFT: usize = 195;
+const WRIGHT: usize = 196;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -244,6 +247,14 @@ const PAGES: &[Page] = &[
                     r(TAB + 3, C, "Timer tab", ""),
                     r(TAB + 4, C, "Shelf tab", ""),
                     r(TAB + 5, C, "Limits tab", ""),
+                    r(TAB + 6, C, "Widgets tab", ""),
+                ],
+            },
+            Card {
+                label: "Widgets",
+                rows: &[
+                    r(WLEFT, Kind::Combo(160), "Left slot", ""),
+                    r(WRIGHT, Kind::Combo(160), "Right slot", ""),
                 ],
             },
             Card {
@@ -1103,7 +1114,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         RSOUNDS => &mut s.reminder_sounds,
         PPAUSE => &mut s.prayer_pause,
         WATER => &mut s.water,
-        TAB..=159 if id - TAB < 6 => &mut s.tabs[id - TAB],
+        TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
         DBTN..=134 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,
     })
@@ -1134,6 +1145,7 @@ fn fill_combo(h: HWND, id: usize) {
         PMETHOD => return Method::ALL.iter().for_each(|m| add_row(h, m.label())),
         PLEAD => &LEAD_ROWS,
         LIMGROUP => &["Gemini models", "Claude and GPT models"],
+        WLEFT | WRIGHT => &["Week calendar", "Battery"],
         NSIZE => &["Auto", "115%", "130%", "150%"],
         NOPEN => &["Hover", "Click"],
         ANIM => &["Normal", "Fast"],
@@ -1525,6 +1537,8 @@ impl SettingsWindow {
                         PMETHOD => row_of(&Method::ALL, &settings.prayer_method),
                         PLEAD => row_of(&LEADS, &settings.prayer_lead),
                         LIMGROUP => usize::from(settings.limits_group),
+                        WLEFT => row_of(&WidgetKind::ALL, &settings.widgets.slot_left),
+                        WRIGHT => row_of(&WidgetKind::ALL, &settings.widgets.slot_right),
                         NSIZE => row_of(&NOTCH_SIZES, &settings.notch_size),
                         NOPEN => usize::from(settings.open_click),
                         ANIM => usize::from(settings.anim_fast),
@@ -1609,6 +1623,8 @@ impl SettingsWindow {
                 Kind::Combo(_) => {
                     let row = chosen_row(h);
                     match item.id {
+                        WLEFT => pick(&WidgetKind::ALL, &mut next.widgets.slot_left, row),
+                        WRIGHT => pick(&WidgetKind::ALL, &mut next.widgets.slot_right, row),
                         THEME => pick(&Theme::ALL, &mut next.theme, row),
                         DOCKSTYLE => pick(&DockStyle::ALL, &mut next.dock_style, row),
                         UNITS => pick(&Units::ALL, &mut next.units, row),

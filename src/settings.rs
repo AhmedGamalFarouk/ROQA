@@ -12,6 +12,7 @@ use crate::{
     theme::Theme,
     timer, water,
     weather::{MAX_CITY, Units},
+    widgets::{WidgetConfig, WidgetKind},
 };
 
 const KINDS: [SurfaceKind; 2] = [SurfaceKind::Notch, SurfaceKind::Dock];
@@ -49,6 +50,7 @@ pub struct Settings {
     pub edge_brightness: bool,
     /// One switch per notch tab (`Tab::ALL` order). A switched-off tab leaves the bar and stops its work.
     pub tabs: Flags,
+    pub widgets: WidgetConfig,
     /// The mascot eyes in the pill; off removes their state, deadlines and drawing.
     pub eyes: bool,
     /// The mic and camera dots (features B5); off closes the registry watch.
@@ -107,6 +109,7 @@ impl Default for Settings {
             edge_volume: false,
             edge_brightness: false,
             tabs: Tab::DEFAULT,
+            widgets: WidgetConfig::default(),
             eyes: true,
             privacy: true,
             city: String::new(),
@@ -289,6 +292,12 @@ impl Settings {
                 true
             }
             "units" => Units::from_key(value).map(|v| self.units = v).is_some(),
+            "widgetleft" => WidgetKind::from_key(value)
+                .map(|kind| self.widgets.slot_left = kind)
+                .is_some(),
+            "widgetright" => WidgetKind::from_key(value)
+                .map(|kind| self.widgets.slot_right = kind)
+                .is_some(),
             "city" if !value.is_empty() => {
                 self.city = value.to_owned();
                 true
@@ -324,6 +333,11 @@ impl Settings {
 
     /// Appends the lines `set` reads. Values that cannot be one line are dropped (`clamped` removes them too).
     pub fn write_lines(&self, out: &mut String) {
+        out.push_str(&format!(
+            "widgetleft={}\nwidgetright={}\n",
+            self.widgets.slot_left.key(),
+            self.widgets.slot_right.key()
+        ));
         let one_line = |v: &&String| !v.contains(['\n', '\r']);
         out.push_str(&format!(
             "dock={}\nnotch={}\nsound={}\nshelfcap={}\ntheme={}\ndesktop={}\nedgevol={}\nedgebri={}\n",
@@ -470,6 +484,23 @@ pub fn parse_timer(text: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn widget_slots_round_trip_and_reject_unknown_values() {
+        let mut settings = Settings::default();
+        assert!(settings.set("widgetleft", "battery"));
+        assert!(settings.set("widgetright", "week"));
+        assert!(!settings.set("widgetleft", "unknown"));
+        let mut lines = String::new();
+        settings.write_lines(&mut lines);
+        let mut restored = Settings::default();
+        for line in lines.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                restored.set(key, value);
+            }
+        }
+        assert_eq!(restored.widgets, settings.widgets);
+    }
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
@@ -793,7 +824,7 @@ mod tests {
             dock_buttons: Buttons::of([false, true, true, false, true]),
             desktop_only: true,
             edge_volume: true,
-            tabs: [false, true, false, true, false, true],
+            tabs: [false, true, false, true, false, true, true],
             limits_codex: true,
             limits_agy: true,
             limits_group: 1,
@@ -873,7 +904,7 @@ mod tests {
         // Each switch is its own line, so one tab can be off without touching the others.
         let mut off = Settings::default();
         assert!(off.set("tabtimer", "0") && off.set("tabweather", "0"));
-        assert_eq!(off.tabs, [true, false, true, false, true, false]);
+        assert_eq!(off.tabs, [true, false, true, false, true, false, true]);
         let mut text = String::new();
         off.write_lines(&mut text);
         for line in [

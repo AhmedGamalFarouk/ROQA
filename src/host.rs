@@ -175,6 +175,7 @@ struct Pages {
     /// The Limits page, rebuilt by `refresh_limits` only while that page shows, and what it was built for.
     limits: limits::View,
     limits_key: Option<(u32, bool, String)>,
+    widgets: crate::widgets::WidgetConfig,
     /// The Pomodoro's phase rules; its running phase is a tagged timer in `Desktop::timers`.
     pomo: pomo::Pomo,
 }
@@ -198,6 +199,7 @@ impl Pages {
             prayer_key: None,
             limits: limits::View::default(),
             limits_key: None,
+            widgets: settings.widgets,
             pomo: pomo::Pomo::default(),
         };
         pages.set_privacy(settings.privacy, Instant::now());
@@ -545,6 +547,8 @@ impl Surface {
         let page = pages.page(track.is_some());
         layout::set_page_height(if page == Tab::Limits {
             layout::limits_height(pages.limits.rows.len())
+        } else if page == Tab::Widgets {
+            140
         } else {
             0
         });
@@ -671,6 +675,7 @@ impl Surface {
             notice,
             shelf: &slots,
             tab: page,
+            widgets: pages.widgets,
             rail: rail.map(|layout| RailScene {
                 layout,
                 hover: self.tab_hover,
@@ -2190,6 +2195,8 @@ impl Desktop {
             self.fullscreen_generation = None; // the next pass hides or shows again
         }
         self.edges_dirty = true;
+        let widgets_changed = old.widgets != self.settings.widgets;
+        self.pages.widgets = self.settings.widgets;
         let tabs_changed = old.tabs != self.settings.tabs;
         if tabs_changed {
             self.pages.tabs.flags = self.settings.tabs;
@@ -2259,7 +2266,7 @@ impl Desktop {
                 }
             }
         }
-        if tabs_changed || eyes_changed {
+        if tabs_changed || eyes_changed || widgets_changed {
             self.request_notches(Repaint::Full, |_| true);
         }
         let cap = self.settings.shelf_cap;
@@ -3174,6 +3181,8 @@ impl Desktop {
             if self.power.update(power::Raw::read(), Instant::now()) {
                 self.open_notches();
                 self.request_notches(Repaint::Full, |_| true);
+            } else if self.page() == Tab::Widgets {
+                self.request_notches(Repaint::Full, |s| s.expanded());
             }
             return Ok(());
         }
@@ -4160,23 +4169,23 @@ mod clock_wait_tests {
     #[test]
     fn the_handle_follows_the_shown_tabs_and_the_active_page() {
         let mut settings = Settings::default();
-        // All five tabs show: a handle, on Media while a session lives, else on the last tab used.
+        // Enabled tabs show a handle, on Media while a session lives, else on the last tab used.
         let pages = Pages::new(&settings, Tab::Shelf);
         let rail = |pages: &Pages, live| pages.rail(live).map(|r| (r.count, r.active));
-        assert_eq!(rail(&pages, true), Some((5, 0)));
-        assert_eq!(rail(&pages, false), Some((5, 4)));
+        assert_eq!(rail(&pages, true), Some((6, 0)));
+        assert_eq!(rail(&pages, false), Some((6, 4)));
         assert_eq!(pages.page(false), Tab::Shelf);
-        // The Timer and Weather tabs off leave three; a pick during one open wins until it ends.
+        // A pick during one open wins until it ends.
         settings.tabs[Tab::Timer.index()] = false;
         settings.tabs[Tab::Weather.index()] = false;
         let mut pages = Pages::new(&settings, Tab::Media);
-        assert_eq!(rail(&pages, false), Some((3, 0)));
+        assert_eq!(rail(&pages, false), Some((4, 0)));
         assert!(pages.tabs.select(Tab::Shelf, true));
-        assert_eq!(rail(&pages, true), Some((3, 2)));
+        assert_eq!(rail(&pages, true), Some((4, 2)));
         // One tab: no handle. None: the plain clock panel is the Media page.
-        settings.tabs = [true, false, false, false, false, false];
+        settings.tabs = [true, false, false, false, false, false, false];
         assert_eq!(rail(&Pages::new(&settings, Tab::Media), true), None);
-        settings.tabs = [false; 6];
+        settings.tabs = [false; 7];
         let none = Pages::new(&settings, Tab::Shelf);
         assert_eq!((rail(&none, true), none.page(true)), (None, Tab::Media));
     }

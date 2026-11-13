@@ -311,8 +311,185 @@ pub(super) fn page(
         Tab::Weather => weather_page(context, scene, body, scale, reveal, p),
         Tab::Prayer => prayer_page(context, scene, body, scale, reveal, p),
         Tab::Limits => limits_page(context, scene, body, scale, reveal, p),
+        Tab::Widgets => widgets_page(context, scene, body, scale, reveal, p),
         _ => Ok(()),
     }
+}
+
+fn widgets_page(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    scale: f32,
+    reveal: f32,
+    p: &Palette,
+) -> Result<()> {
+    use crate::widgets::WidgetKind;
+    let kinds = [scene.widgets.slot_left, scene.widgets.slot_right];
+    for (index, kind) in kinds.into_iter().enumerate() {
+        let x = body.left + (38.0 + index as f32 * 182.0) * scale;
+        let y = body.top + 31.0 * scale;
+        let at = |dx: f32, dy: f32, w: f32, h: f32| D2D_RECT_F {
+            left: x + dx * scale,
+            top: y + dy * scale,
+            right: x + (dx + w) * scale,
+            bottom: y + (dy + h) * scale,
+        };
+        let font = |size, weight, align| Font {
+            family: TEXT_FONT,
+            size: size * scale,
+            weight,
+            designator: 1.0,
+            align,
+        };
+        let ink = |alpha| with_alpha(p.ink, p.ink_alpha(alpha * reveal));
+        // SAFETY: the brush belongs to the live drawing context.
+        unsafe {
+            let fill =
+                context.CreateSolidColorBrush(&with_alpha((255, 255, 255), 0.06 * reveal), None)?;
+            context.FillRoundedRectangle(&rounded(at(0.0, 0.0, 162.0, 96.0), 14.0 * scale), &fill);
+        }
+        let title = match kind {
+            WidgetKind::WeekCalendar => "THIS WEEK",
+            WidgetKind::Battery => "BATTERY",
+        };
+        draw_text(
+            context,
+            title,
+            &font(8.6, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING),
+            at(12.0, 8.0, 138.0, 14.0),
+            ink(0.45),
+        )?;
+        match kind {
+            WidgetKind::WeekCalendar => {
+                // SAFETY: GetLocalTime returns a value and needs no resources.
+                let date = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+                let days = crate::widgets::week_numbers(
+                    date.wYear,
+                    date.wMonth,
+                    date.wDay,
+                    date.wDayOfWeek,
+                );
+                let today = usize::from((date.wDayOfWeek + 6) % 7);
+                for (i, (label, day)) in ["M", "T", "W", "T", "F", "S", "S"]
+                    .into_iter()
+                    .zip(days)
+                    .enumerate()
+                {
+                    let dx = 11.0 + i as f32 * 20.0;
+                    draw_text(
+                        context,
+                        label,
+                        &font(
+                            9.0,
+                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                            DWRITE_TEXT_ALIGNMENT_CENTER,
+                        ),
+                        at(dx, 29.0, 19.0, 15.0),
+                        ink(0.55),
+                    )?;
+                    if i == today {
+                        // SAFETY: brush and rounded rectangle are local to this frame.
+                        unsafe {
+                            let accent = context.CreateSolidColorBrush(
+                                &with_alpha(p.accent, p.ink_alpha(reveal)),
+                                None,
+                            )?;
+                            context.FillRoundedRectangle(
+                                &rounded(at(dx, 49.0, 19.0, 19.0), 9.5 * scale),
+                                &accent,
+                            );
+                        }
+                    }
+                    let colour = if i == today {
+                        with_alpha((255, 255, 255), reveal)
+                    } else {
+                        ink(0.9)
+                    };
+                    draw_text(
+                        context,
+                        &day.to_string(),
+                        &font(
+                            10.0,
+                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                            DWRITE_TEXT_ALIGNMENT_CENTER,
+                        ),
+                        at(dx, 49.0, 19.0, 19.0),
+                        colour,
+                    )?;
+                }
+            }
+            WidgetKind::Battery => {
+                let raw = crate::power::Raw::read();
+                let reading = raw.filter(|r| r.flag & 128 == 0 && r.percent <= 100);
+                let percent = reading.map_or(0, |r| r.percent);
+                // SAFETY: brushes and line segments use the live context; no geometry is retained.
+                unsafe {
+                    let track = context.CreateSolidColorBrush(&ink(0.18), None)?;
+                    let accent = context
+                        .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(reveal)), None)?;
+                    let point = |angle: f32| Vector2 {
+                        X: x + (42.0 + 25.0 * angle.cos()) * scale,
+                        Y: y + (56.0 + 25.0 * angle.sin()) * scale,
+                    };
+                    for step in 0..60 {
+                        let a = -std::f32::consts::FRAC_PI_2
+                            + step as f32 * std::f32::consts::TAU / 60.0;
+                        let b = -std::f32::consts::FRAC_PI_2
+                            + (step + 1) as f32 * std::f32::consts::TAU / 60.0;
+                        context.DrawLine(
+                            point(a),
+                            point(b),
+                            if step * 100 < usize::from(percent) * 60 {
+                                &accent
+                            } else {
+                                &track
+                            },
+                            3.0 * scale,
+                            None,
+                        );
+                    }
+                }
+                let charging = reading.is_some_and(|r| r.flag & 8 != 0);
+                if charging {
+                    draw_text(
+                        context,
+                        "?",
+                        &font(18.0, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER),
+                        at(31.0, 44.0, 22.0, 24.0),
+                        with_alpha(p.accent, p.ink_alpha(reveal)),
+                    )?;
+                }
+                let value = reading.map_or_else(|| "--".to_owned(), |r| format!("{}%", r.percent));
+                draw_text(
+                    context,
+                    &value,
+                    &font(20.0, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING),
+                    at(78.0, 34.0, 76.0, 27.0),
+                    ink(1.0),
+                )?;
+                let status = match reading {
+                    None => "Unavailable",
+                    Some(_) if charging => "Charging",
+                    Some(r) if r.ac == 1 => "Plugged in",
+                    Some(r) if r.ac == 0 => "On battery",
+                    _ => "Unknown",
+                };
+                draw_text(
+                    context,
+                    status,
+                    &font(
+                        9.5,
+                        DWRITE_FONT_WEIGHT_NORMAL,
+                        DWRITE_TEXT_ALIGNMENT_LEADING,
+                    ),
+                    at(78.0, 61.0, 76.0, 17.0),
+                    ink(0.6),
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A page button (`layout::page_button`): an outlined pill with its label in the accent colour.

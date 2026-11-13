@@ -54,6 +54,7 @@ mod topology;
 mod water;
 mod weather;
 mod weather_os;
+mod widgets;
 mod window_catalog;
 mod window_model;
 mod window_source;

@@ -199,6 +199,7 @@ pub struct NotchScene<'a> {
     pub shelf: &'a [ShelfSlot<'a>],
     /// The page the open panel shows. Media is the media and clock panel; the others draw their own content.
     pub tab: Tab,
+    pub widgets: crate::widgets::WidgetConfig,
     /// The hanging tab handle; `None` draws none (fewer than two tabs).
     pub rail: Option<RailScene<'a>>,
     /// The mascot's frame in the pill; `None` at rest, when the pill shows only the time.
@@ -2577,6 +2578,7 @@ mod media_tests {
             timer: None,
             notice: None,
             shelf: &[],
+            widgets: crate::widgets::WidgetConfig::default(),
             tab: Tab::Media,
             rail: None,
             eyes: None,
@@ -2615,6 +2617,7 @@ mod media_tests {
                 timer: None,
                 notice: None,
                 shelf: &[],
+                widgets: crate::widgets::WidgetConfig::default(),
                 tab: Tab::Media,
                 rail: None,
                 eyes: None,
@@ -2861,6 +2864,7 @@ mod media_tests {
                 timer: None,
                 notice: None,
                 shelf: &[],
+                widgets: crate::widgets::WidgetConfig::default(),
                 tab: Tab::Media,
                 rail: None,
                 eyes: None,
@@ -2921,6 +2925,7 @@ mod media_tests {
                     timer: None,
                     notice: None,
                     shelf: &[],
+                    widgets: crate::widgets::WidgetConfig::default(),
                     tab: Tab::Media,
                     rail: None,
                     eyes: None,
@@ -2969,6 +2974,7 @@ mod media_tests {
             timer: None,
             notice: None,
             shelf: &[],
+            widgets: crate::widgets::WidgetConfig::default(),
             tab: Tab::Media,
             rail: None,
             eyes: None,

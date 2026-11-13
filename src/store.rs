@@ -299,7 +299,7 @@ mod tests {
                 shelf_cap: 6,
                 diagnostics: Some(r"C:\logs\run=1.json".into()),
                 // A tab switched off and the mascot off survive a restart.
-                tabs: [true, true, true, false, true, true],
+                tabs: [true, true, true, false, true, true, true],
                 eyes: false,
                 water: true,
                 water_cfg: [6, 300, 8, 20, 45],
