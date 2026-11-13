@@ -1197,3 +1197,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u5-climb`; [packet](ui-council-u5.md). Text-sized buttons, statusline Copy, wider method drop-down, reserved scrollbar gutter, footer hint only after a dock/notch change, dark caption colour.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 357 tests, locked release); 1,049,088 B (+512 vs 1,048,576); baseline 1,152,000 B, limit 1,175,040 unchanged.
 - **NOT RUN:** native/GUI (Chief capture; button fit, gutter, caption colour unverified by eye); reviews paused (REVIEW NOT RUN).
+
+## U6-A Glass isolation (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u6-climb`; [packet](ui-council-u6.md). Glass backing follows the body outline (2 DIP border) at 0.97, rail 0.97; footers and gear sit >= 6 DIP inside it; plain panel 92 DIP; footer text 11 DIP.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 358 tests, locked release); 1,049,088 B (+0 vs 1,049,088); baseline 1,152,000 B, limit 1,175,040 unchanged.
+- **NOT RUN:** native/GUI (Chief capture; glass over busy dark and white backdrops unverified by eye); reviews paused (REVIEW NOT RUN).

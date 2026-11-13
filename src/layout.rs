@@ -22,7 +22,7 @@ pub const NOTCH: NotchShape = NotchShape {
 };
 pub const NOTCH_EXPANDED: NotchShape = NotchShape {
     width: 320.0,
-    height: 86.0,
+    height: 92.0,
     radius: 24.0,
     ears: 16.0,
 };
@@ -284,7 +284,8 @@ pub fn volume_fraction(window_width: i32, dpi: u32, progress: f32, x: i32) -> Op
 }
 
 /// The settings button in the expanded panel's bottom-right corner, in DIPs from the body's left and top
-/// edges (media panel, plain panel): 16 square, 12 from the right edge and 6 from the bottom.
+/// edges (media panel, plain panel): 16 square, 16 from the right edge and 10 from the bottom, so its disc
+/// clears the glass backing's rounded corner (`BACKING_INSET`) by 6.
 const GEAR_SIZE: f32 = 16.0;
 pub fn gear(dpi: u32, media: bool) -> Bounds {
     let shape = tall(if media {
@@ -294,13 +295,23 @@ pub fn gear(dpi: u32, media: bool) -> Bounds {
     });
     scaled_bounds(
         (
-            shape.width - 12.0 - GEAR_SIZE,
-            shape.height - 6.0 - GEAR_SIZE,
+            shape.width - 16.0 - GEAR_SIZE,
+            shape.height - 10.0 - GEAR_SIZE,
             GEAR_SIZE,
             GEAR_SIZE,
         ),
         dpi,
     )
+}
+
+/// The glass themes' content backing runs this far inside the open body's edge (DIPs), so the unoccupied outer
+/// border is all that stays translucent.
+pub const BACKING_INSET: f32 = 2.0;
+/// A page's footer line (Weather's attribution, Prayer's Hijri date), in DIPs from the body's left and top
+/// edges: x, y, width, height for the plain and the media panel. Its bottom is 12 above the body's bottom.
+const FOOTER: [(f32, f32, f32, f32); 2] = [(16.0, 67.0, 288.0, 13.0), (16.0, 95.0, 328.0, 13.0)];
+pub fn footer(media: bool) -> (f32, f32, f32, f32) {
+    FOOTER[usize::from(media)]
 }
 
 /// Whether a window point is on the settings button (a little slack around it); false while the panel is closed.
@@ -1107,6 +1118,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Distance in DIPs from `(x, y)` (panel coordinates) to the glass backing's edge: positive inside.
+    /// The backing is the open body inset by `BACKING_INSET`, its bottom corners rounded to the body's radius less that.
+    fn backing_depth(shape: NotchShape, x: f32, y: f32) -> f32 {
+        let (left, right, bottom) = (
+            BACKING_INSET,
+            shape.width - BACKING_INSET,
+            shape.height - BACKING_INSET,
+        );
+        let r = shape.radius - BACKING_INSET;
+        let straight = (x - left).min(right - x).min(bottom - y);
+        let (cx, cy) = (x.clamp(left + r, right - r), bottom - r);
+        if y > cy {
+            r - ((x - cx).powi(2) + (y - cy).powi(2)).sqrt()
+        } else {
+            straight
+        }
+    }
+
+    #[test]
+    fn every_footer_and_the_gear_sit_six_dips_inside_the_glass_backing() {
+        for media in [false, true] {
+            let shape = if media {
+                MEDIA_EXPANDED
+            } else {
+                NOTCH_EXPANDED
+            };
+            let (x, y, w, h) = footer(media);
+            for corner in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)] {
+                assert!(
+                    backing_depth(shape, corner.0, corner.1) >= 6.0,
+                    "{media} footer {corner:?}"
+                );
+            }
+            // The gear is a disc 8 DIPs in radius.
+            let g = gear(96, media);
+            let (cx, cy) = ((g.x + g.width / 2) as f32, (g.y + g.height / 2) as f32);
+            assert!(backing_depth(shape, cx, cy) >= 6.0 + 8.0, "{media} gear");
+        }
+        // The check itself: a point on the bottom curve's edge is not inside.
+        assert!(backing_depth(NOTCH_EXPANDED, 16.0, 91.0) < 6.0);
     }
 
     #[test]

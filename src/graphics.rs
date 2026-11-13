@@ -381,7 +381,15 @@ impl Canvas {
                 &geometry_shape(context, &outline),
             )?;
             if p.rim.is_some() {
-                glass_scrim(context, &body, scale, motion::reveal(scene.progress), &p)?;
+                let radius = layout::notch_radius(pixels, shape, scene.dpi);
+                glass_scrim(
+                    context,
+                    &body,
+                    radius,
+                    scale,
+                    motion::reveal(scene.progress),
+                    &p,
+                )?;
             }
             // SAFETY: context is live between surface BeginDraw/EndDraw; the clip is popped below.
             unsafe {
@@ -2248,20 +2256,23 @@ fn line(
     }
 }
 
-/// Alpha of the glass themes' content backing (`glass_scrim`) and of the tab handle's fill.
-const GLASS_BACKING: f32 = 0.90;
+/// Alpha of the glass themes' content backing (`glass_scrim`) and of the tab rail's fill: a backdrop's text no
+/// longer shows through either.
+const GLASS_BACKING: f32 = 0.97;
 
-/// Glass themes only: a mostly opaque body-coloured backing under the panel's content, inset from the sides and
-/// bottom so the perimeter stays translucent, and fading in with the panel (`reveal`). A busy backdrop (text,
-/// a diff) no longer shows through the page text; the pill, with no page, keeps the plain glass.
+/// Glass themes only: a near-opaque body-coloured backing under the panel's content, following the body's own
+/// outline inset by `layout::BACKING_INSET` so every label and control sits inside it and only an unoccupied
+/// outer border stays translucent; it fades in with the panel (`reveal`). The pill, with no page, keeps the
+/// plain glass.
 fn glass_scrim(
     context: &ID2D1DeviceContext,
     body: &D2D_RECT_F,
+    radius: f32,
     scale: f32,
     reveal: f32,
     p: &Palette,
 ) -> Result<()> {
-    let inset = 9.0 * scale;
+    let inset = layout::BACKING_INSET * scale;
     // The top runs off the surface so only the lower corners round.
     let backing = D2D_RECT_F {
         left: body.left + inset,
@@ -2274,7 +2285,7 @@ fn glass_scrim(
     unsafe {
         let brush = context
             .CreateSolidColorBrush(&color(Rgba(red, green, blue, GLASS_BACKING * reveal)), None)?;
-        context.FillRoundedRectangle(&rounded(backing, 14.0 * scale), &brush);
+        context.FillRoundedRectangle(&rounded(backing, (radius - inset).max(0.0)), &brush);
     }
     Ok(())
 }

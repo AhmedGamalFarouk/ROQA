@@ -465,16 +465,18 @@ fn weather_page(
     if scene.notice.is_some() {
         return Ok(());
     }
-    let row = if media { 98.0 } else { 70.0 };
-    let footer = font(TEXT_FONT, 10.0, normal, lead);
+    let (x, y, w, h) = layout::footer(media);
     draw_text(
         context,
         &view.footer,
-        &footer,
-        at(16.0, row, width, 12.0),
-        ink(0.45),
+        &font(TEXT_FONT, FOOTER_SIZE, normal, lead),
+        at(x, y, w, h),
+        ink(0.55),
     )
 }
+
+/// The footer line's size (DIPs): a step above the old 10, in a 13 DIP row (`layout::footer`).
+const FOOTER_SIZE: f32 = 11.0;
 
 /// The Prayer page: the next prayer and its countdown at the left, the five times as columns at the right with
 /// the current one on a wash, and the Hijri date as the footer (the notice takes its row while it shows).
@@ -584,13 +586,13 @@ fn prayer_page(
     if scene.notice.is_some() || view.hijri.is_empty() {
         return Ok(());
     }
-    let row = if media { 98.0 } else { 70.0 };
+    let (x, y, w, h) = layout::footer(media);
     draw_text(
         context,
         &view.hijri,
-        &font(TEXT_FONT, 10.0, normal, lead),
-        at(16.0, row, width, 12.0),
-        ink(0.5),
+        &font(TEXT_FONT, FOOTER_SIZE, normal, lead),
+        at(x, y, w, h),
+        ink(0.6),
     )
 }
 
