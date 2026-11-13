@@ -120,6 +120,7 @@ const HKCOMBO: usize = 198;
 const HKAUDIO: usize = 200;
 const HKAUDIOCOMBO: usize = 201;
 const MATCH_ACCENT: usize = 199;
+const DOCK_BADGES: usize = 202;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -264,7 +265,15 @@ const PAGES: &[Page] = &[
             },
             Card {
                 label: "Dock",
-                rows: &[r(DOCKSTYLE, Kind::Combo(170), "Dock style", "")],
+                rows: &[
+                    r(DOCKSTYLE, Kind::Combo(170), "Dock style", ""),
+                    r(
+                        DOCK_BADGES,
+                        C,
+                        "Show notification badges",
+                        "Based on window titles",
+                    ),
+                ],
             },
         ],
     },
@@ -1150,6 +1159,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         HKPICKER => &mut s.hotkey_picker,
         HKAUDIO => &mut s.hotkey_audio,
         MATCH_ACCENT => &mut s.match_accent,
+        DOCK_BADGES => &mut s.dock_badges,
         TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
         DBTN..=134 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,

@@ -140,6 +140,7 @@ pub struct DockSlot<'a> {
     pub icon: Option<&'a IconPixels>,
     pub active: bool,
     pub picker: bool,
+    pub badge: dock::Badge,
     /// Hover animation progress, 0 (rest) to 1 (hovered).
     pub hover: f32,
 }
@@ -2187,6 +2188,38 @@ fn draw_slot(
             // A real group whose icon is unavailable or still loading: neutral tile, never a fake app icon.
             let brush = context.CreateSolidColorBrush(&color(p.tile), None)?;
             context.FillRoundedRectangle(&rounded(frame, px(10)), &brush);
+        }
+        if slot.badge != dock::Badge::None {
+            let label = match slot.badge {
+                dock::Badge::Count(n) if n >= 100 => Some("99+".to_owned()),
+                dock::Badge::Count(n) => Some(n.to_string()),
+                _ => None,
+            };
+            let width = px(match label.as_deref() {
+                Some("99+") => 25,
+                Some(s) if s.len() > 1 => 20,
+                Some(_) => 16,
+                None => 9,
+            });
+            let height = if label.is_some() { px(16) } else { px(9) };
+            let badge = D2D_RECT_F {
+                left: frame.right - width / 2.0,
+                top: frame.top - height / 4.0,
+                right: frame.right + width / 2.0,
+                bottom: frame.top + height * 0.75,
+            };
+            let brush = context.CreateSolidColorBrush(&rgba(214, 31, 41, 1.0), None)?;
+            context.FillRoundedRectangle(&rounded(badge, height / 2.0), &brush);
+            if let Some(label) = label {
+                let font = Font {
+                    family: TEXT_FONT,
+                    size: px(10),
+                    weight: DWRITE_FONT_WEIGHT_BOLD,
+                    designator: 1.0,
+                    align: DWRITE_TEXT_ALIGNMENT_CENTER,
+                };
+                draw_text(context, &label, &font, badge, rgba(255, 255, 255, 1.0))?;
+            }
         }
         if slot.active {
             // Short white pill under the focused group.

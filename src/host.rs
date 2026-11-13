@@ -789,6 +789,7 @@ impl Surface {
             icon: None,
             active: false,
             picker: true,
+            badge: dock::Badge::None,
             hover: hover(Hit::Slot(0)),
         }];
         slots.extend(
@@ -800,6 +801,7 @@ impl Surface {
                     icon: icon.as_deref(),
                     active: item.active,
                     picker: false,
+                    badge: item.badge,
                     hover: hover(Hit::Slot(index + 1)),
                 }),
         );
@@ -2235,7 +2237,9 @@ impl Desktop {
         {
             self.relayout_docks()?;
         }
-        if old.desktop_only != self.settings.desktop_only {
+        if old.desktop_only != self.settings.desktop_only
+            || old.dock_badges != self.settings.dock_badges
+        {
             self.dock_generation = None; // the dock is rebuilt on the next pass
         }
         let (create, destroy) = settings::surface_diff(&old, &self.settings, &devices);
@@ -2462,9 +2466,14 @@ impl Desktop {
         }
         if self.dock_generation != Some(model.generation) {
             self.dock_generation = Some(model.generation);
-            let items = dock::items_with_pins(model, &self.pins, self.settings.desktop_only);
+            let mut items = dock::items_with_pins(model, &self.pins, self.settings.desktop_only);
+            if !self.settings.dock_badges {
+                for item in &mut items {
+                    item.badge = dock::Badge::None;
+                }
+            }
             let changed = items != self.dock_items;
-            // Title-only changes publish new generations but leave pixels untouched.
+            // Only changes to visible dock data require a repaint.
             if !changed && !icons_arrived {
                 return Ok(());
             }

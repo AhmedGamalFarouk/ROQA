@@ -42,6 +42,8 @@ pub struct Settings {
     pub theme: Theme,
     /// Floating (default) or attached to the bottom edge.
     pub dock_style: DockStyle,
+    /// Show notification indicators inferred from window titles.
+    pub dock_badges: bool,
     /// Which taskbar-style buttons the dock shows (`dock::Buttons`).
     pub dock_buttons: Buttons,
     /// The dock lists only windows on the current virtual desktop (pins stay).
@@ -114,6 +116,7 @@ impl Default for Settings {
             diagnostics: None,
             theme: Theme::Classic,
             dock_style: DockStyle::Floating,
+            dock_badges: false,
             dock_buttons: Buttons::default(),
             desktop_only: false,
             // Off until a native run proves the 2 px strips leave edge scrollbars alone; a stored value wins.
@@ -264,6 +267,7 @@ impl Settings {
         match key {
             "dock" => flag(value).map(|v| self.dock = v).is_some(),
             "notch" => flag(value).map(|v| self.notch = v).is_some(),
+            "dockbadge" => flag(value).map(|v| self.dock_badges = v).is_some(),
             "matchaccent" => flag(value).map(|v| self.match_accent = v).is_some(),
             "hkpicker" => flag(value).map(|v| self.hotkey_picker = v).is_some(),
             "hkcombo" => HotkeyCombo::from_key(value)
@@ -381,6 +385,7 @@ impl Settings {
             self.hotkey_audio_combo.key(),
             u8::from(self.match_accent)
         ));
+        out.push_str(&format!("dockbadge={}\n", u8::from(self.dock_badges)));
         let one_line = |v: &&String| !v.contains(['\n', '\r']);
         out.push_str(&format!(
             "dock={}\nnotch={}\nsound={}\nshelfcap={}\ntheme={}\ndesktop={}\nedgevol={}\nedgebri={}\n",
@@ -583,6 +588,20 @@ mod tests {
         }
         assert_eq!(restored2.hotkey_audio, settings.hotkey_audio);
         assert_eq!(restored2.hotkey_audio_combo, settings.hotkey_audio_combo);
+    }
+
+    #[test]
+    fn dock_badge_setting_round_trip() {
+        let mut settings = Settings::default();
+        assert!(!settings.dock_badges);
+        assert!(settings.set("dockbadge", "1"));
+        assert!(settings.dock_badges);
+        assert!(!settings.set("dockbadge", "bad"));
+        let mut lines = String::new();
+        settings.write_lines(&mut lines);
+        assert!(lines.lines().any(|line| line == "dockbadge=1"));
+        assert!(settings.set("dockbadge", "0"));
+        assert!(!settings.dock_badges);
     }
 
     #[test]

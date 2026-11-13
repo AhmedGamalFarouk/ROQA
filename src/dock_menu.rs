@@ -298,6 +298,7 @@ mod tests {
             identity,
             windows: windows.iter().map(|&h| key_of(h)).collect(),
             active: false,
+            badge: crate::dock::Badge::None,
         }
     }
     fn pinned(identity: &Identity) -> Pins {

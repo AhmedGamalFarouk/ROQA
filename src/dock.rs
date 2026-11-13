@@ -30,12 +30,55 @@ pub const HEIGHT_DIPS: i32 = 64;
 /// The bar's corner radius (the floating bar's, and the attached dock's top corners).
 pub const RADIUS_DIPS: i32 = 20;
 
+/// A title-derived indicator. Counts saturate at 100, displayed as 99+.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Badge {
+    #[default]
+    None,
+    Dot,
+    Count(u8),
+}
+
+/// Only edge tokens are interpreted, avoiding numbers embedded in ordinary titles.
+pub fn title_badge(title: &str) -> Badge {
+    let title = title.trim();
+    let mut badge = Badge::None;
+    if title.starts_with('?') || title.ends_with('?') {
+        badge = Badge::Dot;
+    }
+    for (open, close) in [('(', ')'), ('[', ']')] {
+        let token = if let Some(rest) = title.strip_prefix(open) {
+            rest.split_once(close).map(|(value, _)| value)
+        } else if let Some(rest) = title.strip_suffix(close) {
+            rest.rsplit_once(open).map(|(_, value)| value)
+        } else {
+            None
+        };
+        if let Some(token) = token {
+            let (digits, plus) = token
+                .strip_suffix('+')
+                .map_or((token, false), |v| (v, true));
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                let value = digits
+                    .bytes()
+                    .fold(0u8, |n, b| n.saturating_mul(10).saturating_add(b - b'0'))
+                    .min(100);
+                if value > 0 {
+                    badge = badge.max(Badge::Count(if plus && value >= 99 { 100 } else { value }));
+                }
+            }
+        }
+    }
+    badge
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DockItem {
     pub identity: Identity,
     pub executable: Option<String>,
     pub windows: Vec<WindowKey>,
     pub active: bool,
+    pub badge: Badge,
 }
 
 /// One item per real catalog group, in stable identity order. No placeholder rows. With `desktop_only`, a
@@ -55,6 +98,7 @@ pub fn items(model: &WindowModel, desktop_only: bool) -> Vec<DockItem> {
             Some(item) if item.identity == window.identity => {
                 item.windows.push(window.key);
                 item.active |= window.foreground;
+                item.badge = item.badge.max(title_badge(&window.title));
                 if item.executable.is_none() {
                     item.executable.clone_from(&window.executable);
                 }
@@ -64,6 +108,7 @@ pub fn items(model: &WindowModel, desktop_only: bool) -> Vec<DockItem> {
                 executable: window.executable.clone(),
                 windows: vec![window.key],
                 active: window.foreground,
+                badge: title_badge(&window.title),
             }),
         }
     }
@@ -100,6 +145,7 @@ pub fn items_with_pins(model: &WindowModel, pins: &Pins, desktop_only: bool) -> 
                     },
                     windows: Vec::new(),
                     active: false,
+                    badge: Badge::None,
                 }),
         );
     }
@@ -867,12 +913,47 @@ mod tests {
     }
 
     #[test]
+    fn title_indicators_and_group_badges() {
+        assert_eq!(title_badge("(3) Mail"), Badge::Count(3));
+        assert_eq!(title_badge("Chat [2]"), Badge::Count(2));
+        assert_eq!(title_badge("(99+) Chat"), Badge::Count(100));
+        assert_eq!(title_badge("? Downloads"), Badge::Dot);
+        for title in [
+            "Mail (0)",
+            "Report (2026) draft",
+            "[abc] chat",
+            "(3x) chat",
+            "hello",
+        ] {
+            assert_eq!(title_badge(title), Badge::None, "{title}");
+        }
+        assert_eq!(title_badge("(999999999999) Mail"), Badge::Count(100));
+        let id = Identity::Unavailable(1);
+        let make = |handle, title: &str, current_desktop| WindowRecord {
+            key: WindowKey { handle, process: 1 },
+            title: title.into(),
+            identity: id.clone(),
+            executable: None,
+            minimized: false,
+            foreground: false,
+            current_desktop,
+        };
+        let model = WindowModel {
+            windows: vec![make(1, "(3) A", true), make(2, "[7] B", false)],
+            ..Default::default()
+        };
+        assert_eq!(items(&model, false)[0].badge, Badge::Count(7));
+        assert_eq!(items(&model, true)[0].badge, Badge::Count(3));
+    }
+
+    #[test]
     fn click_activates_cycles_and_minimizes_like_a_taskbar() {
         let item = |handles: &[usize]| DockItem {
             identity: Identity::Unavailable(0),
             executable: None,
             windows: handles.iter().map(|h| key(*h)).collect(),
             active: false,
+            badge: Badge::None,
         };
         assert_eq!(
             action(&item(&[1, 2]), Some(key(8))),
@@ -953,6 +1034,7 @@ mod tests {
             executable: Some(exe.into()),
             windows: vec![key(1)],
             active: false,
+            badge: Badge::None,
         };
         let aumid = running(Identity::Application("Vendor.App".into()), r"c:\vendor.exe");
         let mut pins = Pins::default();
@@ -973,6 +1055,7 @@ mod tests {
             executable: None,
             windows: vec![],
             active: false,
+            badge: Badge::None,
         };
         assert_eq!(pinned_as(&gone, &pins), None);
         let unavailable = running(Identity::Unavailable(3), r"c:\other.exe");
