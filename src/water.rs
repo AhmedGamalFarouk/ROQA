@@ -46,8 +46,11 @@ pub fn today(stored: (i64, u8), day: i64) -> u8 {
     if stored.0 == day { stored.1 } else { 0 }
 }
 
-/// "3 of 8 glasses (750 ml)".
+/// "3 of 8 glasses (750 ml)"; with none drunk, no amount.
 pub fn text(drank: u8, c: &Config) -> String {
+    if drank == 0 {
+        return format!("0 of {} glasses", c[0]);
+    }
     format!(
         "{drank} of {} glasses ({} ml)",
         c[0],
@@ -105,5 +108,6 @@ mod tests {
         assert_eq!(today((100, 3), 100), 3);
         assert_eq!(today((100, 3), 101), 0);
         assert_eq!(text(3, &DEFAULT), "3 of 8 glasses (750 ml)");
+        assert_eq!(text(0, &DEFAULT), "0 of 8 glasses");
     }
 }

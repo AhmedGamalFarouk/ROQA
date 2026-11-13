@@ -13,3 +13,10 @@ Native/GUI NOT RUN; the Chief's capture worker verifies by eye. Reviews paused.
 
 - The hanging handle is always open while the panel shows: one 44 x 22 DIP cell per tab with its name (10 DIP semibold), selected = accent wash, hovered = lighter ink wash (`Surface::tab_hover`, a repaint only when the cell under the pointer changes). 290 x 30 DIP for six tabs, so it stays narrower than the 320 plain panel and fits the 164 DIP window under the 120 DIP media or Limits panel. The dot state, the open/close tween, `tabs::Handle`, `refresh_rails` and the per-tab icons in the rail are gone (net deletion); the collapsed pill is untouched.
 - Dock hover: the pop curve (0.3, 0.8, 0.5, 1.2) was front-loaded, 90 % done by 117 ms of 260, which is the ~110 ms the capture saw (the tween and the frame loop run the full 260 ms). New (0.45, 0, 0.3, 1.3): 90 % at ~143 ms, last visible change near 250 ms, 4.5 % overshoot. Test asserts the span.
+
+## U5-C Glass backing and notch spacing (defects 3 and 5)
+
+- Frosted and Liquid: `glass_scrim` fills a body-coloured backing (alpha 0.90, fading in with the panel) inset 9 DIP from the sides and bottom under the page content, so a busy backdrop cannot show through the text while the perimeter keeps the translucent glass and rim; the pill (no page) is unchanged. The tab rail fill is 0.95 in glass. No blur, no new surface.
+- Plain panel 320 x 86 DIP (was 80): the notice row moves to y 70 and is 12 DIP (was 11; the media pocket keeps 11), Prayer countdown y 52 and the Hijri/credit footer y 70, so the Hijri line has a clear gap. `water::text` drops "(0 ml)" at zero glasses.
+- Weather: plain hourly columns are 37 DIP apart from x 178 (last ends 289), clear of the gear at x 292.
+- Limits: bars 24 DIP (was 14) with the percent and reset shifted to match, "as of" 10 DIP (was 9) at 55 %, Refresh pill y 11 and 15 high (was y 5, 17).

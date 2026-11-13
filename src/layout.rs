@@ -22,7 +22,7 @@ pub const NOTCH: NotchShape = NotchShape {
 };
 pub const NOTCH_EXPANDED: NotchShape = NotchShape {
     width: 320.0,
-    height: 80.0,
+    height: 86.0,
     radius: 24.0,
     ears: 16.0,
 };
@@ -316,7 +316,7 @@ pub fn gear_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, 
 }
 
 /// The Limits page's Refresh button beside its title, in DIPs from the body's left and top edges.
-const REFRESH: (f32, f32, f32, f32) = (96.0, 5.0, 76.0, 17.0);
+const REFRESH: (f32, f32, f32, f32) = (96.0, 11.0, 76.0, 15.0);
 pub fn refresh(dpi: u32) -> Bounds {
     scaled_bounds(REFRESH, dpi)
 }
@@ -438,7 +438,7 @@ pub fn timer_pill(dpi: u32) -> Bounds {
 /// top edges: x, y, width, height. Plain panel: the status row under the date (centred). Media panel: the
 /// timer's pocket under the 72 DIP cover and left of the controls (from x 100), leading-aligned.
 const POWER_NOTICE: [(f32, f32, f32, f32); 2] =
-    [(12.0, 66.0, 296.0, 12.0), (16.0, 92.0, 84.0, 16.0)];
+    [(12.0, 70.0, 296.0, 14.0), (16.0, 92.0, 84.0, 16.0)];
 
 /// The power pill's text slot in pixels from the body's left and top edges.
 pub fn power_notice(media: bool, dpi: u32) -> Bounds {

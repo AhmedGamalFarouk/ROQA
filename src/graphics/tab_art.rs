@@ -87,7 +87,14 @@ pub(super) fn rail(
     let outline = notch_outline(context, &shape, radius, ears)?;
     // SAFETY: context is live between surface BeginDraw/EndDraw; brushes and geometry are scoped to this draw.
     unsafe {
-        let fill = context.CreateSolidColorBrush(&color(p.body), None)?;
+        // The names sit on this fill, so a glass theme backs it almost opaquely.
+        let Rgba(red, green, blue, alpha) = p.body;
+        let alpha = if p.rim.is_some() {
+            GLASS_BACKING
+        } else {
+            alpha
+        };
+        let fill = context.CreateSolidColorBrush(&color(Rgba(red, green, blue, alpha)), None)?;
         context.FillGeometry(&outline, &fill, None);
         // While the handle grows out of the panel its items stay inside it.
         context.PushAxisAlignedClip(&shape, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -429,18 +436,20 @@ fn weather_page(
     )?;
     let columns = if media { 4 } else { 3 };
     for (index, cell) in view.hours.iter().take(columns).enumerate() {
-        let x = 182.0 + 40.0 * index as f32;
+        // The plain panel's columns end before the gear at its bottom right corner.
+        let (first, pitch) = if media { (182.0, 40.0) } else { (178.0, 37.0) };
+        let x = first + pitch * index as f32;
         let label = font(TEXT_FONT, 10.0, normal, middle);
         draw_text(
             context,
             &cell.label,
             &label,
-            at(x, 29.0, 40.0, 12.0),
+            at(x, 29.0, pitch, 12.0),
             ink(0.6),
         )?;
         glyphs::draw(
             context,
-            at(x + 14.0, 41.0, 12.0, 12.0),
+            at(x + (pitch - 12.0) / 2.0, 41.0, 12.0, 12.0),
             Glyph::weather(cell.icon),
             ink(0.85),
         )?;
@@ -449,14 +458,14 @@ fn weather_page(
             context,
             &cell.temp,
             &value,
-            at(x, 53.0, 40.0, 13.0),
+            at(x, 53.0, pitch, 13.0),
             ink(1.0),
         )?;
     }
     if scene.notice.is_some() {
         return Ok(());
     }
-    let row = if media { 98.0 } else { 66.0 };
+    let row = if media { 98.0 } else { 70.0 };
     let footer = font(TEXT_FONT, 10.0, normal, lead);
     draw_text(
         context,
@@ -532,7 +541,7 @@ fn prayer_page(
         context,
         &view.left,
         &small,
-        at(16.0, 54.0, left - 20.0, 14.0),
+        at(16.0, 52.0, left - 20.0, 14.0),
         ink(0.7),
     )?;
     for (index, row) in view.rows.iter().enumerate() {
@@ -575,7 +584,7 @@ fn prayer_page(
     if scene.notice.is_some() || view.hijri.is_empty() {
         return Ok(());
     }
-    let row = if media { 98.0 } else { 66.0 };
+    let row = if media { 98.0 } else { 70.0 };
     draw_text(
         context,
         &view.hijri,
@@ -646,13 +655,13 @@ fn limits_page(
     let accent = |alpha: f32| with_alpha(p.accent, p.ink_alpha(alpha * reveal));
     // Columns in DIPs from the body's left (the page is 360 wide): name, then per window a bar, the percent
     // (trailing) and its reset time, each with a gap, and "as of" at the right edge.
-    const WINDOWS: [(f32, f32); 2] = [(90.0, 34.0), (186.0, 54.0)];
+    const WINDOWS: [(f32, f32); 2] = [(80.0, 34.0), (182.0, 46.0)];
     for (label, (x, _)) in ["5h used", "Weekly used"].into_iter().zip(WINDOWS) {
         draw_text(
             context,
             label,
             &font(10.0, normal, lead),
-            at(x, 27.0, 90.0, 11.0),
+            at(x, 28.0, 90.0, 11.0),
             ink(0.6),
         )?;
     }
@@ -663,7 +672,7 @@ fn limits_page(
             context,
             row.name,
             &font(11.5, DWRITE_FONT_WEIGHT_SEMI_BOLD, lead),
-            at(14.0, y, 74.0, 17.0),
+            at(14.0, y, 64.0, 17.0),
             ink(dim),
         )?;
         if let Some(why) = row.why {
@@ -686,7 +695,7 @@ fn limits_page(
                     unsafe {
                         let track = context.CreateSolidColorBrush(&ink(0.18 * dim), None)?;
                         let fill = context.CreateSolidColorBrush(&accent(dim), None)?;
-                        let bar = at(x, y + 6.0, 14.0, 4.0);
+                        let bar = at(x, y + 6.0, 24.0, 4.0);
                         context.FillRoundedRectangle(&rounded(bar, 2.0 * scale), &track);
                         let mut part = bar;
                         part.right = bar.left + (bar.right - bar.left) * f32::from(*pct) / 100.0;
@@ -696,7 +705,7 @@ fn limits_page(
                         context,
                         &format!("{pct}%"),
                         &font(11.5, normal, trail),
-                        at(x + 19.0, y, 28.0, 17.0),
+                        at(x + 28.0, y, 28.0, 17.0),
                         ink(0.9 * dim),
                     )?;
                 }
@@ -704,7 +713,7 @@ fn limits_page(
                     context,
                     "reset",
                     &font(11.5, normal, trail),
-                    at(x + 11.0, y, 36.0, 17.0),
+                    at(x + 20.0, y, 36.0, 17.0),
                     ink(0.7 * dim),
                 )?,
                 Line::Hidden => {}
@@ -713,16 +722,16 @@ fn limits_page(
                 context,
                 reset,
                 &font(10.5, normal, lead),
-                at(x + 53.0, y + 1.0, reset_width, 16.0),
+                at(x + 62.0, y + 1.0, reset_width, 16.0),
                 ink(0.6 * dim),
             )?;
         }
         draw_text(
             context,
             &row.as_of,
-            &font(9.0, normal, trail),
-            at(296.0, y + 1.0, 50.0, 16.0),
-            ink(0.5),
+            &font(10.0, normal, trail),
+            at(290.0, y + 1.0, 60.0, 16.0),
+            ink(0.55),
         )?;
     }
     Ok(())

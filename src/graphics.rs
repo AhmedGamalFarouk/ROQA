@@ -380,6 +380,9 @@ impl Canvas {
                 Some(0.14),
                 &geometry_shape(context, &outline),
             )?;
+            if p.rim.is_some() {
+                glass_scrim(context, &body, scale, motion::reveal(scene.progress), &p)?;
+            }
             // SAFETY: context is live between surface BeginDraw/EndDraw; the clip is popped below.
             unsafe {
                 context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
@@ -1087,7 +1090,8 @@ fn notice_text(
     let top = body.top + slot.y as f32 + (1.0 - scene.fx.notice) * 5.0 * scale;
     let font = Font {
         family: TEXT_FONT,
-        size: 11.0 * scale,
+        // The plain panel has the room for a larger line; the media pocket under the cover does not.
+        size: if media { 11.0 } else { 12.0 } * scale,
         weight: DWRITE_FONT_WEIGHT_NORMAL,
         designator: 1.0,
         align: if media {
@@ -2242,6 +2246,37 @@ fn line(
             &stops,
         )
     }
+}
+
+/// Alpha of the glass themes' content backing (`glass_scrim`) and of the tab handle's fill.
+const GLASS_BACKING: f32 = 0.90;
+
+/// Glass themes only: a mostly opaque body-coloured backing under the panel's content, inset from the sides and
+/// bottom so the perimeter stays translucent, and fading in with the panel (`reveal`). A busy backdrop (text,
+/// a diff) no longer shows through the page text; the pill, with no page, keeps the plain glass.
+fn glass_scrim(
+    context: &ID2D1DeviceContext,
+    body: &D2D_RECT_F,
+    scale: f32,
+    reveal: f32,
+    p: &Palette,
+) -> Result<()> {
+    let inset = 9.0 * scale;
+    // The top runs off the surface so only the lower corners round.
+    let backing = D2D_RECT_F {
+        left: body.left + inset,
+        top: body.top - 24.0 * scale,
+        right: body.right - inset,
+        bottom: body.bottom - inset,
+    };
+    let Rgba(red, green, blue, _) = p.body;
+    // SAFETY: a brush and a fill on the frame's own device context.
+    unsafe {
+        let brush = context
+            .CreateSolidColorBrush(&color(Rgba(red, green, blue, GLASS_BACKING * reveal)), None)?;
+        context.FillRoundedRectangle(&rounded(backing, 14.0 * scale), &brush);
+    }
+    Ok(())
 }
 
 /// A 1 px glass rim: `ink` at the top alpha along `span.0` fading to the bottom alpha at `span.1` (device y).

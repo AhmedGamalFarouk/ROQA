@@ -1185,3 +1185,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u5-climb`; [packet](ui-council-u5.md). Always-open labelled tab rail (selected and hover washes) replaces the dots and the hover-open handle (code deleted); dock hover pop curve spans the 260 ms.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 357 tests, locked release); 1,047,552 B (-3,584 vs 1,051,136); baseline 1,152,000 B, limit 1,175,040 unchanged.
 - **NOT RUN:** native/GUI (Chief capture); reviews paused (REVIEW NOT RUN).
+
+## U5-C Glass + notch spacing (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u5-climb`; [packet](ui-council-u5.md). Frosted/Liquid content backing (perimeter stays glass); plain panel 86 DIP, Hijri gap, weather gear gutter, wider Limits bars, larger "as of" and water notice (no "(0 ml)").
+- **Checks:** verify.ps1 PASS (fmt/clippy, 357 tests, locked release); 1,048,576 B (+1,024 vs 1,047,552); baseline 1,152,000 B, limit 1,175,040 unchanged.
+- **NOT RUN:** native/GUI (Chief capture; glass over a busy dark backdrop and text fit unverified by eye); reviews paused (REVIEW NOT RUN).
