@@ -51,9 +51,12 @@ static PAGE_HEIGHT: AtomicU16 = AtomicU16::new(0);
 pub fn set_page_height(dips: u16) {
     PAGE_HEIGHT.store(dips, Relaxed);
 }
-/// The Limits page's panel height for `rows` tool rows: the rows' 20 DIP pitch from y 38 and room for the gear.
+/// The Limits page's tool rows: the first at y 38 DIPs, `LIMITS_ROW` apart (room for the 11 DIP secondary text).
+pub const LIMITS_TOP: f32 = 38.0;
+pub const LIMITS_ROW: f32 = 22.0;
+/// The Limits page's panel height for `rows` tool rows: the rows and room for the gear under the last.
 pub fn limits_height(rows: usize) -> u16 {
-    38 + 20 * rows as u16 + 22
+    (LIMITS_TOP + LIMITS_ROW * rows as f32) as u16 + 22
 }
 /// While a notice shows the plain panel grows by `NOTICE_ROOM` DIPs for its own row; `shown` (0 to 1) follows
 /// the notice's entry tween, in permille. Set by the host before each paint, like the page height.
@@ -1208,6 +1211,28 @@ mod tests {
                 .1
                 <= NOTCH_WINDOW.1 as f32
         );
+    }
+
+    #[test]
+    fn the_limits_page_grows_with_its_rows_and_still_fits_the_window_with_the_rail() {
+        assert_eq!(limits_height(3), 126);
+        assert!(limits_height(2) < limits_height(3));
+        // Three rows, open overshoot (progress 1.07) and the rail below stay inside the notch window.
+        let shape = NOTCH_EXPANDED.height;
+        let page = f32::from(limits_height(3));
+        let tallest = NOTCH.height + (page.max(shape) - NOTCH.height) * 1.07;
+        assert!(
+            tallest
+                + rail_size(Rail {
+                    count: 6,
+                    active: 0
+                })
+                .1
+                <= NOTCH_WINDOW.1 as f32
+        );
+        // The last row ends above the gear's row.
+        let last_end = LIMITS_TOP + LIMITS_ROW * 3.0;
+        assert!(last_end <= page - 26.0 + 4.0, "{last_end}");
     }
 
     #[test]

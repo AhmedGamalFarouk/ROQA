@@ -596,6 +596,10 @@ fn prayer_page(
     )
 }
 
+/// The Limits page's secondary text (the window labels, reset times and "as of"), a step above the old 10 to
+/// 10.5; its columns were measured for it ("Sun 08:59" is about 52 DIP).
+const SECONDARY: f32 = 11.0;
+
 /// The Limits page: a Refresh button beside the title and one line per tool: name, then for each window a thin
 /// bar, `NN%` and its reset time, then "as of" (or the age when stale). A window that has reset says so, a
 /// hidden one draws nothing, and a tool without a reading says why. Stale rows are dimmed and say so in text.
@@ -657,24 +661,24 @@ fn limits_page(
     let accent = |alpha: f32| with_alpha(p.accent, p.ink_alpha(alpha * reveal));
     // Columns in DIPs from the body's left (the page is 360 wide): name, then per window a bar, the percent
     // (trailing) and its reset time, each with a gap, and "as of" at the right edge.
-    const WINDOWS: [(f32, f32); 2] = [(80.0, 34.0), (182.0, 46.0)];
+    const WINDOWS: [(f32, f32); 2] = [(80.0, 36.0), (174.0, 56.0)];
     for (label, (x, _)) in ["5h used", "Weekly used"].into_iter().zip(WINDOWS) {
         draw_text(
             context,
             label,
-            &font(10.0, normal, lead),
-            at(x, 28.0, 90.0, 11.0),
+            &font(SECONDARY, normal, lead),
+            at(x, 27.0, 90.0, 12.0),
             ink(0.6),
         )?;
     }
     for (index, row) in view.rows.iter().enumerate() {
-        let y = 38.0 + 20.0 * index as f32;
+        let y = layout::LIMITS_TOP + layout::LIMITS_ROW * index as f32;
         let dim = if row.stale { 0.5 } else { 1.0 };
         draw_text(
             context,
             row.name,
             &font(11.5, DWRITE_FONT_WEIGHT_SEMI_BOLD, lead),
-            at(14.0, y, 64.0, 17.0),
+            at(14.0, y, 64.0, 18.0),
             ink(dim),
         )?;
         if let Some(why) = row.why {
@@ -682,7 +686,7 @@ fn limits_page(
                 context,
                 why,
                 &font(11.5, normal, lead),
-                at(WINDOWS[0].0, y, 250.0, 17.0),
+                at(WINDOWS[0].0, y, 250.0, 18.0),
                 ink(0.6),
             )?;
             continue;
@@ -697,7 +701,7 @@ fn limits_page(
                     unsafe {
                         let track = context.CreateSolidColorBrush(&ink(0.18 * dim), None)?;
                         let fill = context.CreateSolidColorBrush(&accent(dim), None)?;
-                        let bar = at(x, y + 6.0, 24.0, 4.0);
+                        let bar = at(x, y + 7.0, 20.0, 4.0);
                         context.FillRoundedRectangle(&rounded(bar, 2.0 * scale), &track);
                         let mut part = bar;
                         part.right = bar.left + (bar.right - bar.left) * f32::from(*pct) / 100.0;
@@ -707,7 +711,7 @@ fn limits_page(
                         context,
                         &format!("{pct}%"),
                         &font(11.5, normal, trail),
-                        at(x + 28.0, y, 28.0, 17.0),
+                        at(x + 22.0, y, 28.0, 18.0),
                         ink(0.9 * dim),
                     )?;
                 }
@@ -715,7 +719,7 @@ fn limits_page(
                     context,
                     "reset",
                     &font(11.5, normal, trail),
-                    at(x + 20.0, y, 36.0, 17.0),
+                    at(x + 14.0, y, 36.0, 18.0),
                     ink(0.7 * dim),
                 )?,
                 Line::Hidden => {}
@@ -723,16 +727,16 @@ fn limits_page(
             draw_text(
                 context,
                 reset,
-                &font(10.5, normal, lead),
-                at(x + 62.0, y + 1.0, reset_width, 16.0),
+                &font(SECONDARY, normal, lead),
+                at(x + 52.0, y + 1.0, reset_width, 17.0),
                 ink(0.6 * dim),
             )?;
         }
         draw_text(
             context,
             &row.as_of,
-            &font(10.0, normal, trail),
-            at(290.0, y + 1.0, 60.0, 16.0),
+            &font(SECONDARY, normal, trail),
+            at(286.0, y + 1.0, 66.0, 17.0),
             ink(0.55),
         )?;
     }
