@@ -26,7 +26,7 @@ impl Drop for OwnedHandle {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Quit,
     ShowNotch,
@@ -199,4 +199,44 @@ unsafe fn sid_text(sid: windows::Win32::Security::PSID) -> Result<String> {
         let _ = LocalFree(Some(HLOCAL(text.0.cast())));
     }
     converted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_parsing_and_names() {
+        assert_eq!(Command::parse("--quit").unwrap(), Command::Quit);
+        assert_eq!(Command::parse("--show-notch").unwrap(), Command::ShowNotch);
+        assert_eq!(Command::parse("--hide-notch").unwrap(), Command::HideNotch);
+        assert_eq!(Command::parse("--show-dock").unwrap(), Command::ShowDock);
+        assert_eq!(Command::parse("--hide-dock").unwrap(), Command::HideDock);
+        assert_eq!(
+            Command::parse("--show-picker").unwrap(),
+            Command::ShowPicker
+        );
+        assert_eq!(
+            Command::parse("--show-settings").unwrap(),
+            Command::ShowSettings
+        );
+
+        assert!(Command::parse("quit").is_err());
+        assert!(Command::parse("--unknown").is_err());
+        assert!(Command::parse("").is_err());
+    }
+
+    #[test]
+    fn command_all_includes_quit_first() {
+        assert_eq!(Command::ALL[0], Command::Quit);
+        assert_eq!(Command::Quit.name(), "quit");
+    }
+
+    #[test]
+    fn object_name_format() {
+        let name_u16 = object_name("quit").unwrap();
+        let name = String::from_utf16(&name_u16[..name_u16.len() - 1]).unwrap();
+        assert!(name.starts_with("Local\\ROQA."));
+        assert!(name.ends_with(".quit"));
+    }
 }
