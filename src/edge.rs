@@ -775,10 +775,9 @@ impl Slider {
                     dim: muted || unsupported,
                     caption: if unsupported {
                         UNSUPPORTED.to_owned()
-                    } else if self.drag.is_some() {
-                        format!("{percent}%")
                     } else {
-                        String::new()
+                        // The level reads at rest too, not only while dragging.
+                        format!("{percent}%")
                     },
                     unsupported,
                 }

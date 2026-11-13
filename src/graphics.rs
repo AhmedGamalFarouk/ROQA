@@ -35,7 +35,7 @@ use windows::Win32::{
             D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
             D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateDevice, ID2D1Bitmap1, ID2D1Brush,
             ID2D1DeviceContext, ID2D1GradientStopCollection1, ID2D1LinearGradientBrush,
-            ID2D1PathGeometry, ID2D1RadialGradientBrush,
+            ID2D1PathGeometry, ID2D1RadialGradientBrush, ID2D1SolidColorBrush,
         },
         Direct3D::D3D_DRIVER_TYPE_HARDWARE,
         Direct3D11::{
@@ -215,6 +215,8 @@ pub struct NotchScene<'a> {
     pub prayer: Option<&'a crate::prayer_tab::View>,
     /// The Limits page's rows; `Some` only while that page shows.
     pub limits: Option<&'a crate::limits::View>,
+    /// The page a switch is leaving, drawn fading out beside the new one while `fx.page` runs.
+    pub leaving: Option<Tab>,
     pub fx: Fx,
 }
 
@@ -236,7 +238,7 @@ pub struct ShelfSlot<'a> {
 }
 
 /// Dock material (docs/design/roqa-visual-spec.md, colours from the theme): bar, ink-alpha hover fill, whole-pixel icon lift.
-const ICON_LIFT_DIPS: f32 = 4.0;
+const ICON_LIFT_DIPS: f32 = 5.0;
 const TEXT_FONT: PCWSTR = w!("Segoe UI Variable Text");
 const DISPLAY_FONT: PCWSTR = w!("Segoe UI Variable Display");
 /// The time's digits lead; "pm" and similar designators sit smaller beside them.
@@ -638,6 +640,7 @@ impl Canvas {
             glass.place(span);
             shape(&glass.body, None);
             shape(&glass.spec, None);
+            shape(&glass.edge, Some(1.0));
             shape(&glass.rim, Some(1.0));
             return Ok(());
         }
@@ -648,13 +651,17 @@ impl Canvas {
                 None,
             );
             match (p.rim, hairline) {
-                (Some(rim), _) => shape(
-                    &rim_brush(context, p.ink, rim, (span.top, span.bottom))?.into(),
-                    Some(1.0),
-                ),
+                (Some(rim), _) => {
+                    let edge = context.CreateSolidColorBrush(&rgba(0, 0, 0, GLASS_EDGE), None)?;
+                    shape(&edge.into(), Some(1.0));
+                    shape(
+                        &rim_brush(context, p.ink, rim, (span.top, span.bottom))?.into(),
+                        Some(1.0),
+                    )
+                }
                 (None, Some(alpha)) => shape(
                     &context
-                        .CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(alpha)), None)?
+                        .CreateSolidColorBrush(&with_alpha(p.ink, p.edge_alpha(alpha)), None)?
                         .into(),
                     Some(1.0),
                 ),
@@ -901,8 +908,13 @@ fn notch_text(
         tab_art::faded(context, 1.0 - reveal, || {
             media_page(context, scene, body, scale, art, status, p)
         })?;
+        if let Some(old) = scene.leaving.filter(|&old| old != Tab::Media) {
+            tab_art::faded(context, 1.0 - scene.fx.page, || {
+                tab_art::page(context, scene, (old, true), body, scale, reveal, p)
+            })?;
+        }
         tab_art::faded(context, scene.fx.page, || {
-            tab_art::page(context, scene, body, scale, reveal, p)
+            tab_art::page(context, scene, (scene.tab, false), body, scale, reveal, p)
         })?;
         // SAFETY: the page may have left a slide transform on the live context.
         unsafe { context.SetTransform(&Matrix3x2::identity()) };
@@ -2254,6 +2266,8 @@ struct Glass {
     body: ID2D1LinearGradientBrush,
     spec: ID2D1RadialGradientBrush,
     rim: ID2D1LinearGradientBrush,
+    /// A dark 1 px edge under the rim, so the glass keeps an outline over a bright page.
+    edge: ID2D1SolidColorBrush,
 }
 impl Glass {
     fn place(&self, span: &D2D_RECT_F) {
@@ -2273,6 +2287,9 @@ impl Glass {
         }
     }
 }
+
+/// Alpha of the dark edge under a glass rim.
+const GLASS_EDGE: f32 = 0.30;
 
 fn bake(context: &ID2D1DeviceContext, p: &Palette, sheen: &Sheen) -> Result<Glass> {
     let (lit, dim) = p.rim.unwrap_or_default();
@@ -2296,6 +2313,8 @@ fn bake(context: &ID2D1DeviceContext, p: &Palette, sheen: &Sheen) -> Result<Glas
             (0.4, 1.0),
             &[(0.0, with_alpha(p.ink, lit)), (1.0, with_alpha(p.ink, dim))],
         )?,
+        // SAFETY: a brush on the frame's own device context.
+        edge: unsafe { context.CreateSolidColorBrush(&rgba(0, 0, 0, GLASS_EDGE), None)? },
         // SAFETY: the properties are local values the call copies.
         spec: unsafe {
             context.CreateRadialGradientBrush(
@@ -2506,6 +2525,7 @@ mod media_tests {
             weather: None,
             prayer: None,
             limits: None,
+            leaving: None,
             fx: Fx::REST,
         };
         let clock = clock_width(time, progress, dpi);
@@ -2543,6 +2563,7 @@ mod media_tests {
                 weather: None,
                 prayer: None,
                 limits: None,
+                leaving: None,
                 fx: Fx::REST,
             };
             let clock = clock_width("9:50 pm", progress, 96);
@@ -2788,6 +2809,7 @@ mod media_tests {
                 weather: None,
                 prayer: None,
                 limits: None,
+                leaving: None,
                 fx: Fx::REST,
             };
             meter_bars(&scene, &body(96, progress))
@@ -2847,6 +2869,7 @@ mod media_tests {
                     weather: None,
                     prayer: None,
                     limits: None,
+                    leaving: None,
                     fx: Fx::REST,
                 };
                 let (bars, _) = meter_bars(&scene, &body(dpi, 1.0)).unwrap();
@@ -2894,6 +2917,7 @@ mod media_tests {
             weather: None,
             prayer: None,
             limits: None,
+            leaving: None,
             fx: Fx::REST,
         };
         let radius = |scene: &NotchScene| volume_bar(scene, &body(96, 1.0)).unwrap().thumb.2;

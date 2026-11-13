@@ -533,6 +533,8 @@ struct Pal {
     content: u32,
     card: u32,
     line: u32,
+    /// The 1 px frame round an edit or a drop-down: a step above the card, never the theme's bright border.
+    field: u32,
     sel: u32,
     text: u32,
     dim: u32,
@@ -554,6 +556,8 @@ struct Paint {
     labels: Vec<(RECT, &'static str)>,
     /// A card and the y of each divider inside it.
     cards: Vec<(RECT, Vec<i32>)>,
+    /// The edits' and drop-downs' boxes, which the parent frames.
+    fields: Vec<RECT>,
 }
 thread_local! {
     static PAINT: RefCell<Option<Paint>> = const { RefCell::new(None) };
@@ -637,6 +641,7 @@ fn palette() -> Pal {
             content: window,
             card: window,
             line: text,
+            field: text,
             sel: select,
             text,
             dim: system(COLOR_GRAYTEXT),
@@ -655,6 +660,7 @@ fn palette() -> Pal {
         content: pick(0x1d1d1f, 0xf6f6f8),
         card: pick(0x28282a, 0xffffff),
         line: pick(0x333336, 0xe4e4e8),
+        field: pick(0x4a4a4e, 0xc4c4ca),
         sel: pick(0x2d2d30, 0xffffff),
         text,
         dim: pick(0x8e8e93, 0x6a6b72),
@@ -744,6 +750,9 @@ fn paint(dc: HDC, window: HWND, p: &Paint) {
                 };
                 fill(dc, line, p.pal.line);
             }
+        }
+        for field in &p.fields {
+            round(dc, *field, px(5), p.pal.card, p.pal.field);
         }
         // The footer is its own strip: scrolled paint never reaches it, and a divider marks its edge.
         let foot = RECT {
@@ -1280,7 +1289,7 @@ impl SettingsWindow {
                     initial,
                     id,
                     ES_AUTOHSCROLL as u32 | clip | extra,
-                    WS_EX_CLIENTEDGE,
+                    flat,
                 )?
             }
             Kind::Btn => {
@@ -1978,6 +1987,7 @@ impl SettingsWindow {
                     title: geometry.title,
                     labels: geometry.labels,
                     cards: geometry.cards,
+                    fields: geometry.fields,
                 }))
             });
         }
@@ -2010,6 +2020,7 @@ impl SettingsWindow {
             title: (RECT::default(), PAGES[self.page].name),
             labels: Vec::new(),
             cards: Vec::new(),
+            fields: Vec::new(),
         };
         let mut y = px(GUTTER) - self.scroll;
         geometry.title.0 = RECT {
@@ -2040,7 +2051,10 @@ impl SettingsWindow {
                 if n > 0 {
                     lines.push(y);
                 }
-                y += self.row(item, scale, (left + px(14), right - px(14)), y, at)?;
+                let (height, field) =
+                    self.row(item, scale, (left + px(14), right - px(14)), y, at)?;
+                geometry.fields.extend(field);
+                y += height;
             }
             if self.page == 0 && index == MAP_CARD {
                 y += self.map(scale, (left + px(14), right - px(14)), y, at.1)?;
@@ -2091,7 +2105,7 @@ impl SettingsWindow {
         (a, b): (i32, i32),
         y: i32,
         (dc, view): (HDC, i32),
-    ) -> Result<i32> {
+    ) -> Result<(i32, Option<RECT>)> {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         // The wrapped height of a static's text at width `w` (0 when there is none).
         let lines = |h: HWND, w: i32| {
@@ -2129,7 +2143,7 @@ impl SettingsWindow {
                 };
                 put(item.h, a, y + top, b - a, height - top)?;
                 put(item.cap, a + px(22), y + px(30), w, cap)?;
-                Ok(height)
+                Ok((height, None))
             }
             Kind::Combo(w) | Kind::Edit(w) => {
                 let w = px(w).min((b - a) / 2);
@@ -2145,7 +2159,20 @@ impl SettingsWindow {
                 } else {
                     px(28)
                 };
-                put(item.h, b - w, y + (height - px(28)) / 2, w, drop)?;
+                // The box is framed by the parent: an edit sits inside it with side margins, a drop-down is
+                // clipped one pixel inside so the theme's own bright border stays hidden.
+                let boxed = RECT {
+                    left: b - w,
+                    top: y + (height - px(28)) / 2,
+                    right: b,
+                    bottom: y + (height - px(28)) / 2 + px(28),
+                };
+                if matches!(item.kind, Kind::Edit(_)) {
+                    put(item.h, b - w + px(7), boxed.top + px(5), w - px(14), px(18))?;
+                } else {
+                    put(item.h, b - w, boxed.top, w, drop)?;
+                    inset(item.h, w, px(28), boxed.top, view);
+                }
                 let top = if c > 0 {
                     y + px(8)
                 } else {
@@ -2153,7 +2180,7 @@ impl SettingsWindow {
                 };
                 put(item.label, a, top, side, l)?;
                 put(item.cap, a, top + l, side, c)?;
-                Ok(height)
+                Ok((height, Some(boxed)))
             }
             Kind::Btn => {
                 let side = b - a - px(178);
@@ -2167,11 +2194,11 @@ impl SettingsWindow {
                     px(28),
                 )?;
                 put(item.label, a, y + (height - l) / 2, side, l)?;
-                Ok(height)
+                Ok((height, None))
             }
             Kind::Note => {
                 put(item.label, a, y + px(10), b - a, px(20))?;
-                Ok(px(40))
+                Ok((px(40), None))
             }
         }
     }
@@ -2191,10 +2218,26 @@ fn clip(h: HWND, top: i32, height: i32, width: i32, view: i32) {
     }
 }
 
+/// A drop-down's visible part: its closed box (`height` tall, `top` in the client) less a 1 px border, rounded,
+/// and cut at the footer like `clip`. The dark card shows through the ring that is left.
+fn inset(h: HWND, width: i32, height: i32, top: i32, view: i32) {
+    let shown = (view - top).clamp(0, height);
+    // SAFETY: our own live child; the system owns a region once it is set.
+    unsafe {
+        let region = if shown >= height {
+            CreateRoundRectRgn(1, 1, width, height, 8, 8)
+        } else {
+            CreateRectRgn(1, 1, width, shown.max(1))
+        };
+        SetWindowRgn(h, Some(region), true);
+    }
+}
+
 struct Geometry {
     title: (RECT, &'static str),
     labels: Vec<(RECT, &'static str)>,
     cards: Vec<(RECT, Vec<i32>)>,
+    fields: Vec<RECT>,
 }
 
 impl Drop for SettingsWindow {

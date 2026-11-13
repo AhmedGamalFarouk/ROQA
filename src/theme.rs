@@ -135,7 +135,7 @@ impl Theme {
                 on_ink: (255, 255, 255),
                 glyph: (52, 56, 64),
                 tile: Rgba(198, 202, 209, 1.0),
-                shadow: 0.35,
+                shadow: 0.55,
                 rim: None,
                 sheen: None,
             },
@@ -154,32 +154,32 @@ impl Theme {
             },
             Self::Frosted => Palette {
                 high_contrast: None,
-                body: Rgba(22, 28, 40, 0.82),
-                dock_hover: Rgba(22, 28, 40, 0.90),
+                body: Rgba(16, 20, 32, 0.74),
+                dock_hover: Rgba(16, 20, 32, 0.88),
                 ink: (255, 255, 255),
                 accent: (255, 255, 255),
                 on_ink: (10, 14, 22),
                 glyph: (235, 240, 250),
                 tile: Rgba(255, 255, 255, 0.16),
                 shadow: 0.0,
-                rim: Some((0.55, 0.10)),
+                rim: Some((0.70, 0.14)),
                 sheen: None,
             },
             Self::Liquid => Palette {
                 high_contrast: None,
-                body: Rgba(22, 30, 48, 0.86),
-                dock_hover: Rgba(22, 30, 48, 0.92),
+                body: Rgba(16, 24, 42, 0.76),
+                dock_hover: Rgba(16, 24, 42, 0.88),
                 ink: (255, 255, 255),
                 accent: (255, 255, 255),
                 on_ink: (10, 14, 22),
                 glyph: (235, 240, 250),
                 tile: Rgba(255, 255, 255, 0.16),
                 shadow: 0.0,
-                rim: Some((0.80, 0.10)),
+                rim: Some((0.95, 0.16)),
                 sheen: Some(Sheen {
-                    top: Rgba(36, 48, 76, 0.86),
-                    bottom: Rgba(30, 42, 66, 0.86),
-                    spec: 0.14,
+                    top: Rgba(24, 32, 56, 0.78),
+                    bottom: Rgba(14, 20, 38, 0.74),
+                    spec: 0.16,
                 }),
             },
         }
@@ -261,9 +261,17 @@ impl Palette {
     pub fn ink_alpha(&self, alpha: f32) -> f32 {
         if self.high_contrast.is_some() && alpha > 0.0 {
             1.0
+        } else if self.ink.0 < 128 {
+            // Dark ink on a light body (Light): faint text and glyphs read weaker there, so lift the curve.
+            alpha.powf(0.6)
         } else {
             alpha
         }
+    }
+    /// The 1 px edge alpha of a flat body: `base` on dark bodies, firmer on a light one that would merge
+    /// with a white page.
+    pub fn edge_alpha(&self, base: f32) -> f32 {
+        if self.ink.0 < 128 { base * 2.6 } else { base }
     }
     /// A fill: the accent, or when `dim` (muted) the system grey-text colour in high contrast, where the
     /// accent is ink anyway.
@@ -355,6 +363,14 @@ mod tests {
         assert_eq!(palette.ink_alpha(0.6), 1.0);
         assert_eq!(palette.ink_alpha(0.0), 0.0);
         assert_eq!((palette.shadow, palette.rim), (0.0, None));
+    }
+    #[test]
+    fn light_lifts_faint_ink_and_edge_while_dark_themes_keep_them() {
+        let (light, classic) = (Theme::Light.palette(), Theme::Classic.palette());
+        assert!(light.ink_alpha(0.55) > 0.65 && light.ink_alpha(0.55) < 0.8);
+        assert_eq!((light.ink_alpha(0.0), light.ink_alpha(1.0)), (0.0, 1.0));
+        assert_eq!(classic.ink_alpha(0.55), 0.55);
+        assert!(light.edge_alpha(0.10) > 0.2 && classic.edge_alpha(0.10) == 0.10);
     }
     #[test]
     fn high_contrast_keeps_track_and_disabled_distinct_from_ink() {

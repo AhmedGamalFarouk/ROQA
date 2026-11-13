@@ -281,6 +281,9 @@ struct Surface {
     /// Notch: the page last drawn (its tab index), the slide and fade of a switch to the current one (1 at
     /// rest) and its direction, and the notice's entry with whether one showed.
     page_at: usize,
+    /// The page a switch left, while its slide runs, and the last notice text (it fades out after it ends).
+    page_from: Option<Tab>,
+    last_notice: String,
     page_dir: f32,
     page_fx: Tween,
     notice_fx: Tween,
@@ -395,6 +398,8 @@ impl Surface {
             grip: Grip::default(),
             volume_fill: Tween::rest(0.0),
             page_at: 0,
+            page_from: None,
+            last_notice: String::new(),
             page_dir: 1.0,
             page_fx: Tween::rest(1.0),
             notice_fx: Tween::rest(1.0),
@@ -574,21 +579,40 @@ impl Surface {
             && self.visible
         {
             self.page_dir = dir;
+            self.page_from = Tab::ALL.get(self.page_at).copied();
             self.page_fx = Tween::rest(0.0);
             self.page_fx
                 .retarget(1.0, motion::PAGE_TIME, motion::EASE_OUT);
             self.live = true;
         }
         self.page_at = page.index();
+        if let Some(text) = notice
+            && self.last_notice != text
+        {
+            self.last_notice = text.to_owned();
+        }
         if notice.is_some() != self.notice_on {
             self.notice_on = !self.notice_on;
-            if self.notice_on && self.visible {
-                self.notice_fx = Tween::rest(0.0);
+            if self.visible {
+                // Fades in, and out again when it ends (the text stays in `last_notice` for that).
+                let (to, from) = if self.notice_on {
+                    (1.0, 0.0)
+                } else {
+                    (0.0, 1.0)
+                };
+                self.notice_fx = Tween::rest(from);
                 self.notice_fx
-                    .retarget(1.0, motion::PAGE_TIME, motion::EASE_OUT);
+                    .retarget(to, motion::PAGE_TIME, motion::EASE_OUT);
                 self.live = true;
+            } else {
+                self.notice_fx = Tween::rest(if self.notice_on { 1.0 } else { 0.0 });
             }
         }
+        if !self.page_fx.running(now) {
+            self.page_from = None;
+        }
+        let fading_out = notice.is_none() && self.notice_fx.running(now);
+        let notice = notice.or(fading_out.then_some(self.last_notice.as_str()));
         let level = audio.level().map_or(0.0, |level| f32::from(level.percent));
         if self.grip.drag {
             self.volume_fill = Tween::rest(level); // the thumb follows the pointer without lag
@@ -666,9 +690,16 @@ impl Surface {
             privacy: pages.dots.alpha(),
             grip: self.grip,
             volume_fill,
-            weather: (page == Tab::Weather).then_some(&pages.weather),
-            prayer: (page == Tab::Prayer).then_some(&pages.prayer),
-            limits: (page == Tab::Limits).then_some(&pages.limits),
+            weather: [Some(page), self.page_from]
+                .contains(&Some(Tab::Weather))
+                .then_some(&pages.weather),
+            prayer: [Some(page), self.page_from]
+                .contains(&Some(Tab::Prayer))
+                .then_some(&pages.prayer),
+            limits: [Some(page), self.page_from]
+                .contains(&Some(Tab::Limits))
+                .then_some(&pages.limits),
+            leaving: self.page_from,
             fx: Fx {
                 page: self.page_fx.value(now),
                 dir: self.page_dir,
@@ -967,6 +998,12 @@ fn edit_shelf(
         }
     }
     changed
+}
+
+/// The DPI icons are extracted for: the densest dock's, else the densest notch's (a shelf needs icons with
+/// the dock off), else none.
+fn icon_dpi(dock: Option<u32>, notch: Option<u32>) -> Option<u32> {
+    dock.or(notch)
 }
 
 struct Desktop {
@@ -2402,15 +2439,17 @@ impl Desktop {
             .unwrap_or(0)
     }
     /// The one icon size the worker's cache holds: the densest dock's. The shelf shares it (a different size
-    /// would empty the cache on every switch) and draws it smaller; none without a dock.
+    /// would empty the cache on every switch) and draws it smaller; a notch-only desktop uses the notch's DPI.
     fn icon_size(&self) -> Option<u32> {
-        let densest = self
-            .surfaces
-            .iter()
-            .filter(|s| s.kind() == SurfaceKind::Dock)
-            .map(|s| s.dpi)
-            .max();
-        densest.map(|dpi| dock::px(dock::ICON_DIPS, dpi) as u32)
+        let densest = |kind| {
+            self.surfaces
+                .iter()
+                .filter(|s| s.kind() == kind)
+                .map(|s| s.dpi)
+                .max()
+        };
+        icon_dpi(densest(SurfaceKind::Dock), densest(SurfaceKind::Notch))
+            .map(|dpi| dock::px(dock::ICON_DIPS, dpi) as u32)
     }
     /// One icon set for every dock, extracted for the densest dock; lower-DPI docks scale it down.
     // shortcut: mixed-DPI docks resample icons; keep one cache size per DPI if that looks soft on hardware.
@@ -2832,9 +2871,10 @@ impl Desktop {
                 DropEvent::Files(_) => {}
             }
         }
-        let wanted = self.shelf.stale || self.icons_arrived;
+        // An arrival while the panel is shut must survive until it opens: remember it as stale.
+        self.shelf.stale |= self.icons_arrived;
         if self.shelf.shelf.is_empty()
-            || !wanted
+            || !self.shelf.stale
             || self.page() != Tab::Shelf
             || !self.surfaces.iter().any(Surface::expanded)
         {
@@ -3842,6 +3882,14 @@ fn remember_fullscreen(
 mod clock_wait_tests {
     use super::*;
     use crate::window_model::Identity;
+
+    #[test]
+    fn icons_are_sized_for_the_dock_else_the_notch() {
+        // A notch-only desktop (dock off) still gets shelf icons.
+        assert_eq!(icon_dpi(Some(144), Some(96)), Some(144));
+        assert_eq!(icon_dpi(None, Some(96)), Some(96));
+        assert_eq!(icon_dpi(None, None), None);
+    }
 
     #[test]
     fn click_mode_swells_a_closed_pill_and_never_shrinks_an_open_one() {

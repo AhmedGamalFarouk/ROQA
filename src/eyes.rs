@@ -80,17 +80,17 @@ pub struct Eye {
 }
 
 /// Distance between the two eyes' centres, and the base capsule.
-pub const GAP: f32 = 22.0;
-const BASE: (f32, f32) = (7.5, 15.0);
+pub const GAP: f32 = 25.0;
+const BASE: (f32, f32) = (9.5, 18.0);
 
 /// Design C's shapes: (width factor, height factor, dy, top lid, bottom lid) per mood, then the pose's
 /// factors on top (`blsq`: wide and flat at the squash, tall and thin at the stretch).
 pub fn eye(mood: Mood, pose: Pose) -> Eye {
     let (sx, sy, dy, top, bottom) = match mood {
         Mood::Idle => (1.0, 1.0, 0.0, 0.0, 0.0),
-        Mood::Happy => (1.22, 0.78, -0.6, 0.0, 0.35),
+        Mood::Happy => (1.3, 0.72, -0.6, 0.0, 0.4),
         Mood::Sleepy => (1.2, 0.5, 2.0, 0.2, 0.0),
-        Mood::Surprised => (0.85, 1.45, -1.0, 0.0, 0.0),
+        Mood::Surprised => (0.85, 1.3, -1.0, 0.0, 0.0),
         Mood::Adhan => (1.2, 0.9, 0.0, 0.25, 0.25),
         Mood::Rain => (0.9, 1.0, 2.0, 0.4, 0.0),
     };
@@ -131,8 +131,8 @@ const BLINK: [Step; 10] = [
 const LOOK: [Step; 11] = [
     (0.3, 0.0, false, R, 60),
     (0.7, 0.0, false, R, 60),
-    (1.0, -3.0, false, R, 350),
-    (1.0, 3.0, false, R, 350),
+    (1.0, -4.0, false, R, 350),
+    (1.0, 4.0, false, R, 350),
     (1.0, 0.0, false, ST, 50),
     (1.0, 0.0, false, SQ, 90),
     (1.0, 0.0, false, ST, 60),
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn poses_squash_wide_and_flat_and_stretch_tall() {
         let rest = eye(Mood::Idle, Pose::Rest);
-        assert_eq!((rest.w, rest.h), (7.5, 15.0));
+        assert_eq!((rest.w, rest.h), (9.5, 18.0));
         let squash = eye(Mood::Idle, Pose::Squash);
         assert!(squash.w > rest.w && squash.h < rest.h / 5.0);
         let stretch = eye(Mood::Idle, Pose::Stretch);

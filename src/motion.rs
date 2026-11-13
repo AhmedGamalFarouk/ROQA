@@ -59,16 +59,17 @@ pub const CLOSE: Curve = Curve::Spring {
 };
 /// Small state feedback (dock hover, hover-intent swell).
 pub const EASE_OUT: Curve = Curve::Bezier(0.2, 0.9, 0.3, 1.0);
-/// Dock hover pop: rises about 10 % past its rest and settles.
-pub const POP: Curve = Curve::Bezier(0.25, 1.6, 0.4, 1.0);
+/// Dock hover pop: a steady rise that lands about 5 % past its rest and settles. The earlier (0.25, 1.6)
+/// start finished its rise in ~40 ms, which read as a one-frame jump.
+pub const POP: Curve = Curve::Bezier(0.3, 0.8, 0.5, 1.2);
 /// A tab switch (slide and fade) and a notice's entry.
 pub const PAGE_TIME: Duration = Duration::from_millis(240);
 pub const OPEN_TIME: Duration = Duration::from_millis(500);
 pub const CLOSE_TIME: Duration = Duration::from_millis(560);
 /// Hover intent: the pill swells slightly at once, then opens only if the pointer stays this long.
 pub const INTENT_TIME: Duration = Duration::from_millis(320);
-pub const HOVER_IN_TIME: Duration = Duration::from_millis(160);
-pub const HOVER_OUT_TIME: Duration = Duration::from_millis(180);
+pub const HOVER_IN_TIME: Duration = Duration::from_millis(260);
+pub const HOVER_OUT_TIME: Duration = Duration::from_millis(220);
 
 /// The slide direction (+1 towards a later tab, -1 an earlier one) of a switch to `page` from `last` while
 /// the panel is `open`; none when the page is unchanged or the panel is not open, so an idle notch starts no
@@ -221,6 +222,12 @@ mod tests {
         assert!(close > 1.05 && close < 1.10, "close undershoot {close}");
         let pop = peak(POP, HOVER_IN_TIME);
         assert!(pop > 1.03 && pop < 1.2, "hover pop {pop}");
+        // Spread over frames: no ~16 ms frame (12 samples of 1.3 ms) covers a quarter of the travel.
+        assert!(
+            samples(POP, HOVER_IN_TIME)
+                .windows(13)
+                .all(|w| w[12] - w[0] < 0.25)
+        );
         assert!((samples(POP, HOVER_IN_TIME)[200] - 1.0).abs() < 0.01);
         let ease = samples(EASE_OUT, HOVER_IN_TIME);
         assert!(ease.windows(2).all(|pair| pair[1] >= pair[0] - 1e-5) && ease[100] > 0.8);

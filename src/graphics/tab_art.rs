@@ -198,12 +198,13 @@ fn items(
     Ok(())
 }
 
-/// A page other than Media: its title, a small clock at the top right and its content, all at `reveal` so
+/// A page other than Media (`tab`, and whether it is the one leaving a switch): its title, a small clock at the top right and its content, all at `reveal` so
 /// they arrive as the pill's content leaves. The Timer page shows the soonest countdown big; the Shelf page
 /// shows the shelf's slots.
 pub(super) fn page(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
+    (tab, leaving): (Tab, bool),
     body: &D2D_RECT_F,
     scale: f32,
     reveal: f32,
@@ -231,14 +232,19 @@ pub(super) fn page(
     // beat later (the stagger).
     let slide = |lag: f32| {
         let t = ((scene.fx.page - lag) / (1.0 - lag)).clamp(0.0, 1.0);
-        let offset = scene.fx.dir * 18.0 * scale * (1.0 - motion::smooth(t));
+        // The page that leaves slides out the other way, as the new one comes in.
+        let offset = if leaving {
+            -scene.fx.dir * 18.0 * scale * motion::smooth(t)
+        } else {
+            scene.fx.dir * 18.0 * scale * (1.0 - motion::smooth(t))
+        };
         // SAFETY: a transform on the frame's live context; the notch resets it after the page.
         unsafe { context.SetTransform(&Matrix3x2::translation(offset, 0.0)) };
     };
     slide(0.0);
-    let title = match scene.weather.filter(|_| scene.tab == Tab::Weather) {
+    let title = match scene.weather.filter(|_| tab == Tab::Weather) {
         Some(view) => view.title.as_str(),
-        None => scene.tab.name(),
+        None => tab.name(),
     };
     draw_text(
         context,
@@ -267,7 +273,7 @@ pub(super) fn page(
         ink(0.6),
     )?;
     slide(0.25);
-    match scene.tab {
+    match tab {
         Tab::Timer => match scene.timer.filter(|view| !view.done) {
             Some(view) => draw_text(
                 context,
@@ -668,48 +674,49 @@ fn limits_page(
         ink(0.8),
     )?;
     let accent = |alpha: f32| with_alpha(p.accent, p.ink_alpha(alpha * reveal));
-    for (label, x) in [("5h used", 72.0), ("Weekly used", 162.0)] {
+    // Columns in DIPs from the body's left (the page is 360 wide): name, then per window a bar, the percent
+    // (trailing) and its reset time, each with a gap, and "as of" at the right edge.
+    const WINDOWS: [(f32, f32); 2] = [(90.0, 34.0), (186.0, 54.0)];
+    for (label, (x, _)) in ["5h used", "Weekly used"].into_iter().zip(WINDOWS) {
         draw_text(
             context,
             label,
-            &font(9.5, normal, lead),
-            at(x, 26.0, 86.0, 12.0),
+            &font(10.0, normal, lead),
+            at(x, 27.0, 90.0, 11.0),
             ink(0.6),
         )?;
     }
     for (index, row) in view.rows.iter().enumerate() {
-        let y = 38.0 + 17.0 * index as f32;
+        let y = 38.0 + 20.0 * index as f32;
         let dim = if row.stale { 0.5 } else { 1.0 };
         draw_text(
             context,
             row.name,
-            &font(10.5, DWRITE_FONT_WEIGHT_SEMI_BOLD, lead),
-            at(16.0, y, 54.0, 16.0),
+            &font(11.5, DWRITE_FONT_WEIGHT_SEMI_BOLD, lead),
+            at(14.0, y, 74.0, 17.0),
             ink(dim),
         )?;
         if let Some(why) = row.why {
             draw_text(
                 context,
                 why,
-                &font(10.5, normal, lead),
-                at(72.0, y, 230.0, 16.0),
+                &font(11.5, normal, lead),
+                at(WINDOWS[0].0, y, 250.0, 17.0),
                 ink(0.6),
             )?;
             continue;
         }
-        // Each window: bar (20), percent (24), reset time; the weekly one has the day too.
-        for (line, x, reset_width) in [(&row.h5, 72.0, 36.0), (&row.wk, 162.0, 52.0)] {
+        for (line, (x, reset_width)) in [&row.h5, &row.wk].into_iter().zip(WINDOWS) {
             let (Line::Used { reset, .. } | Line::Reset { reset }) = line else {
                 continue;
             };
-            let after = x + 51.0;
             match line {
                 Line::Used { pct, .. } => {
                     // SAFETY: brushes and fills on the frame's own device context.
                     unsafe {
                         let track = context.CreateSolidColorBrush(&ink(0.18 * dim), None)?;
                         let fill = context.CreateSolidColorBrush(&accent(dim), None)?;
-                        let bar = at(x, y + 6.0, 22.0, 4.0);
+                        let bar = at(x, y + 6.0, 14.0, 4.0);
                         context.FillRoundedRectangle(&rounded(bar, 2.0 * scale), &track);
                         let mut part = bar;
                         part.right = bar.left + (bar.right - bar.left) * f32::from(*pct) / 100.0;
@@ -718,16 +725,16 @@ fn limits_page(
                     draw_text(
                         context,
                         &format!("{pct}%"),
-                        &font(10.5, normal, trail),
-                        at(x + 23.0, y, 28.0, 16.0),
+                        &font(11.5, normal, trail),
+                        at(x + 19.0, y, 28.0, 17.0),
                         ink(0.9 * dim),
                     )?;
                 }
                 Line::Reset { .. } => draw_text(
                     context,
                     "reset",
-                    &font(10.5, normal, lead),
-                    at(x, y, 50.0, 16.0),
+                    &font(11.5, normal, trail),
+                    at(x + 11.0, y, 36.0, 17.0),
                     ink(0.7 * dim),
                 )?,
                 Line::Hidden => {}
@@ -735,17 +742,17 @@ fn limits_page(
             draw_text(
                 context,
                 reset,
-                &font(10.0, normal, lead),
-                at(after, y, reset_width, 16.0),
-                ink(0.55 * dim),
+                &font(10.5, normal, lead),
+                at(x + 53.0, y + 1.0, reset_width, 16.0),
+                ink(0.6 * dim),
             )?;
         }
         draw_text(
             context,
             &row.as_of,
-            &font(8.5, normal, trail),
-            at(256.0, y, 52.0, 16.0),
-            ink(0.45),
+            &font(9.0, normal, trail),
+            at(296.0, y + 1.0, 50.0, 16.0),
+            ink(0.5),
         )?;
     }
     Ok(())

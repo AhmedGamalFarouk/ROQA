@@ -1167,3 +1167,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Checks:** verify.ps1 PASS (fmt/clippy, 355 tests, locked release); 1,035,264 B (-115,712 B vs 1,150,976); baseline still 1,152,000 B (not changed; user may lower).
 - **Dropped scripts:** picker-smoke.ps1, packaged-hung-check.ps1 (UIA and key injection).
 - **NOT RUN:** native/GUI; reviews paused (REVIEW NOT RUN).
+
+## U4 Polish (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u4-polish`; [packet](ui-council-u4.md). Shelf icons without a dock, Limits columns/size, eased dock hover, framed Settings edits/combos, Light and glass edges, bigger eyes, notice and page exit fades, slider percent at rest.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 357 tests, locked release); 1,043,968 B (+8,704 vs 1,035,264); baseline 1,152,000 B, limit 1,175,040 unchanged.
+- **NOT RUN:** native/GUI (Chief capture); reviews paused (REVIEW NOT RUN). Not done: Settings page fade.

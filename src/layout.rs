@@ -51,14 +51,20 @@ static PAGE_HEIGHT: AtomicU16 = AtomicU16::new(0);
 pub fn set_page_height(dips: u16) {
     PAGE_HEIGHT.store(dips, Relaxed);
 }
-/// The Limits page's panel height for `rows` tool rows: the rows' 17 DIP pitch from y 38 and room for the gear.
+/// The Limits page's panel height for `rows` tool rows: the rows' 20 DIP pitch from y 38 and room for the gear.
 pub fn limits_height(rows: usize) -> u16 {
-    38 + 17 * rows as u16 + 22
+    38 + 20 * rows as u16 + 22
 }
-/// `shape` with at least the page's height.
+/// `shape` with at least the page's height, and the media panel's width for such a page (its columns need it).
 fn tall(shape: NotchShape) -> NotchShape {
+    let page = f32::from(PAGE_HEIGHT.load(Relaxed));
     NotchShape {
-        height: shape.height.max(f32::from(PAGE_HEIGHT.load(Relaxed))),
+        height: shape.height.max(page),
+        width: if page > 0.0 {
+            MEDIA_EXPANDED.width
+        } else {
+            shape.width
+        },
         ..shape
     }
 }
@@ -310,7 +316,7 @@ pub fn gear_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, 
 }
 
 /// The Limits page's Refresh button beside its title, in DIPs from the body's left and top edges.
-const REFRESH: (f32, f32, f32, f32) = (96.0, 6.0, 76.0, 18.0);
+const REFRESH: (f32, f32, f32, f32) = (96.0, 5.0, 76.0, 17.0);
 pub fn refresh(dpi: u32) -> Bounds {
     scaled_bounds(REFRESH, dpi)
 }
