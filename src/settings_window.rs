@@ -29,7 +29,10 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, HANDLE, HWND, LPARAM, RECT, WPARAM},
         Graphics::{
-            Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
+            Dwm::{
+                DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                DwmSetWindowAttribute,
+            },
             Gdi::*,
         },
         System::{
@@ -106,6 +109,8 @@ const WDRANK: usize = 187;
 const PCFG: usize = 188;
 const PSTART: usize = 192;
 const PSKIP: usize = 193;
+/// The Limits page's "Copy" button for the statusline command.
+const LIMCOPY: usize = 194;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -285,8 +290,8 @@ const PAGES: &[Page] = &[
                     r(PCFG + 1, Kind::Edit(70), pomo::LABELS[1], ""),
                     r(PCFG + 2, Kind::Edit(70), pomo::LABELS[2], ""),
                     r(PCFG + 3, Kind::Edit(70), pomo::LABELS[3], ""),
-                    r(PSTART, Kind::Btn, "Start or pause pomodoro", ""),
-                    r(PSKIP, Kind::Btn, "Skip to the next phase", ""),
+                    r(PSTART, Kind::Btn, "Start / pause", "Pomodoro"),
+                    r(PSKIP, Kind::Btn, "Skip", "Skip to the next phase"),
                 ],
             },
             Card {
@@ -353,7 +358,7 @@ const PAGES: &[Page] = &[
                 label: "Reminders",
                 rows: &[
                     r(PRAYER, C, "Prayer reminders", ""),
-                    r(PMETHOD, Kind::Combo(230), "Prayer method", ""),
+                    r(PMETHOD, Kind::Combo(240), "Prayer method", ""),
                     r(PLEAD, Kind::Combo(170), "Heads-up before the prayer", ""),
                     r(
                         PPAUSE,
@@ -429,12 +434,15 @@ const PAGES: &[Page] = &[
             },
             Card {
                 label: "Claude Code",
-                rows: &[r(
-                    LIMSNIP,
-                    Kind::Edit(220),
-                    "Statusline command",
-                    "Optional: copy into settings.json",
-                )],
+                rows: &[
+                    r(
+                        LIMSNIP,
+                        Kind::Edit(220),
+                        "Statusline command",
+                        "Optional: copy into settings.json",
+                    ),
+                    r(LIMCOPY, Kind::Btn, "Copy", "Copy the whole command"),
+                ],
             },
         ],
     },
@@ -1478,6 +1486,8 @@ impl SettingsWindow {
     fn show_page(&mut self, page: usize) -> Result<()> {
         self.page = page.min(PAGES.len() - 1);
         self.scroll = 0;
+        // A message belongs to the page where its action happened.
+        self.say("")?;
         for item in &self.items {
             let command = if item.page as usize == self.page {
                 SW_SHOWNA
@@ -1661,7 +1671,9 @@ impl SettingsWindow {
         if invalid {
             // The box already shows the value that was kept (`show` above), so the message explains the change.
             self.say("A shift is whole minutes from -30 to 30; the nearest is kept.")?;
-        } else if !kept_a_kind {
+        } else if !kept_a_kind
+            && (next.dock != self.current.dock || next.notch != self.current.notch)
+        {
             self.say("Keep the dock or the notch on.")?;
         } else if ranged != next {
             self.say("Keep at least one monitor on.")?;
@@ -1733,6 +1745,15 @@ impl SettingsWindow {
                         }
                     }
                     (WDRANK, _) if notification == BN_CLICKED => self.drank = true,
+                    (LIMCOPY, _) if notification == BN_CLICKED => {
+                        // SAFETY: select-all then copy on our own read-only edit.
+                        unsafe {
+                            let edit = self.h(LIMSNIP);
+                            SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+                            SendMessageW(edit, WM_COPY, None, None);
+                        }
+                        self.say("Copied.")?;
+                    }
                     (PSTART | PSKIP, _) if notification == BN_CLICKED => {
                         self.pomo = Some(id == PSKIP)
                     }
@@ -1824,6 +1845,22 @@ impl SettingsWindow {
                 (&dark as *const BOOL).cast(),
                 size_of::<BOOL>() as u32,
             );
+            // Windows 11 shows the accent in the caption of a dark window; make it the sidebar's colour.
+            // Older Windows ignores both attributes.
+            if self.pal.dark {
+                for (attribute, value) in [
+                    (DWMWA_CAPTION_COLOR, self.pal.side),
+                    (DWMWA_TEXT_COLOR, self.pal.text),
+                ] {
+                    let colour = rgb(value);
+                    let _ = DwmSetWindowAttribute(
+                        self.window,
+                        attribute,
+                        (&colour as *const COLORREF).cast(),
+                        size_of::<COLORREF>() as u32,
+                    );
+                }
+            }
         }
         // Each child with whether it is an edit or a drop-down (they take the dark "CFD" look).
         let field = |i: &Item| matches!(i.kind, Kind::Combo(_) | Kind::Edit(_));
@@ -1914,7 +1951,8 @@ impl SettingsWindow {
         let clamped = self.scroll.clamp(0, self.scroll_max);
         let info = SCROLLINFO {
             cbSize: size_of::<SCROLLINFO>() as u32,
-            fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+            // DISABLENOSCROLL keeps the bar (greyed) on short pages, so the content width and Close never move.
+            fMask: SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL,
             nMin: 0,
             nMax: content - 1,
             nPage: view as u32,
@@ -2146,7 +2184,7 @@ impl SettingsWindow {
                 Ok((height, None))
             }
             Kind::Combo(w) | Kind::Edit(w) => {
-                let w = px(w).min((b - a) / 2);
+                let w = px(w).min((b - a) * 3 / 5);
                 let side = (b - a - w - px(8)).max(1);
                 let (l, c) = (lines(item.label, side).max(px(20)), lines(item.cap, side));
                 let height = if c > 0 {
@@ -2183,16 +2221,16 @@ impl SettingsWindow {
                 Ok((height, Some(boxed)))
             }
             Kind::Btn => {
-                let side = b - a - px(178);
+                // The button is as wide as its text plus margins (never narrower than 120 DIP), so no label clips.
+                let mut words: Vec<u16> = text(item.h, 256).encode_utf16().collect();
+                let mut measured = RECT::default();
+                // SAFETY: measures a local buffer on the caller's live DC.
+                unsafe { DrawTextW(dc, &mut words, &mut measured, DT_CALCRECT | DT_SINGLELINE) };
+                let width = (measured.right + px(32)).max(px(120)).min(b - a - px(80));
+                let side = b - a - width - px(8);
                 let l = lines(item.label, side);
                 let height = (l + px(20)).max(px(40));
-                put(
-                    item.h,
-                    b - px(170),
-                    y + (height - px(28)) / 2,
-                    px(170),
-                    px(28),
-                )?;
+                put(item.h, b - width, y + (height - px(28)) / 2, width, px(28))?;
                 put(item.label, a, y + (height - l) / 2, side, l)?;
                 Ok((height, None))
             }

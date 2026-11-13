@@ -1191,3 +1191,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u5-climb`; [packet](ui-council-u5.md). Frosted/Liquid content backing (perimeter stays glass); plain panel 86 DIP, Hijri gap, weather gear gutter, wider Limits bars, larger "as of" and water notice (no "(0 ml)").
 - **Checks:** verify.ps1 PASS (fmt/clippy, 357 tests, locked release); 1,048,576 B (+1,024 vs 1,047,552); baseline 1,152,000 B, limit 1,175,040 unchanged.
 - **NOT RUN:** native/GUI (Chief capture; glass over a busy dark backdrop and text fit unverified by eye); reviews paused (REVIEW NOT RUN).
+
+## U5-D Settings (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u5-climb`; [packet](ui-council-u5.md). Text-sized buttons, statusline Copy, wider method drop-down, reserved scrollbar gutter, footer hint only after a dock/notch change, dark caption colour.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 357 tests, locked release); 1,049,088 B (+512 vs 1,048,576); baseline 1,152,000 B, limit 1,175,040 unchanged.
+- **NOT RUN:** native/GUI (Chief capture; button fit, gutter, caption colour unverified by eye); reviews paused (REVIEW NOT RUN).

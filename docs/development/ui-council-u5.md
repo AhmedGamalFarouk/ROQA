@@ -20,3 +20,12 @@ Native/GUI NOT RUN; the Chief's capture worker verifies by eye. Reviews paused.
 - Plain panel 320 x 86 DIP (was 80): the notice row moves to y 70 and is 12 DIP (was 11; the media pocket keeps 11), Prayer countdown y 52 and the Hijri/credit footer y 70, so the Hijri line has a clear gap. `water::text` drops "(0 ml)" at zero glasses.
 - Weather: plain hourly columns are 37 DIP apart from x 178 (last ends 289), clear of the gear at x 292.
 - Limits: bars 24 DIP (was 14) with the percent and reset shifted to match, "as of" 10 DIP (was 9) at 55 %, Refresh pill y 11 and 15 high (was y 5, 17).
+
+## U5-D Settings (defect 4)
+
+- Buttons are as wide as their text plus 32 px (at least 120 DIP, measured with `DrawTextW` on the row's DC); Pomodoro rows read "Pomodoro: Start / pause" and "Skip to the next phase: Skip".
+- Limits: a Copy button under the statusline field selects the whole command and sends `WM_COPY` (no clipboard API added); "Copied." in the footer. The field itself still scrolls (a native edit has no ellipsis).
+- Drop-downs and edits may take 60 % of the row (was 50 %), so "Egyptian General Authority" fits at 240 DIP.
+- `SIF_DISABLENOSCROLL`: the scroll bar stays (greyed) on short pages, so the content width and Close do not move between pages.
+- The footer shows "Keep the dock or the notch on." only when that commit changed the dock or notch switch, and a page change clears the footer.
+- Dark windows also set `DWMWA_CAPTION_COLOR` (sidebar colour) and `DWMWA_TEXT_COLOR` besides the dark-mode attribute that was already set; Windows 11 only, ignored elsewhere.
