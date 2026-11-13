@@ -220,9 +220,10 @@ pub struct NotchScene<'a> {
     pub fx: Fx,
 }
 
-/// The tab handle: its geometry and the shown tabs in order.
+/// The tab handle: its geometry, the cell under the pointer and the shown tabs in order.
 pub struct RailScene<'a> {
     pub layout: layout::Rail,
+    pub hover: Option<usize>,
     pub tabs: &'a [Tab],
 }
 

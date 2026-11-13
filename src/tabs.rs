@@ -1,8 +1,5 @@
 //! Notch tabs (features tabs-eyes): the pure rules for which tabs exist, which one shows and when the
-//! hanging handle opens. No window, timer or thread: the host feeds it pointer and focus facts and asks for
-//! one deadline (`Handle::due`).
-
-use std::time::{Duration, Instant};
+//! hanging handle shows. No window, timer or thread.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab {
@@ -134,48 +131,6 @@ impl Tabs {
     }
 }
 
-/// How long the dots take to grow into icons, and how long the pointer may be away before they shrink.
-pub const EXPAND: Duration = Duration::from_millis(240);
-pub const COLLAPSE_DELAY: Duration = Duration::from_millis(450);
-
-/// The handle's open/closed intent. Opens at once on hover or focus; closes `COLLAPSE_DELAY` after both end.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Handle {
-    open: bool,
-    leave_at: Option<Instant>,
-}
-
-impl Handle {
-    /// `want`: the pointer is over the handle or a tab has keyboard focus. Returns the new target (open?)
-    /// when it changed now.
-    pub fn set(&mut self, want: bool, now: Instant) -> Option<bool> {
-        if want {
-            self.leave_at = None;
-            return (!self.open).then(|| {
-                self.open = true;
-                true
-            });
-        }
-        if self.open && self.leave_at.is_none() {
-            self.leave_at = Some(now + COLLAPSE_DELAY);
-        }
-        None
-    }
-    /// Closes when the delay has passed; returns the new target when it changed.
-    pub fn tick(&mut self, now: Instant) -> Option<bool> {
-        if self.leave_at.is_some_and(|at| now >= at) {
-            self.leave_at = None;
-            self.open = false;
-            return Some(false);
-        }
-        None
-    }
-    /// The only wake the handle ever asks for.
-    pub fn due(&self) -> Option<Instant> {
-        self.leave_at
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,42 +249,5 @@ mod tests {
             "disabled: behaviour unchanged"
         );
         assert_eq!(off.active(true), Some(Tab::Media));
-    }
-
-    #[test]
-    fn the_handle_opens_at_once_and_closes_after_the_delay() {
-        let t0 = Instant::now();
-        let mut handle = Handle::default();
-        assert_eq!(handle.due(), None, "closed and idle asks for no wake");
-        assert_eq!(handle.set(false, t0), None);
-        assert_eq!(handle.due(), None);
-        assert_eq!(handle.set(true, t0), Some(true));
-        assert_eq!(handle.set(true, t0), None, "already open");
-        // Leaving arms one deadline, once; more leaves do not push it out.
-        assert_eq!(handle.set(false, t0), None);
-        let due = handle.due().unwrap();
-        assert_eq!(due, t0 + COLLAPSE_DELAY);
-        handle.set(false, t0 + Duration::from_millis(100));
-        assert_eq!(handle.due(), Some(due));
-        assert_eq!(handle.tick(due - Duration::from_millis(1)), None);
-        assert_eq!(handle.tick(due), Some(false));
-        assert_eq!(handle.due(), None);
-        assert_eq!(handle.tick(due + Duration::from_secs(9)), None);
-    }
-
-    #[test]
-    fn coming_back_in_time_or_holding_focus_keeps_the_handle_open() {
-        let t0 = Instant::now();
-        let mut handle = Handle::default();
-        handle.set(true, t0);
-        handle.set(false, t0);
-        assert_eq!(handle.set(true, t0 + Duration::from_millis(200)), None);
-        assert_eq!(handle.due(), None, "returning cancels the collapse");
-        assert_eq!(handle.tick(t0 + Duration::from_secs(5)), None);
-        // Reopening after a close works again.
-        handle.set(false, t0);
-        let due = handle.due().unwrap();
-        handle.tick(due);
-        assert_eq!(handle.set(true, due), Some(true));
     }
 }

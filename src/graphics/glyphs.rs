@@ -4,7 +4,7 @@
 //! stay sharp at any DPI. No raster, no icon font.
 
 use super::*;
-use crate::{tabs::Tab, weather::Icon};
+use crate::weather::Icon;
 use std::cell::RefCell;
 use windows::Win32::Graphics::Direct2D::{
     Common::{D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN},
@@ -102,17 +102,6 @@ impl Glyph {
             0 => Glyph::Muted,
             1..=33 => Glyph::SpeakerLow,
             _ => Glyph::Speaker,
-        }
-    }
-    /// The tab handle's icon; Media is the play triangle, Weather the partly cloudy sky.
-    pub(super) fn tab(tab: Tab) -> Glyph {
-        match tab {
-            Tab::Media => Glyph::Play,
-            Tab::Weather => Glyph::PartlyCloudy,
-            Tab::Prayer => Glyph::Prayer,
-            Tab::Timer => Glyph::Timer,
-            Tab::Shelf => Glyph::Shelf,
-            Tab::Limits => Glyph::Limits,
         }
     }
     pub(super) fn weather(icon: Icon) -> Glyph {

@@ -46,9 +46,9 @@ pub(super) fn faded(
     drawn
 }
 
-/// The hanging handle (design T3), drawn after the body clip is popped because it lies below the body: a
-/// body-coloured shape with the notch's own concave ears, then per tab a dot that becomes an icon as the
-/// handle opens (`p`) and the active one accented.
+/// The hanging handle (design T3, always open since U5), drawn after the body clip is popped because it lies
+/// below the body: a body-coloured shape with the notch's own concave ears, then a labelled cell per tab; the
+/// selected one has an accent wash and the one under the pointer a lighter one.
 pub(super) fn rail(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -68,7 +68,6 @@ pub(super) fn rail(
     ) else {
         return Ok(());
     };
-    let open = handle.layout.p.clamp(0.0, 1.0);
     let shape = D2D_RECT_F {
         left: surface.left + hang.x as f32,
         top: surface.top + hang.y as f32,
@@ -83,7 +82,6 @@ pub(super) fn rail(
             height: hang.height,
             ears: ears as i32,
         },
-        open,
         scene.dpi,
     );
     let outline = notch_outline(context, &shape, radius, ears)?;
@@ -100,7 +98,7 @@ pub(super) fn rail(
     drawn
 }
 
-/// The handle's dots, icons and active wash.
+/// The handle's tab names and their selected and hover washes.
 fn items(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -111,9 +109,15 @@ fn items(
 ) -> Result<()> {
     let scale = scene.dpi as f32 / 96.0;
     let reveal = motion::reveal(scene.progress);
-    let open = handle.layout.p.clamp(0.0, 1.0);
+    let name = Font {
+        family: TEXT_FONT,
+        size: 10.0 * scale,
+        weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        designator: 1.0,
+        align: DWRITE_TEXT_ALIGNMENT_CENTER,
+    };
     for (position, &tab) in handle.tabs.iter().enumerate() {
-        let item = layout::rail_item(hang, scene.dpi, handle.layout, position);
+        let item = layout::rail_item(hang, scene.dpi, position);
         let cell = D2D_RECT_F {
             left: surface.left + item.x as f32,
             top: surface.top + item.y as f32,
@@ -121,79 +125,28 @@ fn items(
             bottom: surface.top + (item.y + item.height) as f32,
         };
         let active = position == handle.layout.active;
-        let corner = (2.5 + 6.0 * open) * scale;
-        // SAFETY: as above.
-        unsafe {
-            // The dot fades out by a third of the way open; the active one is a brighter bar.
-            let dot = (1.0 - 3.0 * open).clamp(0.0, 1.0);
-            if dot > 0.0 {
-                let alpha = if active { 1.0 } else { 0.4 } * dot * reveal;
-                let brush =
-                    context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(alpha)), None)?;
-                let half = (2.5 * scale).min((cell.bottom - cell.top) / 2.0);
-                let middle = (cell.top + cell.bottom) / 2.0;
-                let bar = D2D_RECT_F {
-                    top: middle - half,
-                    bottom: middle + half,
-                    ..cell
-                };
-                context.FillRoundedRectangle(&rounded(bar, half), &brush);
-            }
-            if active && open > 0.0 {
-                let wash = context.CreateSolidColorBrush(
-                    &with_alpha(p.accent, p.ink_alpha(0.22 * open * reveal)),
-                    None,
-                )?;
-                context.FillRoundedRectangle(&rounded(cell, corner), &wash);
-            }
-        }
-        let shown = (open * 1.7 - 0.5).clamp(0.0, 1.0) * reveal;
-        if shown > 0.0 {
-            // 16 DIP glyphs grown from 40 % of that, centred in the button.
-            let side = (16.0 * scale * (0.4 + 0.6 * open)).round();
-            let (cx, cy) = (
-                if active {
-                    cell.left + (cell.bottom - cell.top) / 2.0
-                } else {
-                    (cell.left + cell.right) / 2.0
-                },
-                (cell.top + cell.bottom) / 2.0,
-            );
-            let square = D2D_RECT_F {
-                left: (cx - side / 2.0).round(),
-                top: (cy - side / 2.0).round(),
-                right: (cx - side / 2.0).round() + side,
-                bottom: (cy - side / 2.0).round() + side,
-            };
-            let color = if active {
-                with_alpha(glyphs::active_ink(p), p.ink_alpha(shown))
+        let hovered = handle.hover == Some(position);
+        if active || hovered {
+            let wash = if active {
+                with_alpha(p.accent, p.ink_alpha(0.22 * reveal))
             } else {
-                with_alpha(p.ink, p.ink_alpha(0.7 * shown))
+                with_alpha(p.ink, p.ink_alpha(0.10 * reveal))
             };
-            glyphs::draw(context, square, Glyph::tab(tab), color)?;
-            if active {
-                // The active tab names its page beside its icon.
-                let name = Font {
-                    family: TEXT_FONT,
-                    size: 10.0 * scale,
-                    weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                    designator: 1.0,
-                    align: DWRITE_TEXT_ALIGNMENT_LEADING,
-                };
-                let text = D2D_RECT_F {
-                    left: cell.left + 28.0 * scale,
-                    ..cell
-                };
-                let alpha = (open * 3.0 - 2.0).clamp(0.0, 1.0) * reveal;
-                draw_text(
-                    context,
-                    tab.name(),
-                    &name,
-                    text,
-                    with_alpha(glyphs::active_ink(p), p.ink_alpha(alpha)),
-                )?;
+            // SAFETY: a brush on the frame's own device context.
+            unsafe {
+                let brush = context.CreateSolidColorBrush(&wash, None)?;
+                context.FillRoundedRectangle(&rounded(cell, 7.0 * scale), &brush);
             }
         }
+        let ink = if active {
+            with_alpha(glyphs::active_ink(p), p.ink_alpha(reveal))
+        } else {
+            with_alpha(
+                p.ink,
+                p.ink_alpha(if hovered { 0.95 } else { 0.62 } * reveal),
+            )
+        };
+        draw_text(context, tab.name(), &name, cell, ink)?;
     }
     Ok(())
 }

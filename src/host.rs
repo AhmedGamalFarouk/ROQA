@@ -30,7 +30,7 @@ use crate::{
     shelf_os::{self, DropEvent, Drops},
     sort,
     store::{self, Flush, Pending, Store},
-    tabs::{self, Handle, Tab, Tabs},
+    tabs::{Tab, Tabs},
     text_settings::TextSettings,
     theme::Palette,
     timer::{self, Timers},
@@ -236,32 +236,17 @@ impl Pages {
     fn page(&self, media_live: bool) -> Tab {
         self.tabs.active(media_live).unwrap_or(Tab::Media)
     }
-    /// The handle's layout at open fraction `p`; `None` with fewer than two tabs.
-    fn rail(&self, media_live: bool, p: f32) -> Option<layout::Rail> {
+    /// The handle's layout; `None` with fewer than two tabs.
+    fn rail(&self, media_live: bool) -> Option<layout::Rail> {
         let visible = self.tabs.visible();
         let active = visible.position(self.page(media_live))?;
         visible.handle().then_some(layout::Rail {
             count: visible.as_slice().len(),
             active,
-            p,
         })
     }
     fn touch(&mut self) {
         self.last_input = Instant::now();
-    }
-}
-
-/// A notch's handle: its open/closed intent (`tabs::Handle`) and the 0 to 1 tween drawn from it.
-struct Hang {
-    handle: Handle,
-    tween: Tween,
-}
-impl Hang {
-    fn rest() -> Self {
-        Self {
-            handle: Handle::default(),
-            tween: Tween::rest(0.0),
-        }
     }
 }
 
@@ -291,8 +276,8 @@ struct Surface {
     bars: [i32; audio::BARS],
     /// Notch: what this pass has asked to repaint (`Desktop::paint_requested`).
     repaint: Repaint,
-    /// Notch: the tab handle's open state.
-    hang: Hang,
+    /// Notch: the tab cell under the pointer (a position in the visible tabs), for its hover wash.
+    tab_hover: Option<usize>,
     /// Notch: the pointer on the volume bar (hover, and a captured drag).
     grip: Grip,
     /// Notch: the volume bar's drawn fill (percent), easing toward the real level; a drag sets it at once.
@@ -413,7 +398,7 @@ impl Surface {
             played: None,
             bars: [0; audio::BARS],
             repaint: Repaint::Nothing,
-            hang: Hang::rest(),
+            tab_hover: None,
             grip: Grip::default(),
             volume_fill: Tween::rest(0.0),
             page_at: 0,
@@ -427,30 +412,6 @@ impl Surface {
             dock_style,
             dock_buttons,
         })
-    }
-    /// The handle opens at once for the pointer and closes `tabs::COLLAPSE_DELAY` after
-    /// both end (`Desktop::refresh_rails` keeps that one deadline). Frames run only while it moves.
-    fn set_rail(&mut self, want: bool, now: Instant) {
-        if let Some(open) = self.hang.handle.set(want, now) {
-            self.hang
-                .tween
-                .retarget(f32::from(open), tabs::EXPAND, motion::EASE_OUT);
-            self.live = true;
-        }
-    }
-    /// Closes the handle if its delay passed. A closing or closed notch just snaps it shut: no frames for
-    /// a handle nobody sees.
-    fn tick_rail(&mut self, now: Instant) {
-        if let Some(open) = self.hang.handle.tick(now) {
-            if self.motion.target() <= 0.0 {
-                self.hang.tween = Tween::rest(f32::from(open));
-            } else {
-                self.hang
-                    .tween
-                    .retarget(f32::from(open), tabs::EXPAND, motion::EASE_OUT);
-                self.live = true;
-            }
-        }
     }
     /// Closed and not moving: nothing of the panel is drawn.
     fn collapsed(&self, now: Instant) -> bool {
@@ -514,7 +475,7 @@ impl Surface {
             // A hidden window gets no leave notification and needs no frames: settle at rest now.
             (self.hovered, self.live, self.motion) = (false, false, Tween::rest(0.0));
             self.slide = Tween::rest(0.0);
-            self.hang = Hang::rest();
+            self.tab_hover = None;
             match &mut self.role {
                 Role::Notch {
                     engaged, intent, ..
@@ -541,7 +502,7 @@ impl Surface {
                 self.hover_dock(None, false);
             } else {
                 self.set_notch_hover(false);
-                self.set_rail(false, Instant::now());
+                self.tab_hover = None;
             }
         }
     }
@@ -656,7 +617,7 @@ impl Surface {
             return Ok(());
         };
         let visible = pages.tabs.visible();
-        let rail = pages.rail(track.is_some(), self.hang.tween.value(now));
+        let rail = pages.rail(track.is_some());
         // Input and drawing use the same frame progress and shape, without a speculative growth lead.
         let rows = layout::notch_rows(self.bounds, self.dpi, progress, track.is_some(), rail);
         if *area != rows {
@@ -703,6 +664,7 @@ impl Surface {
             tab: page,
             rail: rail.map(|layout| RailScene {
                 layout,
+                hover: self.tab_hover,
                 tabs: visible.as_slice(),
             }),
             eyes: pages.eyes.and_then(|eyes| eyes.frame()),
@@ -1800,18 +1762,6 @@ impl Desktop {
         self.prayer.sound_end = length.map(|length| now + length);
         length.is_some()
     }
-    /// Closes each notch's tab handle once its delay passed; returns the wait until the next such deadline
-    /// (`INFINITE` with none waiting, the common case).
-    #[inline(never)]
-    fn refresh_rails(&mut self) -> u32 {
-        let now = Instant::now();
-        let mut due = None::<Instant>;
-        for notch in &mut self.surfaces {
-            notch.tick_rail(now);
-            due = [due, notch.hang.handle.due()].into_iter().flatten().min();
-        }
-        due.map_or(INFINITE, |due| milliseconds_until(due, now))
-    }
     /// The mascot: picks the mood from the facts and steps the running show, or starts the idle one whose
     /// deadline passed. With the setting off it returns at once. Returns the wait until the next step or show.
     #[inline(never)]
@@ -2042,7 +1992,6 @@ impl Desktop {
                     SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
                 }
                 surface.live = surface.motion.running(now)
-                    || surface.hang.tween.running(now)
                     || surface.volume_fill.running(now)
                     || surface.page_fx.running(now)
                     || surface.notice_fx.running(now)
@@ -3104,7 +3053,7 @@ impl Desktop {
         let (width, dpi) = (surface.bounds.width, surface.dpi);
         let live = self.pages.track(&self.media).is_some();
         // The tab handle first: it hangs below the panel.
-        if let Some(rail) = self.pages.rail(live, surface.hang.tween.value(now))
+        if let Some(rail) = self.pages.rail(live)
             && let Some(position) = layout::rail_tab_at(width, dpi, progress, live, rail, (x, y))
         {
             if let Some(&tab) = self.pages.tabs.visible().as_slice().get(position) {
@@ -3291,15 +3240,18 @@ impl Desktop {
                     let progress = surface.motion.value(now);
                     let width = surface.bounds.width;
                     let media = self.pages.track(&self.media).is_some();
-                    let rail = self.pages.rail(media, surface.hang.tween.value(now));
+                    let rail = self.pages.rail(media);
                     let over = layout::notch_hit(width, surface.dpi, progress, media, rail, x, y);
                     // While a menu is open the notch does not open under it.
                     surface.set_notch_hover(over && self.menu.is_none());
-                    // The handle opens under the pointer.
-                    let on_rail = rail.is_some_and(|rail| {
-                        layout::rail_hit(width, surface.dpi, progress, media, rail, (x, y))
+                    // The tab cell under the pointer washes lighter.
+                    let tab = rail.and_then(|rail| {
+                        layout::rail_tab_at(width, surface.dpi, progress, media, rail, (x, y))
                     });
-                    surface.set_rail(on_rail, now);
+                    if tab != surface.tab_hover {
+                        surface.tab_hover = tab;
+                        surface.request(Repaint::Full);
+                    }
                     self.pages.touch();
                     if volume_ui {
                         let bar = layout::volume_at(width, surface.dpi, progress, x, y).is_some();
@@ -3570,7 +3522,6 @@ impl Desktop {
             .min(self.refresh_power())
             .min(self.refresh_preview())
             .min(self.refresh_edges())
-            .min(self.refresh_rails())
             .min(self.refresh_eyes())
             .min(self.refresh_privacy())
             .min(self.refresh_prayer())
@@ -4176,7 +4127,7 @@ mod clock_wait_tests {
         let mut settings = Settings::default();
         // All five tabs show: a handle, on Media while a session lives, else on the last tab used.
         let pages = Pages::new(&settings, Tab::Shelf);
-        let rail = |pages: &Pages, live| pages.rail(live, 0.0).map(|r| (r.count, r.active));
+        let rail = |pages: &Pages, live| pages.rail(live).map(|r| (r.count, r.active));
         assert_eq!(rail(&pages, true), Some((5, 0)));
         assert_eq!(rail(&pages, false), Some((5, 4)));
         assert_eq!(pages.page(false), Tab::Shelf);

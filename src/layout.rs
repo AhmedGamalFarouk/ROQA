@@ -182,7 +182,7 @@ pub fn notch_rows(
             height: hang.height,
             ears: scaled(RAIL_EARS, dpi).min(hang.height),
         };
-        let radius = rail_radius(shape, rail.p, dpi);
+        let radius = rail_radius(shape, dpi);
         rows.extend(
             (0..hang.height)
                 .take_while(|y| hang.y + y < window.height)
@@ -535,44 +535,34 @@ pub fn media_seek_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32)
         .map(|offset| f64::from(offset) / f64::from(bar.width))
 }
 
-/// The tab handle (design round 2, T3 "Hanging handle"): a bar hanging off the open panel's bottom edge,
-/// dots at rest that grow into 24 DIP icon buttons as `p` goes 0 to 1. The active tab is a longer bar at
-/// rest. `count` tabs are shown, `active` is the position of the selected one.
+/// The tab handle (design round 2, T3 "Hanging handle", U5: always open): a bar hanging off the open panel's
+/// bottom edge with one labelled cell per tab. `count` tabs are shown, `active` is the position of the
+/// selected one.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rail {
     pub count: usize,
     pub active: usize,
-    pub p: f32,
 }
 
 pub const RAIL_EARS: f32 = 6.0;
 const RAIL_PAD_X: f32 = 8.0;
+const RAIL_PAD_Y: f32 = 4.0;
+/// A tab cell's width (fits the longest name, "Weather", at 10 DIP) and height, and the gap between cells.
+const RAIL_CELL: (f32, f32) = (44.0, 22.0);
+const RAIL_GAP: f32 = 2.0;
 
-/// Dot or button side, the active one's width (it also shows its name when open), the gap between items and
-/// the vertical padding, in DIPs.
-fn rail_metrics(p: f32) -> (f32, f32, f32, f32) {
-    let lerp = |a: f32, b: f32| a + (b - a) * p.clamp(0.0, 1.0);
-    (
-        lerp(5.0, 26.0),
-        lerp(14.0, 76.0),
-        lerp(5.0, 4.0),
-        lerp(3.0, 4.0),
-    )
-}
-
-/// The handle's full size in DIPs: 70 x 11 at rest and 212 x 34 open for five tabs.
+/// The handle's full size in DIPs: 290 x 30 for six tabs.
 pub fn rail_size(rail: Rail) -> (f32, f32) {
-    let (side, active, gap, pad) = rail_metrics(rail.p);
-    let others = rail.count.saturating_sub(1) as f32;
+    let count = rail.count as f32;
     (
-        2.0 * RAIL_PAD_X + active + others * (side + gap),
-        2.0 * pad + side,
+        2.0 * RAIL_PAD_X + count * RAIL_CELL.0 + (count - 1.0).max(0.0) * RAIL_GAP,
+        2.0 * RAIL_PAD_Y + RAIL_CELL.1,
     )
 }
 
-/// The handle's bottom corner radius in pixels (7 DIP at rest, 14 open), kept inside its shape.
-pub fn rail_radius(shape: NotchBody, p: f32, dpi: u32) -> f32 {
-    scaled(7.0 + 7.0 * p.clamp(0.0, 1.0), dpi)
+/// The handle's bottom corner radius in pixels (14 DIP), kept inside its shape.
+pub fn rail_radius(shape: NotchBody, dpi: u32) -> f32 {
+    scaled(14.0, dpi)
         .min(shape.height - shape.ears)
         .min(shape.width / 2)
         .max(0) as f32
@@ -603,35 +593,18 @@ pub fn rail_bounds(
     })
 }
 
-/// Handle item `index` in window pixels; they sit left to right inside the handle, the active one longer.
-pub fn rail_item(handle: Bounds, dpi: u32, rail: Rail, index: usize) -> Bounds {
-    let (side, active, gap, pad) = rail_metrics(rail.p);
-    let width = |item: usize| if item == rail.active { active } else { side };
-    let before: f32 = (0..index).map(|item| width(item) + gap).sum();
+/// Handle item `index` in window pixels; they sit left to right inside the handle.
+pub fn rail_item(handle: Bounds, dpi: u32, index: usize) -> Bounds {
     Bounds {
-        x: handle.x + scaled(RAIL_PAD_X + before, dpi),
-        y: handle.y + scaled(pad, dpi),
-        width: scaled(width(index), dpi),
-        height: scaled(side, dpi),
+        x: handle.x + scaled(RAIL_PAD_X + index as f32 * (RAIL_CELL.0 + RAIL_GAP), dpi),
+        y: handle.y + scaled(RAIL_PAD_Y, dpi),
+        width: scaled(RAIL_CELL.0, dpi),
+        height: scaled(RAIL_CELL.1, dpi),
     }
 }
 
-/// Whether a window point is on the drawn handle (what makes it open).
-pub fn rail_hit(
-    window_width: i32,
-    dpi: u32,
-    progress: f32,
-    media: bool,
-    rail: Rail,
-    (x, y): (i32, i32),
-) -> bool {
-    rail_bounds(window_width, dpi, progress, media, rail).is_some_and(|hang| {
-        (hang.x..hang.x + hang.width).contains(&x) && (hang.y..hang.y + hang.height).contains(&y)
-    })
-}
-
 /// The tab position under a window point. The gap beside an item belongs to it, so a click between two
-/// buttons still lands; a point outside the item row hits none.
+/// cells still lands; a point outside the item row hits none.
 pub fn rail_tab_at(
     window_width: i32,
     dpi: u32,
@@ -641,13 +614,13 @@ pub fn rail_tab_at(
     (x, y): (i32, i32),
 ) -> Option<usize> {
     let hang = rail_bounds(window_width, dpi, progress, media, rail)?;
-    // The whole handle height is a target, not only the 26 DIP buttons.
+    // The whole handle height is a target, not only the cells.
     if !(hang.y..hang.y + hang.height).contains(&y) {
         return None;
     }
-    let half_gap = scaled(rail_metrics(rail.p).2, dpi) / 2;
+    let half_gap = scaled(RAIL_GAP, dpi) / 2;
     (0..rail.count).find(|&index| {
-        let item = rail_item(hang, dpi, rail, index);
+        let item = rail_item(hang, dpi, index);
         (item.x - half_gap..item.x + item.width + half_gap).contains(&x)
     })
 }
@@ -1453,24 +1426,16 @@ mod tests {
         }
     }
 
-    fn rail(count: usize, active: usize, p: f32) -> Rail {
-        Rail { count, active, p }
+    fn rail(count: usize, active: usize) -> Rail {
+        Rail { count, active }
     }
 
     #[test]
-    fn the_handle_matches_the_design_sizes_and_grows_from_dots_to_buttons() {
-        // Design T3: 70 x 11 at rest and 212 x 34 open for five tabs; fewer tabs are narrower.
-        let (rest_w, rest_h) = rail_size(rail(5, 0, 0.0));
-        assert_eq!((rest_w, rest_h), (70.0, 11.0));
-        let (open_w, open_h) = rail_size(rail(5, 0, 1.0));
-        assert_eq!((open_w, open_h), (212.0, 34.0));
-        assert!(rail_size(rail(3, 0, 1.0)).0 < open_w);
-        let mut last = rail_size(rail(3, 1, 0.0));
-        for step in 1..=10 {
-            let now = rail_size(rail(3, 1, step as f32 / 10.0));
-            assert!(now.0 >= last.0 && now.1 >= last.1, "{step}");
-            last = now;
-        }
+    fn the_handle_fits_every_tab_name_and_stays_narrower_than_the_panel() {
+        let (six_w, six_h) = rail_size(rail(6, 0));
+        assert_eq!((six_w, six_h), (290.0, 30.0));
+        assert!(six_w <= NOTCH_EXPANDED.width);
+        assert!(rail_size(rail(3, 0)).0 < rail_size(rail(5, 0)).0);
     }
 
     #[test]
@@ -1483,7 +1448,7 @@ mod tests {
                 height: scaled(164.0, dpi),
             };
             for media in [false, true] {
-                let r = rail(5, 2, 1.0);
+                let r = rail(6, 2);
                 // Collapsed or barely open: no handle.
                 for progress in [-0.09, 0.0, 0.07, 0.35] {
                     assert_eq!(rail_bounds(window.width, dpi, progress, media, r), None);
@@ -1497,8 +1462,8 @@ mod tests {
                         hang.y + hang.height <= window.height,
                         "{dpi} {media} {progress}"
                     );
-                    // Centred like the body.
-                    assert_eq!(hang.x + hang.width / 2, window.width / 2);
+                    // Centred like the body (to a pixel).
+                    assert!((hang.x + hang.width / 2).abs_diff(window.width / 2) <= 1);
                     // The region takes its rows, and only those rows hold the pointer.
                     let rows = notch_rows(window, dpi, progress, media, Some(r));
                     let below = rows.iter().filter(|row| row.y >= body.height).count() as i32;
@@ -1543,8 +1508,8 @@ mod tests {
     #[test]
     fn a_single_tab_has_no_handle() {
         let window = 440;
-        assert_eq!(rail_bounds(window, 96, 1.0, true, rail(1, 0, 1.0)), None);
-        assert_eq!(rail_bounds(window, 96, 1.0, true, rail(0, 0, 1.0)), None);
+        assert_eq!(rail_bounds(window, 96, 1.0, true, rail(1, 0)), None);
+        assert_eq!(rail_bounds(window, 96, 1.0, true, rail(0, 0)), None);
         let rows = notch_rows(
             Bounds {
                 x: 0,
@@ -1555,7 +1520,7 @@ mod tests {
             96,
             1.0,
             true,
-            Some(rail(1, 0, 1.0)),
+            Some(rail(1, 0)),
         );
         assert_eq!(rows.len(), 120, "just the panel");
     }
@@ -1564,54 +1529,34 @@ mod tests {
     fn handle_items_lie_inside_it_in_order_and_each_point_picks_one_tab() {
         for dpi in [96, 144, 192] {
             let width = scaled(440.0, dpi);
-            for p in [0.0, 0.5, 1.0] {
-                let r = rail(5, 1, p);
-                let hang = rail_bounds(width, dpi, 1.0, true, r).unwrap();
-                let items: Vec<Bounds> = (0..5).map(|i| rail_item(hang, dpi, r, i)).collect();
-                for (i, item) in items.iter().enumerate() {
-                    assert!(
-                        item.x >= hang.x && item.x + item.width <= hang.x + hang.width,
-                        "{dpi} {p} {i}"
-                    );
-                    assert!(
-                        item.y >= hang.y && item.y + item.height <= hang.y + hang.height,
-                        "{dpi} {p} {i}"
-                    );
-                    assert!(
-                        i == 0 || item.x >= items[i - 1].x + items[i - 1].width,
-                        "ordered, no overlap"
-                    );
-                    let middle = (item.x + item.width / 2, item.y + item.height / 2);
-                    assert_eq!(
-                        rail_tab_at(width, dpi, 1.0, true, r, middle),
-                        Some(i),
-                        "{dpi} {p}"
-                    );
-                    assert!(rail_hit(width, dpi, 1.0, true, r, middle));
-                }
-                // The active tab is the longer bar at rest, and equal to the others when open.
+            let r = rail(6, 1);
+            let hang = rail_bounds(width, dpi, 1.0, true, r).unwrap();
+            let items: Vec<Bounds> = (0..6).map(|i| rail_item(hang, dpi, i)).collect();
+            for (i, item) in items.iter().enumerate() {
                 assert!(
-                    items[1].width > items[0].width || p == 1.0 && items[1].width == items[0].width,
-                    "{p}"
+                    item.x >= hang.x && item.x + item.width <= hang.x + hang.width,
+                    "{dpi} {i}"
                 );
-                // Above the item row, or outside the handle, picks nothing.
-                assert_eq!(
-                    rail_tab_at(width, dpi, 1.0, true, r, (items[2].x, hang.y - 1)),
-                    None
+                assert!(
+                    item.y >= hang.y && item.y + item.height <= hang.y + hang.height,
+                    "{dpi} {i}"
                 );
-                assert_eq!(
-                    rail_tab_at(width, dpi, 1.0, true, r, (hang.x - 1, items[0].y)),
-                    None
+                assert!(
+                    i == 0 || item.x >= items[i - 1].x + items[i - 1].width,
+                    "ordered, no overlap"
                 );
-                assert!(!rail_hit(
-                    width,
-                    dpi,
-                    1.0,
-                    true,
-                    r,
-                    (hang.x - 1, items[0].y)
-                ));
+                let middle = (item.x + item.width / 2, item.y + item.height / 2);
+                assert_eq!(rail_tab_at(width, dpi, 1.0, true, r, middle), Some(i));
             }
+            // Above the item row, or outside the handle, picks nothing.
+            assert_eq!(
+                rail_tab_at(width, dpi, 1.0, true, r, (items[2].x, hang.y - 1)),
+                None
+            );
+            assert_eq!(
+                rail_tab_at(width, dpi, 1.0, true, r, (hang.x - 1, items[0].y)),
+                None
+            );
         }
     }
 }

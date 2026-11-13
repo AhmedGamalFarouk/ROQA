@@ -59,9 +59,10 @@ pub const CLOSE: Curve = Curve::Spring {
 };
 /// Small state feedback (dock hover, hover-intent swell).
 pub const EASE_OUT: Curve = Curve::Bezier(0.2, 0.9, 0.3, 1.0);
-/// Dock hover pop: a steady rise that lands about 5 % past its rest and settles. The earlier (0.25, 1.6)
-/// start finished its rise in ~40 ms, which read as a one-frame jump.
-pub const POP: Curve = Curve::Bezier(0.3, 0.8, 0.5, 1.2);
+/// Dock hover pop: a steady rise that lands about 4 % past its rest and settles. The earlier (0.3, 0.8, 0.5, 1.2)
+/// was front-loaded (90 % by 117 ms of 260), so the move read as ~110 ms; this one is at 90 % by ~143 ms
+/// and its last visible change is near 250 ms.
+pub const POP: Curve = Curve::Bezier(0.45, 0.0, 0.3, 1.3);
 /// A tab switch (slide and fade) and a notice's entry.
 pub const PAGE_TIME: Duration = Duration::from_millis(240);
 pub const OPEN_TIME: Duration = Duration::from_millis(500);
@@ -229,6 +230,10 @@ mod tests {
                 .all(|w| w[12] - w[0] < 0.25)
         );
         assert!((samples(POP, HOVER_IN_TIME)[200] - 1.0).abs() < 0.01);
+        // The move spans the duration: not 90 % done before half of it, and still moving at 90 % of it.
+        let pop_values = samples(POP, HOVER_IN_TIME);
+        assert!(pop_values.iter().position(|&v| v >= 0.9).unwrap() >= 100);
+        assert!((pop_values[180] - 1.0).abs() > 0.02);
         let ease = samples(EASE_OUT, HOVER_IN_TIME);
         assert!(ease.windows(2).all(|pair| pair[1] >= pair[0] - 1e-5) && ease[100] > 0.8);
     }
