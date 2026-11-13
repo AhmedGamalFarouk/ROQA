@@ -10,8 +10,48 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// At most this many timers run at once (UNVERIFIED default from m5-preparation.md section 4).
 pub const MAX: usize = 3;
-/// The notch's idle Timer page buttons, in minutes.
-pub const PRESETS: [u64; 4] = [5, 10, 15, 25];
+/// What a Timer page button does; `controls` says which ones the page shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ctl {
+    /// Start a plain countdown of this many minutes.
+    Preset(u64),
+    /// Start the Pomodoro.
+    Focus,
+    Pause,
+    Resume,
+    Skip,
+    Cancel,
+}
+impl Ctl {
+    pub fn label(self) -> String {
+        match self {
+            Ctl::Preset(minutes) => format!("{minutes} min"),
+            Ctl::Focus => "Focus".to_owned(),
+            Ctl::Pause => "Pause".to_owned(),
+            Ctl::Resume => "Resume".to_owned(),
+            Ctl::Skip => "Skip".to_owned(),
+            Ctl::Cancel => "Cancel".to_owned(),
+        }
+    }
+}
+const IDLE: [Ctl; 5] = [
+    Ctl::Preset(5),
+    Ctl::Preset(10),
+    Ctl::Preset(15),
+    Ctl::Preset(25),
+    Ctl::Focus,
+];
+
+/// The Timer page's buttons for what it shows: presets and Focus when idle (or just finished), else the
+/// controls of the soonest countdown, which is the one the page shows.
+pub fn controls(view: Option<&View>) -> &'static [Ctl] {
+    match view.filter(|view| !view.done) {
+        None => &IDLE,
+        Some(view) if view.paused => &[Ctl::Resume, Ctl::Skip, Ctl::Cancel],
+        Some(view) if view.tagged => &[Ctl::Pause, Ctl::Skip, Ctl::Cancel],
+        Some(_) => &[Ctl::Cancel],
+    }
+}
 /// Longest countdown; also rejects a corrupt or clock-skewed stored expiry.
 pub const MAX_SECONDS: u64 = 24 * 60 * 60;
 /// How long a completion keeps the notch open before it closes by itself.
@@ -46,6 +86,27 @@ pub struct View {
     pub name: String,
     /// A timer just finished and none is left running: the panel says so, in the accent colour.
     pub done: bool,
+    /// The soonest countdown is a Pomodoro phase.
+    pub tagged: bool,
+    /// A Pomodoro phase is paused (nothing runs; the host fills `panel` from its remainder).
+    pub paused: bool,
+    /// The Pomodoro's phase line (the page title); empty for a plain timer.
+    pub label: String,
+}
+
+impl View {
+    /// The page for a paused Pomodoro phase with `left` seconds remaining.
+    pub fn paused(left: u64, label: String) -> Self {
+        Self {
+            pill: format!("{}m", left.div_ceil(60)),
+            panel: clock(left),
+            name: format!("{label}, {} remaining", clock(left)),
+            done: false,
+            tagged: true,
+            paused: true,
+            label,
+        }
+    }
 }
 
 pub fn wall_now() -> u64 {
@@ -169,6 +230,13 @@ impl Timers {
         Some(secs_left(self.list.remove(at).deadline, now).max(1))
     }
 
+    /// Cancels the soonest countdown (the one the page shows).
+    pub fn cancel_soonest(&mut self) {
+        if !self.list.is_empty() {
+            self.list.remove(0);
+        }
+    }
+
     /// A completion's alert is showing (the mascot is surprised while it does).
     pub fn finished(&self) -> bool {
         self.alert.is_some()
@@ -239,6 +307,9 @@ impl Timers {
             },
             name: names.join("; "),
             done,
+            tagged: self.list.first().is_some_and(|timer| timer.tag.is_some()),
+            paused: false,
+            label: String::new(),
         })
     }
 }
@@ -471,5 +542,34 @@ mod tests {
                 "23:59:59".into()
             )
         );
+    }
+
+    #[test]
+    fn the_page_offers_the_controls_of_what_it_shows() {
+        let now = Instant::now();
+        let mut timers = Timers::default();
+        assert_eq!(controls(None).len(), 5, "four presets and Focus");
+        assert!(timers.start(60, WALL, now));
+        let plain = timers.view(now);
+        assert_eq!(controls(plain.as_ref()), [Ctl::Cancel]);
+        timers.cancel_soonest();
+        assert_eq!(timers.view(now), None);
+        assert!(timers.start_as(60, WALL, now, Some("Focus")));
+        let running = timers.view(now);
+        assert_eq!(
+            controls(running.as_ref()),
+            [Ctl::Pause, Ctl::Skip, Ctl::Cancel]
+        );
+        let paused = View::paused(90, "Focus, paused".to_owned());
+        assert_eq!(
+            controls(Some(&paused)),
+            [Ctl::Resume, Ctl::Skip, Ctl::Cancel]
+        );
+        assert_eq!(paused.panel, "1:30");
+        assert_eq!(Ctl::Preset(15).label(), "15 min");
+        // A just-finished timer goes back to the start buttons.
+        assert!(timers.take_done(now + secs(61)));
+        let done = timers.view(now + secs(61));
+        assert_eq!(controls(done.as_ref()).len(), 5);
     }
 }

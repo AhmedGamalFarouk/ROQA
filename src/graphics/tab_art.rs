@@ -244,7 +244,13 @@ pub(super) fn page(
     slide(0.0);
     let title = match scene.weather.filter(|_| tab == Tab::Weather) {
         Some(view) => view.title.as_str(),
-        None => tab.name(),
+        None => match scene
+            .timer
+            .filter(|view| tab == Tab::Timer && !view.label.is_empty())
+        {
+            Some(view) => view.label.as_str(),
+            None => tab.name(),
+        },
     };
     draw_text(
         context,
@@ -275,23 +281,26 @@ pub(super) fn page(
     slide(0.25);
     match tab {
         Tab::Timer => match scene.timer.filter(|view| !view.done) {
-            Some(view) => draw_text(
-                context,
-                &view.panel,
-                &font(
-                    DISPLAY_FONT,
-                    26.0,
-                    DWRITE_FONT_WEIGHT_BOLD,
-                    1.0,
-                    DWRITE_TEXT_ALIGNMENT_LEADING,
-                ),
-                rect(layout::page_value(scene.dpi)),
-                if view.done {
-                    with_alpha(p.accent, p.ink_alpha(reveal))
-                } else {
-                    ink(1.0)
-                },
-            ),
+            Some(view) => {
+                draw_text(
+                    context,
+                    &view.panel,
+                    &font(
+                        DISPLAY_FONT,
+                        26.0,
+                        DWRITE_FONT_WEIGHT_BOLD,
+                        1.0,
+                        DWRITE_TEXT_ALIGNMENT_LEADING,
+                    ),
+                    rect(layout::page_value(scene.dpi)),
+                    ink(if view.paused { 0.55 } else { 1.0 }),
+                )?;
+                for (index, control) in crate::timer::controls(Some(view)).iter().enumerate() {
+                    let slot = layout::page_button(index, true, scene.dpi);
+                    pill(context, scene, body, slot, &control.label(), reveal, p)?;
+                }
+                Ok(())
+            }
             None => {
                 // Idle, or the last one just finished: the preset buttons start the next.
                 let line = scene
@@ -312,16 +321,9 @@ pub(super) fn page(
                     rect(slot),
                     with_alpha(p.accent, p.ink_alpha(reveal)),
                 )?;
-                for (index, minutes) in crate::timer::PRESETS.into_iter().enumerate() {
-                    pill(
-                        context,
-                        scene,
-                        body,
-                        index,
-                        &format!("{minutes} min"),
-                        reveal,
-                        p,
-                    )?;
+                for (index, control) in crate::timer::controls(scene.timer).iter().enumerate() {
+                    let slot = layout::page_button(index, false, scene.dpi);
+                    pill(context, scene, body, slot, &control.label(), reveal, p)?;
                 }
                 Ok(())
             }
@@ -357,13 +359,12 @@ fn pill(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
     body: &D2D_RECT_F,
-    index: usize,
+    slot: Bounds,
     label: &str,
     reveal: f32,
     p: &Palette,
 ) -> Result<()> {
     let scale = scene.dpi as f32 / 96.0;
-    let slot = layout::page_button(index, scene.dpi);
     let square = D2D_RECT_F {
         left: body.left + slot.x as f32,
         top: body.top + slot.y as f32,
@@ -434,7 +435,15 @@ fn weather_page(
             at(16.0, 32.0, width, 16.0),
             ink(0.6),
         )?;
-        return pill(context, scene, body, 0, "Set city", reveal, p);
+        return pill(
+            context,
+            scene,
+            body,
+            layout::page_button(0, false, scene.dpi),
+            "Set city",
+            reveal,
+            p,
+        );
     }
     glyphs::draw(
         context,
@@ -544,7 +553,15 @@ fn prayer_page(
             at(16.0, 32.0, width, 16.0),
             ink(0.6),
         )?;
-        return pill(context, scene, body, 0, "Set city", reveal, p);
+        return pill(
+            context,
+            scene,
+            body,
+            layout::page_button(0, false, scene.dpi),
+            "Set city",
+            reveal,
+            p,
+        );
     }
     // Wide enough for "Maghrib" at the name size, so no name is cut.
     let column = if media { 44.0 } else { 40.0 };

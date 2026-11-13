@@ -175,6 +175,8 @@ struct Pages {
     /// The Limits page, rebuilt by `refresh_limits` only while that page shows, and what it was built for.
     limits: limits::View,
     limits_key: Option<(u32, bool, String)>,
+    /// The Pomodoro's phase rules; its running phase is a tagged timer in `Desktop::timers`.
+    pomo: pomo::Pomo,
 }
 impl Pages {
     fn new(settings: &Settings, last: Tab) -> Self {
@@ -196,9 +198,26 @@ impl Pages {
             prayer_key: None,
             limits: limits::View::default(),
             limits_key: None,
+            pomo: pomo::Pomo::default(),
         };
         pages.set_privacy(settings.privacy, Instant::now());
         pages
+    }
+    /// The Timer page's content: the soonest countdown, named for its Pomodoro phase, or a paused phase
+    /// when nothing runs.
+    fn timer_view(&self, timers: &Timers, now: Instant) -> Option<timer::View> {
+        let view = timers.view(now);
+        if let Some(left) = self.pomo.left
+            && view.as_ref().is_none_or(|view| view.done)
+        {
+            return Some(timer::View::paused(left, self.pomo.title(true)));
+        }
+        view.map(|mut view| {
+            if view.tagged {
+                view.label = self.pomo.title(false);
+            }
+            view
+        })
     }
     /// Starts or stops the registry watch with the setting and reads the devices once; true when the dots changed.
     fn set_privacy(&mut self, on: bool, now: Instant) -> bool {
@@ -571,7 +590,7 @@ impl Surface {
         let timer = pages
             .tabs
             .on(Tab::Timer)
-            .then(|| timers.view(now))
+            .then(|| pages.timer_view(timers, now))
             .flatten();
         let notice = power.text();
         // A switch of page while the panel is open slides and fades the new one in; a notice eases in.
@@ -1100,7 +1119,6 @@ struct Desktop {
     prayer: PrayerRun,
     /// When the next water reminder is due; `None` until `refresh_water` computes it.
     water_due: Option<Instant>,
-    pomo: pomo::Pomo,
 }
 /// The reminder schedule for the day, the last pass it was checked at, and the MCI sound while one plays.
 #[derive(Default)]
@@ -1217,7 +1235,6 @@ impl Desktop {
             limits_open: false,
             prayer: PrayerRun::default(),
             water_due: None,
-            pomo: pomo::Pomo::default(),
         };
         if desktop.settings.notch {
             desktop.show(SurfaceKind::Notch)?;
@@ -1432,8 +1449,8 @@ impl Desktop {
             self.complete_timer();
             if self.timers.take_pomo_done() {
                 // The next phase follows by itself; Start or pause stops the round.
-                let finished = self.pomo.phase.label();
-                self.pomo.advance(&self.settings.pomo_cfg);
+                let finished = self.pages.pomo.phase.label();
+                self.pages.pomo.advance(&self.settings.pomo_cfg);
                 let status = self.pomo_start(now);
                 self.show_notice(format!("{finished} done. {status}"), now);
             }
@@ -2295,16 +2312,18 @@ impl Desktop {
     /// Starts the current Pomodoro phase (or resumes a paused one) as a tagged timer.
     fn pomo_start(&mut self, now: Instant) -> String {
         let seconds = self
+            .pages
             .pomo
             .left
             .take()
-            .unwrap_or_else(|| self.pomo.secs(&self.settings.pomo_cfg));
-        let label = self.pomo.phase.label();
+            .unwrap_or_else(|| self.pages.pomo.secs(&self.settings.pomo_cfg));
+        let label = self.pages.pomo.phase.label();
+        self.pages.pomo.track(&self.settings.pomo_cfg);
         if !self
             .timers
             .start_as(seconds, timer::wall_now(), now, Some(label))
         {
-            self.pomo.left = Some(seconds);
+            self.pages.pomo.left = Some(seconds);
             return format!("{} timers are already running.", timer::MAX);
         }
         self.timers
@@ -2317,15 +2336,38 @@ impl Desktop {
         let now = Instant::now();
         let left = self.timers.stop_pomo(now);
         if skip {
-            self.pomo.advance(&self.settings.pomo_cfg);
+            self.pages.pomo.advance(&self.settings.pomo_cfg);
         } else if left.is_some() {
-            self.pomo.left = left;
+            self.pages.pomo.left = left;
             self.timers
                 .write_to(&mut self.store, &mut self.pending, now);
             self.request_notches(Repaint::Full, |_| true);
             return "Pomodoro paused.".to_owned();
         }
         self.pomo_start(now)
+    }
+    /// A Timer page button; what it did is announced as a notice (the presets just start, as before).
+    fn timer_press(&mut self, control: timer::Ctl, now: Instant) {
+        use timer::Ctl;
+        let status = match control {
+            Ctl::Preset(minutes) => return drop(self.start_timer(minutes * 60)),
+            Ctl::Focus | Ctl::Pause | Ctl::Resume => self.pomo_act(false),
+            Ctl::Skip => self.pomo_act(true),
+            Ctl::Cancel => {
+                let view = self.pages.timer_view(&self.timers, now);
+                if view.as_ref().is_some_and(|view| view.tagged) {
+                    self.timers.stop_pomo(now);
+                    self.pages.pomo = pomo::Pomo::default();
+                    "Pomodoro cancelled.".to_owned()
+                } else {
+                    self.timers.cancel_soonest();
+                    "Timer cancelled.".to_owned()
+                }
+            }
+        };
+        self.timers
+            .write_to(&mut self.store, &mut self.pending, now);
+        self.show_notice(status, now);
     }
     fn start_timer(&mut self, seconds: u64) -> String {
         let now = Instant::now();
@@ -3081,18 +3123,21 @@ impl Desktop {
             self.start_limits(limits_os::now(), true);
             return true;
         }
-        // Timer: a preset button starts that many minutes when none runs (or the last one finished). Weather and
-        // Prayer: the "Set city" button opens Settings.
+        // Timer: the presets and Focus, or the controls of the countdown it shows. Weather and Prayer: the
+        // "Set city" button opens Settings.
+        let view = self.pages.timer_view(&self.timers, now);
+        let controls = timer::controls(view.as_ref());
+        let beside = view.as_ref().is_some_and(|view| !view.done);
         let buttons = match page {
-            Tab::Timer => timer::PRESETS.len(),
-            Tab::Weather | Tab::Prayer => 1,
-            _ => 0,
+            Tab::Timer => (controls.len(), beside),
+            Tab::Weather | Tab::Prayer => (1, false),
+            _ => (0, false),
         };
         if let Some(button) = layout::page_button_at(width, dpi, progress, live, buttons, (x, y)) {
             if page != Tab::Timer {
                 let _ = self.open_settings();
-            } else if self.timers.view(now).is_none_or(|view| view.done) {
-                self.start_timer(timer::PRESETS[button] * 60);
+            } else {
+                self.timer_press(controls[button], now);
             }
             return true;
         }

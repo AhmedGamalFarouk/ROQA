@@ -38,6 +38,8 @@ pub struct Pomo {
     done: u16,
     /// Seconds left of a paused phase.
     pub left: Option<u64>,
+    /// Focus sessions per round as of the last start or advance (0: not yet seen, so the default).
+    per_round: u16,
 }
 
 impl Pomo {
@@ -46,10 +48,34 @@ impl Pomo {
         u64::from(c[self.phase as usize]) * 60
     }
 
+    /// Remembers the round length for `title`.
+    pub fn track(&mut self, c: &Config) {
+        self.per_round = c[3];
+    }
+
+    /// The page title: "Focus 2 of 4", "Short break" or "Long break", with "paused" after it while paused.
+    pub fn title(&self, paused: bool) -> String {
+        let n = if self.per_round == 0 {
+            DEFAULT[3]
+        } else {
+            self.per_round
+        };
+        let base = match self.phase {
+            Phase::Focus => format!("Focus {} of {n}", self.done % n + 1),
+            other => other.label().to_owned(),
+        };
+        if paused {
+            format!("{base}, paused")
+        } else {
+            base
+        }
+    }
+
     /// Moves on: focus leads to a short break, or to a long one after every `c[3]`th session; a break leads
     /// back to focus. Any paused remainder is dropped.
     pub fn advance(&mut self, c: &Config) {
         self.left = None;
+        self.per_round = c[3];
         self.phase = if self.phase == Phase::Focus {
             self.done += 1;
             if self.done.is_multiple_of(c[3].max(1)) {
@@ -101,5 +127,20 @@ mod tests {
         let mut d = DEFAULT;
         clamp(&mut d);
         assert_eq!(d, DEFAULT);
+    }
+
+    #[test]
+    fn the_title_names_the_phase_and_session() {
+        let c = [25, 5, 15, 2];
+        let mut p = Pomo::default();
+        p.track(&c);
+        assert_eq!(p.title(false), "Focus 1 of 2");
+        p.advance(&c);
+        assert_eq!(p.title(true), "Short break, paused");
+        p.advance(&c);
+        assert_eq!(p.title(false), "Focus 2 of 2");
+        p.advance(&c);
+        assert_eq!(p.title(false), "Long break");
+        assert_eq!(Pomo::default().title(false), "Focus 1 of 4");
     }
 }

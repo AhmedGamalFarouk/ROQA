@@ -325,10 +325,18 @@ pub fn refresh(dpi: u32) -> Bounds {
 pub fn refresh_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, y: i32) -> bool {
     on_slot(refresh(dpi), window_width, dpi, progress, media, x, y)
 }
-/// The page buttons (the timer's presets, the empty Weather and Prayer "Set city"): 52 x 22 DIP pills 58
-/// apart from x 16, y 48, in DIPs from the body's left and top edges.
-pub fn page_button(index: usize, dpi: u32) -> Bounds {
-    scaled_bounds((16.0 + 58.0 * index as f32, 48.0, 52.0, 22.0), dpi)
+/// The page buttons (the timer's presets, the empty Weather and Prayer "Set city"): 48 x 22 DIP pills 52
+/// apart from x 16, y 48, in DIPs from the body's left and top edges. `beside`: the Timer page's controls
+/// while a countdown shows, 48 x 22 pills 52 apart from x 156 at y 34, right of the digits.
+pub fn page_button(index: usize, beside: bool, dpi: u32) -> Bounds {
+    scaled_bounds(
+        if beside {
+            (156.0 + 52.0 * index as f32, 34.0, 48.0, 22.0)
+        } else {
+            (16.0 + 52.0 * index as f32, 48.0, 48.0, 22.0)
+        },
+        dpi,
+    )
 }
 /// The page button under a window point among the first `count`; none while the panel is closed.
 pub fn page_button_at(
@@ -336,12 +344,12 @@ pub fn page_button_at(
     dpi: u32,
     progress: f32,
     media: bool,
-    count: usize,
+    (count, beside): (usize, bool),
     (x, y): (i32, i32),
 ) -> Option<usize> {
     (0..count).find(|&i| {
         on_slot(
-            page_button(i, dpi),
+            page_button(i, beside, dpi),
             window_width,
             dpi,
             progress,
@@ -394,7 +402,7 @@ const TIMER_PILL: (f32, f32, f32, f32) = (108.0, 8.0, 30.0, 14.0);
 /// The pages other than Media (Timer, Shelf), in DIPs from the body's left and top edges: a title row, the
 /// Timer page's big value under it, and a small clock at the top right (right-aligned, 16 from the edge).
 const PAGE_TITLE: (f32, f32, f32, f32) = (16.0, 12.0, 160.0, 16.0);
-const PAGE_VALUE: (f32, f32, f32, f32) = (16.0, 30.0, 220.0, 32.0);
+const PAGE_VALUE: (f32, f32, f32, f32) = (16.0, 30.0, 136.0, 32.0);
 const PAGE_CLOCK: (f32, f32, f32, f32) = (0.0, 11.0, 100.0, 16.0);
 const PAGE_CLOCK_MARGIN: f32 = 16.0;
 /// The Shelf page's hint beside the empty shelf's add slot.
@@ -1316,6 +1324,17 @@ mod tests {
                 for (a, first) in timer_page.iter().enumerate() {
                     for second in &timer_page[a + 1..] {
                         assert!(!hit(*first, *second), "{dpi} {media}");
+                    }
+                }
+                // The Timer page's buttons, idle (five) or beside the digits (three), clear of the rest.
+                for (count, beside) in [(5, false), (3, true)] {
+                    for index in 0..count {
+                        let button = page_button(index, beside, dpi);
+                        assert!(fits(button), "{dpi} {media}");
+                        for other in [title, clock, gear(dpi, media)] {
+                            assert!(!hit(button, other), "{dpi} {media} {index}");
+                        }
+                        assert!(!beside || !hit(button, value), "{dpi} {media}");
                     }
                 }
                 // Shelf page: the add slot, its hint, the title and the clock.

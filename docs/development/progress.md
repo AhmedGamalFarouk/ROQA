@@ -1173,3 +1173,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u4-polish`; [packet](ui-council-u4.md). Shelf icons without a dock, Limits columns/size, eased dock hover, framed Settings edits/combos, Light and glass edges, bigger eyes, notice and page exit fades, slider percent at rest.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 357 tests, locked release); 1,043,968 B (+8,704 vs 1,035,264); baseline 1,152,000 B, limit 1,175,040 unchanged.
 - **NOT RUN:** native/GUI (Chief capture); reviews paused (REVIEW NOT RUN). Not done: Settings page fade.
+
+## U5-A Timer controls (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u5-climb`; [packet](ui-council-u5.md). Timer tab: phase/session title, Pause/Resume, Skip, Cancel, a Focus start pill, notices for each; plain timers get Cancel.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 359 tests, locked release); 1,051,136 B (+7,168 vs 1,043,968); baseline 1,152,000 B, limit 1,175,040 unchanged.
+- **NOT RUN:** native/GUI (Chief capture); reviews paused (REVIEW NOT RUN).
