@@ -35,11 +35,7 @@ impl Units {
         Units::ALL.into_iter().find(|units| units.key() == key)
     }
     pub fn label(self) -> &'static str {
-        [
-            "Units: automatic",
-            "Units: Celsius (°C)",
-            "Units: Fahrenheit (°F)",
-        ][self as usize]
+        ["Automatic", "Celsius (°C)", "Fahrenheit (°F)"][self as usize]
     }
     /// °F for the explicit choice, else by the Windows locale's `region` (the few countries that use it).
     pub fn fahrenheit(self, region: &str) -> bool {

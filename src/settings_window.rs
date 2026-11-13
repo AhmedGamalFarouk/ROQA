@@ -454,8 +454,8 @@ const PAGES: &[Page] = &[
                 rows: &[r(
                     DIAGNOSTICS,
                     Kind::Edit(220),
-                    "Diagnostics report file",
-                    "Empty is off",
+                    "Report file",
+                    "Diagnostics; empty is off",
                 )],
             },
             Card {
@@ -1668,17 +1668,9 @@ impl SettingsWindow {
         let ranged = next.clamped();
         let next = ranged.clone().keep_one_monitor(&self.devices);
         self.show(&next);
-        if invalid {
-            // The box already shows the value that was kept (`show` above), so the message explains the change.
-            self.say("A shift is whole minutes from -30 to 30; the nearest is kept.")?;
-        } else if !kept_a_kind
-            && (next.dock != self.current.dock || next.notch != self.current.notch)
-        {
-            self.say("Keep the dock or the notch on.")?;
-        } else if ranged != next {
-            self.say("Keep at least one monitor on.")?;
-        } else if next != self.current {
-            self.say("Applied.")?;
+        let changed = next != self.current;
+        if let Some(status) = footer_status(invalid, kept_a_kind, ranged != next, changed) {
+            self.say(status)?;
         }
         if next != self.current {
             self.current = next.clone();
@@ -2303,6 +2295,29 @@ fn parse_shift(text: &str, old: i8) -> (i8, bool) {
     }
 }
 
+/// The footer line after an edit, if any. `kept_a_kind` is whether the values the user asked for keep the dock or
+/// the notch on (not the clamped ones: a refused switch snaps back, so the clamped result looks unchanged),
+/// `monitor_kept` whether the last monitor was kept on, `changed` whether anything differs from before.
+fn footer_status(
+    invalid_shift: bool,
+    kept_a_kind: bool,
+    monitor_kept: bool,
+    changed: bool,
+) -> Option<&'static str> {
+    if invalid_shift {
+        // The box already shows the value that was kept, so the message explains the change.
+        Some("A shift is whole minutes from -30 to 30; the nearest is kept.")
+    } else if !kept_a_kind {
+        Some("Keep the dock or the notch on.")
+    } else if monitor_kept {
+        Some("Keep at least one monitor on.")
+    } else if changed {
+        Some("Applied.")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2378,5 +2393,28 @@ mod tests {
     fn the_fixed_lists_line_up_with_their_settings() {
         assert_eq!(LEAD_ROWS.len(), LEADS.len());
         assert_eq!(NOTCH_SIZES.len(), 4);
+    }
+
+    #[test]
+    fn a_refused_last_switch_says_so_instead_of_applied() {
+        // Asked for neither dock nor notch: refused even though the clamped result equals the current one.
+        assert_eq!(
+            footer_status(false, false, false, false),
+            Some("Keep the dock or the notch on.")
+        );
+        assert_eq!(
+            footer_status(false, false, false, true),
+            Some("Keep the dock or the notch on.")
+        );
+        assert_eq!(footer_status(false, true, false, true), Some("Applied."));
+        assert_eq!(footer_status(false, true, false, false), None);
+        assert_eq!(
+            footer_status(false, true, true, true),
+            Some("Keep at least one monitor on.")
+        );
+        assert_eq!(
+            footer_status(true, false, false, true),
+            Some("A shift is whole minutes from -30 to 30; the nearest is kept.")
+        );
     }
 }

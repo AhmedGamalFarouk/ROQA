@@ -11,3 +11,8 @@ Native/GUI NOT RUN; the Chief's capture worker verifies by eye. Reviews paused.
 
 - The plain panel grows by `layout::NOTICE_ROOM` (8 DIP, 92 -> 100) while a notice shows, eased by the notice's own entry tween (`notice_fx`, the motion clock) and eased back as it leaves; `layout::set_notice_shown` carries it to the shape like the page height. The notice row moved to y 76: 6 DIP under the Timer pills, 10 above the bottom. The media panel keeps its pocket notice and the Limits page (no spare window height) does not grow.
 - Phase starts and resumes ("Focus: 25 min.", "Short break: 5 min.") no longer raise a notice from the Timer page buttons: the title line already says it (`pomo::is_start_status`; errors, pause and cancel still show). Tests: `a_notice_grows_the_plain_panel_by_its_row_and_leaves_padding`, `only_a_phase_start_line_is_redundant`.
+
+## U6-C Settings feedback and wording (defect 3, polish)
+
+- A refused switch-off of the last of dock/notch now says "Keep the dock or the notch on." The old test compared the clamped result with the current settings, which snap back to equal when the notch is the one left on, so it never fired; `footer_status` decides from the REQUESTED values (`kept_a_kind` is computed before clamping). Test `a_refused_last_switch_says_so_instead_of_applied`.
+- Weather > Units drop-down items no longer repeat the row label ("Automatic", "Celsius (°C)", "Fahrenheit (°F)"); About > "Diagnostics report file" is now "Report file" under the Diagnostics card (no wrap), hint "Diagnostics; empty is off".
