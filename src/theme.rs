@@ -91,22 +91,24 @@ impl Theme {
         }
     }
 
-    /// The palette with the system `accent` on its fills and rings. Light keeps ink, and so does any
-    /// accent under `ACCENT_CONTRAST` against the body over a white or a black backdrop (a Glass body
-    /// is translucent), like the text rule in the tests.
+    /// The palette with the system `accent` on its fills and rings. Any accent under `ACCENT_CONTRAST` against
+    /// the body over a white or a black backdrop (a Glass body is translucent) keeps ink instead, like the text
+    /// rule in the tests. Light deepens the accent (`deepen`) so the selected tab and chip read as an accent
+    /// wash with dark accent text, not as a disabled grey.
     pub fn palette_with(self, accent: Rgb) -> Palette {
         let palette = self.palette();
+        let accent = if self == Self::Light {
+            deepen(accent)
+        } else {
+            accent
+        };
         let reads = palette.fills().into_iter().all(|Rgba(r, g, b, alpha)| {
             [(255, 255, 255), (0, 0, 0)].into_iter().all(|backdrop| {
                 contrast(accent, over((r, g, b), alpha, backdrop)) >= ACCENT_CONTRAST
             })
         });
         Palette {
-            accent: if self != Self::Light && reads {
-                accent
-            } else {
-                palette.ink
-            },
+            accent: if reads { accent } else { palette.ink },
             ..palette
         }
     }
@@ -320,6 +322,12 @@ impl Palette {
     }
 }
 
+/// `accent` a fifth darker, for text and washes on the Light theme's pale body.
+fn deepen((r, g, b): Rgb) -> Rgb {
+    let dark = |c: u8| (f32::from(c) * 0.8).round() as u8;
+    (dark(r), dark(g), dark(b))
+}
+
 /// WCAG 1.4.11 non-text contrast, for the accent against the body.
 const ACCENT_CONTRAST: f32 = 3.0;
 
@@ -454,8 +462,14 @@ mod tests {
     #[test]
     fn the_accent_colours_fills_and_rings_only_where_it_reads() {
         let blue = (0, 120, 215);
-        // Light, high contrast and the plain themes' own palettes keep ink.
-        assert_eq!(Theme::Light.palette_with(blue).accent, (20, 22, 26));
+        // Light takes a deeper accent where it reads (the selected tab is an accent wash, not grey), else ink.
+        assert_eq!(Theme::Light.palette_with(blue).accent, (0, 96, 172));
+        assert_eq!(
+            Theme::Light.palette_with((255, 196, 0)).accent,
+            (20, 22, 26)
+        );
+        assert_eq!(Theme::Light.palette().accent, (20, 22, 26));
+        // High contrast and the plain themes' own palettes keep ink.
         assert_eq!(Theme::Classic.palette().accent, (255, 255, 255));
         let high = Palette::contrast((1, 2, 3), (250, 251, 252), (4, 5, 6), (7, 8, 9));
         assert_eq!(high.accent, high.ink);
@@ -482,7 +496,12 @@ mod tests {
                 (200, 30, 30),
             ] {
                 let chosen = theme.palette_with(accent).accent;
-                assert!(chosen == p.ink || chosen == accent, "{theme:?}");
+                let shown = if theme == Theme::Light {
+                    deepen(accent)
+                } else {
+                    accent
+                };
+                assert!(chosen == p.ink || chosen == shown, "{theme:?}");
                 if chosen != p.ink {
                     for (Rgba(r, g, b, alpha), backdrop) in p
                         .fills()

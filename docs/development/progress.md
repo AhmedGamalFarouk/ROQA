@@ -1215,3 +1215,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u6-climb`; [packet](ui-council-u6.md). Refused last dock/notch switch says "Keep the dock or the notch on." (requested value, not clamped); Units items and the Diagnostics row no longer repeat or wrap.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 361 tests, locked release); 1,050,112 B (+0 vs 1,050,112); baseline 1,152,000 B, limit 1,175,040 unchanged.
 - **NOT RUN:** native/GUI (Chief capture); reviews paused (REVIEW NOT RUN).
+
+## U6-D Light accent (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u6-climb`; [packet](ui-council-u6.md). Light uses a deepened system accent: selected tab and next-prayer chip read as accent wash + dark accent text, not grey.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 361 tests, locked release); 1,050,112 B (+0 vs 1,050,112); baseline 1,152,000 B, limit 1,175,040 unchanged.
+- **NOT RUN:** native/GUI (Chief capture); reviews paused (REVIEW NOT RUN).

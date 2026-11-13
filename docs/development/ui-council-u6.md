@@ -16,3 +16,7 @@ Native/GUI NOT RUN; the Chief's capture worker verifies by eye. Reviews paused.
 
 - A refused switch-off of the last of dock/notch now says "Keep the dock or the notch on." The old test compared the clamped result with the current settings, which snap back to equal when the notch is the one left on, so it never fired; `footer_status` decides from the REQUESTED values (`kept_a_kind` is computed before clamping). Test `a_refused_last_switch_says_so_instead_of_applied`.
 - Weather > Units drop-down items no longer repeat the row label ("Automatic", "Celsius (°C)", "Fahrenheit (°F)"); About > "Diagnostics report file" is now "Report file" under the Diagnostics card (no wrap), hint "Diagnostics; empty is off".
+
+## U6-D Light accent (defect 4)
+
+- Light now takes the system accent where it reads, deepened a fifth (`theme::deepen`; blue 0,120,215 becomes 0,96,172, contrast >= 3 against the body checked like the other themes), so the selected tab and the next-prayer chip are an accent wash with dark accent text, like Classic and Midnight; a pale accent still falls back to ink. Test `the_accent_colours_fills_and_rings_only_where_it_reads` updated.
