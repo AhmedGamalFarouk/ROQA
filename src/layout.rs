@@ -55,11 +55,29 @@ pub fn set_page_height(dips: u16) {
 pub fn limits_height(rows: usize) -> u16 {
     38 + 20 * rows as u16 + 22
 }
+/// While a notice shows the plain panel grows by `NOTICE_ROOM` DIPs for its own row; `shown` (0 to 1) follows
+/// the notice's entry tween, in permille. Set by the host before each paint, like the page height.
+pub const NOTICE_ROOM: f32 = 8.0;
+static NOTICE_SHOWN: AtomicU16 = AtomicU16::new(0);
+pub fn set_notice_shown(shown: f32) {
+    NOTICE_SHOWN.store((shown.clamp(0.0, 1.0) * 1000.0).round() as u16, Relaxed);
+}
+/// `height` grown for a notice `shown` (0 to 1) of the way in.
+fn with_notice(height: f32, shown: f32) -> f32 {
+    height + NOTICE_ROOM * shown.clamp(0.0, 1.0)
+}
 /// `shape` with at least the page's height, and the media panel's width for such a page (its columns need it).
-fn tall(shape: NotchShape) -> NotchShape {
+/// The plain panel (`notice_row`, not a tall page) also grows while a notice shows; the media panel keeps its
+/// notice in the pocket under the cover, and the Limits page has no spare height in the window.
+fn tall(shape: NotchShape, notice_row: bool) -> NotchShape {
     let page = f32::from(PAGE_HEIGHT.load(Relaxed));
+    let shown = f32::from(NOTICE_SHOWN.load(Relaxed)) / 1000.0;
     NotchShape {
-        height: shape.height.max(page),
+        height: if notice_row && page == 0.0 {
+            with_notice(shape.height, shown)
+        } else {
+            shape.height.max(page)
+        },
         width: if page > 0.0 {
             MEDIA_EXPANDED.width
         } else {
@@ -91,9 +109,9 @@ pub fn notch_shape(progress: f32, media: bool) -> NotchShape {
     let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let settled = progress.clamp(0.0, 1.0);
     let (from, to) = if media {
-        (MEDIA_NOTCH, tall(MEDIA_EXPANDED))
+        (MEDIA_NOTCH, tall(MEDIA_EXPANDED, false))
     } else {
-        (NOTCH, tall(NOTCH_EXPANDED))
+        (NOTCH, tall(NOTCH_EXPANDED, true))
     };
     let from = pill(from, to, PILL_PERCENT.load(Relaxed));
     NotchShape {
@@ -288,11 +306,14 @@ pub fn volume_fraction(window_width: i32, dpi: u32, progress: f32, x: i32) -> Op
 /// clears the glass backing's rounded corner (`BACKING_INSET`) by 6.
 const GEAR_SIZE: f32 = 16.0;
 pub fn gear(dpi: u32, media: bool) -> Bounds {
-    let shape = tall(if media {
-        MEDIA_EXPANDED
-    } else {
-        NOTCH_EXPANDED
-    });
+    let shape = tall(
+        if media {
+            MEDIA_EXPANDED
+        } else {
+            NOTCH_EXPANDED
+        },
+        !media,
+    );
     scaled_bounds(
         (
             shape.width - 16.0 - GEAR_SIZE,
@@ -446,10 +467,11 @@ pub fn timer_pill(dpi: u32) -> Bounds {
 }
 
 /// The power pill's text slot (features B1, PROVISIONAL, no design review), in DIPs from the body's left and
-/// top edges: x, y, width, height. Plain panel: the status row under the date (centred). Media panel: the
+/// top edges: x, y, width, height. Plain panel: its own row, 6 under the Timer pills (the panel grows by
+/// `NOTICE_ROOM` for it, leaving 10 below; centred). Media panel: the
 /// timer's pocket under the 72 DIP cover and left of the controls (from x 100), leading-aligned.
 const POWER_NOTICE: [(f32, f32, f32, f32); 2] =
-    [(12.0, 70.0, 296.0, 14.0), (16.0, 92.0, 84.0, 16.0)];
+    [(12.0, 76.0, 296.0, 14.0), (16.0, 92.0, 84.0, 16.0)];
 
 /// The power pill's text slot in pixels from the body's left and top edges.
 pub fn power_notice(media: bool, dpi: u32) -> Bounds {
@@ -1160,6 +1182,32 @@ mod tests {
         }
         // The check itself: a point on the bottom curve's edge is not inside.
         assert!(backing_depth(NOTCH_EXPANDED, 16.0, 91.0) < 6.0);
+    }
+
+    #[test]
+    fn a_notice_grows_the_plain_panel_by_its_row_and_leaves_padding() {
+        assert_eq!(with_notice(92.0, 0.0), 92.0);
+        assert_eq!(with_notice(92.0, 0.5), 96.0);
+        assert_eq!(with_notice(92.0, 1.0), 92.0 + NOTICE_ROOM);
+        assert_eq!(with_notice(92.0, 3.0), 92.0 + NOTICE_ROOM, "clamped");
+        let (_, y, _, h) = (0.0, 76.0, 0.0, 14.0);
+        let notice = power_notice(false, 96);
+        assert_eq!((notice.y as f32, notice.height as f32), (y, h));
+        // Pills end at 70: 6 above the row; 10 below it once the panel has grown.
+        let pill = page_button(0, false, 96);
+        assert_eq!(notice.y - (pill.y + pill.height), 6);
+        assert_eq!(NOTCH_EXPANDED.height + NOTICE_ROOM - (y + h), 10.0);
+        // Grown, with the rail below and the open overshoot, it still fits the window.
+        let tallest = NOTCH.height + (NOTCH_EXPANDED.height + NOTICE_ROOM - NOTCH.height) * 1.07;
+        assert!(
+            tallest
+                + rail_size(Rail {
+                    count: 6,
+                    active: 0
+                })
+                .1
+                <= NOTCH_WINDOW.1 as f32
+        );
     }
 
     #[test]

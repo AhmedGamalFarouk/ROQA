@@ -593,6 +593,12 @@ impl Surface {
         }
         let fading_out = notice.is_none() && self.notice_fx.running(now);
         let notice = notice.or(fading_out.then_some(self.last_notice.as_str()));
+        // The plain panel makes room for the notice's row as it eases in, and gives it back as it leaves.
+        layout::set_notice_shown(if notice.is_some() {
+            self.notice_fx.value(now)
+        } else {
+            0.0
+        });
         let level = audio.level().map_or(0.0, |level| f32::from(level.percent));
         if self.grip.drag {
             self.volume_fill = Tween::rest(level); // the thumb follows the pointer without lag
@@ -2316,7 +2322,10 @@ impl Desktop {
         };
         self.timers
             .write_to(&mut self.store, &mut self.pending, now);
-        self.show_notice(status, now);
+        // A phase starting shows in the page's title line, so it needs no notice of its own.
+        if !pomo::is_start_status(&status) {
+            self.show_notice(status, now);
+        }
     }
     fn start_timer(&mut self, seconds: u64) -> String {
         let now = Instant::now();

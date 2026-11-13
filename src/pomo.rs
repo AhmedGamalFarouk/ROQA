@@ -31,6 +31,19 @@ impl Phase {
     }
 }
 
+/// Whether `status` is only the "Focus: 25 min." line a phase start reports (`Host::pomo_start`), which the
+/// Timer page's title already says.
+pub fn is_start_status(status: &str) -> bool {
+    [Phase::Focus, Phase::Short, Phase::Long]
+        .iter()
+        .any(|phase| {
+            status
+                .strip_prefix(phase.label())
+                .and_then(|rest| rest.strip_prefix(": "))
+                .is_some_and(|minutes| minutes.ends_with(" min."))
+        })
+}
+
 #[derive(Debug, Default)]
 pub struct Pomo {
     pub phase: Phase,
@@ -142,5 +155,24 @@ mod tests {
         p.advance(&c);
         assert_eq!(p.title(false), "Long break");
         assert_eq!(Pomo::default().title(false), "Focus 1 of 4");
+    }
+
+    #[test]
+    fn only_a_phase_start_line_is_redundant() {
+        for line in [
+            "Focus: 25 min.",
+            "Short break: 5 min.",
+            "Long break: 15 min.",
+        ] {
+            assert!(is_start_status(line), "{line}");
+        }
+        for line in [
+            "Pomodoro paused.",
+            "Pomodoro cancelled.",
+            "3 timers are already running.",
+            "Focus done.",
+        ] {
+            assert!(!is_start_status(line), "{line}");
+        }
     }
 }
