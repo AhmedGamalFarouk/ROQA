@@ -40,8 +40,8 @@ pub const MEDIA_EXPANDED: NotchShape = NotchShape {
 };
 /// The notch HWND never moves or resizes: the media panel and ears plus room for the open
 /// overshoot and the soft shadow, keeping the plain panel's 40 DIP of side and 44 DIP of bottom
-/// shadow room (the window is 192 DIP tall so the Limits page, its notice row and the rail below fit). `notch_region` bounds body input; a separate transparent HWND draws the shadow.
-pub const NOTCH_WINDOW: (i32, i32) = (440, 192);
+/// shadow room (the window is 200 DIP tall so the Limits page, its notice row and the rail below fit). `notch_region` bounds body input; a separate transparent HWND draws the shadow.
+pub const NOTCH_WINDOW: (i32, i32) = (440, 200);
 /// Pointer slop around the drawn body that still counts as hovering it.
 const NOTCH_HOVER_SLOP: f32 = 4.0;
 
@@ -51,9 +51,10 @@ static PAGE_HEIGHT: AtomicU16 = AtomicU16::new(0);
 pub fn set_page_height(dips: u16) {
     PAGE_HEIGHT.store(dips, Relaxed);
 }
-/// The Limits page's tool rows: the first at y 38 DIPs, `LIMITS_ROW` apart (room for the 11 DIP secondary text).
+/// The Limits page's tool rows: the first at y 38 DIPs, `LIMITS_ROW` apart (two lines each: the used values, then
+/// the reset times and the freshness).
 pub const LIMITS_TOP: f32 = 38.0;
-pub const LIMITS_ROW: f32 = 22.0;
+pub const LIMITS_ROW: f32 = 30.0;
 /// The Limits page's panel height for `rows` tool rows: the rows and room for the gear under the last.
 pub fn limits_height(rows: usize) -> u16 {
     (LIMITS_TOP + LIMITS_ROW * rows as f32) as u16 + 22
@@ -978,7 +979,7 @@ mod tests {
                 x: 1480,
                 y: 0,
                 width: 880,
-                height: 384
+                height: 400
             }
         );
     }
@@ -993,9 +994,9 @@ mod tests {
         };
         // (dpi, window, media pill, media panel) in physical pixels.
         for (dpi, window, pill, panel) in [
-            (96, (440, 192), (262, 30), (360, 120)),
-            (144, (660, 288), (393, 45), (540, 180)),
-            (192, (880, 384), (524, 60), (720, 240)),
+            (96, (440, 200), (262, 30), (360, 120)),
+            (144, (660, 300), (393, 45), (540, 180)),
+            (192, (880, 400), (524, 60), (720, 240)),
         ] {
             let bounds = placement(work, dpi, SurfaceKind::Notch, 0);
             assert_eq!((bounds.width, bounds.height), window);
@@ -1228,7 +1229,7 @@ mod tests {
 
     #[test]
     fn the_limits_page_grows_with_its_rows_and_still_fits_the_window_with_the_rail() {
-        assert_eq!(limits_height(3), 126);
+        assert_eq!(limits_height(3), 150);
         assert!(limits_height(2) < limits_height(3));
         // Three rows, open overshoot (progress 1.07) and the rail below stay inside the notch window.
         let shape = NOTCH_EXPANDED.height;
@@ -1471,8 +1472,12 @@ mod tests {
     fn a_tall_page_gets_its_notice_row_under_its_content_inside_the_grown_panel() {
         let page = limits_height(3);
         let notice = notice_slot(true, page, 96);
-        // 6 under the last row's 22 pitch and the gear's row, 10 above the grown panel's bottom.
+        // 6 under the last row, 10 above the grown panel's bottom.
         assert_eq!(notice.y, i32::from(page) - 16);
+        assert!(
+            notice.y as f32 >= LIMITS_TOP + LIMITS_ROW * 3.0 + 6.0,
+            "6 under the last row"
+        );
         assert_eq!(
             f32::from(page) + NOTICE_ROOM - (notice.y + notice.height) as f32,
             10.0

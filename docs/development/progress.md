@@ -1245,3 +1245,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u7-climb`; [packet](ui-council-u7.md). About "Empty = off" and "Antigravity models" no longer wrap; non-scrolling Settings pages hide the scroll bar (width still reserved); statusline end-ellipsis skipped (not cheap).
 - **Checks:** verify.ps1 PASS (fmt/clippy, 367 tests, locked release); 1,050,624 B (+0 vs 1,050,624); baseline 1,152,000 B, limit 1,175,040 unchanged.
 - **NOT RUN:** native/GUI (Chief capture; gutter/scroll bar hide unverified by eye); reviews paused (REVIEW NOT RUN).
+
+## U7-C Limits rows (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u7-climb`; [packet](ui-council-u7.md). Limits: two lines per tool (aligned used value, labelled "resets ..." line, freshness under the name); row pitch 30, panel 150 DIP for three rows, window 200 DIP.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 367 tests, locked release); 1,051,136 B (+512 vs 1,050,624); baseline 1,152,000 B, limit 1,175,040 unchanged.
+- **NOT RUN:** native/GUI (Chief capture; text fit of "resets Sun 08:59" and "as of HH:MM" estimated, not measured); reviews paused (REVIEW NOT RUN).
