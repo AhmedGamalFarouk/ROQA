@@ -87,15 +87,16 @@ pub(super) fn rail(
     let outline = notch_outline(context, &shape, radius, ears)?;
     // SAFETY: context is live between surface BeginDraw/EndDraw; brushes and geometry are scoped to this draw.
     unsafe {
-        // The names sit on this fill, so a glass theme backs it almost opaquely.
+        // The names sit on this fill, so a glass theme backs it fully opaquely (no backdrop text doubles).
         let Rgba(red, green, blue, alpha) = p.body;
-        let alpha = if p.rim.is_some() {
-            GLASS_BACKING
-        } else {
-            alpha
-        };
+        let alpha = if p.rim.is_some() { 1.0 } else { alpha };
         let fill = context.CreateSolidColorBrush(&color(Rgba(red, green, blue, alpha)), None)?;
         context.FillGeometry(&outline, &fill, None);
+        // A dark-ink (Light) rail gets a hairline so its edge reads on a white backdrop.
+        if p.ink.0 < 128 {
+            let edge = context.CreateSolidColorBrush(&with_alpha(p.ink, 0.22), None)?;
+            context.DrawGeometry(&outline, &edge, scale, None);
+        }
         // While the handle grows out of the panel its items stay inside it.
         context.PushAxisAlignedClip(&shape, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     }

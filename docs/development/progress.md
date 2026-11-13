@@ -1233,3 +1233,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** branch `feat/u6-climb`; [packet](ui-council-u6.md). Limits secondary text 11 DIP, row pitch 22 (panel 126 DIP for three rows), columns re-spaced.
 - **Checks:** verify.ps1 PASS (fmt/clippy, 365 tests, locked release); 1,051,136 B (+1,024 vs 1,050,112); baseline 1,152,000 B, limit 1,175,040 unchanged.
 - **NOT RUN:** native/GUI (Chief capture; column fit of "Sun 08:59" and "as of HH:MM" estimated, not measured); reviews paused (REVIEW NOT RUN).
+
+## U7-A One notice path (2026-11-13 Africa/Cairo)
+
+- **Scope:** branch `feat/u7-climb`; [packet](ui-council-u7.md). Every notice grows the panel for a padded row (Limits included, window 164 -> 192 DIP); Pomodoro actions/presets clear a stale notice; glass rail opaque; Light rail hairline.
+- **Checks:** verify.ps1 PASS (fmt/clippy, 367 tests, locked release); 1,050,624 B (-512 vs 1,051,136); baseline 1,152,000 B, limit 1,175,040 unchanged.
+- **NOT RUN:** native/GUI (Chief capture; Limits notice row, rail opacity and hairline unverified by eye); reviews paused (REVIEW NOT RUN).

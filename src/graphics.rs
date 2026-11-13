@@ -1091,7 +1091,7 @@ fn notice_text(
     let Some(text) = scene.notice.filter(|_| reveal > 0.0) else {
         return Ok(());
     };
-    let media = scene.track.is_some();
+    let media = layout::notice_in_pocket(scene.track.is_some());
     let slot = layout::power_notice(media, scene.dpi);
     let left = body.left + slot.x as f32;
     // The notice rises 5 DIP into place as it fades in.
@@ -2270,8 +2270,8 @@ fn line(
     }
 }
 
-/// Alpha of the glass themes' content backing (`glass_scrim`) and of the tab rail's fill: a backdrop's text no
-/// longer shows through either.
+/// Alpha of the glass themes' content backing (`glass_scrim`): a backdrop's text no longer shows through it (the
+/// tab rail's fill is fully opaque).
 const GLASS_BACKING: f32 = 0.97;
 
 /// Glass themes only: a near-opaque body-coloured backing under the panel's content, following the body's own

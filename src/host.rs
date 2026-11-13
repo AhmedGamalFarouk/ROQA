@@ -2319,7 +2319,10 @@ impl Desktop {
     fn timer_press(&mut self, control: timer::Ctl, now: Instant) {
         use timer::Ctl;
         let status = match control {
-            Ctl::Preset(minutes) => return drop(self.start_timer(minutes * 60)),
+            Ctl::Preset(minutes) => {
+                self.clear_notice();
+                return drop(self.start_timer(minutes * 60));
+            }
             Ctl::Focus | Ctl::Pause | Ctl::Resume => self.pomo_act(false),
             Ctl::Skip => self.pomo_act(true),
             Ctl::Cancel => {
@@ -2336,9 +2339,18 @@ impl Desktop {
         };
         self.timers
             .write_to(&mut self.store, &mut self.pending, now);
-        // A phase starting shows in the page's title line, so it needs no notice of its own.
-        if !pomo::is_start_status(&status) {
+        // A phase starting shows in the page's title line, so it needs no notice of its own, and an earlier
+        // notice ("Pomodoro paused.") is stale by then.
+        if pomo::is_start_status(&status) {
+            self.clear_notice();
+        } else {
             self.show_notice(status, now);
+        }
+    }
+    /// Ends the notice row at once when what it said no longer holds.
+    fn clear_notice(&mut self) {
+        if self.power.clear() {
+            self.request_notches(Repaint::Full, |_| true);
         }
     }
     fn start_timer(&mut self, seconds: u64) -> String {

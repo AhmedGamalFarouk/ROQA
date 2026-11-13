@@ -40,8 +40,8 @@ pub const MEDIA_EXPANDED: NotchShape = NotchShape {
 };
 /// The notch HWND never moves or resizes: the media panel and ears plus room for the open
 /// overshoot and the soft shadow, keeping the plain panel's 40 DIP of side and 44 DIP of bottom
-/// shadow room. `notch_region` bounds body input; a separate transparent HWND draws the shadow.
-pub const NOTCH_WINDOW: (i32, i32) = (440, 164);
+/// shadow room (the window is 192 DIP tall so the Limits page, its notice row and the rail below fit). `notch_region` bounds body input; a separate transparent HWND draws the shadow.
+pub const NOTCH_WINDOW: (i32, i32) = (440, 192);
 /// Pointer slop around the drawn body that still counts as hovering it.
 const NOTCH_HOVER_SLOP: f32 = 4.0;
 
@@ -70,16 +70,16 @@ fn with_notice(height: f32, shown: f32) -> f32 {
     height + NOTICE_ROOM * shown.clamp(0.0, 1.0)
 }
 /// `shape` with at least the page's height, and the media panel's width for such a page (its columns need it).
-/// The plain panel (`notice_row`, not a tall page) also grows while a notice shows; the media panel keeps its
-/// notice in the pocket under the cover, and the Limits page has no spare height in the window.
+/// The plain panel (`notice_row`) and a tall page also grow while a notice shows, for its own row under the
+/// page; only the media panel's Media page keeps its notice in the pocket under the cover.
 fn tall(shape: NotchShape, notice_row: bool) -> NotchShape {
     let page = f32::from(PAGE_HEIGHT.load(Relaxed));
     let shown = f32::from(NOTICE_SHOWN.load(Relaxed)) / 1000.0;
     NotchShape {
-        height: if notice_row && page == 0.0 {
-            with_notice(shape.height, shown)
+        height: if notice_row || page > 0.0 {
+            with_notice(shape.height.max(page), shown)
         } else {
-            shape.height.max(page)
+            shape.height
         },
         width: if page > 0.0 {
             MEDIA_EXPANDED.width
@@ -476,8 +476,21 @@ pub fn timer_pill(dpi: u32) -> Bounds {
 const POWER_NOTICE: [(f32, f32, f32, f32); 2] =
     [(12.0, 76.0, 296.0, 14.0), (16.0, 92.0, 84.0, 16.0)];
 
-/// The power pill's text slot in pixels from the body's left and top edges.
+/// Whether the notice sits in the media panel's pocket under the cover (the Media page), not in a row of its own.
+pub fn notice_in_pocket(media: bool) -> bool {
+    media && PAGE_HEIGHT.load(Relaxed) == 0
+}
+
+/// The power pill's text slot in pixels from the body's left and top edges. A tall page (Limits) puts it in its
+/// own row 6 under the page, like the plain panel, spanning the page's width.
 pub fn power_notice(media: bool, dpi: u32) -> Bounds {
+    notice_slot(media, PAGE_HEIGHT.load(Relaxed), dpi)
+}
+fn notice_slot(media: bool, page: u16, dpi: u32) -> Bounds {
+    if page > 0 {
+        let width = MEDIA_EXPANDED.width - 24.0;
+        return scaled_bounds((12.0, f32::from(page) - 16.0, width, 14.0), dpi);
+    }
     scaled_bounds(POWER_NOTICE[usize::from(media)], dpi)
 }
 
@@ -965,7 +978,7 @@ mod tests {
                 x: 1480,
                 y: 0,
                 width: 880,
-                height: 328
+                height: 384
             }
         );
     }
@@ -980,9 +993,9 @@ mod tests {
         };
         // (dpi, window, media pill, media panel) in physical pixels.
         for (dpi, window, pill, panel) in [
-            (96, (440, 164), (262, 30), (360, 120)),
-            (144, (660, 246), (393, 45), (540, 180)),
-            (192, (880, 328), (524, 60), (720, 240)),
+            (96, (440, 192), (262, 30), (360, 120)),
+            (144, (660, 288), (393, 45), (540, 180)),
+            (192, (880, 384), (524, 60), (720, 240)),
         ] {
             let bounds = placement(work, dpi, SurfaceKind::Notch, 0);
             assert_eq!((bounds.width, bounds.height), window);
@@ -1290,7 +1303,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 width: scaled(440.0, dpi),
-                height: scaled(164.0, dpi),
+                height: scaled(NOTCH_WINDOW.1 as f32, dpi),
             };
             for progress in [-0.09, 0.0, 0.07, 0.3, 0.7, 1.0, 1.07] {
                 let shape = notch_shape(progress, media);
@@ -1345,7 +1358,7 @@ mod tests {
                     x: 0,
                     y: 0,
                     width: 440,
-                    height: 164
+                    height: NOTCH_WINDOW.1
                 },
                 96,
                 1.0,
@@ -1452,6 +1465,35 @@ mod tests {
                 "{dpi}"
             );
         }
+    }
+
+    #[test]
+    fn a_tall_page_gets_its_notice_row_under_its_content_inside_the_grown_panel() {
+        let page = limits_height(3);
+        let notice = notice_slot(true, page, 96);
+        // 6 under the last row's 22 pitch and the gear's row, 10 above the grown panel's bottom.
+        assert_eq!(notice.y, i32::from(page) - 16);
+        assert_eq!(
+            f32::from(page) + NOTICE_ROOM - (notice.y + notice.height) as f32,
+            10.0
+        );
+        assert!(notice.x + notice.width <= MEDIA_EXPANDED.width as i32);
+        assert_eq!(
+            notice_slot(false, 0, 96),
+            power_notice(false, 96),
+            "plain panel unchanged"
+        );
+        // Grown by the notice, with the open overshoot and the rail below, it stays inside the window.
+        let tallest = NOTCH.height + (f32::from(page) + NOTICE_ROOM - NOTCH.height) * 1.07;
+        assert!(
+            tallest
+                + rail_size(Rail {
+                    count: 6,
+                    active: 0
+                })
+                .1
+                <= NOTCH_WINDOW.1 as f32
+        );
     }
 
     #[test]
@@ -1571,7 +1613,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 width: scaled(440.0, dpi),
-                height: scaled(164.0, dpi),
+                height: scaled(NOTCH_WINDOW.1 as f32, dpi),
             };
             for media in [false, true] {
                 let r = rail(6, 2);
@@ -1641,7 +1683,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 width: window,
-                height: 164,
+                height: NOTCH_WINDOW.1,
             },
             96,
             1.0,

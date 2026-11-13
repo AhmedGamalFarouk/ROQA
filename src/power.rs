@@ -103,6 +103,11 @@ impl Power {
         self.notice = Some((text, now + hold));
     }
 
+    /// Drops the notice at once (a state change that makes it stale); true if one was showing.
+    pub fn clear(&mut self) -> bool {
+        self.notice.take().is_some()
+    }
+
     pub fn text(&self) -> Option<&str> {
         self.notice.as_ref().map(|(text, _)| text.as_str())
     }
@@ -185,6 +190,17 @@ mod tests {
             assert!(power.update(reading, now), "{expected}");
             assert_eq!(power.text(), Some(expected));
         }
+    }
+
+    #[test]
+    fn clear_drops_a_stale_notice_once() {
+        let now = Instant::now();
+        let mut power = Power::new(raw(0, 1, 60));
+        assert!(!power.clear(), "nothing to clear");
+        power.announce("Pomodoro paused.".to_owned(), now, NOTICE);
+        assert!(power.clear());
+        assert_eq!((power.text(), power.deadline()), (None, None));
+        assert!(!power.clear());
     }
 
     #[test]
