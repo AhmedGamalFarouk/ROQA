@@ -95,6 +95,8 @@ pub struct Settings {
     pub hotkey_picker: bool,
     /// Which key combination triggers the picker (`hotkey::HotkeyCombo`).
     pub hotkey_combo: HotkeyCombo,
+    /// Tint progress bars and highlights with Windows accent colour; false (off) by default.
+    pub match_accent: bool,
 }
 
 impl Default for Settings {
@@ -139,6 +141,7 @@ impl Default for Settings {
             pomo_cfg: pomo::DEFAULT,
             hotkey_picker: false,
             hotkey_combo: HotkeyCombo::AltSpace,
+            match_accent: false,
         }
     }
 }
@@ -250,6 +253,7 @@ impl Settings {
         match key {
             "dock" => flag(value).map(|v| self.dock = v).is_some(),
             "notch" => flag(value).map(|v| self.notch = v).is_some(),
+            "matchaccent" => flag(value).map(|v| self.match_accent = v).is_some(),
             "hkpicker" => flag(value).map(|v| self.hotkey_picker = v).is_some(),
             "hkcombo" => HotkeyCombo::from_key(value)
                 .map(|v| self.hotkey_combo = v)
@@ -355,9 +359,10 @@ impl Settings {
             self.widgets.slot_right.key()
         ));
         out.push_str(&format!(
-            "hkpicker={}\nhkcombo={}\n",
+            "hkpicker={}\nhkcombo={}\nmatchaccent={}\n",
             u8::from(self.hotkey_picker),
-            self.hotkey_combo.key()
+            self.hotkey_combo.key(),
+            u8::from(self.match_accent)
         ));
         let one_line = |v: &&String| !v.contains(['\n', '\r']);
         out.push_str(&format!(
@@ -543,6 +548,24 @@ mod tests {
         }
         assert_eq!(restored.hotkey_picker, settings.hotkey_picker);
         assert_eq!(restored.hotkey_combo, settings.hotkey_combo);
+    }
+
+    #[test]
+    fn match_accent_setting_round_trip() {
+        let mut settings = Settings::default();
+        assert!(!settings.match_accent);
+        assert!(settings.set("matchaccent", "1"));
+        assert!(settings.match_accent);
+
+        let mut lines = String::new();
+        settings.write_lines(&mut lines);
+        let mut restored = Settings::default();
+        for line in lines.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                restored.set(key, value);
+            }
+        }
+        assert_eq!(restored.match_accent, settings.match_accent);
     }
 
     fn names(list: &[&str]) -> Vec<String> {

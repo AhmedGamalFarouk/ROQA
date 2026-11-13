@@ -188,8 +188,40 @@ impl Theme {
     }
 }
 
+/// Queries the Windows system accent colour from `HKCU\Software\Microsoft\Windows\DWM\AccentColor`.
+/// Returns `None` if the registry value cannot be read or is absent.
+pub fn windows_accent_color() -> Option<Rgb> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    use windows::core::w;
+
+    let key = w!(r"Software\Microsoft\Windows\DWM");
+    let name = w!("AccentColor");
+    let (mut value, mut size) = (0u32, 4u32);
+    // SAFETY: reads one DWORD into a local.
+    let read = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key,
+            name,
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut value as *mut u32).cast()),
+            Some(&mut size),
+        )
+    };
+    if read.is_ok() {
+        // AccentColor is stored as 0xAABBGGRR.
+        let r = (value & 0xff) as u8;
+        let g = ((value >> 8) & 0xff) as u8;
+        let b = ((value >> 16) & 0xff) as u8;
+        Some((r, g, b))
+    } else {
+        None
+    }
+}
+
 /// Read only at construction or a system notification; never polls or changes Windows settings.
-pub fn system_palette(theme: Theme, accent: Rgb) -> Palette {
+pub fn system_palette(theme: Theme, accent: Option<Rgb>) -> Palette {
     use windows::Win32::{
         Graphics::Gdi::{
             COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor,
@@ -230,7 +262,10 @@ pub fn system_palette(theme: Theme, accent: Rgb) -> Palette {
             );
         }
     }
-    theme.palette_with(accent)
+    match accent {
+        Some(accent) => theme.palette_with(accent),
+        None => theme.palette(),
+    }
 }
 
 impl Palette {
@@ -575,5 +610,18 @@ mod tests {
         }
         let light = Theme::Light.palette().dock_fill(0.5);
         assert_eq!((light.0, light.1, light.2), (231, 234, 238));
+    }
+
+    #[test]
+    fn system_palette_with_none_accent_keeps_theme_default() {
+        let default_classic = system_palette(Theme::Classic, None);
+        assert_eq!(default_classic.accent, Theme::Classic.palette().accent);
+
+        let default_light = system_palette(Theme::Light, None);
+        assert_eq!(default_light.accent, Theme::Light.palette().accent);
+
+        let custom_accent = (0, 120, 215);
+        let tinted_classic = system_palette(Theme::Classic, Some(custom_accent));
+        assert_eq!(tinted_classic.accent, custom_accent);
     }
 }

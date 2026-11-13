@@ -1157,6 +1157,11 @@ impl Desktop {
         let timers = Timers::restore(&store.timers, timer::wall_now(), now);
         // The section now mirrors what is running; stale entries leave the file with its next write.
         timers.write_to(&mut store, &mut Pending::default(), now);
+        let effective_accent = if settings.match_accent {
+            crate::theme::windows_accent_color().or_else(|| Some(text.accent()))
+        } else {
+            None
+        };
         let mut desktop = Self {
             surfaces: Vec::new(),
             monitors,
@@ -1172,7 +1177,7 @@ impl Desktop {
             graphics: Graphics::create()?,
             rebuild: Rebuild::new(Instant::now()),
             picker: None,
-            palette: crate::theme::system_palette(settings.theme, text.accent()),
+            palette: crate::theme::system_palette(settings.theme, effective_accent),
             palette_dirty: false,
             settings_window: None,
             file_picker: Default::default(),
@@ -2180,9 +2185,10 @@ impl Desktop {
         let old = std::mem::replace(&mut self.settings, next);
         self.settings.apply_globals();
         self.water_due = None; // the schedule follows the new hours
-        // A new theme or pill size is fixed when a surface is created, so both rebuild the surfaces.
-        let restyle =
-            old.theme != self.settings.theme || old.notch_size != self.settings.notch_size;
+        // A new theme, pill size or accent mode is fixed when a surface is created, so they rebuild the surfaces.
+        let restyle = old.theme != self.settings.theme
+            || old.notch_size != self.settings.notch_size
+            || old.match_accent != self.settings.match_accent;
         if self.settings.open_click && !old.open_click {
             // A hover intent still pending must not open the notch after the switch to click mode.
             for surface in &mut self.surfaces {
@@ -2243,7 +2249,8 @@ impl Desktop {
         self.surfaces
             .retain(|s| !destroy.contains(&(s.kind(), s.monitor.clone())));
         if restyle {
-            self.palette = crate::theme::system_palette(self.settings.theme, self.text.accent());
+            self.palette =
+                crate::theme::system_palette(self.settings.theme, self.effective_accent());
             self.menu = None;
             self.edges.release();
             // Colours are fixed when a surface is created, so a new theme rebuilds the survivors (as a text-scale
@@ -2380,6 +2387,13 @@ impl Desktop {
             Ok(())
         } else {
             self.open_picker(catalog)
+        }
+    }
+    fn effective_accent(&self) -> Option<crate::theme::Rgb> {
+        if self.settings.match_accent {
+            crate::theme::windows_accent_color().or_else(|| Some(self.text.accent()))
+        } else {
+            None
         }
     }
 }
@@ -3520,7 +3534,8 @@ impl Desktop {
         // The accent changed (the event only flagged it): rebuild like any palette change.
         let accent = self.text.take_colors_changed();
         if std::mem::take(&mut self.palette_dirty) || accent {
-            let palette = crate::theme::system_palette(self.settings.theme, self.text.accent());
+            let palette =
+                crate::theme::system_palette(self.settings.theme, self.effective_accent());
             if palette != self.palette {
                 self.palette = palette;
                 self.menu = None;

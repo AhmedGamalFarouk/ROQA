@@ -1270,3 +1270,9 @@ Prepared docs/development/m3-topology-preparation.md from current host/native-wi
 - **Scope:** Opt-in global hotkey (`RegisterHotKey`) to toggle/open the window picker; off by default; customizable hotkey combo in Settings General page (`Alt+Space`, `Ctrl+Space`, etc.); RAII unregistration on quit and drop; zero background threads/timers.
 - **Checks:** verify.ps1 PASS (fmt, clippy, 376 tests, release); 1,061,888 B (+512 vs 1,061,376 B), limit 1,175,040 B.
 - **NOT RUN:** native/GUI by user instruction; milestone reviews not run.
+
+## Windows System Accent Colour (2026-11-13 Africa/Cairo)
+
+- **Scope:** Opt-in system accent colour (`HKCU\Software\Microsoft\Windows\DWM\AccentColor` via existing `WM_SETTINGCHANGE` / `REPOSITION`); off by default; customizable via "Match Windows accent colour" in Settings Appearance page; when off, keeps pure designer palette defaults; when on, tints progress fills, active tabs, and highlights; zero polling/threads.
+- **Checks:** verify.ps1 PASS (fmt, clippy, 378 tests, release); 1,064,960 B, limit 1,175,040 B.
+- **NOT RUN:** native/GUI by user instruction; milestone reviews not run.

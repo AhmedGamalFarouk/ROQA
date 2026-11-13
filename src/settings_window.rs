@@ -117,6 +117,7 @@ const WLEFT: usize = 195;
 const WRIGHT: usize = 196;
 const HKPICKER: usize = 197;
 const HKCOMBO: usize = 198;
+const MATCH_ACCENT: usize = 199;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -224,7 +225,15 @@ const PAGES: &[Page] = &[
         cards: &[
             Card {
                 label: "Colours",
-                rows: &[r(THEME, Kind::Combo(170), "Theme", "")],
+                rows: &[
+                    r(THEME, Kind::Combo(170), "Theme", ""),
+                    r(
+                        MATCH_ACCENT,
+                        C,
+                        "Match Windows accent colour",
+                        "Tint progress bars and active tabs with the system accent",
+                    ),
+                ],
             },
             Card {
                 label: "Notch",
@@ -1130,6 +1139,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         PPAUSE => &mut s.prayer_pause,
         WATER => &mut s.water,
         HKPICKER => &mut s.hotkey_picker,
+        MATCH_ACCENT => &mut s.match_accent,
         TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
         DBTN..=134 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,
