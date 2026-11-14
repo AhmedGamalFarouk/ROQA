@@ -109,14 +109,14 @@ pub(super) fn rail(
 fn rail_font(scale: f32) -> Font {
     Font {
         family: TEXT_FONT,
-        size: 11.0 * scale,
+        size: 10.5 * scale,
         weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
         designator: 1.0,
         align: DWRITE_TEXT_ALIGNMENT_CENTER,
     }
 }
 
-/// The handle's tab names and their selected and hover washes.
+/// The handle's cells: a glyph over the name, in one capsule wash when selected (accent) or hovered (ink).
 fn items(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -156,7 +156,21 @@ fn items(
         } else {
             with_alpha(p.ink, p.ink_alpha(if hovered { 1.0 } else { 0.8 } * reveal))
         };
-        draw_text(context, tab.name(), &name, cell, ink)?;
+        // The glyph sits 3 DIP under the cell's top, the name in the 14 DIP below it.
+        let (top, side) = (cell.top + 3.0 * scale, 14.0 * scale);
+        let middle = (cell.left + cell.right) / 2.0;
+        glyphs::draw(
+            context,
+            pixel_square(middle - side / 2.0, top, side),
+            Glyph::tab(tab),
+            ink,
+        )?;
+        let label = D2D_RECT_F {
+            top: top + side + 0.5 * scale,
+            bottom: cell.bottom,
+            ..cell
+        };
+        draw_text(context, tab.name(), &name, label, ink)?;
     }
     Ok(())
 }
@@ -383,6 +397,18 @@ fn widgets_page(
                     date.wDayOfWeek,
                 );
                 let today = usize::from((date.wDayOfWeek + 6) % 7);
+                // The date heads the tile, the week strip sits in its lower two thirds: no empty band.
+                draw_text(
+                    context,
+                    scene.date,
+                    &font(
+                        12.0,
+                        DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                        DWRITE_TEXT_ALIGNMENT_LEADING,
+                    ),
+                    at(14.0, 13.0, 134.0, 16.0),
+                    ink(0.9),
+                )?;
                 for (i, (label, day)) in ["M", "T", "W", "T", "F", "S", "S"]
                     .into_iter()
                     .zip(days)
@@ -397,7 +423,7 @@ fn widgets_page(
                             DWRITE_FONT_WEIGHT_SEMI_BOLD,
                             DWRITE_TEXT_ALIGNMENT_CENTER,
                         ),
-                        at(dx, 29.0, 19.0, 15.0),
+                        at(dx, 42.0, 19.0, 15.0),
                         ink(0.55),
                     )?;
                     if i == today {
@@ -408,7 +434,7 @@ fn widgets_page(
                                 None,
                             )?;
                             context.FillRoundedRectangle(
-                                &rounded(at(dx, 49.0, 19.0, 19.0), 9.5 * scale),
+                                &rounded(at(dx, 60.0, 19.0, 19.0), 9.5 * scale),
                                 &accent,
                             );
                         }
@@ -426,7 +452,7 @@ fn widgets_page(
                             DWRITE_FONT_WEIGHT_SEMI_BOLD,
                             DWRITE_TEXT_ALIGNMENT_CENTER,
                         ),
-                        at(dx, 49.0, 19.0, 19.0),
+                        at(dx, 60.0, 19.0, 19.0),
                         colour,
                     )?;
                 }
@@ -441,8 +467,8 @@ fn widgets_page(
                     let accent = context
                         .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(reveal)), None)?;
                     let point = |angle: f32| Vector2 {
-                        X: x + (42.0 + 25.0 * angle.cos()) * scale,
-                        Y: y + (56.0 + 25.0 * angle.sin()) * scale,
+                        X: x + (46.0 + 27.0 * angle.cos()) * scale,
+                        Y: y + (48.0 + 27.0 * angle.sin()) * scale,
                     };
                     for step in 0..60 {
                         let a = -std::f32::consts::FRAC_PI_2
@@ -457,7 +483,7 @@ fn widgets_page(
                             } else {
                                 &track
                             },
-                            3.0 * scale,
+                            4.0 * scale,
                             None,
                         );
                     }
@@ -466,7 +492,7 @@ fn widgets_page(
                 if charging {
                     glyphs::draw(
                         context,
-                        at(31.0, 45.0, 22.0, 22.0),
+                        at(34.0, 36.0, 24.0, 24.0),
                         Glyph::Charging,
                         with_alpha(p.accent, p.ink_alpha(reveal)),
                     )?;
@@ -475,8 +501,8 @@ fn widgets_page(
                 draw_text(
                     context,
                     &value,
-                    &font(20.0, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING),
-                    at(78.0, 34.0, 76.0, 27.0),
+                    &font(22.0, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING),
+                    at(86.0, 28.0, 70.0, 28.0),
                     ink(1.0),
                 )?;
                 let status = match reading {
@@ -494,7 +520,7 @@ fn widgets_page(
                         DWRITE_FONT_WEIGHT_NORMAL,
                         DWRITE_TEXT_ALIGNMENT_LEADING,
                     ),
-                    at(78.0, 61.0, 76.0, 17.0),
+                    at(86.0, 58.0, 70.0, 17.0),
                     ink(0.6),
                 )?;
             }
@@ -734,6 +760,7 @@ fn prayer_page(
     // Wide enough for "Maghrib" at the name size, so no name is cut.
     let column = if media { 44.0 } else { 40.0 };
     let left = 16.0 + width - column * view.rows.len() as f32;
+    sun_arc(context, (body, scale, reveal), (left, column, view), p)?;
     let name = font(DISPLAY_FONT, 18.0, DWRITE_FONT_WEIGHT_BOLD, lead);
     draw_text(
         context,
@@ -760,8 +787,9 @@ fn prayer_page(
                     &with_alpha(p.accent, p.ink_alpha(0.22 * reveal)),
                     None,
                 )?;
+                // A capsule behind the name and time under its stop.
                 context.FillRoundedRectangle(
-                    &rounded(at(x + 1.0, 27.0, column - 2.0, 29.0), 6.0 * scale),
+                    &rounded(at(x + 1.0, 41.0, column - 2.0, 26.0), 13.0 * scale),
                     &wash,
                 );
             }
@@ -776,14 +804,14 @@ fn prayer_page(
             context,
             row.name,
             &font(TEXT_FONT, 9.5, normal, middle),
-            at(x, 29.0, column, 12.0),
+            at(x, 43.0, column, 12.0),
             ink(alpha),
         )?;
         draw_text(
             context,
             &row.time,
             &font(TEXT_FONT, 11.0, weight, middle),
-            at(x, 41.0, column, 14.0),
+            at(x, 53.0, column, 14.0),
             ink(if row.current { 1.0 } else { 0.85 }),
         )?;
     }
@@ -798,6 +826,73 @@ fn prayer_page(
         at(x, y, w, h),
         ink(0.6),
     )
+}
+
+/// The five prayer stops on a shallow arc over their columns, with the sun on it: the part it has passed in the
+/// accent, the rest faint. The sun is the one glow in the system (a halo under the disc).
+fn sun_arc(
+    context: &ID2D1DeviceContext,
+    (body, scale, reveal): (&D2D_RECT_F, f32, f32),
+    (left, column, view): (f32, f32, &crate::prayer_tab::View),
+    p: &Palette,
+) -> Result<()> {
+    // Stop `u` (0 to 1) along the arc: x over the first to the last column's middle, y a parabola 7 DIP high.
+    let first = left + column / 2.0;
+    let point = |u: f32| Vector2 {
+        X: body.left + (first + u * column * 4.0) * scale,
+        Y: body.top + (38.0 - 7.0 * (1.0 - (2.0 * u - 1.0).powi(2))) * scale,
+    };
+    let sun = view.sun.clamp(0.0, 1.0);
+    let colour = |passed: bool| {
+        if passed {
+            with_alpha(p.accent, p.ink_alpha(0.55 * reveal))
+        } else {
+            with_alpha(p.ink, p.ink_alpha(0.22 * reveal))
+        }
+    };
+    // SAFETY: brushes and shapes live for this draw on the frame's own device context.
+    unsafe {
+        let (passed, ahead) = (
+            context.CreateSolidColorBrush(&colour(true), None)?,
+            context.CreateSolidColorBrush(&colour(false), None)?,
+        );
+        const STEPS: usize = 24;
+        for step in 0..STEPS {
+            let (a, b) = (step as f32 / STEPS as f32, (step + 1) as f32 / STEPS as f32);
+            let brush = if b <= sun { &passed } else { &ahead };
+            context.DrawLine(point(a), point(b), brush, 1.5 * scale, None);
+        }
+        for stop in 0..5 {
+            let at = point(stop as f32 / 4.0);
+            let brush = if stop as f32 / 4.0 <= sun {
+                &passed
+            } else {
+                &ahead
+            };
+            context.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: at,
+                    radiusX: 2.5 * scale,
+                    radiusY: 2.5 * scale,
+                },
+                brush,
+            );
+        }
+        let at = point(sun);
+        for (radius, alpha) in [(8.0, 0.18), (3.5, 1.0)] {
+            let brush = context
+                .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(alpha * reveal)), None)?;
+            context.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: at,
+                    radiusX: radius * scale,
+                    radiusY: radius * scale,
+                },
+                &brush,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The Limits page's secondary text (the window labels, reset times and "as of"), a step above the old 10 to

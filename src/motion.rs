@@ -34,6 +34,23 @@ fn paced(fast: bool, duration: Duration, curve: Curve) -> (Duration, Curve) {
     };
     (duration.mul_f32(FAST_SCALE), curve)
 }
+/// Reduced motion (the Settings "fast" choice): no looping or overshooting extras.
+pub fn calm() -> bool {
+    FAST.load(Relaxed)
+}
+/// How often the collapsed pill's timer ring is repainted while it breathes; the ring is a function of the
+/// wall clock (`breath`), so nothing runs between repaints and none are asked for when it is hidden.
+pub const BREATH_STEP: Duration = Duration::from_millis(250);
+/// The timer ring's opacity: 0.35 to 0.75 over 3.2 s, a steady 0.6 under reduced motion.
+pub fn breath() -> f32 {
+    if calm() {
+        return 0.6;
+    }
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() % 3200);
+    0.55 + 0.2 * (since as f32 / 3200.0 * std::f32::consts::TAU).sin()
+}
 /// A deadline length at the chosen speed (the hover intent).
 pub fn time(duration: Duration) -> Duration {
     paced(FAST.load(Relaxed), duration, SETTLE).0
@@ -241,6 +258,20 @@ mod tests {
         assert!(samples(SLIDE, PAGE_TIME)[200] > 0.99);
         let ease = samples(SETTLE, HOVER_IN_TIME);
         assert!(ease.windows(2).all(|pair| pair[1] >= pair[0] - 1e-5) && ease[100] > 0.8);
+    }
+
+    #[test]
+    fn the_ring_breathes_between_a_third_and_three_quarters_opacity() {
+        let range = (0..3200)
+            .step_by(50)
+            .map(|ms| 0.55 + 0.2 * (ms as f32 / 3200.0 * std::f32::consts::TAU).sin());
+        assert!(
+            range
+                .clone()
+                .all(|v| (0.35 - 1e-4..=0.75 + 1e-4).contains(&v))
+        );
+        assert!(range.fold(0.0f32, f32::max) > 0.74);
+        assert!((0.35..=0.75).contains(&breath()));
     }
 
     #[test]

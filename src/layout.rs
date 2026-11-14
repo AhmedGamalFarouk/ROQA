@@ -17,14 +17,15 @@ pub struct NotchShape {
 pub const NOTCH: NotchShape = NotchShape {
     width: 150.0,
     height: 30.0,
-    radius: 14.0,
+    // Capsule: radius = height / 2 (brand grammar).
+    radius: 15.0,
     ears: 10.0,
 };
 pub const NOTCH_EXPANDED: NotchShape = NotchShape {
     width: 320.0,
     height: 92.0,
-    radius: 24.0,
-    ears: 16.0,
+    radius: 28.0,
+    ears: 14.0,
 };
 /// While media is playing with a title or artist the pill widens for the cover slot and title, and the panel grows
 /// for the cover, title, progress, controls and volume rows (direction B, provisional;
@@ -40,8 +41,8 @@ pub const MEDIA_EXPANDED: NotchShape = NotchShape {
 };
 /// The notch HWND never moves or resizes: the media panel and ears plus room for the open
 /// overshoot and the soft shadow, keeping the plain panel's 40 DIP of side and 44 DIP of bottom
-/// shadow room (the window is 200 DIP tall so the Limits page, its notice row and the rail below fit). `notch_region` bounds body input; a separate transparent HWND draws the shadow.
-pub const NOTCH_WINDOW: (i32, i32) = (440, 200);
+/// shadow room (the window is 208 DIP tall so the Limits page, its notice row and the rail below fit). `notch_region` bounds body input; a separate transparent HWND draws the shadow.
+pub const NOTCH_WINDOW: (i32, i32) = (440, 208);
 /// Pointer slop around the drawn body that still counts as hovering it.
 const NOTCH_HOVER_SLOP: f32 = 4.0;
 
@@ -90,7 +91,7 @@ fn tall(shape: NotchShape, notice_row: bool) -> NotchShape {
             shape.width
         },
         ears: if page == 140.0 { 10.0 } else { shape.ears },
-        ..shape
+        radius: if page == 140.0 { 32.0 } else { shape.radius },
     }
 }
 
@@ -626,12 +627,12 @@ pub struct Rail {
 
 pub const RAIL_EARS: f32 = 6.0;
 const RAIL_PAD_X: f32 = 8.0;
-const RAIL_PAD_Y: f32 = 4.0;
-/// A tab cell's width (fits the longest name, "Weather", at 10 DIP) and height, and the gap between cells.
-const RAIL_CELL: (f32, f32) = (55.0, 24.0);
+const RAIL_PAD_Y: f32 = 3.0;
+/// A tab cell's width (fits the longest name, "Weather") and height (a glyph over the name), and the gap between cells.
+const RAIL_CELL: (f32, f32) = (55.0, 34.0);
 const RAIL_GAP: f32 = 2.0;
 
-/// The handle's full size in DIPs: 413 x 32 for seven tabs.
+/// The handle's full size in DIPs: 413 x 40 for seven tabs.
 pub fn rail_size(rail: Rail) -> (f32, f32) {
     let count = rail.count as f32;
     (
@@ -640,9 +641,9 @@ pub fn rail_size(rail: Rail) -> (f32, f32) {
     )
 }
 
-/// The handle's bottom corner radius in pixels (14 DIP), kept inside its shape.
+/// The handle's bottom corner radius in pixels (a capsule's, 20 DIP), kept inside its shape.
 pub fn rail_radius(shape: NotchBody, dpi: u32) -> f32 {
-    scaled(14.0, dpi)
+    scaled(20.0, dpi)
         .min(shape.height - shape.ears)
         .min(shape.width / 2)
         .max(0) as f32
@@ -824,7 +825,7 @@ mod tests {
         let big = pill(NOTCH, NOTCH_EXPANDED, 150);
         assert_eq!(
             (big.width, big.height, big.radius, big.ears),
-            (225.0, 45.0, 21.0, 15.0)
+            (225.0, 45.0, 22.5, 15.0)
         );
         // The media pill would pass its panel's width, so it stops there.
         assert_eq!(
@@ -950,7 +951,7 @@ mod tests {
             DockStyle::Attached,
             Buttons::NONE,
         );
-        assert_eq!(attached_radius(at, 96), 20.0);
+        assert_eq!(attached_radius(at, 96), 32.0);
     }
 
     #[test]
@@ -1018,7 +1019,7 @@ mod tests {
                 x: 1480,
                 y: 0,
                 width: 880,
-                height: 400
+                height: 416
             }
         );
     }
@@ -1033,9 +1034,9 @@ mod tests {
         };
         // (dpi, window, media pill, media panel) in physical pixels.
         for (dpi, window, pill, panel) in [
-            (96, (440, 200), (262, 30), (360, 120)),
-            (144, (660, 300), (393, 45), (540, 180)),
-            (192, (880, 400), (524, 60), (720, 240)),
+            (96, (440, 208), (262, 30), (360, 120)),
+            (144, (660, 312), (393, 45), (540, 180)),
+            (192, (880, 416), (524, 60), (720, 240)),
         ] {
             let bounds = placement(work, dpi, SurfaceKind::Notch, 0);
             assert_eq!((bounds.width, bounds.height), window);
@@ -1698,9 +1699,9 @@ mod tests {
     #[test]
     fn the_handle_reserves_label_width_for_all_seven_tabs() {
         let (six_w, six_h) = rail_size(rail(6, 0));
-        assert_eq!((six_w, six_h), (356.0, 32.0));
+        assert_eq!((six_w, six_h), (356.0, 40.0));
         let (seven_w, seven_h) = rail_size(rail(7, 0));
-        assert_eq!((seven_w, seven_h), (413.0, 32.0));
+        assert_eq!((seven_w, seven_h), (413.0, 40.0));
         assert!(seven_w < NOTCH_WINDOW.0 as f32);
         assert!(rail_size(rail(3, 0)).0 < rail_size(rail(5, 0)).0);
     }

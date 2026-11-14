@@ -459,6 +459,28 @@ mod tests {
     }
 
     #[test]
+    fn every_theme_reads_its_secondary_ink_and_its_accent_on_the_body() {
+        for theme in Theme::ALL {
+            let palette = theme.palette();
+            let Rgba(r, g, b, alpha) = palette.body;
+            // Glass bodies are translucent: judge them over the worse of a white and a black backdrop.
+            for backdrop in [(255, 255, 255), (0, 0, 0)] {
+                let body = over((r, g, b), alpha, backdrop);
+                // The faintest text the pages draw is 0.55; the accent glyph and the eyes need 3:1 (4.5:1 as text on Light).
+                let faint = over(palette.ink, palette.ink_alpha(0.55), body);
+                let need = if theme == Theme::Light { 4.5 } else { 3.0 };
+                assert!(
+                    contrast(faint, body) >= need,
+                    "{theme:?} faint ink on {backdrop:?}"
+                );
+                if theme != Theme::Frosted && theme != Theme::Liquid {
+                    assert!(contrast(palette.accent, body) >= 4.5, "{theme:?} accent");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn high_contrast_is_opaque_and_uses_only_supplied_system_colours() {
         let palette = Palette::contrast((1, 2, 3), (250, 251, 252), (4, 5, 6), (7, 8, 9));
         assert_eq!(palette.body, Rgba(1, 2, 3, 1.0));

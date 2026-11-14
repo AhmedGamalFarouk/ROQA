@@ -27,8 +27,8 @@ pub const SLOT_DIPS: i32 = 56;
 pub const PAD_DIPS: i32 = 8;
 pub const ICON_DIPS: i32 = 40;
 pub const HEIGHT_DIPS: i32 = 64;
-/// The bar's corner radius (the floating bar's, and the attached dock's top corners).
-pub const RADIUS_DIPS: i32 = 20;
+/// The bar's corner radius: a capsule, half the bar's height (the floating bar's, and the attached dock's top corners).
+pub const RADIUS_DIPS: i32 = HEIGHT_DIPS / 2;
 
 /// A title-derived indicator. Counts saturate at 100, displayed as 99+.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]

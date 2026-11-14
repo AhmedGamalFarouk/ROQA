@@ -592,6 +592,8 @@ struct Pal {
     /// Toggle track when off, toggle thumb, the selected sidebar row's text.
     off: u32,
     thumb: u32,
+    /// Ink on an accent capsule (a toggle's thumb when on, a primary button's text).
+    on_accent: u32,
     seltext: u32,
     dark: bool,
 }
@@ -689,6 +691,7 @@ fn palette() -> Pal {
             accent: select,
             off: system(COLOR_GRAYTEXT),
             thumb: window,
+            on_accent: system(COLOR_HIGHLIGHTTEXT),
             seltext: system(COLOR_HIGHLIGHTTEXT),
             dark: false,
         };
@@ -708,6 +711,8 @@ fn palette() -> Pal {
         accent: accent(dark),
         off: pick(0x48484c, 0xc9c9ce),
         thumb: 0xffffff,
+        // Dark ink on Lamp (10:1); white on the light window's deep Lamp (5:1).
+        on_accent: pick(0x14161a, 0xffffff),
         seltext: text,
         dark,
     }
@@ -781,7 +786,14 @@ fn paint(dc: HDC, window: HWND, p: &Paint) {
             write(dc, text, *rect, p.pal.dim, DT_LEFT | DT_NOPREFIX);
         }
         for (rect, lines) in &p.cards {
-            round(dc, *rect, px(10), p.pal.card, p.pal.line);
+            // A tile of the window (radius 14); separated by fill, with an edge only where the fills are close.
+            round(
+                dc,
+                *rect,
+                px(14),
+                p.pal.card,
+                if p.pal.dark { p.pal.card } else { p.pal.line },
+            );
             for &y in lines {
                 let line = RECT {
                     left: rect.left + px(14),
@@ -793,7 +805,7 @@ fn paint(dc: HDC, window: HWND, p: &Paint) {
             }
         }
         for field in &p.fields {
-            round(dc, *field, px(5), p.pal.card, p.pal.field);
+            round(dc, *field, px(14), p.pal.card, p.pal.field);
         }
         // The footer is its own strip: scrolled paint never reaches it, and a divider marks its edge.
         let foot = RECT {
@@ -950,10 +962,57 @@ fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
             right: thumb + px(18),
             bottom: mid + px(9),
         };
-        round(dc, knob, px(9), p.pal.thumb, p.pal.thumb);
+        let thumb_ink = if on { p.pal.on_accent } else { p.pal.thumb };
+        round(dc, knob, px(9), thumb_ink, thumb_ink);
         SetBkMode(dc, TRANSPARENT);
         SelectObject(dc, p.font.into());
         write(dc, &text(h, 256), title, p.pal.text, DT_LEFT);
+    }
+}
+
+fn is_push(h: HWND) -> bool {
+    // SAFETY: scalar query of a live child.
+    let kind = (unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32) & 0xf;
+    kind == BS_PUSHBUTTON as u32 || kind == BS_DEFPUSHBUTTON as u32
+}
+
+/// A push button as a capsule: the few starting actions are solid accent with dark ink, the rest a quiet fill;
+/// lighter under the pointer, an accent ring while focused, dim text when disabled.
+fn draw_push(note: &NMCUSTOMDRAW, p: &Paint) {
+    let (dc, r, h) = (note.hdc, note.rc, note.hdr.hwndFrom);
+    let state = note.uItemState.0;
+    let primary = matches!(
+        // SAFETY: scalar query of a live child.
+        unsafe { GetDlgCtrlID(h) } as usize,
+        START | PSTART | WDRANK
+    );
+    let (fill_colour, ink) = if state & CDIS_DISABLED.0 != 0 {
+        (p.pal.off, p.pal.dim)
+    } else if primary {
+        (p.pal.accent, p.pal.on_accent)
+    } else if state & (CDIS_HOT.0 | CDIS_SELECTED.0) != 0 {
+        (p.pal.field, p.pal.text)
+    } else {
+        (p.pal.sel, p.pal.text)
+    };
+    let ring = if state & CDIS_FOCUS.0 != 0 {
+        p.pal.accent
+    } else {
+        fill_colour
+    };
+    // SAFETY: the DC and rectangle come from this custom-draw notification.
+    unsafe {
+        fill(dc, r, p.pal.card);
+        round(dc, r, (r.bottom - r.top) / 2, fill_colour, ring);
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, p.font.into());
+        write(
+            dc,
+            &text(h, 256),
+            r,
+            ink,
+            DT_CENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
     }
 }
 
@@ -984,13 +1043,17 @@ fn draw_tile(note: &NMCUSTOMDRAW, p: &Paint) {
     // SAFETY: the DC and rectangle come from this custom-draw notification.
     unsafe {
         fill(dc, r, p.pal.card);
-        round(
-            dc,
-            r,
-            px(8),
-            fill_colour,
-            if on { p.pal.accent } else { p.pal.line },
-        );
+        // A capsule-cornered tile, lit by its fill and an accent dot; no outline.
+        round(dc, r, px(14), fill_colour, fill_colour);
+        if on {
+            let dot = RECT {
+                left: r.right - px(18),
+                top: r.top + px(8),
+                right: r.right - px(10),
+                bottom: r.top + px(16),
+            };
+            round(dc, dot, px(4), p.pal.accent, p.pal.accent);
+        }
         SetBkMode(dc, TRANSPARENT);
         SelectObject(dc, p.font.into());
         let lines = [head.as_str(), rest[0], rest[1]];
@@ -1048,10 +1111,14 @@ unsafe extern "system" fn settings_proc(
                 }
                 // SAFETY: the code says this is an NMCUSTOMDRAW.
                 let note = unsafe { &*(lparam.0 as *const NMCUSTOMDRAW) };
-                if note.dwDrawStage != CDDS_PREPAINT || !is_toggle(note.hdr.hwndFrom) {
+                if note.dwDrawStage != CDDS_PREPAINT
+                    || !(is_toggle(note.hdr.hwndFrom) || is_push(note.hdr.hwndFrom))
+                {
                     return None;
                 }
-                if is_tile(note.hdr.hwndFrom) {
+                if is_push(note.hdr.hwndFrom) {
+                    draw_push(note, p);
+                } else if is_tile(note.hdr.hwndFrom) {
                     draw_tile(note, p);
                 } else {
                     draw_toggle(note, p);

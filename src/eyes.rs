@@ -171,10 +171,22 @@ const DOZE: [Step; 6] = [
     (0.5, 0.0, false, DZ, 60),
     (0.0, 0.0, false, R, 0),
 ];
-/// The pointer arrived while the eyes show: a quick squash, then back to rest and out.
-const BUMP: [Step; 5] = [
+/// The pointer arrived while the eyes show: a quick squash, then back with the pop curve's overshoot (a
+/// stretch step), rest and out.
+const BUMP: [Step; 6] = [
     (1.0, 0.0, false, BP, 90),
+    (1.0, 0.0, false, ST, 70),
     (1.0, 0.0, false, R, 700),
+    (0.6, 0.0, false, R, 60),
+    (0.3, 0.0, false, R, 60),
+    (0.0, 0.0, false, R, 0),
+];
+/// The pointer arrived while the eyes were hidden: they pop in squashed, overshoot, settle and fade.
+const HELLO: [Step; 7] = [
+    (0.5, 0.0, false, BP, 80),
+    (1.0, 0.0, false, BP, 90),
+    (1.0, 0.0, false, ST, 70),
+    (1.0, 0.0, false, R, 600),
     (0.6, 0.0, false, R, 60),
     (0.3, 0.0, false, R, 60),
     (0.0, 0.0, false, R, 0),
@@ -231,6 +243,10 @@ const WAKE: [Step; 11] = [
     (0.0, 0.0, false, R, 0),
 ];
 
+/// No pointer on the notch for this long and the eyes doze once (the lids slide, then they fade); the next
+/// pointer move wakes them with a wave. The deadline joins `due`, so no timer runs for it.
+pub const DOZE_AFTER: Duration = Duration::from_secs(20);
+
 /// The gap before the next idle show: `MIN_GAP` plus up to `SPREAD_MS` more.
 pub const MIN_GAP: Duration = Duration::from_secs(40);
 const SPREAD_MS: u32 = 60_000;
@@ -259,6 +275,10 @@ pub struct Eyes {
     seed: u32,
     /// Horizontal lean (DIPs) the eyes hold while shown: towards a running timer (+) or the media tile (-).
     lean: f32,
+    /// When the pointer's quiet becomes a doze (`None` once it has, until the next pointer move), and whether
+    /// the last show was that doze.
+    doze_due: Option<Instant>,
+    dozed: bool,
 }
 
 impl Default for Eyes {
@@ -279,6 +299,8 @@ impl Eyes {
             next_show: now,
             seed: seed | 1,
             lean: 0.0,
+            doze_due: Some(now + DOZE_AFTER),
+            dozed: false,
         };
         eyes.next_show = now + eyes.gap();
         eyes
@@ -339,14 +361,24 @@ impl Eyes {
     pub fn set_lean(&mut self, dx: f32) {
         self.lean = dx;
     }
-    /// The pointer entered the pill: while the eyes are fully shown they squash and settle. True when it
-    /// started (a repaint is needed).
+    /// The pointer entered the pill: fully shown eyes squash and settle, hidden ones pop in; mid-fade or an
+    /// adhan nothing starts. True when it started (a repaint is needed).
     pub fn poke(&mut self, now: Instant) -> bool {
-        if self.mood == Mood::Adhan || !self.run.is_some_and(|run| run.steps[run.at].0 >= 1.0) {
+        if self.mood == Mood::Adhan {
             return false;
         }
-        self.start(&BUMP, now);
+        match self.run {
+            None => self.start(&HELLO, now),
+            Some(run) if run.steps[run.at].0 >= 1.0 => self.start(&BUMP, now),
+            _ => return false,
+        }
         true
+    }
+    /// The pointer moved on the notch: the doze deadline restarts, and eyes that dozed wake with a wave when the
+    /// pill is `visible` (closed). True when that wake started (a repaint is needed).
+    pub fn touch(&mut self, now: Instant, visible: bool) -> bool {
+        self.doze_due = Some(now + DOZE_AFTER);
+        std::mem::take(&mut self.dozed) && visible && self.wake(now)
     }
     /// Plays the wake animation now, replacing any show; true (a repaint is needed).
     pub fn wake(&mut self, now: Instant) -> bool {
@@ -358,9 +390,12 @@ impl Eyes {
     pub fn tick(&mut self, now: Instant) -> bool {
         let before = self.frame();
         let Some(mut run) = self.run else {
-            if now >= self.next_show {
+            if self.doze_due.is_some_and(|due| now >= due) {
+                (self.doze_due, self.dozed) = (None, true);
+                self.start(&DOZE, now);
+            } else if now >= self.next_show {
                 self.next_show = now + self.gap();
-                let shows: [&'static [Step]; 4] = [&BLINK, &LOOK, &SMILE, &DOZE];
+                let shows: [&'static [Step]; 3] = [&BLINK, &LOOK, &SMILE];
                 let pick = shows[self.roll() as usize % shows.len()];
                 self.start(pick, now);
             }
@@ -377,9 +412,16 @@ impl Eyes {
         }
         self.frame() != before
     }
-    /// The next step's time while a show runs, else the next show's: the only wait the eyes ask for.
+    /// The next step's time while a show runs, else the sooner of the next show and the doze: the only wait the
+    /// eyes ask for.
     pub fn due(&self) -> Instant {
-        self.run.map_or(self.next_show, |run| run.next)
+        self.run.map_or_else(
+            || {
+                self.doze_due
+                    .map_or(self.next_show, |due| due.min(self.next_show))
+            },
+            |run| run.next,
+        )
     }
 }
 
@@ -494,7 +536,9 @@ mod tests {
     fn hover_squashes_only_shown_eyes_and_lean_shifts_the_look() {
         let t0 = Instant::now();
         let mut eyes = Eyes::new(t0, 11);
-        assert!(!eyes.poke(t0), "hidden eyes do not react");
+        assert!(eyes.poke(t0), "hidden eyes pop in");
+        assert_eq!(eyes.frame().unwrap().pose, Pose::Bump);
+        eyes.run = None;
         eyes.start(&WAKE, t0);
         assert!(!eyes.poke(t0), "mid fade-in does not react");
         eyes.tick(eyes.due());
@@ -556,6 +600,7 @@ mod tests {
     fn at_rest_nothing_is_drawn_and_the_only_wait_is_the_next_show() {
         let t0 = Instant::now();
         let mut eyes = Eyes::new(t0, 7);
+        eyes.doze_due = None;
         assert!(eyes.frame().is_none());
         let due = eyes.due();
         assert!(due >= t0 + MIN_GAP && due < t0 + MIN_GAP + Duration::from_millis(60_000));
@@ -572,6 +617,7 @@ mod tests {
         let mut kinds = std::collections::HashSet::new();
         for seed in 1..40 {
             let mut eyes = Eyes::new(t0, seed);
+            eyes.doze_due = None;
             let mut now = eyes.due();
             for _ in 0..3 {
                 assert!(eyes.tick(now), "the show's first frame is painted");
@@ -595,6 +641,31 @@ mod tests {
             kinds.len() >= 3,
             "blink, look and smile all occur: {kinds:?}"
         );
+    }
+
+    #[test]
+    fn a_quiet_pointer_dozes_the_eyes_once_and_the_next_move_wakes_them() {
+        let t0 = Instant::now();
+        let mut eyes = Eyes::new(t0, 13);
+        let doze_at = t0 + DOZE_AFTER;
+        // The deadline is the only wait; a move before it pushes it back.
+        assert_eq!(eyes.due(), doze_at);
+        assert!(!eyes.touch(t0 + Duration::from_secs(5), true));
+        let later = t0 + Duration::from_secs(5) + DOZE_AFTER;
+        assert_eq!(eyes.due(), later);
+        eyes.next_show = later + Duration::from_secs(300);
+        assert!(eyes.tick(later) && eyes.dozed && eyes.doze_due.is_none());
+        let (frames, end) = play(&mut eyes, later);
+        assert!(frames.iter().any(|f| f.pose == Pose::Doze));
+        // Dozing is not repeated while the pointer stays away.
+        assert!(eyes.due() > end + Duration::from_secs(60));
+        assert!(!eyes.tick(end + Duration::from_secs(60)));
+        // A move while the pill is not visible only re-arms; on the pill it waves.
+        let mut hidden = Eyes::new(t0, 17);
+        hidden.dozed = true;
+        assert!(!hidden.touch(t0, false) && !hidden.dozed);
+        assert!(eyes.touch(end, true));
+        assert!(eyes.doze_due.is_some() && eyes.frame().unwrap().pose == Pose::Squash);
     }
 
     #[test]

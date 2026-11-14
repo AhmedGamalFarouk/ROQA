@@ -1778,7 +1778,10 @@ impl Desktop {
                 if self.settings.reminder_plays() {
                     chime();
                 }
-                self.show_notice(format!("Time for water: {}", water::text(drank, &cfg)), now);
+                self.show_notice(
+                    format!("Time for a glass of water. {}", water::text(drank, &cfg)),
+                    now,
+                );
             }
         }
         // One second past the clock, so a wake a hair before the slot cannot fire it twice.
@@ -1856,6 +1859,33 @@ impl Desktop {
             self.request_notches(Repaint::Full, |s| !s.live && s.motion.value(now) < 0.1);
         }
         milliseconds_until(due, now)
+    }
+    /// The collapsed pill's timer ring breathes: while a countdown runs and a pill is on screen, closed and not
+    /// already animating, it is repainted every `BREATH_STEP`. Hidden, open, reduced motion or no timer: no wait.
+    #[inline(never)]
+    fn refresh_ring(&mut self) -> u32 {
+        if motion::calm()
+            || !self.pages.tabs.on(Tab::Timer)
+            || !self.timers.running()
+            || self.pages.track(&self.media).is_some()
+        {
+            return INFINITE;
+        }
+        let now = Instant::now();
+        let mut shown = false;
+        for notch in &mut self.surfaces {
+            if notch.kind() == SurfaceKind::Notch && notch.visible && notch.collapsed(now) {
+                shown = true;
+                if !notch.live {
+                    notch.request(Repaint::Full);
+                }
+            }
+        }
+        if shown {
+            motion::BREATH_STEP.as_millis() as u32
+        } else {
+            INFINITE
+        }
     }
     /// Steps the dots' fade; returns the wait until its next step (`INFINITE` at rest, the common case).
     #[inline(never)]
@@ -2136,7 +2166,7 @@ impl Desktop {
                 let status = if self.play_prayer_sound(Instant::now()) {
                     "Playing the prayer sound."
                 } else {
-                    "Nothing to play: the sound is None, or the file would not open."
+                    "No sound to play. Pick another file."
                 };
                 if let Some(window) = &self.settings_window {
                     let _ = window.say(status);
@@ -3072,7 +3102,7 @@ impl Desktop {
         });
         if displaced > 0 {
             self.show_notice(
-                format!("Shelf full. Older entries removed: {displaced}"),
+                format!("Shelf full. Removed {displaced} older."),
                 Instant::now(),
             );
         }
@@ -3508,6 +3538,12 @@ impl Desktop {
                         surface.request(Repaint::Full);
                     }
                     self.pages.touch();
+                    // Pointer activity restarts the doze deadline; eyes that dozed wave on the closed pill.
+                    if let Some(eyes) = &mut self.pages.eyes
+                        && eyes.touch(now, progress < 0.1)
+                    {
+                        surface.request(Repaint::Full);
+                    }
                     if volume_ui {
                         let bar = layout::volume_at(width, surface.dpi, progress, x, y).is_some();
                         if surface.grip.drag {
@@ -3779,6 +3815,7 @@ impl Desktop {
             .min(self.refresh_preview())
             .min(self.refresh_edges())
             .min(self.refresh_eyes())
+            .min(self.refresh_ring())
             .min(self.refresh_privacy())
             .min(self.refresh_prayer())
             .min(self.refresh_water());

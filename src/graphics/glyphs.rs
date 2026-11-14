@@ -51,8 +51,12 @@ pub enum Glyph {
     More,
     /// A shelf entry whose system icon did not load.
     File,
+    /// The Media tab: a note.
+    Music,
+    /// The Widgets tab: a tall and two small tiles.
+    Widgets,
 }
-const ALL: [Glyph; 32] = [
+const ALL: [Glyph; 34] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -85,6 +89,8 @@ const ALL: [Glyph; 32] = [
     Glyph::Add,
     Glyph::More,
     Glyph::File,
+    Glyph::Music,
+    Glyph::Widgets,
 ];
 /// Grid size and stroke, in grid units.
 const GRID: f32 = 24.0;
@@ -106,6 +112,19 @@ impl Glyph {
             0 => Glyph::Muted,
             1..=33 => Glyph::SpeakerLow,
             _ => Glyph::Speaker,
+        }
+    }
+    /// The tab's icon on the handle: the one stroke style, the accent when selected.
+    pub(super) fn tab(tab: crate::tabs::Tab) -> Glyph {
+        use crate::tabs::Tab;
+        match tab {
+            Tab::Media => Glyph::Music,
+            Tab::Weather => Glyph::PartlyCloudy,
+            Tab::Prayer => Glyph::Prayer,
+            Tab::Timer => Glyph::Timer,
+            Tab::Shelf => Glyph::Shelf,
+            Tab::Limits => Glyph::Limits,
+            Tab::Widgets => Glyph::Widgets,
         }
     }
     pub(super) fn weather(icon: Icon) -> Glyph {
@@ -197,6 +216,12 @@ impl Glyph {
             Glyph::Add => "M12 4v16M4 12h16",
             Glyph::More => "M5 12h.01M12 12h.01M19 12h.01",
             Glyph::File => "M7 3.5h7l4 4v13H7zM14 3.5v4h4",
+            Glyph::Music => {
+                "M9.5 17.5V6.2l9-1.7v11M9.5 17.5a2.7 2.7 0 1 1-5.4 0a2.7 2.7 0 0 1 5.4 0zM18.5 15.5a2.7 2.7 0 1 1-5.4 0a2.7 2.7 0 0 1 5.4 0z"
+            }
+            Glyph::Widgets => {
+                "M5.5 4h3.5a1.5 1.5 0 0 1 1.5 1.5v13a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 18.5v-13A1.5 1.5 0 0 1 5.5 4zM15 4h3.5A1.5 1.5 0 0 1 20 5.5V9a1.5 1.5 0 0 1-1.5 1.5H15A1.5 1.5 0 0 1 13.5 9V5.5A1.5 1.5 0 0 1 15 4zM15 13.5h3.5a1.5 1.5 0 0 1 1.5 1.5v3.5a1.5 1.5 0 0 1-1.5 1.5H15a1.5 1.5 0 0 1-1.5-1.5V15a1.5 1.5 0 0 1 1.5-1.5z"
+            }
         }
     }
 }

@@ -141,6 +141,20 @@ pub struct View {
     pub left: String,
     pub hijri: String,
     pub rows: Vec<Row>,
+    /// Where the sun is on the page's arc, 0 (Fajr) to 1 (Isha), moving through the five stops.
+    pub sun: f32,
+}
+
+/// The sun's place on the five-stop arc: the stop index plus the share of the interval to the next stop, over 4.
+pub fn sun(stops: [i32; 5], secs: i32) -> f32 {
+    let Some(at) = stops.iter().rposition(|&t| t <= secs) else {
+        return 0.0;
+    };
+    if at == 4 {
+        return 1.0;
+    }
+    let span = (stops[at + 1] - stops[at]).max(1) as f32;
+    (at as f32 + (secs - stops[at]) as f32 / span) / 4.0
 }
 
 /// The page for `params` (or `message` without a place) at `local`; `label` writes a time of day.
@@ -183,6 +197,7 @@ pub fn view(
         next: next_name.to_owned(),
         left: short,
         hijri,
+        sun: sun(FIVE.map(|p| times[p as usize]), local.secs),
         rows: FIVE
             .iter()
             .enumerate()
@@ -297,6 +312,17 @@ mod tests {
         16 * 3600 + 600,
         17 * 3600 + 900,
     ];
+
+    #[test]
+    fn the_sun_walks_the_five_stops() {
+        let stops = [100, 200, 300, 400, 500];
+        assert_eq!(sun(stops, 50), 0.0);
+        assert_eq!(sun(stops, 100), 0.0);
+        assert_eq!(sun(stops, 150), 0.125);
+        assert_eq!(sun(stops, 300), 0.5);
+        assert_eq!(sun(stops, 500), 1.0);
+        assert_eq!(sun(stops, 900), 1.0);
+    }
 
     #[test]
     fn events_are_ordered_and_a_lead_adds_a_heads_up_before_each() {

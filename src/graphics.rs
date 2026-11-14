@@ -27,7 +27,7 @@ use windows::Win32::{
             D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_BRUSH_PROPERTIES1, D2D1_BITMAP_OPTIONS_NONE,
             D2D1_BITMAP_PROPERTIES1, D2D1_BRUSH_PROPERTIES, D2D1_BUFFER_PRECISION_8BPC_UNORM,
             D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT, D2D1_COLOR_SPACE_SRGB,
-            D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
+            D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
             D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_INTERPOLATION_MODE_LINEAR,
             D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PROPERTY_TYPE_FLOAT,
             D2D1_PROPERTY_TYPE_VECTOR4, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
@@ -1084,6 +1084,31 @@ fn timer_text(
     else {
         return Ok(());
     };
+    // The breathing ring at the pill's left, in the accent: a function of the wall clock, repainted by the host
+    // only while the pill is on screen.
+    if !view.done && !view.paused {
+        let centre = Vector2 {
+            X: body.left + 21.0 * scale,
+            Y: body.top + 15.0 * scale,
+        };
+        // SAFETY: a brush and an outline on the frame's own device context.
+        unsafe {
+            let brush = context.CreateSolidColorBrush(
+                &with_alpha(p.accent, p.ink_alpha(motion::breath() * (1.0 - reveal))),
+                None,
+            )?;
+            context.DrawEllipse(
+                &D2D1_ELLIPSE {
+                    point: centre,
+                    radiusX: 4.5 * scale,
+                    radiusY: 4.5 * scale,
+                },
+                &brush,
+                2.0 * scale,
+                None,
+            );
+        }
+    }
     let slot = layout::timer_pill(scene.dpi);
     let left = body.left + slot.x as f32;
     let top = body.top + slot.y as f32;
@@ -2210,7 +2235,8 @@ fn draw_slot(
         } else {
             // A real group whose icon is unavailable or still loading: neutral tile, never a fake app icon.
             let brush = context.CreateSolidColorBrush(&color(p.tile), None)?;
-            context.FillRoundedRectangle(&rounded(frame, px(10)), &brush);
+            // A capsule disc, the one tile shape.
+            context.FillRoundedRectangle(&rounded(frame, size / 2.0), &brush);
         }
         if slot.badge != dock::Badge::None {
             let label = match slot.badge {

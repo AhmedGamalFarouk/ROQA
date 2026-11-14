@@ -641,10 +641,10 @@ pub fn view(
     let (Some(report), Some(place)) = (&feed.report, &feed.place) else {
         let message = match feed.last_fail {
             _ if !configured => "Set a city for local weather",
-            Some(_) if feed.fetching() => "Retrying weather…",
+            Some(_) if feed.fetching() => "Trying again now.",
             Some(Fail::Unlocated) => "Location not found",
-            Some(_) => "Weather unavailable",
-            None => "Loading weather…",
+            Some(_) => "No weather yet. Trying again soon.",
+            None => "Loading the weather.",
         };
         return View {
             title: "Weather".to_owned(),
@@ -1056,7 +1056,7 @@ mod tests {
         );
         assert_eq!(
             view(&empty, true, false, 0, &label).message,
-            Some("Loading weather…")
+            Some("Loading the weather.")
         );
         assert!(view(&empty, false, false, 0, &label).set_city);
         assert!(!view(&empty, true, false, 0, &label).set_city);
@@ -1072,7 +1072,7 @@ mod tests {
         );
         assert_eq!(
             view(&failed, true, false, 0, &label).message,
-            Some("Weather unavailable")
+            Some("No weather yet. Trying again soon.")
         );
 
         assert!(!view(&failed, true, false, 0, &label).set_city);
@@ -1080,7 +1080,7 @@ mod tests {
         failed.start(Instant::now() + Duration::from_secs(900), false, "x");
         assert_ne!(failed.rev, revision);
         let retrying = view(&failed, true, false, 0, &label);
-        assert_eq!(retrying.message, Some("Retrying weather…"));
+        assert_eq!(retrying.message, Some("Trying again now."));
         assert!(!retrying.set_city);
 
         let mut data = report(1_000);
