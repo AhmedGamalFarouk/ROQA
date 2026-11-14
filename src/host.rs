@@ -681,7 +681,7 @@ impl Surface {
                 hover: self.tab_hover,
                 tabs: visible.as_slice(),
             }),
-            eyes: pages.eyes.and_then(|eyes| eyes.frame()),
+            eyes: pages.eyes.map(|eyes| eyes.scene()),
             privacy: pages.dots.alpha(),
             grip: self.grip,
             volume_fill,

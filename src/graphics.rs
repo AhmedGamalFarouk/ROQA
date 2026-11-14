@@ -204,7 +204,7 @@ pub struct NotchScene<'a> {
     pub widgets: crate::widgets::WidgetConfig,
     /// The hanging tab handle; `None` draws none (fewer than two tabs).
     pub rail: Option<RailScene<'a>>,
-    /// The mascot's frame in the pill; `None` at rest, when the pill shows only the time.
+    /// The mascot's frame (`None` with the setting off); alpha 0 at rest, when the pill shows only the time.
     pub eyes: Option<Frame>,
     /// Opacity of the microphone (orange) and camera (green) dots at the right of the pill and panel header.
     pub privacy: [f32; 2],

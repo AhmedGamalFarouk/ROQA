@@ -970,6 +970,59 @@ fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
     }
 }
 
+/// A drop-down row, owner-drawn: the closed field and the list rows on the card, the row under the pointer a
+/// solid accent capsule with dark ink.
+fn draw_combo(item: &DRAWITEMSTRUCT, p: &Paint) {
+    let px = |v: i32| (v as f64 * p.scale).round() as i32;
+    let (dc, row) = (item.hDC, item.rcItem);
+    let field = item.itemState.0 & ODS_COMBOBOXEDIT.0 != 0;
+    let lit = !field && item.itemState.0 & ODS_SELECTED.0 != 0;
+    let mut buffer = [0u16; 128];
+    // SAFETY: the combo copies one row's text into a local buffer of the length it is given.
+    let length = unsafe {
+        SendMessageW(
+            item.hwndItem,
+            CB_GETLBTEXT,
+            Some(WPARAM(item.itemID as usize)),
+            Some(LPARAM(buffer.as_mut_ptr() as isize)),
+        )
+    }
+    .0
+    .clamp(0, 127) as usize;
+    let (back, ink) = if lit {
+        (p.pal.accent, p.pal.on_accent)
+    } else {
+        (p.pal.card, p.pal.text)
+    };
+    // SAFETY: the DC and rectangle come from this owner-draw message.
+    unsafe {
+        fill(dc, row, p.pal.card);
+        if lit {
+            let cell = RECT {
+                left: row.left + px(3),
+                right: row.right - px(3),
+                ..row
+            };
+            round(dc, cell, (cell.bottom - cell.top) / 2, back, back);
+        }
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, p.font.into());
+        let at = RECT {
+            left: row.left + px(10),
+            ..row
+        };
+        if item.itemID != u32::MAX {
+            write(
+                dc,
+                &String::from_utf16_lossy(&buffer[..length]),
+                at,
+                ink,
+                DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+        }
+    }
+}
+
 fn is_push(h: HWND) -> bool {
     // SAFETY: scalar query of a live child.
     let kind = (unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32) & 0xf;
@@ -1131,7 +1184,12 @@ unsafe extern "system" fn settings_proc(
             }
             WM_DRAWITEM => {
                 // SAFETY: for WM_DRAWITEM lparam is a DRAWITEMSTRUCT that lives through this call.
-                draw_side(unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) }, p);
+                let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
+                if item.CtlType == ODT_COMBOBOX {
+                    draw_combo(item, p);
+                } else {
+                    draw_side(item, p);
+                }
                 Some(1)
             }
             _ => None,
@@ -1390,7 +1448,11 @@ impl SettingsWindow {
                     w!("ComboBox"),
                     "",
                     id,
-                    CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | clip,
+                    CBS_DROPDOWNLIST as u32
+                        | CBS_OWNERDRAWFIXED as u32
+                        | CBS_HASSTRINGS as u32
+                        | WS_VSCROLL.0
+                        | clip,
                     flat,
                 )?
             }

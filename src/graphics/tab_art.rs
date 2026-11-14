@@ -255,6 +255,16 @@ pub(super) fn page(
         rect(layout::page_clock(media, scene.dpi)),
         ink(0.6),
     )?;
+    // The mascot keeps a small watch beside the title, leaning to a running countdown.
+    if let Some(frame) = scene.eyes {
+        let toward =
+            if tab == Tab::Timer && scene.timer.is_some_and(|view| !view.done && !view.paused) {
+                -5.0
+            } else {
+                0.0
+            };
+        panel_eyes(context, body, scale, reveal, (frame, toward), p)?;
+    }
     slide(0.25);
     match tab {
         Tab::Timer => match scene.timer.filter(|view| !view.done) {
@@ -1120,6 +1130,54 @@ pub(super) fn draw_eyes(
             if wave {
                 context.SetTransform(&Matrix3x2::identity());
             }
+            context.PopAxisAlignedClip();
+        }
+    }
+    Ok(())
+}
+
+/// Two small resting eyes in the open panel's title row, in the accent at the page's reveal: static, so they
+/// cost nothing; `toward` shifts them (DIPs) to look at the page's content.
+fn panel_eyes(
+    context: &ID2D1DeviceContext,
+    body: &D2D_RECT_F,
+    scale: f32,
+    alpha: f32,
+    (frame, toward): (eyes::Frame, f32),
+    p: &Palette,
+) -> Result<()> {
+    if alpha <= 0.0 {
+        return Ok(());
+    }
+    const K: f32 = 0.55;
+    let Eye {
+        w,
+        h,
+        dy,
+        top,
+        bottom,
+    } = eyes::eye(frame.mood, eyes::Pose::Rest);
+    let (w, h) = (w * K * scale, h * K * scale);
+    let y = body.top + (20.0 + dy * K) * scale;
+    // SAFETY: a brush and fills on the frame's own device context; each clip is popped in its iteration.
+    unsafe {
+        let brush =
+            context.CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(alpha)), None)?;
+        for side in [-1.0f32, 1.0] {
+            let x = body.left + (150.0 + side * eyes::GAP * K / 2.0 + toward) * scale;
+            let capsule = D2D_RECT_F {
+                left: x - w / 2.0,
+                top: y - h / 2.0,
+                right: x + w / 2.0,
+                bottom: y + h / 2.0,
+            };
+            let lids = D2D_RECT_F {
+                top: capsule.top + top * h,
+                bottom: capsule.bottom - bottom * h,
+                ..capsule
+            };
+            context.PushAxisAlignedClip(&lids, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            context.FillRoundedRectangle(&rounded(capsule, w.min(h) / 2.0), &brush);
             context.PopAxisAlignedClip();
         }
     }

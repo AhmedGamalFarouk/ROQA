@@ -309,6 +309,16 @@ impl Eyes {
     pub fn mood(&self) -> Mood {
         self.mood
     }
+    /// What the pill draws now, or at rest an invisible frame (alpha 0): the open panel still draws its small
+    /// resting eyes from it, and the pill draws nothing for it.
+    pub fn scene(&self) -> Frame {
+        self.frame().unwrap_or(Frame {
+            mood: self.mood,
+            pose: Pose::Rest,
+            alpha: 0.0,
+            look: 0.0,
+        })
+    }
     /// xorshift32: cheap, and the shows only need to look unpredictable.
     fn roll(&mut self) -> u32 {
         self.seed ^= self.seed << 13;
