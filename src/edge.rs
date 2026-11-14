@@ -831,6 +831,7 @@ impl Slider {
                         })
                         .collect();
                     canvas.paint_list(&ListScene {
+                        reveal: 1.0,
                         dpi: self.dpi,
                         panel,
                         rows: &rows,

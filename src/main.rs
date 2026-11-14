@@ -17,7 +17,6 @@ mod clock;
 mod diagnostics;
 mod dock;
 mod dock_menu;
-mod dock_tips;
 mod edge;
 mod error_log;
 mod eyes;

@@ -26,6 +26,7 @@ pub const RETRY: Duration = Duration::from_secs(30);
 pub struct Store {
     /// Pinned apps (AUMID or executable path), in display order.
     pub pins: Vec<String>,
+    pub folders: Vec<String>,
     /// File-shelf references, in display order.
     pub shelf: Vec<String>,
     /// Copied text for the Shelf's Copied list, newest first (`clipboard.rs`).
@@ -163,6 +164,7 @@ fn parse(text: &str) -> Option<Store> {
         }
         match line.split_once('=') {
             Some(("pin", value)) if !value.is_empty() => store.pins.push(value.into()),
+            Some(("folder", value)) if !value.is_empty() => store.folders.push(value.into()),
             Some(("shelf", value)) if !value.is_empty() => store.shelf.push(value.into()),
             Some(("clip", value)) if !value.is_empty() => {
                 store.clips.push(crate::clipboard::decode(value))
@@ -205,7 +207,11 @@ fn migrate(from: u32, store: &mut Store) {
 impl Store {
     fn serialize(&self) -> String {
         let mut out = format!("version={VERSION}\n");
-        for (key, list) in [("pin", &self.pins), ("shelf", &self.shelf)] {
+        for (key, list) in [
+            ("pin", &self.pins),
+            ("folder", &self.folders),
+            ("shelf", &self.shelf),
+        ] {
             // Newlines cannot be represented in this line format (and cannot occur in Windows paths or AUMIDs).
             for value in list
                 .iter()
@@ -296,6 +302,7 @@ mod tests {
 
     fn sample() -> Store {
         Store {
+            folders: vec!["Together\tapp:One\tapp:Two".into()],
             pins: vec![
                 "Microsoft.Edge_8wekyb3d8bbwe!App".into(),
                 r"C:\Apps\a=b.exe".into(),
@@ -381,6 +388,7 @@ mod tests {
         assert_eq!(
             parse(text),
             Some(Store {
+                folders: Vec::new(),
                 pins: vec!["a".into()],
                 shelf: vec!["b".into()],
                 clips: Vec::new(),

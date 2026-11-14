@@ -9,13 +9,13 @@ use std::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use windows::Win32::{
-    Foundation::{E_FAIL, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Foundation::{COLORREF, E_FAIL, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
     Graphics::Gdi::{
         DeleteObject, EnumDisplayMonitors, ExtCreateRegion, GetMonitorInfoW, HDC, HMONITOR,
         MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW,
-        MonitorFromPoint, MonitorFromWindow, RDH_RECTANGLES, RGNDATA, RGNDATAHEADER, SetWindowRgn,
-        ValidateRect,
+        MonitorFromPoint, MonitorFromWindow, RDH_RECTANGLES, RGNDATA, RGNDATAHEADER, SetBkColor,
+        SetTextColor, SetWindowRgn, ValidateRect,
     },
     System::{
         LibraryLoader::GetModuleHandleW,
@@ -549,6 +549,23 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
             return LRESULT(isize::from(message == WM_POWERBROADCAST));
         }
         match message {
+            WM_CTLCOLOREDIT => {
+                let brush = GetPropW(hwnd, w!("ROQA.EditBrush"));
+                if !brush.is_invalid() {
+                    let context = HDC(wparam.0 as *mut _);
+                    SetTextColor(
+                        context,
+                        COLORREF(GetPropW(hwnd, w!("ROQA.EditInk")).0 as usize as u32),
+                    );
+                    SetBkColor(
+                        context,
+                        COLORREF(GetPropW(hwnd, w!("ROQA.EditFill")).0 as usize as u32),
+                    );
+                    LRESULT(brush.0 as isize)
+                } else {
+                    DefWindowProcW(hwnd, message, wparam, lparam)
+                }
+            }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_ERASEBKGND => LRESULT(1),
             WM_PAINT => {

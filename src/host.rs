@@ -5,7 +5,6 @@ use crate::{
     clipboard_os, clock,
     dock::{self, Button, Buttons, DockItem, Hit},
     dock_menu::{self, Event, Item},
-    dock_tips::Tips,
     edge::{self, Edges},
     eyes::{self, Eyes},
     graphics::{
@@ -378,7 +377,6 @@ enum Role {
     Dock {
         hover: Option<usize>,
         slots: Vec<Tween>,
-        tips: Option<Tips>,
     },
 }
 impl Surface {
@@ -407,17 +405,10 @@ impl Surface {
             eprintln!("Shelf: file drops unavailable: {error}");
         }
         let role = match shadow {
-            None => {
-                let tips = Tips::create(window.0)
-                    .inspect(|tips| tips.place(dock_buttons, bounds.width, bounds.height, dpi))
-                    .inspect_err(|error| eprintln!("Dock tooltips unavailable: {error}"))
-                    .ok();
-                Role::Dock {
-                    hover: None,
-                    slots: vec![Tween::rest(0.0); dock::cell_count(dock_buttons, slots)],
-                    tips,
-                }
-            }
+            None => Role::Dock {
+                hover: None,
+                slots: vec![Tween::rest(0.0); dock::cell_count(dock_buttons, slots)],
+            },
             // The first paint, which always precedes showing the window, applies the input region
             // of the plain or media pill.
             Some(shadow) => Role::Notch {
@@ -890,7 +881,11 @@ impl Surface {
         self.hover_unpainted = true;
         self.live = true;
     }
-    fn paint_dock(&mut self, items: &[DockItem], icons: &[Option<Arc<IconPixels>>]) -> Result<()> {
+    fn paint_dock(
+        &mut self,
+        items: &[DockItem],
+        icons: &[Vec<Option<Arc<IconPixels>>>],
+    ) -> Result<()> {
         let now = Instant::now();
         // A hover began at a mouse message; its first frame comes later. Start the clocks here so that frame
         // shows the rest value and the motion keeps its whole duration.
@@ -912,6 +907,8 @@ impl Surface {
         };
         let mut slots = vec![DockSlot {
             icon: None,
+            mini: Vec::new(),
+            running: false,
             active: false,
             picker: true,
             badge: dock::Badge::None,
@@ -923,7 +920,13 @@ impl Surface {
                 .zip(icons)
                 .enumerate()
                 .map(|(index, (item, icon))| DockSlot {
-                    icon: icon.as_deref(),
+                    icon: icon.first().and_then(Option::as_deref),
+                    mini: if item.members.is_empty() {
+                        Vec::new()
+                    } else {
+                        icon.iter().map(Option::as_deref).collect()
+                    },
+                    running: !item.windows.is_empty(),
                     active: item.active,
                     picker: false,
                     badge: item.badge,
@@ -1211,6 +1214,8 @@ struct Desktop {
     popup: Option<preview::Popup>,
     /// The dock's right-click menu while open; nothing exists, and nothing is polled, otherwise.
     menu: Option<dock_menu::Menu>,
+    hover_popup: Option<dock_menu::Menu>,
+    hover_spot: Option<(usize, Hit, Instant)>,
     /// Wheel movement left over after the last whole notch on the volume bar.
     volume_wheel: i32,
     /// The volume and brightness sliders on every monitor's edges, rebuilt to match the monitors and
@@ -1344,6 +1349,8 @@ impl Desktop {
             preview: preview::Intent::default(),
             popup: None,
             menu: None,
+            hover_popup: None,
+            hover_spot: None,
             volume_wheel: 0,
             edges: Edges::default(),
             edges_dirty: true,
@@ -2078,7 +2085,7 @@ impl Desktop {
                     .filter(|slot| *slot >= 1 && surface.visible)?;
                 self.dock_items
                     .get(slot - 1)
-                    .filter(|item| !item.windows.is_empty())
+                    .filter(|item| !item.windows.is_empty() && item.members.is_empty())
                     .map(|item| (index, slot, item))
             });
         // A thumbnail would float over the open menu.
@@ -2181,7 +2188,10 @@ impl Desktop {
         } else {
             Vec::new()
         };
-        let mut running = false;
+        let mut running = self
+            .hover_popup
+            .as_ref()
+            .is_some_and(|popup| popup.running(now));
         for surface in &mut self.surfaces {
             if let Role::Notch { intent, .. } = &mut surface.role
                 && intent.is_some_and(|at| now >= at)
@@ -2619,7 +2629,6 @@ impl Desktop {
             let Role::Dock {
                 hover,
                 slots: tweens,
-                tips,
                 ..
             } = &mut dock.role
             else {
@@ -2638,9 +2647,6 @@ impl Desktop {
                 style,
                 buttons,
             );
-            if let Some(tips) = tips {
-                tips.place(buttons, dock.bounds.width, dock.bounds.height, dock.dpi);
-            }
             dock.window.resize(dock.bounds)?;
             dock.canvas.resize(dock.bounds)?;
             dock.paint_dock(&self.dock_items, &icons)?;
@@ -2668,9 +2674,10 @@ impl Desktop {
                 return Ok(());
             }
             if changed {
+                self.hover_popup = None;
                 let shelf = self.shelf.shelf.entries();
                 self.icons.retain(|identity| {
-                    items.iter().any(|item| &item.identity == identity)
+                    items.iter().any(|item| &item.identity == identity || item.members.iter().any(|member| &member.identity == identity))
                         || matches!(identity, Identity::Executable(path) if shelf.iter().any(|e| &e.path == path))
                 });
             }
@@ -2716,15 +2723,26 @@ impl Desktop {
     }
     /// One icon set for every dock, extracted for the densest dock; lower-DPI docks scale it down.
     // shortcut: mixed-DPI docks resample icons; keep one cache size per DPI if that looks soft on hardware.
-    fn dock_icons(&mut self) -> Vec<Option<Arc<IconPixels>>> {
+    fn dock_icons(&mut self) -> Vec<Vec<Option<Arc<IconPixels>>>> {
         let Some(size) = self.icon_size() else {
             return Vec::new();
         };
         self.dock_items
             .iter()
             .map(|item| {
-                let sources = icons::sources(&item.identity, item.executable.as_deref());
-                self.icons.icon(&item.identity, sources, size)
+                let members = if item.members.is_empty() {
+                    std::slice::from_ref(item)
+                } else {
+                    &item.members
+                };
+                members
+                    .iter()
+                    .map(|member| {
+                        let sources =
+                            icons::sources(&member.identity, member.executable.as_deref());
+                        self.icons.icon(&member.identity, sources, size)
+                    })
+                    .collect()
             })
             .collect()
     }
@@ -2733,6 +2751,15 @@ impl Desktop {
         match hit {
             Some(Hit::Slot(0)) => self.open_picker(catalog),
             Some(Hit::Slot(slot)) => {
+                if let Some(item) = self.dock_items.get(slot - 1)
+                    && !item.members.is_empty()
+                {
+                    let members = item.members.clone();
+                    for member in &members {
+                        self.open_member(member);
+                    }
+                    return Ok(());
+                }
                 if let Some(action) = self
                     .dock_items
                     .get(slot - 1)
@@ -2752,6 +2779,214 @@ impl Desktop {
     fn run_dock_action(&mut self, action: dock::Action) {
         if let Some(failure) = dock::action_failure(action) {
             self.show_notice(failure.into(), Instant::now());
+        }
+    }
+    fn open_member(&mut self, member: &DockItem) {
+        if let Some(action) = dock::open_action(member) {
+            self.run_dock_action(action);
+        }
+    }
+
+    fn refresh_hover_popup(&mut self) -> u32 {
+        let now = Instant::now();
+        if self.menu.is_some() || self.drag.as_ref().is_some_and(|drag| drag.active) {
+            self.hover_popup = None;
+            self.hover_spot = None;
+            return INFINITE;
+        }
+        let slots = self.dock_slots();
+        let hovered = self.surfaces.iter().find_map(|surface| {
+            if let Role::Dock {
+                hover: Some(cell), ..
+            } = surface.role
+                && surface.visible
+            {
+                dock::cell(surface.dock_buttons, slots, cell).map(|hit| (surface.window.0, hit))
+            } else {
+                None
+            }
+        });
+        if self.hover_spot.as_ref().map(|&(hwnd, hit, _)| (hwnd, hit))
+            != hovered.map(|(hwnd, hit)| (hwnd.0 as usize, hit))
+        {
+            self.hover_spot =
+                hovered.map(|(hwnd, hit)| (hwnd.0 as usize, hit, now + preview::DELAY));
+        }
+        if let Some(popup) = &mut self.hover_popup {
+            let same = hovered
+                .is_some_and(|(hwnd, hit)| hwnd == popup.dock() && Some(hit) == popup.hover_hit);
+            let owner_visible = self
+                .surfaces
+                .iter()
+                .any(|surface| surface.window.0 == popup.dock() && surface.visible);
+            if !owner_visible {
+                self.hover_popup = None;
+                return INFINITE;
+            }
+            if same || popup.under_pointer() {
+                popup.close_at = None;
+                if popup.closing() {
+                    popup.set_open(true);
+                }
+            } else if !popup.closing() {
+                let due = *popup
+                    .close_at
+                    .get_or_insert(now + Duration::from_millis(180));
+                if now >= due {
+                    popup.close_at = None;
+                    popup.set_open(false);
+                }
+            }
+            if popup.closing() && !popup.running(now) {
+                self.hover_popup = None;
+            }
+        }
+        if self.hover_popup.is_none()
+            && let Some((hwnd, hit, due)) = self.hover_spot
+            && now >= due
+        {
+            self.show_hover_popup(HWND(hwnd as *mut _), hit);
+        }
+        if let Some(popup) = &mut self.hover_popup {
+            if popup.paint().is_err() {
+                self.hover_popup = None;
+                return INFINITE;
+            }
+            return popup
+                .close_at
+                .map_or(INFINITE, |due| milliseconds_until(due, now));
+        }
+        self.hover_spot
+            .filter(|(_, _, due)| *due > now)
+            .map_or(INFINITE, |(_, _, due)| milliseconds_until(due, now))
+    }
+
+    fn show_hover_popup(&mut self, hwnd: HWND, hit: Hit) {
+        let item = hit
+            .slot()
+            .and_then(|slot| slot.checked_sub(1))
+            .and_then(|index| self.dock_items.get(index));
+        if item.is_some_and(|item| item.members.is_empty() && !item.windows.is_empty()) {
+            return;
+        }
+        let (identity, members, label) = match item {
+            Some(item) => (
+                item.identity.clone(),
+                item.members.clone(),
+                dock::pinned_as(item, &self.pins)
+                    .as_ref()
+                    .and_then(|pin| self.pins.folder(pin))
+                    .map_or_else(
+                        || crate::pins::display_name(&item.identity),
+                        |folder| folder.name.clone(),
+                    ),
+            ),
+            None => (
+                Identity::Unavailable(0),
+                Vec::new(),
+                match hit {
+                    Hit::Button(button) => button.label().into(),
+                    _ => "Your apps".into(),
+                },
+            ),
+        };
+        let Some(dock) = self.dock_at(hwnd) else {
+            return;
+        };
+        let Some(work) = self
+            .monitors
+            .iter()
+            .find(|monitor| monitor.device == dock.monitor)
+            .map(|monitor| monitor.work)
+        else {
+            return;
+        };
+        let (left, width) = dock::span(dock.dock_buttons, dock.bounds.width, dock.dpi, hit);
+        let spec = dock_menu::Spec {
+            dock: hwnd,
+            slot: hit.slot().unwrap_or(usize::MAX),
+            identity,
+            windows: Vec::new(),
+            items: std::iter::once(Item::Label)
+                .chain((0..members.len()).map(Item::Member))
+                .collect(),
+            dock_bounds: dock.bounds,
+            work,
+            dpi: dock.dpi,
+            app: label.clone(),
+            titles: std::iter::once(label)
+                .chain(
+                    members
+                        .iter()
+                        .map(|member| crate::pins::display_name(&member.identity)),
+                )
+                .collect(),
+            icons: Vec::new(),
+            x: dock.bounds.x + left + width / 2,
+            below: None,
+            return_to: None,
+        };
+        let size = self.icon_size().unwrap_or(40);
+        let mut spec = spec;
+        spec.icons = std::iter::once(None)
+            .chain(members.iter().map(|member| {
+                self.icons.icon(
+                    &member.identity,
+                    icons::sources(&member.identity, member.executable.as_deref()),
+                    size,
+                )
+            }))
+            .collect();
+        match dock_menu::Menu::open_hover(&self.graphics, self.palette, spec) {
+            Ok(mut popup) => {
+                popup.hover_hit = Some(hit);
+                self.hover_popup = Some(popup);
+            }
+            Err(error) => eprintln!("Dock folder: {error}"),
+        }
+    }
+
+    fn hover_popup_message(&mut self, message: &MSG) -> bool {
+        let Some(popup) = &mut self.hover_popup else {
+            return false;
+        };
+        let slot = popup.slot;
+        let hwnd = popup.dock();
+        match popup.message(message) {
+            Event::Ignored => false,
+            Event::Consumed => true,
+            Event::Dismiss => {
+                self.hover_popup = None;
+                false
+            }
+            Event::Choose(Item::Member(index)) => {
+                let member = self
+                    .dock_items
+                    .get(slot - 1)
+                    .and_then(|tile| tile.members.get(index))
+                    .cloned();
+                self.hover_popup = None;
+                if let Some(member) = member {
+                    self.open_member(&member);
+                }
+                true
+            }
+            Event::Choose(Item::MemberMenu(index)) => {
+                let member = self
+                    .dock_items
+                    .get(slot - 1)
+                    .and_then(|tile| tile.members.get(index))
+                    .cloned();
+                self.hover_popup = None;
+                if let Some(member) = member {
+                    self.open_item_menu(hwnd, slot, member);
+                }
+                true
+            }
+            Event::Choose(_) => {
+                self.hover_popup = None;
+                true
+            }
         }
     }
     /// A taskbar button: the shell shortcut it stands for (sent on this click only), or the minimized list.
@@ -2836,21 +3071,6 @@ impl Desktop {
             Err(error) => eprintln!("Minimized list: {error}"),
         }
     }
-    /// Pins the slot's app, or unpins it if pinned (the menu's Pin and Unpin). The dock is rebuilt on the
-    /// next pass.
-    fn toggle_pin(&mut self, slot: Option<usize>) {
-        let Some(item) = slot
-            .and_then(|slot| slot.checked_sub(1))
-            .and_then(|index| self.dock_items.get(index))
-        else {
-            return;
-        };
-        let (identity, pinned) = (item.identity.clone(), dock::pinned_as(item, &self.pins));
-        self.change_pins(|pins| match &pinned {
-            Some(pin) => pins.remove(pin),
-            None => pins.add(identity).is_ok(),
-        });
-    }
     /// Middle-click on a dock slot launches a new instance when the app can be launched.
     fn middle_click_slot(&mut self, slot: usize) {
         if let Some(index) = slot.checked_sub(1)
@@ -2870,14 +3090,21 @@ impl Desktop {
         }
         self.dismiss_preview();
         self.close_menu();
-        let Some((dock, slot)) = self
+        let Some((_, slot)) = self
             .dock_at(hwnd)
             .zip(slot.filter(|&slot| slot >= 1))
             .filter(|(dock, _)| dock.visible)
         else {
             return;
         };
-        let Some(item) = self.dock_items.get(slot - 1) else {
+        let Some(item) = self.dock_items.get(slot - 1).cloned() else {
+            return;
+        };
+        self.open_item_menu(hwnd, slot, item);
+    }
+    fn open_item_menu(&mut self, hwnd: HWND, slot: usize, item: DockItem) {
+        self.hover_popup = None;
+        let Some(dock) = self.dock_at(hwnd) else {
             return;
         };
         let Some(work) = self
@@ -2893,7 +3120,7 @@ impl Desktop {
             slot,
             identity: item.identity.clone(),
             windows: item.windows.clone(),
-            items: dock_menu::items(item, &self.pins),
+            items: dock_menu::items(&item, &self.pins),
             dock_bounds: dock.bounds,
             work,
             dpi: dock.dpi,
@@ -3010,9 +3237,85 @@ impl Desktop {
     /// Does the chosen action on the slot's app, if the slot still holds it. A new instance leaves the
     /// foreground to the app it starts; the rest return it to the window the menu came from.
     fn run_menu(&mut self, item: Item) {
-        let Some(menu) = self.menu.take() else {
+        let Some(mut menu) = self.menu.take() else {
             return;
         };
+        if item == Item::Rename {
+            let name = self
+                .pins
+                .folder(&menu.identity)
+                .map(|folder| folder.name.clone());
+            if let Some(name) = name {
+                if let Err(error) = menu.rename(&name) {
+                    eprintln!("Folder name: {error}");
+                }
+                self.menu = Some(menu);
+            }
+            return;
+        }
+        if item == Item::Group {
+            let choices: Vec<_> = self
+                .dock_items
+                .iter()
+                .enumerate()
+                .filter(|(_, target)| {
+                    target.identity != menu.identity
+                        && crate::pins::launch_target(&target.identity).is_some()
+                })
+                .collect();
+            let labels = choices
+                .iter()
+                .map(|(_, target)| {
+                    self.pins.folder(&target.identity).map_or_else(
+                        || {
+                            format!(
+                                "New folder with {}",
+                                crate::pins::display_name(&target.identity)
+                            )
+                        },
+                        |folder| format!("Add to {}", folder.name),
+                    )
+                })
+                .collect();
+            if !choices.is_empty() {
+                menu.targets = choices
+                    .iter()
+                    .map(|(_, target)| {
+                        dock::pinned_as(target, &self.pins)
+                            .unwrap_or_else(|| target.identity.clone())
+                    })
+                    .collect();
+                let actions = (0..menu.targets.len()).map(Item::GroupTarget).collect();
+                if let Err(error) = menu.relist(actions, labels, Vec::new()) {
+                    eprintln!("Dock folder: {error}");
+                }
+                self.menu = Some(menu);
+            } else {
+                dock::restore_foreground(menu.hwnd(), menu.return_to);
+                self.show_notice("Drag another app here to group it.".into(), Instant::now());
+            }
+            return;
+        }
+        let name = (item == Item::SaveName).then(|| menu.edited_name());
+        if let Some(name) = name {
+            self.change_pins(|pins| pins.rename(&menu.identity, &name));
+            dock::restore_foreground(menu.hwnd(), menu.return_to);
+            return;
+        }
+        if let Item::GroupTarget(index) = item {
+            if let Some(target) = menu.targets.get(index).cloned() {
+                let source = self
+                    .dock_items
+                    .iter()
+                    .flat_map(|tile| std::iter::once(tile).chain(tile.members.iter()))
+                    .find(|candidate| candidate.identity == menu.identity)
+                    .and_then(|source| dock::pinned_as(source, &self.pins))
+                    .unwrap_or_else(|| menu.identity.clone());
+                self.change_pins(|pins| pins.group(&source, &target));
+            }
+            dock::restore_foreground(menu.hwnd(), menu.return_to);
+            return;
+        }
         // A new instance or a restored window takes the foreground itself.
         if !matches!(item, Item::NewInstance | Item::Restore(_)) {
             dock::restore_foreground(menu.hwnd(), menu.return_to);
@@ -3042,6 +3345,15 @@ impl Desktop {
         let target = self
             .dock_items
             .get(menu.slot - 1)
+            .and_then(|tile| {
+                if menu.items().contains(&Item::RemoveMember) {
+                    tile.members
+                        .iter()
+                        .find(|member| member.identity == menu.identity)
+                } else {
+                    Some(tile)
+                }
+            })
             .filter(|target| {
                 dock_menu::describes(
                     &menu.identity,
@@ -3056,6 +3368,27 @@ impl Desktop {
             return;
         };
         match item {
+            Item::OpenFolder => {
+                for member in &target.members {
+                    self.open_member(member);
+                }
+            }
+            Item::Dissolve => {
+                let members: Vec<_> = target
+                    .members
+                    .iter()
+                    .filter_map(|member| dock::pinned_as(member, &self.pins))
+                    .collect();
+                self.change_pins(|pins| {
+                    members
+                        .iter()
+                        .fold(false, |changed, member| pins.ungroup(member) || changed)
+                });
+            }
+            Item::RemoveMember => {
+                let identity = dock::pinned_as(&target, &self.pins).unwrap_or(target.identity);
+                self.change_pins(|pins| pins.ungroup(&identity));
+            }
             Item::Close(key) => dock::close(&[key]),
             Item::CloseAll => dock::close(&menu.windows),
             Item::NewInstance => {
@@ -3063,12 +3396,28 @@ impl Desktop {
                     self.run_dock_action(dock::Action::Launch(launch));
                 }
             }
-            Item::Pin | Item::Unpin => self.toggle_pin(Some(menu.slot)),
+            Item::Pin | Item::Unpin => {
+                let identity = dock::pinned_as(&target, &self.pins).unwrap_or(target.identity);
+                self.change_pins(|pins| {
+                    if item == Item::Unpin {
+                        pins.remove(&identity)
+                    } else {
+                        pins.add(identity).is_ok()
+                    }
+                });
+            }
             Item::Settings
             | Item::Quit
             | Item::Restore(_)
             | Item::RemoveShelf
-            | Item::UndoShelf => {}
+            | Item::UndoShelf
+            | Item::Group
+            | Item::GroupTarget(_)
+            | Item::Rename
+            | Item::SaveName
+            | Item::Member(_)
+            | Item::MemberMenu(_)
+            | Item::Label => {}
         }
     }
     /// Ends the open menu once it no longer describes the dock (its slot changed, or a full-screen app hid
@@ -3104,6 +3453,7 @@ impl Desktop {
             now,
             edit,
         ) {
+            self.hover_popup = None;
             self.dock_generation = None;
             // Every pin change (dock click, drag, settings move) refreshes the list so a later Move is not stale.
             let selected = self
@@ -3126,20 +3476,41 @@ impl Desktop {
         if !drag.active {
             return false;
         }
-        let (slots, pins) = (self.dock_slots(), self.pins.items().len());
+        let slots = self.dock_slots();
         let target = self.dock_at(hwnd).and_then(|dock| {
             let (x, _) = point(lparam);
-            dock::drop_index(
+            let slot = dock::drop_index(
                 dock.dock_buttons,
                 x,
                 dock.bounds.width,
                 dock.dpi,
                 slots,
-                pins,
-            )
+                self.dock_items.len(),
+            )?;
+            let hit = Hit::Slot(slot + 1);
+            let item = self.dock_items.get(slot)?;
+            let pin = dock::pinned_as(item, &self.pins).unwrap_or_else(|| item.identity.clone());
+            let (left, width) = dock::span(dock.dock_buttons, dock.bounds.width, dock.dpi, hit);
+            Some((pin, dock::folder_drop(x - left, width, dock.dpi)))
         });
-        if let Some(to) = target {
-            self.change_pins(|pins| pins.move_to(drag.from, to));
+        if let Some((target, group)) = target
+            && let Some(source) = self.dock_items.get(drag.from)
+        {
+            let group = group && source.members.is_empty();
+            let source =
+                dock::pinned_as(source, &self.pins).unwrap_or_else(|| source.identity.clone());
+            self.change_pins(|pins| {
+                if group {
+                    pins.group(&source, &target)
+                } else {
+                    pins.position(&source)
+                        .zip(
+                            pins.position(&target)
+                                .or_else(|| pins.items().len().checked_sub(1)),
+                        )
+                        .is_some_and(|(from, to)| pins.move_to(from, to))
+                }
+            });
         }
         true
     }
@@ -3691,7 +4062,11 @@ impl Desktop {
                     .dock_hit(message.lParam, slots)
                     .and_then(Hit::slot)
                     .and_then(|slot| slot.checked_sub(1))
-                    .filter(|&index| index < self.pins.items().len());
+                    .filter(|&index| {
+                        self.dock_items.get(index).is_some_and(|item| {
+                            crate::pins::launch_target(&item.identity).is_some()
+                        })
+                    });
                 self.drag = from.map(|from| Drag {
                     from,
                     x: point(message.lParam).0,
@@ -3976,6 +4351,8 @@ impl Desktop {
             if palette != self.palette {
                 self.palette = palette;
                 self.menu = None;
+                self.hover_popup = None;
+                self.hover_spot = None;
                 self.edges.release(); // an open pill takes the new colours when it next shows
                 self.surfaces.clear();
                 for kind in self.shown.clone() {
@@ -4033,6 +4410,7 @@ impl Desktop {
             .min(self.refresh_timers())
             .min(self.refresh_power())
             .min(self.refresh_preview())
+            .min(self.refresh_hover_popup())
             .min(self.refresh_edges())
             .min(self.refresh_eyes())
             .min(self.refresh_ring())
@@ -4315,7 +4693,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             if catalog.message(&message)? {
                 continue;
             }
-            if desktop.menu_message(&message) {
+            if desktop.hover_popup_message(&message) || desktop.menu_message(&message) {
                 continue;
             }
             if matches!(

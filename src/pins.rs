@@ -18,11 +18,17 @@ pub enum PinError {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Pins(Vec<Identity>);
+pub struct Pins(Vec<Identity>, Vec<Folder>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Folder {
+    pub name: String,
+    pub members: Vec<Identity>,
+}
 
 /// Canonical pin key: exe paths are lowercased (the catalog already does), unusable identities are rejected.
 fn normalize(identity: &Identity) -> Option<Identity> {
-    let valid = |text: &str| !text.is_empty() && !text.contains(['\n', '\r']);
+    let valid = |text: &str| !text.is_empty() && !text.chars().any(char::is_control);
     match identity {
         Identity::Application(id) if valid(id) => Some(identity.clone()),
         Identity::Executable(path) if valid(path) => {
@@ -56,12 +62,45 @@ impl Pins {
         for identity in store.pins.iter().filter_map(|text| decode(text)) {
             let _ = pins.add(identity);
         }
+        for line in store.folders.iter().take(MAX_PINS / 2) {
+            let mut parts = line.split('\t');
+            let name = parts.next().unwrap_or_default();
+            let mut members = Vec::new();
+            for identity in parts.filter_map(decode) {
+                if pins.position(&identity).is_some()
+                    && pins.folder(&identity).is_none()
+                    && !members.contains(&identity)
+                {
+                    members.push(identity);
+                }
+            }
+            if members.len() >= 2 {
+                pins.1.push(Folder {
+                    name: folder_name(name),
+                    members,
+                });
+            }
+        }
         pins
     }
 
     /// Replaces the store's pin section; the caller marks the store dirty.
     pub fn write_to(&self, store: &mut Store) {
         store.pins = self.0.iter().filter_map(encode).collect();
+        store.folders = self
+            .1
+            .iter()
+            .map(|folder| {
+                let mut line = folder.name.clone();
+                for member in &folder.members {
+                    if let Some(key) = encode(member) {
+                        line.push('\t');
+                        line.push_str(&key);
+                    }
+                }
+                line
+            })
+            .collect();
     }
 
     pub fn items(&self) -> &[Identity] {
@@ -87,9 +126,82 @@ impl Pins {
     }
 
     pub fn remove(&mut self, identity: &Identity) -> bool {
+        self.ungroup(identity);
         self.position(identity)
             .map(|at| self.0.remove(at))
             .is_some()
+    }
+
+    pub fn folder(&self, identity: &Identity) -> Option<&Folder> {
+        self.1
+            .iter()
+            .find(|folder| folder.members.contains(identity))
+    }
+    pub fn has_folders(&self) -> bool {
+        !self.1.is_empty()
+    }
+
+    pub fn group(&mut self, source: &Identity, target: &Identity) -> bool {
+        let (Some(source), Some(target)) = (normalize(source), normalize(target)) else {
+            return false;
+        };
+        if source == target
+            || self.0.len()
+                + usize::from(self.position(&source).is_none())
+                + usize::from(self.position(&target).is_none())
+                > MAX_PINS
+            || self
+                .folder(&source)
+                .is_some_and(|folder| folder.members.contains(&target))
+        {
+            return false;
+        }
+        let _ = self.add(source.clone());
+        let _ = self.add(target.clone());
+        self.ungroup(&source);
+        if let Some(folder) = self
+            .1
+            .iter_mut()
+            .find(|folder| folder.members.contains(&target))
+        {
+            folder.members.push(source.clone());
+        } else {
+            self.1.push(Folder {
+                name: "Together".into(),
+                members: vec![target.clone(), source.clone()],
+            });
+        }
+        true
+    }
+
+    pub fn ungroup(&mut self, identity: &Identity) -> bool {
+        let Some(identity) = normalize(identity) else {
+            return false;
+        };
+        let mut changed = false;
+        for folder in &mut self.1 {
+            let before = folder.members.len();
+            folder.members.retain(|member| member != &identity);
+            changed |= before != folder.members.len();
+        }
+        self.1.retain(|folder| folder.members.len() >= 2);
+        changed
+    }
+
+    pub fn rename(&mut self, identity: &Identity, name: &str) -> bool {
+        let Some(folder) = self
+            .1
+            .iter_mut()
+            .find(|folder| folder.members.contains(identity))
+        else {
+            return false;
+        };
+        let name = folder_name(name);
+        if folder.name == name {
+            return false;
+        }
+        folder.name = name;
+        true
     }
 
     /// Moves one pin to a new index. False (and no change) when either index is out of bounds or equal,
@@ -98,9 +210,45 @@ impl Pins {
         if from == to || from >= self.0.len() || to >= self.0.len() {
             return false;
         }
-        let pin = self.0.remove(from);
-        self.0.insert(to, pin);
+        let source = self.0[from].clone();
+        let target = self.0[to].clone();
+        let members = self
+            .folder(&source)
+            .map_or_else(|| vec![source], |folder| folder.members.clone());
+        if members.contains(&target) {
+            return false;
+        }
+        let targets = self
+            .folder(&target)
+            .map_or_else(|| vec![target], |folder| folder.members.clone());
+        self.0.retain(|pin| !members.contains(pin));
+        let positions = self
+            .0
+            .iter()
+            .enumerate()
+            .filter(|(_, pin)| targets.contains(pin))
+            .map(|(index, _)| index);
+        let at = if from < to {
+            positions.max().unwrap_or(0) + 1
+        } else {
+            positions.min().unwrap_or(0)
+        };
+        self.0.splice(at..at, members);
         true
+    }
+}
+
+fn folder_name(name: &str) -> String {
+    let name: String = name
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(40)
+        .collect();
+    if name.is_empty() {
+        "Together".into()
+    } else {
+        name
     }
 }
 
@@ -130,6 +278,62 @@ pub fn launch_target(identity: &Identity) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folders_round_trip_and_dissolve_without_losing_pins() {
+        let mut pins = Pins::default();
+        assert!(pins.group(&app("A"), &app("B")));
+        assert!(pins.group(&app("C"), &app("B")));
+        assert!(pins.rename(&app("B"), "  Daily\tapps\n  "));
+        let mut store = Store::default();
+        pins.write_to(&mut store);
+        assert_eq!(Pins::from_store(&store), pins);
+        assert_eq!(pins.folder(&app("A")).unwrap().name, "Dailyapps");
+        assert!(!pins.group(&app("A"), &app("B")));
+        assert!(pins.ungroup(&app("A")));
+        assert_eq!(pins.folder(&app("B")).unwrap().members.len(), 2);
+        assert!(pins.remove(&app("C")));
+        assert!(!pins.has_folders());
+        assert_eq!(pins.items().len(), 2);
+    }
+
+    #[test]
+    fn moving_a_folder_keeps_its_members_together() {
+        let mut pins = Pins::default();
+        for name in ["A", "B", "C", "D"] {
+            pins.add(app(name)).unwrap();
+        }
+        assert!(pins.group(&app("A"), &app("C")));
+        assert!(pins.move_to(0, 3));
+        assert_eq!(pins.items(), &[app("B"), app("D"), app("C"), app("A")]);
+        assert!(!pins.move_to(2, 3));
+    }
+
+    #[test]
+    fn corrupt_folder_metadata_cannot_duplicate_or_hide_pins() {
+        let store = Store {
+            pins: vec!["app:A".into(), "app:B".into(), "app:C".into()],
+            folders: vec![
+                "\tapp:A\tapp:A\tapp:B\tapp:Missing".into(),
+                "Other\tapp:B\tapp:C".into(),
+            ],
+            ..Store::default()
+        };
+        let pins = Pins::from_store(&store);
+        assert_eq!(
+            pins.folder(&app("A")).unwrap().members,
+            [app("A"), app("B")]
+        );
+        assert_eq!(pins.folder(&app("A")).unwrap().name, "Together");
+        assert!(pins.folder(&app("C")).is_none());
+        let mut full = Pins::default();
+        for index in 0..MAX_PINS {
+            full.add(app(&format!("App{index}"))).unwrap();
+        }
+        let before = full.clone();
+        assert!(!full.group(&app("New"), &app("App0")));
+        assert_eq!(full, before);
+    }
 
     fn app(id: &str) -> Identity {
         Identity::Application(id.into())

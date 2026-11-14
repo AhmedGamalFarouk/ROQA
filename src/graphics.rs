@@ -139,6 +139,8 @@ fn is_loss(code: HRESULT) -> bool {
 /// What one dock slot shows. Slot 0 is the picker glyph; the others are real app groups.
 pub struct DockSlot<'a> {
     pub icon: Option<&'a IconPixels>,
+    pub mini: Vec<Option<&'a IconPixels>>,
+    pub running: bool,
     pub active: bool,
     pub picker: bool,
     pub badge: dock::Badge,
@@ -271,6 +273,7 @@ pub struct SliderScene<'a> {
     pub note: Option<bool>,
 }
 pub struct ListScene<'a> {
+    pub reveal: f32,
     pub dpi: u32,
     pub panel: Bounds,
     pub rows: &'a [ListRow<'a>],
@@ -543,7 +546,26 @@ impl Canvas {
         let p = self.palette;
         let scale = scene.dpi as f32 / 96.0;
         self.draw(|context, rect| {
-            self.panel(context, surface_rect(rect, scene.panel), 12.0 * scale)?;
+            let panel = surface_rect(rect, scene.panel);
+            let progress = scene.reveal;
+            let stretch = 0.94 + 0.06 * progress;
+            let center = (panel.left + panel.right) / 2.0;
+            // SAFETY: the live draw context copies this transform before drawing the popup.
+            unsafe {
+                context.SetTransform(&Matrix3x2 {
+                    M11: stretch,
+                    M12: 0.0,
+                    M21: 0.0,
+                    M22: stretch,
+                    M31: center * (1.0 - stretch),
+                    M32: panel.bottom * (1.0 - stretch),
+                });
+            }
+            self.panel(
+                context,
+                panel,
+                (scene.panel.height as f32 / 2.0).min(28.0 * scale),
+            )?;
             let font = Font {
                 family: TEXT_FONT,
                 size: 13.0 * scale,
@@ -559,7 +581,10 @@ impl Canvas {
                 unsafe {
                     if scene.hover == Some(index) {
                         let brush = context.CreateSolidColorBrush(&tint(p.track(0.16)), None)?;
-                        context.FillRoundedRectangle(&rounded(cell, 8.0 * scale), &brush);
+                        context.FillRoundedRectangle(
+                            &rounded(cell, (cell.bottom - cell.top) / 2.0),
+                            &brush,
+                        );
                     }
                     if row.current {
                         let brush =
@@ -624,7 +649,7 @@ impl Canvas {
                     context,
                     &rect,
                     p.body,
-                    (p.ink.0 < 128).then_some(0.10),
+                    None,
                     &geometry_shape(context, &outline),
                 )?;
                 return paint_slots(context, &rect, self.width as i32, scene, &px, &p);
@@ -707,26 +732,20 @@ impl Canvas {
             right: rect.right - 0.5,
             bottom: rect.bottom - 0.5,
         };
-        self.body(
-            context,
-            &rect,
-            flat,
-            (self.palette.ink.0 < 128).then_some(0.10),
-            &|brush, width| {
-                // SAFETY: context is live between surface BeginDraw/EndDraw.
-                unsafe {
-                    match width {
-                        None => context.FillRoundedRectangle(&rounded(rect, radius), brush),
-                        Some(width) => context.DrawRoundedRectangle(
-                            &rounded(edge, radius - 0.5),
-                            brush,
-                            width,
-                            None,
-                        ),
-                    }
+        self.body(context, &rect, flat, None, &|brush, width| {
+            // SAFETY: context is live between surface BeginDraw/EndDraw.
+            unsafe {
+                match width {
+                    None => context.FillRoundedRectangle(&rounded(rect, radius), brush),
+                    Some(width) => context.DrawRoundedRectangle(
+                        &rounded(edge, radius - 0.5),
+                        brush,
+                        width,
+                        None,
+                    ),
                 }
-            },
-        )
+            }
+        })
     }
     fn panel(&self, context: &ID2D1DeviceContext, rect: D2D_RECT_F, radius: f32) -> Result<()> {
         self.rounded_body(context, rect, radius, self.palette.body)
@@ -2140,12 +2159,12 @@ fn paint_slots(
         {
             let at = rect.left + x as f32;
             let hairline = D2D_RECT_F {
-                left: at - 0.5,
+                left: at - px(3) / 2.0,
                 top: rect.top + px(20),
-                right: at + 0.5,
+                right: at + px(3) / 2.0,
                 bottom: rect.bottom - px(20),
             };
-            context.FillRectangle(&hairline, &line);
+            context.FillRoundedRectangle(&rounded(hairline, px(3) / 2.0), &line);
         }
     }
     Ok(())
@@ -2294,10 +2313,44 @@ fn draw_slot(
                 bottom: center_y + half,
             };
             let brush = context.CreateSolidColorBrush(&tint(p.track(0.12 * slot.hover)), None)?;
-            context.FillRoundedRectangle(&rounded(highlight, half), &brush);
+            context.FillRoundedRectangle(&rounded(highlight, px(24)), &brush);
         }
-        if slot.picker {
-            glyphs::draw(context, frame, Glyph::Apps, with_alpha(p.glyph, 1.0))?;
+        if !slot.mini.is_empty() {
+            let brush = context.CreateSolidColorBrush(&tint(p.track(0.16)), None)?;
+            context.FillRoundedRectangle(&rounded(frame, size / 2.0), &brush);
+            let side = size * 0.36;
+            for (index, icon) in slot.mini.iter().take(4).enumerate() {
+                let (column, row, _) = dock::mini_cell(index).unwrap();
+                let left = frame.left + size * column;
+                let top = frame.top + size * row;
+                let mini = D2D_RECT_F {
+                    left,
+                    top,
+                    right: left + side,
+                    bottom: top + side,
+                };
+                if let Some(pixels) = icon {
+                    context.DrawBitmap(
+                        &upload(context, pixels)?,
+                        Some(&mini),
+                        1.0,
+                        D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                        None,
+                        None,
+                    );
+                } else {
+                    glyphs::draw(context, mini, Glyph::Apps, with_alpha(p.glyph, 1.0))?;
+                }
+            }
+        } else if slot.picker {
+            let side = px(24);
+            let glyph = D2D_RECT_F {
+                left: center_x - side / 2.0,
+                top: center_y - side / 2.0,
+                right: center_x + side / 2.0,
+                bottom: center_y + side / 2.0,
+            };
+            glyphs::draw(context, glyph, Glyph::Apps, with_alpha(p.glyph, 1.0))?;
         } else if let Some(pixels) = slot.icon {
             // shortcut: bitmaps are rebuilt per paint (catalog/icon/hover changes and the frames of a ~0.2 s hover animation); cache per device if profiling shows cost.
             context.DrawBitmap(
@@ -2333,7 +2386,7 @@ fn draw_slot(
                 right: frame.right + width / 2.0,
                 bottom: frame.top + height * 0.75,
             };
-            let brush = context.CreateSolidColorBrush(&rgba(214, 31, 41, 1.0), None)?;
+            let brush = context.CreateSolidColorBrush(&tint(p.track(1.0)), None)?;
             context.FillRoundedRectangle(&rounded(badge, height / 2.0), &brush);
             if let Some(label) = label {
                 let font = Font {
@@ -2343,20 +2396,26 @@ fn draw_slot(
                     designator: 1.0,
                     align: DWRITE_TEXT_ALIGNMENT_CENTER,
                 };
-                draw_text(context, &label, &font, badge, rgba(255, 255, 255, 1.0))?;
+                draw_text(context, &label, &font, badge, with_alpha(p.on_ink, 1.0))?;
             }
         }
-        if slot.active {
-            // Short white pill under the focused group.
-            let (half, bottom) = (px(6), cell.bottom - px(4));
+        if slot.active || slot.running {
+            // Focus uses Lamp; other running groups keep a quiet neutral dot.
+            let (half, bottom) = (px(if slot.active { 6 } else { 2 }), cell.bottom - px(4));
             let pill = D2D_RECT_F {
                 left: center_x - half,
                 top: bottom - px(3),
                 right: center_x + half,
                 bottom,
             };
-            let brush =
-                context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(0.92)), None)?;
+            let brush = context.CreateSolidColorBrush(
+                &tint(if slot.active {
+                    p.accent_dim(false, 1.0)
+                } else {
+                    p.ink_dim(false, 0.55)
+                }),
+                None,
+            )?;
             context.FillRoundedRectangle(&rounded(pill, px(3) / 2.0), &brush);
         }
     }

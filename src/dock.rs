@@ -79,6 +79,7 @@ pub struct DockItem {
     pub windows: Vec<WindowKey>,
     pub active: bool,
     pub badge: Badge,
+    pub members: Vec<DockItem>,
 }
 
 /// One item per real catalog group, in stable identity order. No placeholder rows. With `desktop_only`, a
@@ -109,6 +110,7 @@ pub fn items(model: &WindowModel, desktop_only: bool) -> Vec<DockItem> {
                 windows: vec![window.key],
                 active: window.foreground,
                 badge: title_badge(&window.title),
+                members: Vec::new(),
             }),
         }
     }
@@ -146,11 +148,70 @@ pub fn items_with_pins(model: &WindowModel, pins: &Pins, desktop_only: bool) -> 
                     windows: Vec::new(),
                     active: false,
                     badge: Badge::None,
+                    members: Vec::new(),
                 }),
         );
     }
     merged.extend(running.into_iter().flatten());
-    merged
+    if !pins.has_folders() {
+        return merged;
+    }
+    let other_desktops = if desktop_only {
+        items(model, false)
+    } else {
+        Vec::new()
+    };
+    let mut folded = Vec::with_capacity(merged.len());
+    let mut claimed = Vec::new();
+    for item in &merged {
+        let pin = pinned_as(item, pins);
+        if pin.as_ref().is_some_and(|pin| claimed.contains(pin)) {
+            continue;
+        }
+        if let Some(folder) = pin.as_ref().and_then(|pin| pins.folder(pin)) {
+            let members: Vec<_> = folder
+                .members
+                .iter()
+                .filter_map(|identity| {
+                    merged
+                        .iter()
+                        .find(|item| pinned_as(item, pins).as_ref() == Some(identity))
+                        .cloned()
+                        .map(|member| {
+                            if member.windows.is_empty() {
+                                other_desktops
+                                    .iter()
+                                    .find(|running| {
+                                        pinned_as(running, pins).as_ref() == Some(identity)
+                                    })
+                                    .cloned()
+                                    .unwrap_or(member)
+                            } else {
+                                member
+                            }
+                        })
+                })
+                .collect();
+            claimed.extend(folder.members.iter().cloned());
+            let mut tile = item.clone();
+            tile.identity = pin.unwrap_or_else(|| item.identity.clone());
+            tile.windows = members
+                .iter()
+                .flat_map(|item| item.windows.iter().copied())
+                .collect();
+            tile.active = members.iter().any(|item| item.active);
+            tile.badge = members
+                .iter()
+                .map(|item| item.badge)
+                .max()
+                .unwrap_or_default();
+            tile.members = members;
+            folded.push(tile);
+        } else {
+            folded.push(item.clone());
+        }
+    }
+    folded
 }
 
 /// Taskbar-style buttons beside the app slots (features D2). Start, Search and Task View sit left of the
@@ -478,6 +539,20 @@ pub fn separators(buttons: Buttons, width_px: i32, dpi: u32) -> [Option<i32>; 2]
 /// Pointer travel (DIPs) before a press on a pinned slot becomes a reorder drag instead of a click.
 pub const DRAG_DIPS: i32 = 6;
 
+pub fn folder_drop(offset: i32, width: i32, dpi: u32) -> bool {
+    (offset - width / 2).abs() <= px(14, dpi)
+}
+
+pub fn mini_cell(index: usize) -> Option<(f32, f32, f32)> {
+    (index < 4).then_some({
+        (
+            0.10 + (index % 2) as f32 * 0.44,
+            0.10 + (index / 2) as f32 * 0.44,
+            0.36,
+        )
+    })
+}
+
 pub fn drag_started(origin_x: i32, x: i32, dpi: u32) -> bool {
     (x - origin_x).abs() >= px(DRAG_DIPS, dpi)
 }
@@ -516,6 +591,14 @@ pub enum Action {
     Minimize(WindowKey),
     /// Shell target of a pinned app with no window; `launch` runs it (`perform` only handles window actions).
     Launch(String),
+}
+
+pub fn open_action(item: &DockItem) -> Option<Action> {
+    item.windows
+        .first()
+        .copied()
+        .map(Action::Activate)
+        .or_else(|| pins::launch_target(&item.identity).map(Action::Launch))
 }
 
 /// Taskbar-like click: focus the group, cycle within an already focused group, minimize a lone focused window.
@@ -716,6 +799,111 @@ mod tests {
 
     use super::*;
     use crate::window_model::WindowRecord;
+
+    #[test]
+    fn folder_open_focuses_running_members_without_minimizing_or_launching_again() {
+        let mut pins = Pins::default();
+        let exe = Identity::Executable(r"c:\vendor.exe".into());
+        pins.group(&exe, &Identity::Application("Idle".into()));
+        let mut window = record(1, Identity::Application("Vendor!App".into()), true);
+        window.executable = Some(r"c:\vendor.exe".into());
+        window.current_desktop = false;
+        let model = WindowModel {
+            windows: vec![window],
+            ..Default::default()
+        };
+        let tiles = items_with_pins(&model, &pins, true);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].members.len(), 2);
+        let running = tiles[0]
+            .members
+            .iter()
+            .find(|member| !member.windows.is_empty())
+            .unwrap();
+        assert_eq!(open_action(running), Some(Action::Activate(key(1))));
+        let idle = tiles[0]
+            .members
+            .iter()
+            .find(|member| member.windows.is_empty())
+            .unwrap();
+        assert!(matches!(open_action(idle), Some(Action::Launch(_))));
+        assert_eq!(pins.folder(&tiles[0].identity).unwrap().members.len(), 2);
+    }
+
+    #[test]
+    fn cross_desktop_folder_claims_canonical_pins_in_either_order() {
+        let executable = Identity::Executable(r"c:\vendor.exe".into());
+        let idle = Identity::Application("Idle".into());
+        let mut window = record(1, Identity::Application("Vendor!App".into()), true);
+        window.executable = Some(r"c:\vendor.exe".into());
+        window.current_desktop = false;
+        let model = WindowModel {
+            windows: vec![window],
+            ..Default::default()
+        };
+        for (source, target) in [(&executable, &idle), (&idle, &executable)] {
+            let mut pins = Pins::default();
+            assert!(pins.group(source, target));
+            let tiles = items_with_pins(&model, &pins, true);
+            assert_eq!(tiles.len(), 1);
+            assert_eq!(tiles[0].members.len(), 2);
+            assert_eq!(tiles[0].windows, [key(1)]);
+            assert_eq!(
+                tiles[0]
+                    .members
+                    .iter()
+                    .filter(|member| !member.windows.is_empty())
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn folder_drop_has_a_center_target_and_reorder_edges_at_every_scale() {
+        for dpi in [96, 120, 144, 192] {
+            let width = px(SLOT_DIPS, dpi);
+            assert!(folder_drop(width / 2, width, dpi));
+            assert!(!folder_drop(0, width, dpi));
+            assert!(!folder_drop(width - 1, width, dpi));
+        }
+        let previews: Vec<_> = (0..4).map(|index| mini_cell(index).unwrap()).collect();
+        assert!(mini_cell(4).is_none());
+        assert!(previews.iter().all(|&(left, top, side)| left >= 0.0
+            && top >= 0.0
+            && left + side <= 1.0
+            && top + side <= 1.0));
+        assert!(previews[0].0 + previews[0].2 < previews[1].0);
+        assert!(previews[0].1 + previews[0].2 < previews[2].1);
+    }
+
+    #[test]
+    fn folders_fold_badges_and_windows_but_keep_every_launcher() {
+        let mut pins = Pins::default();
+        pins.group(
+            &Identity::Application("A".into()),
+            &Identity::Application("B".into()),
+        );
+        pins.add(Identity::Application("C".into())).unwrap();
+        let mut window = record(1, Identity::Application("B".into()), true);
+        window.title = "Inbox (7)".into();
+        let model = WindowModel {
+            windows: vec![window],
+            ..Default::default()
+        };
+        let folded = items_with_pins(&model, &pins, false);
+        assert_eq!(folded.len(), 2);
+        assert_eq!(folded[0].members.len(), 2);
+        assert_eq!(folded[0].windows, [key(1)]);
+        assert!(folded[0].active);
+        assert_eq!(folded[0].badge, Badge::Count(7));
+        assert!(
+            folded[0]
+                .members
+                .iter()
+                .any(|member| member.windows.is_empty())
+        );
+    }
 
     const N: Buttons = Buttons::NONE;
     fn slot_at(x: i32, width: i32, dpi: u32, slots: usize) -> Option<usize> {
@@ -975,6 +1163,7 @@ mod tests {
     #[test]
     fn click_activates_cycles_and_minimizes_like_a_taskbar() {
         let item = |handles: &[usize]| DockItem {
+            members: Vec::new(),
             identity: Identity::Unavailable(0),
             executable: None,
             windows: handles.iter().map(|h| key(*h)).collect(),
@@ -1056,6 +1245,7 @@ mod tests {
     #[test]
     fn pin_toggle_target_follows_the_claiming_pin() {
         let running = |identity, exe: &str| DockItem {
+            members: Vec::new(),
             identity,
             executable: Some(exe.into()),
             windows: vec![key(1)],
@@ -1077,6 +1267,7 @@ mod tests {
         assert_eq!(pinned_as(&aumid, &pins), Some(aumid.identity.clone()));
         // A pin-only item and an unpinnable one.
         let gone = DockItem {
+            members: Vec::new(),
             identity: Identity::Application("Gone".into()),
             executable: None,
             windows: vec![],
