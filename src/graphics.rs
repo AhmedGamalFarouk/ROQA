@@ -380,7 +380,7 @@ impl Canvas {
                 },
                 p.body,
                 // A faint edge so the panel does not merge into a dark backdrop.
-                Some(0.14),
+                (p.ink.0 < 128).then_some(0.14),
                 &geometry_shape(context, &outline),
             )?;
             if p.rim.is_some() {
@@ -617,7 +617,7 @@ impl Canvas {
                     context,
                     &rect,
                     p.body,
-                    Some(0.10),
+                    (p.ink.0 < 128).then_some(0.10),
                     &geometry_shape(context, &outline),
                 )?;
                 return paint_slots(context, &rect, self.width as i32, scene, &px, &p);
@@ -700,20 +700,26 @@ impl Canvas {
             right: rect.right - 0.5,
             bottom: rect.bottom - 0.5,
         };
-        self.body(context, &rect, flat, Some(0.10), &|brush, width| {
-            // SAFETY: context is live between surface BeginDraw/EndDraw.
-            unsafe {
-                match width {
-                    None => context.FillRoundedRectangle(&rounded(rect, radius), brush),
-                    Some(width) => context.DrawRoundedRectangle(
-                        &rounded(edge, radius - 0.5),
-                        brush,
-                        width,
-                        None,
-                    ),
+        self.body(
+            context,
+            &rect,
+            flat,
+            (self.palette.ink.0 < 128).then_some(0.10),
+            &|brush, width| {
+                // SAFETY: context is live between surface BeginDraw/EndDraw.
+                unsafe {
+                    match width {
+                        None => context.FillRoundedRectangle(&rounded(rect, radius), brush),
+                        Some(width) => context.DrawRoundedRectangle(
+                            &rounded(edge, radius - 0.5),
+                            brush,
+                            width,
+                            None,
+                        ),
+                    }
                 }
-            }
-        })
+            },
+        )
     }
     fn panel(&self, context: &ID2D1DeviceContext, rect: D2D_RECT_F, radius: f32) -> Result<()> {
         self.rounded_body(context, rect, radius, self.palette.body)
