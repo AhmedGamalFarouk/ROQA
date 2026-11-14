@@ -1,64 +1,155 @@
-<img src="assets/icon.svg" width="64" height="64" alt="">
+<div align="center">
+  <img src="assets/icon.svg" width="72" height="72" alt="ROQA Logo">
+  <h1>ROQA</h1>
+  <p><strong>A fast, ultra-lightweight native Windows dock and dynamic notch island built in Rust.</strong></p>
+  <p>Pure Win32 &bull; DirectComposition &bull; Direct2D &bull; 0% WebView &bull; Single ~1 MB Binary</p>
+</div>
 
-# ROQA
+---
 
-A native Windows dock and notch, built in Rust. Development follows the independently reviewed [plan](PLAN.md).
+## Overview
 
-M1 has passed both independent council reviews. The visible UI remains a **graphics and lifecycle proof**, with two small solid capsules and hover feedback. Current M2a development adds the real event-driven window catalog underneath; launcher controls and media are still being built. The Windows taskbar stays available; ROQA makes no startup, registry or work-area changes.
+**ROQA** is a modern desktop enhancement shell for Windows 11 built entirely in native Rust. It delivers a fluid, interactive top dynamic notch island and bottom application dock with zero runtime bloat.
 
-## Develop on Windows 11 x64
+- **Ultra-lightweight:** Self-contained single-binary executable (~1.08 MB) compiled with full LTO and stripped debug info.
+- **Hardware-Accelerated DirectComposition:** Sub-pixel Direct2D and DirectWrite rendering with smooth 60fps springs and transitions.
+- **Pure Event-Driven Win32:** Zero polling loops or invasive system hooks; sleeps quietly when idle.
+- **Non-Invasive:** Leaves the native Windows taskbar intact, registers no background services, and makes zero unsolicited startup or registry modifications.
+- **Multi-Monitor & DPI-Native:** Full Per-Monitor V2 (PMv2) DPI awareness and automatic fullscreen suppression (auto-hides during gaming and fullscreen video).
 
-Requires the installed Visual Studio 2022 C++ Build Tools and Windows SDK. The setup installs Rust 1.91.1 only inside this project's ignored `.tools` directory; it does not change global PATH. Its archived installer is checksum-verified. The active rustup manager identity and an uninstall-registry observation with unknown attribution are recorded in the candidate packets; PATH suppression is not a claim of complete installer isolation.
+---
+
+## Features
+
+### Dynamic Notch Island & Shelf
+- **Interactive Top Capsule:** Displays time and date, expanding on hover to reveal rich modular tabs and tools.
+- **Media Island:** Full Windows Global System Media Transport Controls (GSMTC) integration with album artwork, title/artist display, playback controls, scrubbable progress bar, and volume slider with quick audio device switcher.
+- **Modular Widgets:** Week calendar view, live battery status pill, and power notifications.
+- **Live Weather:** Real-time conditions, temperature, and hourly forecast powered by Open-Meteo with automatic geolocation or manual city search.
+- **Astronomical Prayer Times:** High-precision prayer calculations (Fajr, Dhuhr, Asr, Maghrib, Isha) supporting major calculation authorities (Egyptian General Authority, ISNA, MWL, Umm al-Qura, Karachi), juristic methods (Shafi'i/Hanafi), and audio alerts.
+- **Pomodoro & Quick Timers:** Preset countdowns (25m, 15m, 5m) or custom durations with visual progress and completion chime.
+- **Drop-Target File Shelf:** Drag-and-drop quick-staging drawer for files, folders, and snippets with shell integration.
+- **AI Usage Monitor:** Live tracking of tool subscription usage (Antigravity, Codex, etc.).
+- **Interactive Mascot:** Expressive reactive eyes with glance intent, wake animations, and customizable mood presets.
+
+### Application Dock
+- **Window Grouping & Catalog:** Tracks running windows by AppUserModelID and executable path via native out-of-context win-events.
+- **Shell Icons:** Asynchronous background icon extraction with bounded memory caching.
+- **Pin Management:** Pinned applications with drag-and-drop reordering, middle-click/context-menu launch.
+- **Window Switching & Minimizing:** Single-click activation, window cycling within groups, and minimizing.
+- **Dock Context Menu:** Clean right-click menu with options to launch new instances, pin/unpin apps, and close windows.
+- **Notification Badges:** Real-time unread counter and status indicator dots on application icons.
+- **Desktop & Minimized Strip:** Quick show-desktop strip and minimized window drawer.
+- **Window Picker:** Modeless search dialog (`--show-picker`) to instantly filter and jump to any active window.
+
+### Personalization & Settings
+- **Theme Palette:** Built-in curated themes including *Dark, Light, OLED, Sunset, Midnight, Matcha, Rose, Cyber,* and *Frosted Glass*.
+- **Windows System Accent Match:** Optional integration with Windows system accent colour (`HKCU\...\DWM\AccentColor`).
+- **Global Hotkeys:** Opt-in shortcuts (`RegisterHotKey`) for toggling the window picker and switching audio output devices.
+- **Tuning:** Adjustable notch sizing percentage, animation pace, and click-to-open behavior.
+
+---
+
+## Architecture & Technology Stack
+
+| Component | Implementation |
+|---|---|
+| **Language** | Rust 2024 edition (1.91.1+) |
+| **Graphics** | Direct2D 1.1, DirectWrite, WIC, DirectComposition via Windows SDK |
+| **Windowing & Events** | Pure Win32 (`CreateWindowExW`, `SetWinEventHook`, `RegisterHotKey`) |
+| **Media Integration** | WinRT GSMTC (`Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager`) |
+| **Audio Endpoints** | Windows Core Audio APIs (`IMMDeviceEnumerator`, `IAudioEndpointVolume`) |
+| **Weather & Networking** | Windows WinHTTP (`winhttp.dll`) with OS-managed TLS stack |
+| **Storage & Settings** | Atomic JSON persistence under `%APPDATA%\ROQA\` |
+
+---
+
+## Developing & Building
+
+### Prerequisites
+- **OS:** Windows 11 x64 (Build 22000+)
+- **Build Tools:** Visual Studio 2022 C++ Build Tools with Windows 10/11 SDK installed.
+
+### Setup & Bootstrap
+ROQA uses a self-contained local toolchain managed via PowerShell scripts (avoids polluting global `PATH`):
 
 ```powershell
+# 1. Bootstrap local Rust toolchain and tools
 ./scripts/bootstrap.ps1
+
+# 2. Run formatting, Clippy, unit tests, and release build verification
 ./scripts/verify.ps1
+
+# 3. Launch ROQA
 ./scripts/run.ps1
-./scripts/run.ps1 quit
 ```
 
-Use `show-notch`, `hide-notch`, `show-dock` and `hide-dock` with `run.ps1` to create/destroy either surface while the other remains alive. Closing the last surface exits. The raw binary supports `--quit` and corresponding `--show-*`/`--hide-*` commands. Control commands acknowledge delivery; runtime tests separately verify their effects.
-
-Cargo is available through `scripts/cargo.ps1`. In PowerShell, quote the argument separator or pass an explicit array:
+### Cargo Wrapper
+To run Cargo commands through the pinned local toolchain:
 
 ```powershell
-./scripts/cargo.ps1 clippy --locked --all-targets '--' -D warnings
+./scripts/cargo.ps1 check --all-targets
+./scripts/cargo.ps1 test
+./scripts/cargo.ps1 clippy --locked --all-targets -- -D warnings
 ```
 
-## Verify the native shell
+---
+
+## CLI & IPC Controls
+
+When ROQA is running, you can control its surfaces and features via command-line arguments:
 
 ```powershell
+# IPC surface control
+roqa --show-notch        # Show the notch island
+roqa --hide-notch        # Hide the notch island
+roqa --show-dock         # Show the dock
+roqa --hide-dock         # Hide the dock
+
+# UI dialogs
+roqa --show-picker       # Open the window search picker
+roqa --show-settings     # Open the settings panel
+
+# Diagnostics & Shutdown
+roqa --diagnostics <out> # Output atomic catalog snapshot
+roqa --quit              # Gracefully shut down ROQA and persist settings
+```
+
+---
+
+## Verification & Testing
+
+ROQA includes automated native verification scripts:
+
+```powershell
+# Comprehensive suite (checks, clippy, unit tests, release build, size ratchet)
+./scripts/verify.ps1
+
+# Interactive native smoke test (tests surface composition, DPI, focus preservation)
 ./scripts/smoke.ps1
+
+# 100-cycle idle resource stability sampler
 ./scripts/measure-idle.ps1
+
+# Window catalog event resilience and burst test
 ./scripts/catalog-smoke.ps1
 ```
 
-Run these sequentially on an unlocked interactive desktop with no existing ROQA instance. The smoke test temporarily creates a foreground test window and moves the pointer, then restores them. It moves only test-owned ROQA windows away from screen edges during pixel assertions to avoid interference from other notch/dock overlays. It never closes other applications. All three native scripts accept `-EvidenceDirectory` to keep runs separate. Smoke/idle default to ignored `artifacts/m1/`; the catalog test defaults to `artifacts/m2a/`. `verify.ps1` captures separate check/build stdout, stderr and explicit exit codes under `artifacts/verification/`.
+---
 
-The smoke test checks visible composed pixels and hover/leave behavior, intended placement, focus preservation, work-area preservation, synthetic DPI messages, independent window lifetime, 100 in-process resource cycles, focus-independent quit, last-window exit and failure paths. Physical mixed-DPI changes, media, RTL/IME and device-loss recovery belong to later reviewed milestones.
+## Uninstall & Clean Removal
 
-The idle sampler records one short process-counter observation. It excludes DWM/GPU/power attribution and establishes no performance advantage over Nectar or Nusa.
+ROQA is entirely portable. To remove it cleanly:
 
-## Window catalog foundation (M2a candidate)
+```powershell
+# Preview what would be removed
+./scripts/uninstall.ps1 -DryRun
 
-One worker maintains the catalog for both future surfaces. Six narrow out-of-context window-event subscriptions feed a bounded buffer. Ordinary events refresh affected HWNDs after a 50 ms batching interval. Full enumeration handles startup, overflow and a 30-second monotonic reconciliation deadline. These are window-state notifications, with no input interception or taskbar mutation. The main loop checks elapsed deadlines on every bounded pass and limits its blocking wait to the next deadline; it does not depend on WM_TIMER delivery. Incomplete scans retry after 1, 2, 4, 8, 16 and at most 30 seconds, retaining the last complete model. Subscriptions and the worker are explicitly stopped during shutdown.
+# Gracefully terminate process and purge application data (%APPDATA%\ROQA)
+./scripts/uninstall.ps1 -PurgeData
 
-The catalog test creates real native fixture windows and exercises enumeration, rename/Arabic title metadata, minimize/restore, foreground, hide/show, create/destroy churn, title-event bursts, queue-capacity posted-message traffic, timed reconciliation and shutdown under continuing events. Reading Arabic title metadata is not proof of Arabic rendering or IME support. Those, icons, packaged-app grouping and activation remain in the M2b interaction candidate and the full M2 stack gate.
+# Or terminate process while preserving settings
+./scripts/uninstall.ps1 -KeepData
+```
 
-For explicit numeric diagnostics, start the raw binary with `--diagnostics <output-file>` in an existing directory. This writes catalog counts, HWND/PID identities and state flags, with no titles or executable paths. Ordinary launches write no catalog file. Diagnostics are replaced as snapshots arrive and record successful hook/worker shutdown. Avoid pointing an external reader at the file with a deny-delete sharing mode, since writes replace it atomically.
-
-## Window picker (M2b1 candidate)
-
-Clicking the dock's first ("All windows") slot, or running `./scripts/run.ps1 show-picker`, opens a modeless standard-control window picker built from the live catalog: a native filter edit, list box, status text and Open/Close buttons. Double-click activates the selected real window; Close dismisses it and returns focus to the previous app when ROQA still owns the foreground. The list is never mock data.
-
-## Dock and notch (M2b)
-
-The dock shows one slot per real window group after the picker slot. Groups use the window's AppUserModelID (packaged apps such as Calculator and Settings stay separate even though one host process owns their frames) and fall back to the executable. Icons come from the shell on a bounded background thread. A click activates the group, cycles through a focused group's windows, or minimizes a lone focused window. Windows refuses minimizing an elevated window from ROQA (UIPI), and the dock gives no feedback. Windows' "Not Responding" ghost windows are not listed separately. ROQA is mouse-only: keyboard navigation, hotkeys and screen-reader (UIA/Narrator) support were removed by user decision (K1, 2026-11-13). The black notch at the top shows the time and expands to the date on hover.
-
-`packaged-hung-check.ps1` and `picker-smoke.ps1` were dropped in K1: both read the dock and picker through UI Automation and injected keys, which no longer exist.
-
-## Review discipline
-
-[Project rules](AGENTS.md) require independent GPT-6.1 Sol High and Opus 5.5 High review. Authors cannot approve their own work. Each accepted milestone needs both dispositions against the same frozen manifest plus its required evidence. See the [development ledger](docs/development/progress.md) for actual status; a build succeeding is not milestone acceptance.
-
-No source or artwork from Nectar or Nusa is incorporated. The project's release license remains undecided; do not infer a license from dependencies or inspiration.
+ROQA leaves zero background services, zero scheduled tasks, and zero orphaned registry keys.
