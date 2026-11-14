@@ -7,6 +7,7 @@
 
 use crate::{
     dock::{foreground_key, restore_foreground},
+    graphics::{Glyph, draw_settings_glyph},
     hotkey::{AudioHotkeyCombo, HotkeyCombo},
     layout::DockStyle,
     native_window,
@@ -530,10 +531,16 @@ const PAGES: &[Page] = &[
         ],
     },
 ];
-/// One Segoe MDL2 Assets glyph per sidebar page (gear, palette, monitor, task view, sun, moon, stopwatch,
-/// info), drawn in one ink.
-const TILES: [&str; 8] = [
-    "\u{e713}", "\u{e790}", "\u{e7f4}", "\u{e7c4}", "\u{e706}", "\u{e708}", "\u{e916}", "\u{e946}",
+/// The sidebar uses the same outline family as the notch, with accent only on selection.
+const TILES: [Glyph; 8] = [
+    Glyph::Gear,
+    Glyph::Sun,
+    Glyph::Music,
+    Glyph::TaskView,
+    Glyph::PartlyCloudy,
+    Glyph::Prayer,
+    Glyph::Limits,
+    Glyph::Widgets,
 ];
 
 struct Item {
@@ -853,30 +860,12 @@ fn draw_side(item: &DRAWITEMSTRUCT, p: &Paint) {
             round(dc, cell, (cell.bottom - cell.top) / 2, p.pal.sel, p.pal.sel);
         }
         let glyph = TILES[item.itemID as usize % 8];
-        SetBkMode(dc, TRANSPARENT);
-        // The glyph comes from the icon font, made for this paint and deleted at once.
-        let mut face = LOGFONTW {
-            lfHeight: -px(13),
-            lfCharSet: DEFAULT_CHARSET,
-            ..Default::default()
-        };
-        for (d, s) in face
-            .lfFaceName
-            .iter_mut()
-            .zip("Segoe MDL2 Assets".encode_utf16())
-        {
-            *d = s;
-        }
-        let icons = CreateFontIndirectW(&face);
-        let old = SelectObject(dc, icons.into());
         let ink = if item.itemState.0 & ODS_SELECTED.0 != 0 {
             p.pal.accent
         } else {
             p.pal.text
         };
-        write(dc, glyph, tile, ink, DT_CENTER | DT_NOPREFIX);
-        SelectObject(dc, old);
-        let _ = DeleteObject(icons.into());
+        draw_settings_glyph(dc, tile, glyph, ink);
         SelectObject(dc, p.font.into());
         let name = RECT {
             left: tile.right + px(12),

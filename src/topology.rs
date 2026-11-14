@@ -135,6 +135,7 @@ mod tests {
         let rail = crate::layout::Rail {
             count: 7,
             active: 6,
+            expansion: [0.0; 7],
         };
         let rail = crate::layout::rail_bounds(notch.width, new_dpi, 1.0, true, rail).unwrap();
         assert!(rail.x >= 0 && rail.x + rail.width <= notch.width);

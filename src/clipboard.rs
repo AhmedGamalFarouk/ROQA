@@ -7,9 +7,9 @@ use crate::store::Store;
 pub const MAX: usize = 12;
 /// Characters kept per entry (longer text is cut, so the store file stays small).
 pub const MAX_CHARS: usize = 400;
-/// Cells the file grid leaves for entries (the fourth is Undo's); with more entries than this the last cell is "More" and the rest page.
+/// Public slots: two entries and a separate footer pager.
 pub const VISIBLE: usize = crate::shelf::VISIBLE;
-/// Entries per page when "More" takes the last cell.
+/// Entries per focal row.
 const PER_PAGE: usize = VISIBLE - 1;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -42,7 +42,7 @@ impl Clips {
         &self.items
     }
     pub fn has_more(&self) -> bool {
-        self.items.len() > VISIBLE
+        self.items.len() > PER_PAGE
     }
     fn start(&self) -> usize {
         if self.has_more() {
@@ -54,12 +54,16 @@ impl Clips {
     /// The entries in the grid: all of them, or one page beside the "More" cell.
     pub fn visible(&self) -> &[String] {
         let start = self.start();
-        let len = if self.has_more() { PER_PAGE } else { VISIBLE };
+        let len = PER_PAGE;
         &self.items[start..(start + len).min(self.items.len())]
     }
     /// The grid cells drawn: the entries plus "More" when there is overflow.
     pub fn slot_count(&self) -> usize {
-        self.visible().len() + usize::from(self.has_more())
+        if self.has_more() {
+            VISIBLE
+        } else {
+            self.visible().len()
+        }
     }
     /// The list index behind grid cell `slot`; none for the "More" cell or an empty one.
     pub fn absolute(&self, slot: usize) -> Option<usize> {

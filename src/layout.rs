@@ -24,7 +24,7 @@ pub const NOTCH: NotchShape = NotchShape {
 pub const NOTCH_EXPANDED: NotchShape = NotchShape {
     width: 360.0,
     height: 128.0,
-    radius: 28.0,
+    radius: 40.0,
     ears: 14.0,
 };
 /// While media is playing with a title or artist the pill widens for the cover slot and title, and the panel grows
@@ -101,7 +101,7 @@ fn tall(shape: NotchShape, notice_row: bool) -> NotchShape {
             shape.width
         },
         ears: if page == 140.0 { 10.0 } else { shape.ears },
-        radius: if page == 140.0 { 32.0 } else { shape.radius },
+        radius: shape.radius,
     }
 }
 
@@ -385,20 +385,20 @@ pub fn refresh_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i3
     on_slot(refresh(dpi), window_width, dpi, progress, media, x, y)
 }
 pub fn shelf_action(dpi: u32, undo: bool) -> Bounds {
-    // Add files takes the header action; Undo sits in the grid's free cell (row two, right), short of the gear.
+    // Secondary actions clear the focal row, pager, clock and gear.
     scaled_bounds(
         if undo {
-            (shelf_cell(1).0, shelf_cell(2).1, 140.0, SHELF_CELL_H)
+            (116.0, 86.0, 48.0, 18.0)
         } else {
-            ACTION
+            (220.0, 10.0, 40.0, 18.0)
         },
         dpi,
     )
 }
 
-/// The Shelf header's Files | Copied switch: one capsule track of two equal halves, 20 high, where the title sits
+/// The Shelf header's Files | Copied switch: two quiet 18 DIP halves where the title sits
 /// on other pages. `index` 0 is Files, 1 is Copied.
-const SHELF_SWITCH: (f32, f32, f32, f32) = (PAD, 9.0, 66.0, 20.0);
+const SHELF_SWITCH: (f32, f32, f32, f32) = (PAD, 10.0, 48.0, 18.0);
 pub fn shelf_switch(dpi: u32, index: usize) -> Bounds {
     let (x, y, w, h) = SHELF_SWITCH;
     scaled_bounds((x + w * index as f32, y, w, h), dpi)
@@ -593,21 +593,19 @@ fn notice_slot(media: bool, page: u16, dpi: u32) -> Bounds {
     scaled_bounds(POWER_NOTICE[usize::from(media)], dpi)
 }
 
-/// The file shelf's `shelf::VISIBLE` file capsules in a two column grid under the header (156 x 28 DIPs, an 8
-/// gutter), left to right then down, in DIPs from the body's left and top edges, on both panel kinds. Each draws
-/// a 16 DIP system icon, the name and a remove target at its right end.
-const SHELF_CELL_W: f32 = 156.0;
-const SHELF_CELL_H: f32 = 28.0;
+/// Two 160 x 32 DIP file capsules share one focal row, with the pager below.
+const SHELF_CELL_W: f32 = 160.0;
+const SHELF_CELL_H: f32 = 32.0;
 /// The origin of grid cell `index`.
 fn shelf_cell(index: usize) -> (f32, f32) {
-    (
-        PAD + (SHELF_CELL_W + GUTTER) * (index % 2) as f32,
-        BODY_Y + (SHELF_CELL_H + GUTTER) * (index / 2) as f32,
-    )
+    (PAD + (SHELF_CELL_W + GUTTER) * (index % 2) as f32, 44.0)
 }
 
 /// A shelf slot in pixels from the body's left and top edges.
 pub fn shelf_slot(_media: bool, index: usize, dpi: u32) -> Bounds {
+    if index == crate::shelf::VISIBLE - 1 {
+        return scaled_bounds((PAD, 86.0, 80.0, 18.0), dpi);
+    }
     let (x, y) = shelf_cell(index);
     scaled_bounds((x, y, SHELF_CELL_W, SHELF_CELL_H), dpi)
 }
@@ -630,7 +628,7 @@ pub fn shelf_remove_at(
         return None;
     }
     let body = notch_body(window_width, dpi, notch_shape(progress, false));
-    (0..crate::shelf::VISIBLE).find(|&index| {
+    (0..crate::shelf::VISIBLE - 1).find(|&index| {
         let target = shelf_remove(index, dpi);
         (target.x..target.x + target.width).contains(&(x - body.left))
             && (target.y..target.y + target.height).contains(&y)
@@ -725,35 +723,49 @@ pub fn media_seek_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32)
         .map(|offset| f64::from(offset) / f64::from(bar.width))
 }
 
-/// The tab handle (design round 2, T3 "Hanging handle", U5: always open): a bar hanging off the open panel's
-/// bottom edge with one labelled cell per tab. `count` tabs are shown, `active` is the position of the
-/// selected one.
+/// A centred row of dots below the panel, with space borrowed only during hover.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rail {
     pub count: usize,
     pub active: usize,
+    /// Per-tab hover expansion, sampled on the host frame clock.
+    pub expansion: [f32; 7],
 }
 
-pub const RAIL_EARS: f32 = 6.0;
-/// The rail's side padding is the grid's 8 gutter; cells sit 4 apart so the indicator capsule has air.
+pub const RAIL_EARS: f32 = 3.0;
 const RAIL_PAD_X: f32 = 8.0;
-const RAIL_PAD_Y: f32 = 3.0;
-/// A tab cell's width (fits the longest name, "Weather") and height (a glyph over the name), and the gap between cells.
-const RAIL_CELL: (f32, f32) = (52.0, 34.0);
-const RAIL_GAP: f32 = 4.0;
+const RAIL_PAD_Y: f32 = 4.0;
+const RAIL_GAP: f32 = 10.0;
+const RAIL_HEIGHT: f32 = 24.0;
 
-/// The handle's full size in DIPs: 404 x 40 for seven tabs.
+fn rail_width(rail: Rail, index: usize) -> f32 {
+    let rest = if index == rail.active { 18.0 } else { 7.0 };
+    rest + (86.0 - rest) * rail.expansion[index].clamp(0.0, 1.08)
+}
+
+fn rail_height(rail: Rail) -> f32 {
+    7.0 + (RAIL_HEIGHT - 7.0)
+        * rail.expansion[..rail.count]
+            .iter()
+            .copied()
+            .fold(0.0, f32::max)
+            .clamp(0.0, 1.0)
+}
+
+/// Only the hovered dot borrows room for a name; neighbours move with its width.
 pub fn rail_size(rail: Rail) -> (f32, f32) {
-    let count = rail.count as f32;
     (
-        2.0 * RAIL_PAD_X + count * RAIL_CELL.0 + (count - 1.0).max(0.0) * RAIL_GAP,
-        2.0 * RAIL_PAD_Y + RAIL_CELL.1,
+        2.0 * RAIL_PAD_X
+            + (0..rail.count).map(|i| rail_width(rail, i)).sum::<f32>()
+            + rail.count.saturating_sub(1) as f32 * RAIL_GAP,
+        2.0 * RAIL_PAD_Y + rail_height(rail),
     )
 }
 
-/// The handle's bottom corner radius in pixels (a capsule's, 20 DIP), kept inside its shape.
+/// The compact rail's capsule radius, kept inside its silhouette.
 pub fn rail_radius(shape: NotchBody, dpi: u32) -> f32 {
-    scaled(20.0, dpi)
+    scaled(16.0, dpi)
+        .min(shape.height / 2)
         .min(shape.height - shape.ears)
         .min(shape.width / 2)
         .max(0) as f32
@@ -785,17 +797,34 @@ pub fn rail_bounds(
 }
 
 /// Handle item `index` in window pixels; they sit left to right inside the handle.
-pub fn rail_item(handle: Bounds, dpi: u32, index: usize) -> Bounds {
-    rail_slot(handle, dpi, index as f32)
+pub fn rail_item(handle: Bounds, dpi: u32, rail: Rail, index: usize) -> Bounds {
+    let x = RAIL_PAD_X
+        + (0..index)
+            .map(|i| rail_width(rail, i) + RAIL_GAP)
+            .sum::<f32>();
+    let height = 7.0 + (RAIL_HEIGHT - 7.0) * rail.expansion[index].clamp(0.0, 1.0);
+    Bounds {
+        x: handle.x + scaled(x, dpi),
+        y: handle.y + scaled(RAIL_PAD_Y + (rail_height(rail) - height) / 2.0, dpi),
+        width: scaled(rail_width(rail, index), dpi),
+        height: scaled(height, dpi),
+    }
 }
 
-/// A cell at a fractional position: the sliding indicator sits between two tabs while it travels.
-pub fn rail_slot(handle: Bounds, dpi: u32, position: f32) -> Bounds {
+/// Interpolate the existing sliding indicator through the moving dot centres.
+pub fn rail_slot(handle: Bounds, dpi: u32, rail: Rail, position: f32) -> Bounds {
+    let position = position.clamp(0.0, rail.count.saturating_sub(1) as f32);
+    let index = position.floor() as usize;
+    let a = rail_item(handle, dpi, rail, index);
+    let b = rail_item(handle, dpi, rail, (index + 1).min(rail.count - 1));
+    let t = position.fract();
+    let lerp = |a: i32, b: i32| (a as f32 + (b - a) as f32 * t).round() as i32;
+    let width = lerp(a.width, b.width).max(scaled(18.0, dpi));
     Bounds {
-        x: handle.x + scaled(RAIL_PAD_X + position * (RAIL_CELL.0 + RAIL_GAP), dpi),
-        y: handle.y + scaled(RAIL_PAD_Y, dpi),
-        width: scaled(RAIL_CELL.0, dpi),
-        height: scaled(RAIL_CELL.1, dpi),
+        x: lerp(a.x + a.width / 2, b.x + b.width / 2) - width / 2,
+        y: lerp(a.y, b.y),
+        width,
+        height: lerp(a.height, b.height),
     }
 }
 
@@ -816,7 +845,7 @@ pub fn rail_tab_at(
     }
     let half_gap = scaled(RAIL_GAP, dpi) / 2;
     (0..rail.count).find(|&index| {
-        let item = rail_item(hang, dpi, index);
+        let item = rail_item(hang, dpi, rail, index);
         (item.x - half_gap..item.x + item.width + half_gap).contains(&x)
     })
 }
@@ -1379,7 +1408,8 @@ mod tests {
             tallest
                 + rail_size(Rail {
                     count: 6,
-                    active: 0
+                    active: 0,
+                    expansion: [0.0; 7]
                 })
                 .1
                 <= NOTCH_WINDOW.1 as f32
@@ -1398,7 +1428,8 @@ mod tests {
             tallest
                 + rail_size(Rail {
                     count: 6,
-                    active: 0
+                    active: 0,
+                    expansion: [0.0; 7]
                 })
                 .1
                 <= NOTCH_WINDOW.1 as f32
@@ -1674,7 +1705,8 @@ mod tests {
             tallest
                 + rail_size(Rail {
                     count: 6,
-                    active: 0
+                    active: 0,
+                    expansion: [0.0; 7]
                 })
                 .1
                 <= NOTCH_WINDOW.1 as f32
@@ -1789,7 +1821,11 @@ mod tests {
     }
 
     fn rail(count: usize, active: usize) -> Rail {
-        Rail { count, active }
+        Rail {
+            count,
+            active,
+            expansion: [0.0; 7],
+        }
     }
 
     #[test]
@@ -1806,18 +1842,18 @@ mod tests {
         let rail = rail(7, 0);
         let row = rail_bounds(window.width, dpi, 1.0, true, rail).unwrap();
         for index in 0..rail.count {
-            let cell = rail_item(row, dpi, index);
+            let cell = rail_item(row, dpi, rail, index);
             assert!(cell.x >= 0 && cell.x + cell.width <= window.width);
             assert!(cell.y >= 0 && cell.y + cell.height <= window.height);
         }
     }
 
     #[test]
-    fn the_handle_reserves_label_width_for_all_seven_tabs() {
+    fn the_dot_rail_reserves_only_its_resting_width() {
         let (six_w, six_h) = rail_size(rail(6, 0));
-        assert_eq!((six_w, six_h), (356.0, 40.0));
+        assert_eq!((six_w, six_h), (119.0, 15.0));
         let (seven_w, seven_h) = rail_size(rail(7, 0));
-        assert_eq!((seven_w, seven_h), (404.0, 40.0));
+        assert_eq!((seven_w, seven_h), (136.0, 15.0));
         assert!(seven_w < NOTCH_WINDOW.0 as f32);
         assert!(rail_size(rail(3, 0)).0 < rail_size(rail(5, 0)).0);
     }
@@ -1915,7 +1951,7 @@ mod tests {
             let width = scaled(440.0, dpi);
             let r = rail(6, 1);
             let hang = rail_bounds(width, dpi, 1.0, true, r).unwrap();
-            let items: Vec<Bounds> = (0..6).map(|i| rail_item(hang, dpi, i)).collect();
+            let items: Vec<Bounds> = (0..6).map(|i| rail_item(hang, dpi, r, i)).collect();
             for (i, item) in items.iter().enumerate() {
                 assert!(
                     item.x >= hang.x && item.x + item.width <= hang.x + hang.width,
@@ -1941,6 +1977,87 @@ mod tests {
                 rail_tab_at(width, dpi, 1.0, true, r, (hang.x - 1, items[0].y)),
                 None
             );
+        }
+    }
+
+    #[test]
+    fn hover_expansion_moves_neighbours_and_keeps_every_hit_target_in_order() {
+        for dpi in [96, 120, 144, 192, 240, 432] {
+            let width = scaled(NOTCH_WINDOW.0 as f32, dpi);
+            for selected in 0..7 {
+                for hovered in 0..7 {
+                    let resting = rail(7, selected);
+                    let rest = rail_bounds(width, dpi, 1.0, false, resting).unwrap();
+                    for amount in [0.0, 0.35, 1.0, 1.08] {
+                        let mut r = resting;
+                        r.expansion[hovered] = amount;
+                        let bounds = rail_bounds(width, dpi, 1.0, false, r).unwrap();
+                        assert!(bounds.width >= rest.width);
+                        assert!(bounds.width <= scaled(222.0, dpi));
+                        assert!((bounds.x + bounds.width / 2).abs_diff(width / 2) <= 1);
+                        let mut right = bounds.x;
+                        for index in 0..r.count {
+                            let cell = rail_item(bounds, dpi, r, index);
+                            assert!(
+                                cell.x >= right && cell.x + cell.width <= bounds.x + bounds.width
+                            );
+                            assert!(
+                                cell.y >= bounds.y
+                                    && cell.y + cell.height <= bounds.y + bounds.height
+                            );
+                            right = cell.x + cell.width;
+                            let centre = (cell.x + cell.width / 2, cell.y + cell.height / 2);
+                            assert_eq!(rail_tab_at(width, dpi, 1.0, false, r, centre), Some(index));
+                        }
+                        // Growing a dot keeps its original centre inside its own target.
+                        let original = rail_item(rest, dpi, resting, hovered);
+                        assert_eq!(
+                            rail_tab_at(
+                                width,
+                                dpi,
+                                1.0,
+                                false,
+                                r,
+                                (
+                                    original.x + original.width / 2,
+                                    original.y + original.height / 2
+                                )
+                            ),
+                            Some(hovered)
+                        );
+                        if amount == 1.0 {
+                            let cell = rail_item(bounds, dpi, r, hovered);
+                            assert_eq!(
+                                (cell.width, cell.height),
+                                (scaled(86.0, dpi), scaled(24.0, dpi))
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shelf_pagination_and_undo_clear_the_focal_row_and_header() {
+        for dpi in [96, 120, 144, 192, 240] {
+            let pager = dips(shelf_slot(false, crate::shelf::VISIBLE - 1, dpi), dpi);
+            let undo = dips(shelf_action(dpi, true), dpi);
+            assert!(!overlap(pager, undo));
+            let mut slots: Vec<Rect> = (0..crate::shelf::VISIBLE - 1)
+                .map(|i| dips(shelf_slot(false, i, dpi), dpi))
+                .collect();
+            slots.extend([
+                dips(shelf_switch(dpi, 0), dpi),
+                dips(shelf_switch(dpi, 1), dpi),
+                dips(shelf_action(dpi, false), dpi),
+                dips(page_clock(false, dpi), dpi),
+                dips(gear(dpi, false), dpi),
+            ]);
+            for slot in slots {
+                assert!(!overlap(pager, slot));
+                assert!(!overlap(undo, slot));
+            }
         }
     }
 
@@ -2042,7 +2159,7 @@ mod tests {
     #[test]
     fn shelf_capsules_form_a_grid_whose_remove_targets_are_their_own() {
         let window = scaled(440.0, 96);
-        for index in 0..crate::shelf::VISIBLE {
+        for index in 0..crate::shelf::VISIBLE - 1 {
             let cell = shelf_slot(false, index, 96);
             let cross = shelf_remove(index, 96);
             assert!(cross.x >= cell.x && cross.x + cross.width <= cell.x + cell.width);
@@ -2060,7 +2177,7 @@ mod tests {
             );
             // Undo takes the grid's free cell and clears the gear.
             let undo = shelf_action(96, true);
-            assert!(!hit(undo, cell) || index == 3);
+            assert!(!hit(undo, cell));
             assert!(!hit(undo, gear(96, false)));
         }
         // An empty shelf is one zone: any point in it adds.

@@ -66,6 +66,7 @@ use windows::core::{Error, HRESULT, Interface, PCWSTR, Result, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
 mod glyphs;
+pub use glyphs::draw_gdi as draw_settings_glyph;
 mod tab_art;
 pub use glyphs::Glyph;
 
@@ -199,6 +200,7 @@ pub struct NotchScene<'a> {
     /// The file shelf's visible entries (S6, PROVISIONAL); empty draws nothing.
     pub shelf: &'a [ShelfSlot<'a>],
     pub shelf_undo: bool,
+    pub shelf_hover: bool,
     /// The Shelf shows its Copied list: `shelf` then holds copied text (an empty list is the empty state).
     pub clips: bool,
     /// The page the open panel shows. Media is the media and clock panel; the others draw their own content.
@@ -228,20 +230,17 @@ pub struct NotchScene<'a> {
 /// The tab handle: its geometry, the cell under the pointer and the shown tabs in order.
 pub struct RailScene<'a> {
     pub layout: layout::Rail,
-    pub hover: Option<usize>,
     pub tabs: &'a [Tab],
     /// The sliding indicator's fractional tab position, its arrival pop (0 to 1, overshoots), the fading
     /// hover wash (tab, strength) and the press squash (0 to 1).
     pub ind: f32,
     pub pop: f32,
-    pub wash: (usize, f32),
     pub press: f32,
 }
 
-/// One shelf entry: its system icon once the worker delivered it (a plain square until then), and whether
+/// One shelf entry and whether
 /// the last activation found the target gone.
 pub struct ShelfSlot<'a> {
-    pub icon: Option<&'a IconPixels>,
     /// The file name shown under the icon; empty for the add and more slots.
     pub name: &'a str,
     pub missing: bool,
@@ -1213,12 +1212,7 @@ fn notice_text(
 /// Side of a shelf icon inside its capsule, in DIPs.
 const SHELF_ICON: f32 = 16.0;
 
-/// The shelf's entries as file capsules in their `layout::shelf_slot` cells, faded in with the panel: the system
-/// icon, the name and a remove cross at the right end. A missing target is dimmed like a disabled control. The
-/// empty page's drop zone (`tab_art`) draws the add slot itself. The tiny icon bitmaps are uploaded per paint,
-/// which only an open panel does.
-// shortcut: up to `shelf::VISIBLE` bitmap uploads per full paint of an open panel; cache them per canvas
-// like the art if a trace shows it.
+/// Outline file capsules share one focal row; the separate footer pager stays neutral.
 fn shelf_row(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -1233,7 +1227,15 @@ fn shelf_row(
     let media = scene.track.is_some();
     let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha));
     for (index, slot) in scene.shelf.iter().enumerate().filter(|(_, slot)| !slot.add) {
-        let cell = layout::shelf_slot(media, index, scene.dpi);
+        let cell = layout::shelf_slot(
+            media,
+            if slot.more {
+                crate::shelf::VISIBLE - 1
+            } else {
+                index
+            },
+            scene.dpi,
+        );
         let (left, top) = (body.left + cell.x as f32, body.top + cell.y as f32);
         let rect = D2D_RECT_F {
             left,
@@ -1253,7 +1255,7 @@ fn shelf_row(
             top + ((cell.height as f32 - side) / 2.0).round(),
             side,
         );
-        let name = if slot.more { "More" } else { slot.name };
+        let name = if slot.more { "Next" } else { slot.name };
         let font = Font {
             family: TEXT_FONT,
             size: 11.5 * scale,
@@ -1271,45 +1273,22 @@ fn shelf_row(
             glyphs::draw(context, square, Glyph::More, ink(reveal))?;
             continue;
         }
-        if let Some(icon) = slot.icon {
-            let bitmap = upload(context, icon)?;
-            fill_art(
-                context,
-                &rounded(square, 3.0 * scale),
-                icon.width,
-                &bitmap,
-                alpha,
-            )?;
-        } else {
-            // No icon yet, or the shell had none: a file glyph instead of an empty square.
-            glyphs::draw(context, square, Glyph::File, ink(0.6 * alpha))?;
+        glyphs::draw(context, square, Glyph::File, ink(0.7 * alpha))?;
+        if !scene.shelf_hover {
+            continue;
         }
         // The remove cross, centred in its target (`layout::shelf_remove`).
         let target = layout::shelf_remove(index, scene.dpi);
-        let (cx, cy) = (
-            body.left + (target.x + target.width / 2) as f32,
-            body.top + (target.y + target.height / 2) as f32,
-        );
-        let arm = 3.5 * scale;
-        // SAFETY: a brush and two strokes on the frame's own device context.
-        unsafe {
-            let brush = context.CreateSolidColorBrush(&ink(0.6 * reveal), None)?;
-            for (from, to) in [((-arm, -arm), (arm, arm)), ((-arm, arm), (arm, -arm))] {
-                context.DrawLine(
-                    Vector2 {
-                        X: cx + from.0,
-                        Y: cy + from.1,
-                    },
-                    Vector2 {
-                        X: cx + to.0,
-                        Y: cy + to.1,
-                    },
-                    &brush,
-                    1.5 * scale,
-                    None,
-                );
-            }
-        }
+        glyphs::draw(
+            context,
+            pixel_square(
+                body.left + target.x as f32 + (target.width as f32 - 16.0 * scale) / 2.0,
+                body.top + target.y as f32 + (target.height as f32 - 16.0 * scale) / 2.0,
+                16.0 * scale,
+            ),
+            Glyph::Close,
+            ink(0.6 * reveal),
+        )?;
     }
     Ok(())
 }
@@ -2758,6 +2737,7 @@ mod media_tests {
             notice: None,
             shelf: &[],
             shelf_undo: false,
+            shelf_hover: false,
             clips: false,
             widgets: crate::widgets::WidgetConfig::default(),
             tab: Tab::Media,
@@ -2799,6 +2779,7 @@ mod media_tests {
                 notice: None,
                 shelf: &[],
                 shelf_undo: false,
+                shelf_hover: false,
                 clips: false,
                 widgets: crate::widgets::WidgetConfig::default(),
                 tab: Tab::Media,
@@ -3049,6 +3030,7 @@ mod media_tests {
                 notice: None,
                 shelf: &[],
                 shelf_undo: false,
+                shelf_hover: false,
                 clips: false,
                 widgets: crate::widgets::WidgetConfig::default(),
                 tab: Tab::Media,
@@ -3112,6 +3094,7 @@ mod media_tests {
                     notice: None,
                     shelf: &[],
                     shelf_undo: false,
+                    shelf_hover: false,
                     clips: false,
                     widgets: crate::widgets::WidgetConfig::default(),
                     tab: Tab::Media,
@@ -3163,6 +3146,7 @@ mod media_tests {
             notice: None,
             shelf: &[],
             shelf_undo: false,
+            shelf_hover: false,
             clips: false,
             widgets: crate::widgets::WidgetConfig::default(),
             tab: Tab::Media,

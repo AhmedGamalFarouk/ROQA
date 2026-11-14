@@ -253,6 +253,7 @@ impl Pages {
         visible.handle().then_some(layout::Rail {
             count: visible.as_slice().len(),
             active,
+            expansion: [0.0; 7],
         })
     }
     fn touch(&mut self) {
@@ -260,14 +261,12 @@ impl Pages {
     }
 }
 
-/// The tab rail's motion on the one clock: the indicator's place (a fractional tab position), its arrival
-/// pop, the hover wash of tab `wash_at` and the press squash. Reduced motion lands every one at once.
+/// Dot expansion and the sliding indicator share the existing frame clock. Reduced motion lands instantly.
 #[derive(Clone, Copy)]
 struct RailFx {
     ind: Tween,
     pop: Tween,
-    wash: Tween,
-    wash_at: usize,
+    expansion: [Tween; 7],
     press: Tween,
 }
 
@@ -276,14 +275,14 @@ impl RailFx {
         Self {
             ind: Tween::rest(0.0),
             pop: Tween::rest(1.0),
-            wash: Tween::rest(0.0),
-            wash_at: 0,
+            expansion: [Tween::rest(0.0); 7],
             press: Tween::rest(0.0),
         }
     }
     fn running(&self, now: Instant) -> bool {
-        [self.ind, self.pop, self.wash, self.press]
+        [self.ind, self.pop, self.press]
             .iter()
+            .chain(self.expansion.iter())
             .any(|tween| tween.running(now))
     }
     fn go(tween: &mut Tween, to: f32, time: Duration, curve: motion::Curve) {
@@ -526,7 +525,7 @@ impl Surface {
             (self.hovered, self.live, self.motion) = (false, false, Tween::rest(0.0));
             self.slide = Tween::rest(0.0);
             self.tab_hover = None;
-            self.rail_fx.wash = Tween::rest(0.0);
+            self.rail_fx.expansion.fill(Tween::rest(0.0));
             self.rail_fx.press = Tween::rest(0.0);
             match &mut self.role {
                 Role::Notch {
@@ -547,8 +546,7 @@ impl Surface {
             self.live = true;
         }
     }
-    /// The tab cell under the pointer: its wash fades in, and the last one's fades out; a release or a
-    /// move off the cell lets go of a press.
+    /// Expand only the hovered dot and settle the others, including interrupted transitions.
     fn set_tab_hover(&mut self, tab: Option<usize>) {
         if tab == self.tab_hover {
             return;
@@ -556,17 +554,26 @@ impl Surface {
         self.tab_hover = tab;
         let fx = &mut self.rail_fx;
         RailFx::go(&mut fx.press, 0.0, motion::POP_TIME, motion::POP);
-        match tab {
-            Some(at) => {
-                if fx.wash_at != at {
-                    fx.wash_at = at;
-                    fx.wash = Tween::rest(0.0);
-                }
-                RailFx::go(&mut fx.wash, 1.0, motion::HOVER_IN_TIME, motion::SETTLE);
-            }
-            None => RailFx::go(&mut fx.wash, 0.0, motion::HOVER_OUT_TIME, motion::SETTLE),
+        for (index, tween) in fx.expansion.iter_mut().enumerate() {
+            let hovered = tab == Some(index);
+            RailFx::go(
+                tween,
+                if hovered { 1.0 } else { 0.0 },
+                if hovered {
+                    motion::POP_TIME
+                } else {
+                    motion::HOVER_IN_TIME
+                },
+                if hovered { motion::POP } else { motion::SETTLE },
+            );
         }
         self.live = true;
+    }
+    fn tab_rail(&self, pages: &Pages, media: bool, now: Instant) -> Option<layout::Rail> {
+        pages.rail(media).map(|mut rail| {
+            rail.expansion = self.rail_fx.expansion.map(|tween| tween.value(now));
+            rail
+        })
     }
     fn leave(&mut self) {
         if self.hovered {
@@ -693,11 +700,11 @@ impl Surface {
             _ => [0.0; audio::BARS],
         };
         self.bars = layout::meter_heights(peaks, self.dpi);
+        let rail = self.tab_rail(pages, track.is_some(), now);
         let Role::Notch { shadow, area, .. } = &mut self.role else {
             return Ok(());
         };
         let visible = pages.tabs.visible();
-        let rail = pages.rail(track.is_some());
         // The indicator slides to the new tab with a squash that pops on arrival; a closed panel or a
         // changed tab set puts it in place without a frame.
         if let Some(rail) = rail {
@@ -734,7 +741,6 @@ impl Surface {
         };
         let mut slots: Vec<ShelfSlot> = if copied {
             let clip = |name, more| ShelfSlot {
-                icon: None,
                 name,
                 missing: false,
                 more,
@@ -752,9 +758,7 @@ impl Surface {
                 .visible()
                 .iter()
                 .filter(|_| shelf_on)
-                .enumerate()
-                .map(|(index, entry)| ShelfSlot {
-                    icon: shelf.icons.get(index).and_then(|icon| icon.as_deref()),
+                .map(|entry| ShelfSlot {
                     name: &entry.name,
                     missing: entry.check == Check::Missing,
                     more: false,
@@ -764,7 +768,6 @@ impl Surface {
         };
         if shelf_on && !copied && (shelf.shelf.overflow() || shelf.shelf.is_empty()) {
             slots.push(ShelfSlot {
-                icon: None,
                 name: "",
                 missing: false,
                 more: shelf.shelf.overflow(),
@@ -785,16 +788,15 @@ impl Surface {
             notice,
             shelf: &slots,
             shelf_undo: shelf.removed.is_some() && !copied,
+            shelf_hover: self.hovered,
             clips: copied,
             tab: page,
             widgets: pages.widgets,
             rail: rail.map(|layout| RailScene {
                 layout,
-                hover: self.tab_hover,
                 tabs: visible.as_slice(),
                 ind: self.rail_fx.ind.value(now),
                 pop: self.rail_fx.pop.value(now),
-                wash: (self.rail_fx.wash_at, self.rail_fx.wash.value(now)),
                 press: self.rail_fx.press.value(now),
             }),
             eyes: pages.eyes.map(|eyes| eyes.scene()),
@@ -1104,19 +1106,16 @@ fn edit_pins(
     changed
 }
 
-/// The shelf and what drawing it needs beyond the list: the system icons delivered so far for its visible
-/// entries, and whether they must be asked for again (the list changed, or the panel was never open).
+/// Shelf page state, including the last removal available to undo.
 struct ShelfView {
     removed: Option<(usize, shelf::Entry)>,
     shelf: Shelf,
     /// The Copied list and whether the Shelf page shows it instead of the files (not persisted).
     clips: Clips,
     copied: bool,
-    icons: Vec<Option<Arc<IconPixels>>>,
-    stale: bool,
 }
 
-/// As `edit_pins`, for the shelf: only a real change marks the store dirty (once) and re-asks for icons.
+/// As `edit_pins`, only a real persisted change marks the store dirty.
 fn edit_shelf(
     view: &mut ShelfView,
     store: &mut Store,
@@ -1125,11 +1124,8 @@ fn edit_shelf(
     edit: impl FnOnce(&mut Shelf) -> bool,
 ) -> bool {
     let changed = edit(&mut view.shelf);
-    if changed {
-        view.stale = true;
-        if view.shelf.write_to(store) {
-            pending.mark(now);
-        }
+    if changed && view.shelf.write_to(store) {
+        pending.mark(now);
     }
     changed
 }
@@ -1325,8 +1321,6 @@ impl Desktop {
                 shelf,
                 clips,
                 copied: false,
-                icons: Vec::new(),
-                stale: true,
             },
             drops: Drops::default(),
             icons_arrived: false,
@@ -2406,8 +2400,6 @@ impl Desktop {
         let tabs_changed = old.tabs != self.settings.tabs;
         if tabs_changed {
             self.pages.tabs.flags = self.settings.tabs;
-            // A tab back on picks up what it missed: icons for the shelf, an expired timer.
-            self.shelf.stale = true;
             if !self.settings.tabs[Tab::Media.index()] {
                 self.audio.stop();
             }
@@ -3151,9 +3143,7 @@ impl Desktop {
         }
         true
     }
-    /// Applies what the drop target queued, then asks the worker for the visible entries' icons, but only
-    /// while a panel is open and only when the list changed or an icon arrived: an empty shelf, a collapsed
-    /// notch and an idle pass do nothing here.
+    /// Applies queued drops without extracting file artwork or polling the file system.
     #[inline(never)]
     fn refresh_shelf(&mut self) {
         let events = std::mem::take(&mut *self.drops.borrow_mut());
@@ -3183,42 +3173,6 @@ impl Desktop {
                 }
                 DropEvent::Files(_) => {}
             }
-        }
-        // An arrival while the panel is shut must survive until it opens: remember it as stale.
-        self.shelf.stale |= self.icons_arrived;
-        if self.shelf.shelf.is_empty()
-            || !self.shelf.stale
-            || self.page() != Tab::Shelf
-            || !self.surfaces.iter().any(Surface::expanded)
-        {
-            return;
-        }
-        let Some(size) = self.icon_size() else {
-            return;
-        };
-        let icons: Vec<_> = self
-            .shelf
-            .shelf
-            .visible()
-            .iter()
-            .map(|entry| {
-                let identity = Identity::Executable(entry.path.clone());
-                self.icons.icon(&identity, vec![entry.path.clone()], size)
-            })
-            .collect();
-        self.shelf.stale = false;
-        let same =
-            |(new, old): (&Option<Arc<IconPixels>>, &Option<Arc<IconPixels>>)| match (new, old) {
-                (Some(new), Some(old)) => Arc::ptr_eq(new, old),
-                (None, None) => true,
-                _ => false,
-            };
-        let changed =
-            icons.len() != self.shelf.icons.len() || !icons.iter().zip(&self.shelf.icons).all(same);
-        self.shelf.icons = icons;
-        if changed {
-            // A running animation paints every frame already.
-            self.request_notches(Repaint::Full, |s| s.expanded() && !s.live);
         }
     }
     /// Opens the picker; a finished one whose completion wake was lost is collected instead of stranding it.
@@ -3274,7 +3228,11 @@ impl Desktop {
             x,
             y,
         )
-        .filter(|&index| index < self.shelf.shelf.slot_count())
+        .filter(|&index| {
+            self.shelf.shelf.absolute(index).is_some()
+                || (index == shelf::VISIBLE - 1 && self.shelf.shelf.overflow())
+                || (index == 0 && self.shelf.shelf.is_empty())
+        })
     }
     /// A user activation of shelf entry `index`: open it, or with `reveal` select it in Explorer. The only
     /// existence check in the shelf's life happens here, never for a UNC path (`shelf_os::open` runs that
@@ -3390,7 +3348,10 @@ impl Desktop {
         let progress = surface.motion.value(Instant::now());
         let live = self.pages.track(&self.media).is_some();
         let clips = &self.shelf.clips;
-        if !clips.is_empty() && layout::shelf_action_at(width, dpi, progress, live, (x, y), false) {
+        if surface.hovered
+            && !clips.is_empty()
+            && layout::shelf_action_at(width, dpi, progress, live, (x, y), false)
+        {
             self.change_clips(Clips::clear);
             return true;
         }
@@ -3400,8 +3361,12 @@ impl Desktop {
             self.change_clips(|clips| clips.remove(at));
             return true;
         }
-        let Some(slot) = layout::shelf_at(width, dpi, progress, live, false, x, y)
-            .filter(|&slot| slot < clips.slot_count())
+        let Some(slot) =
+            layout::shelf_at(width, dpi, progress, live, false, x, y).filter(|&slot| {
+                slot < clips.slot_count()
+                    && (clips.absolute(slot).is_some()
+                        || (slot == clipboard::VISIBLE - 1 && clips.has_more()))
+            })
         else {
             return false;
         };
@@ -3528,7 +3493,7 @@ impl Desktop {
         let (width, dpi) = (surface.bounds.width, surface.dpi);
         let live = self.pages.track(&self.media).is_some();
         // The tab handle first: it hangs below the panel.
-        if let Some(rail) = self.pages.rail(live)
+        if let Some(rail) = surface.tab_rail(&self.pages, live, now)
             && let Some(position) = layout::rail_tab_at(width, dpi, progress, live, rail, (x, y))
         {
             if let Some(&tab) = self.pages.tabs.visible().as_slice().get(position) {
@@ -3588,8 +3553,7 @@ impl Desktop {
                 self.undo_shelf_removal();
                 return true;
             }
-            if !self.shelf.shelf.is_empty()
-                && layout::shelf_action_at(width, dpi, progress, live, (x, y), false)
+            if surface.hovered && layout::shelf_action_at(width, dpi, progress, live, (x, y), false)
             {
                 self.start_file_picker();
                 return true;
@@ -3762,7 +3726,7 @@ impl Desktop {
                     let progress = surface.motion.value(now);
                     let width = surface.bounds.width;
                     let media = self.pages.track(&self.media).is_some();
-                    let rail = self.pages.rail(media);
+                    let rail = surface.tab_rail(&self.pages, media, now);
                     let over = layout::notch_hit(width, surface.dpi, progress, media, rail, x, y);
                     // While a menu is open the notch does not open under it.
                     let was = matches!(surface.role, Role::Notch { engaged: true, .. });
@@ -4509,8 +4473,6 @@ mod clock_wait_tests {
             shelf: Shelf::default(),
             clips: Clips::default(),
             copied: false,
-            icons: Vec::new(),
-            stale: false,
         };
         let (mut store, mut pending, now) = (Store::default(), Pending::default(), Instant::now());
         let mut add = |view: &mut ShelfView, list: &[&str]| {
@@ -4518,9 +4480,7 @@ mod clock_wait_tests {
         };
         // Nothing valid in a drop: no change, no dirty mark, no icon request.
         assert!(!add(&mut view, &["relative.txt", r"\\.\PhysicalDrive0"]));
-        assert!(!view.stale);
         assert!(add(&mut view, &[r"C:\a.txt", r"C:\b.txt"]));
-        assert!(view.stale);
         // The same files again are duplicates: nothing to write.
         assert!(!add(&mut view, &[r"C:\A.TXT"]));
         assert_eq!(store.shelf, [r"C:\a.txt", r"C:\b.txt"]);

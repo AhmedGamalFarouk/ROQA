@@ -55,8 +55,9 @@ pub enum Glyph {
     Music,
     /// The Widgets tab: a tall and two small tiles.
     Widgets,
+    Close,
 }
-const ALL: [Glyph; 34] = [
+const ALL: [Glyph; 35] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -91,10 +92,12 @@ const ALL: [Glyph; 34] = [
     Glyph::File,
     Glyph::Music,
     Glyph::Widgets,
+    Glyph::Close,
 ];
 /// Grid size and stroke, in grid units.
 const GRID: f32 = 24.0;
-const STROKE: f32 = 1.75;
+// Normalize the 24-unit source paths to the brand 20-unit optical grid.
+const STROKE: f32 = 1.75 * GRID / 20.0;
 
 impl Glyph {
     /// The speaker for a level: silent or muted shows no waves, up to a third one wave, above it two.
@@ -134,6 +137,7 @@ impl Glyph {
     /// The glyph's path on the 24-unit grid (SVG syntax: M L H V A Z, absolute or relative).
     fn path(self) -> &'static str {
         match self {
+            Glyph::Close => "M7 7l10 10M17 7L7 17",
             Glyph::Play => {
                 "M8.5 5.8v12.4a.6.6 0 0 0 .9.5l9.6-6.2a.6.6 0 0 0 0-1L9.4 5.3a.6.6 0 0 0-.9.5z"
             }
@@ -156,7 +160,7 @@ impl Glyph {
                 "M4.5 9.5h2.7L12 5.6v12.8l-4.8-3.9H4.5a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1zM16 9.6l5 5M21 9.6l-5 5"
             }
             Glyph::Gear => {
-                "M9.87 5.02L10.5 2.52L13.5 2.52L14.13 5.02L15.43 5.55L17.64 4.23L19.77 6.36L18.45 8.57L18.98 9.87L21.48 10.5L21.48 13.5L18.98 14.13L18.45 15.43L19.77 17.64L17.64 19.77L15.43 18.45L14.13 18.98L13.5 21.48L10.5 21.48L9.87 18.98L8.57 18.45L6.36 19.77L4.23 17.64L5.55 15.43L5.02 14.13L2.52 13.5L2.52 10.5L5.02 9.87L5.55 8.57L4.23 6.36L6.36 4.23L8.57 5.55zM12 9.2a2.8 2.8 0 1 0 0 5.6a2.8 2.8 0 1 0 0-5.6z"
+                "M3 7h3M10 7h11M3 17h11M18 17h3M8 5a2 2 0 1 0 0 4a2 2 0 1 0 0-4zM16 15a2 2 0 1 0 0 4a2 2 0 1 0 0-4z"
             }
             Glyph::Sun => {
                 "M12 8.4a3.6 3.6 0 1 0 0 7.2a3.6 3.6 0 1 0 0-7.2zM12 8.4a3.6 3.6 0 0 1 0 7.2zM12 3v1.8M12 19.2V21M3 12h1.8M19.2 12H21M5.6 5.6l1.3 1.3M17.1 17.1l1.3 1.3M5.6 18.4l1.3-1.3M17.1 6.9l1.3-1.3"
@@ -183,20 +187,16 @@ impl Glyph {
             Glyph::Storm => {
                 "M7 14.5h9.5a3 3 0 0 0 .4-5.97A4.6 4.6 0 0 0 8.4 7.9 3.3 3.3 0 0 0 7 14.5zM12.8 15.6l-2.6 3.2h3l-2 3.2"
             }
-            Glyph::Prayer => {
-                "M5.5 20.5v-4.6a6.5 6.5 0 0 1 13 0v4.6zM13.4 2.8a2.8 2.8 0 1 0 0 5.2a2.2 2.2 0 1 1 0-5.2zM10.6 20.5v-2.4a1.4 1.4 0 0 1 2.8 0v2.4"
-            }
-            Glyph::Timer => {
-                "M12 6.2a7.4 7.4 0 1 0 0 14.8a7.4 7.4 0 1 0 0-14.8zM12 13.6V9.9M9.6 2.8h4.8M18.4 6.2l1.3-1.3"
-            }
+            Glyph::Prayer => "M3 18h18M6 18a6 6 0 0 1 12 0M12 4v2M4.5 9l1.5 1.5M19.5 9L18 10.5",
+            Glyph::Timer => "M12 6a7.5 7.5 0 1 0 0 15a7.5 7.5 0 1 0 0-15zM12 10v4l3 2M9 2.5h6",
             Glyph::Shelf => {
-                "M3.5 13.8l2.1-6.9a1.6 1.6 0 0 1 1.5-1.1h9.8a1.6 1.6 0 0 1 1.5 1.1l2.1 6.9v4.2a1.6 1.6 0 0 1-1.6 1.6H5.1A1.6 1.6 0 0 1 3.5 18zM3.5 13.8h4.6a3.9 3.9 0 0 0 7.8 0h4.6"
+                "M3.5 15h17v4a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5zM12 3v11M7.5 9.5L12 14l4.5-4.5"
             }
             Glyph::Start => {
                 "M5 5h5.5v5.5H5zM13.5 5H19v5.5h-5.5zM5 13.5h5.5V19H5zM13.5 13.5H19V19h-5.5z"
             }
             Glyph::Apps => "M4 6h16v12H4zM4 10h16M9 10v8",
-            Glyph::Limits => "M4 18a9 9 0 1 1 16 0M12 13l4-5M6 14H4M18 14h2M7 7l1.4 1.4M12 4v2",
+            Glyph::Limits => "M3.5 18a8.5 8.5 0 1 1 17 0M12 15l5-6",
             Glyph::Search => "M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13zM15.4 15.4L20.5 20.5",
             Glyph::TaskView => {
                 "M9 7.5h9a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2zM4 15V7a2 2 0 0 1 2-2h9"
@@ -207,9 +207,11 @@ impl Glyph {
             Glyph::Charging => "M13 2L5 13h6l-1 9 9-12h-6z",
             Glyph::Add => "M12 4v16M4 12h16",
             Glyph::More => "M5 12h.01M12 12h.01M19 12h.01",
-            Glyph::File => "M7 3.5h7l4 4v13H7zM14 3.5v4h4",
+            Glyph::File => {
+                "M7 3.5h6l5 5v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2zM13 3.5v5h5"
+            }
             Glyph::Music => {
-                "M9.5 17.5V6.2l9-1.7v11M9.5 17.5a2.7 2.7 0 1 1-5.4 0a2.7 2.7 0 0 1 5.4 0zM18.5 15.5a2.7 2.7 0 1 1-5.4 0a2.7 2.7 0 0 1 5.4 0z"
+                "M7 3.5h10A3.5 3.5 0 0 1 20.5 7v10a3.5 3.5 0 0 1-3.5 3.5H7A3.5 3.5 0 0 1 3.5 17V7A3.5 3.5 0 0 1 7 3.5zM10 8l6 4-6 4z"
             }
             Glyph::Widgets => {
                 "M5.5 4h3.5a1.5 1.5 0 0 1 1.5 1.5v13a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 18.5v-13A1.5 1.5 0 0 1 5.5 4zM15 4h3.5A1.5 1.5 0 0 1 20 5.5V9a1.5 1.5 0 0 1-1.5 1.5H15A1.5 1.5 0 0 1 13.5 9V5.5A1.5 1.5 0 0 1 15 4zM15 13.5h3.5a1.5 1.5 0 0 1 1.5 1.5v3.5a1.5 1.5 0 0 1-1.5 1.5H15a1.5 1.5 0 0 1-1.5-1.5V15a1.5 1.5 0 0 1 1.5-1.5z"
@@ -465,6 +467,106 @@ pub(super) fn draw(
     Ok(())
 }
 
+/// Settings uses GDI, but shares the exact paths and rounded stroke with the D2D tabs.
+pub fn draw_gdi(
+    dc: windows::Win32::Graphics::Gdi::HDC,
+    rect: windows::Win32::Foundation::RECT,
+    glyph: Glyph,
+    ink: u32,
+) {
+    use windows::Win32::{Foundation::COLORREF, Graphics::Gdi::*};
+    let side = (rect.right - rect.left) as f32;
+    let point = |x: f32, y: f32| {
+        (
+            rect.left + snap(x, side).round() as i32,
+            rect.top + snap(y, side).round() as i32,
+        )
+    };
+    // SAFETY: the owner-draw DC is live; the selected pen is restored before deletion.
+    unsafe {
+        let brush = LOGBRUSH {
+            lbStyle: BS_SOLID,
+            lbColor: COLORREF(ink),
+            lbHatch: 0,
+        };
+        let pen = ExtCreatePen(
+            PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND | PS_JOIN_ROUND,
+            stroke_pixels(side) as u32,
+            &brush,
+            None,
+        );
+        if pen.is_invalid() {
+            return;
+        }
+        let old = SelectObject(dc, pen.into());
+        let _ = BeginPath(dc);
+        let mut here = (0.0, 0.0);
+        parse(glyph.path(), |seg| match seg {
+            Seg::M(x, y) => {
+                let (px, py) = point(x, y);
+                let _ = MoveToEx(dc, px, py, None);
+                here = (x, y);
+            }
+            Seg::L(x, y) => {
+                let (px, py) = point(x, y);
+                let _ = LineTo(dc, px, py);
+                here = (x, y);
+            }
+            Seg::A(radius, large, sweep, x, y) => {
+                arc_points(here, (x, y), (radius, large, sweep), |x, y| {
+                    let (px, py) = point(x, y);
+                    let _ = LineTo(dc, px, py);
+                });
+                here = (x, y);
+            }
+            Seg::Z => {
+                let _ = CloseFigure(dc);
+            }
+        });
+        let _ = EndPath(dc);
+        let _ = StrokePath(dc);
+        SelectObject(dc, old);
+        let _ = DeleteObject(pen.into());
+    }
+}
+
+/// Flatten circular SVG arcs for the Settings DC, at sub-pixel intervals on its small icons.
+fn arc_points(
+    from: (f32, f32),
+    to: (f32, f32),
+    arc: (f32, bool, bool),
+    mut emit: impl FnMut(f32, f32),
+) {
+    let (radius, large, sweep) = arc;
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let chord = dx.hypot(dy);
+    if chord == 0.0 {
+        return;
+    }
+    let radius = radius.max(chord / 2.0);
+    let offset = (radius * radius - chord * chord / 4.0).max(0.0).sqrt()
+        * if large == sweep { -1.0 } else { 1.0 };
+    let centre = (
+        (from.0 + to.0) / 2.0 - dy / chord * offset,
+        (from.1 + to.1) / 2.0 + dx / chord * offset,
+    );
+    let start = (from.1 - centre.1).atan2(from.0 - centre.0);
+    let end = (to.1 - centre.1).atan2(to.0 - centre.0);
+    let turn = if sweep {
+        (end - start).rem_euclid(std::f32::consts::TAU)
+    } else {
+        -(start - end).rem_euclid(std::f32::consts::TAU)
+    };
+    let steps = (turn.abs() * radius * 2.0).ceil() as usize;
+    for step in 1..=steps {
+        let angle = start + turn * step as f32 / steps as f32;
+        emit(
+            centre.0 + radius * angle.cos(),
+            centre.1 + radius * angle.sin(),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,6 +660,6 @@ mod tests {
         }
         assert_eq!(stroke_pixels(16.0), 1.0);
         assert_eq!(stroke_pixels(24.0), 2.0);
-        assert_eq!(stroke_pixels(64.0), 5.0);
+        assert_eq!(stroke_pixels(64.0), 6.0);
     }
 }

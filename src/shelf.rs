@@ -7,7 +7,7 @@ use crate::store::Store;
 /// Hard ceiling and default of the entries kept (UNVERIFIED default from m5-preparation.md section 4). A new
 /// one evicts the oldest beyond the shelf's cap.
 pub const MAX: usize = 12;
-/// Entries drawn and exposed to UI Automation: the newest ones fit the panel's free pocket (PROVISIONAL).
+/// Public slots: two entries and a separate footer pager.
 pub const VISIBLE: usize = 3;
 /// Longest accepted path, in chars; keeps a hostile drop from filling the store.
 pub const MAX_PATH_CHARS: usize = 1024;
@@ -155,11 +155,10 @@ impl Shelf {
     /// The entries drawn and exposed to UI Automation.
     pub fn visible(&self) -> &[Entry] {
         let start = self.page_start();
-        &self.entries
-            [start..(start + if self.overflow() { 2 } else { VISIBLE }).min(self.entries.len())]
+        &self.entries[start..(start + VISIBLE - 1).min(self.entries.len())]
     }
     pub fn overflow(&self) -> bool {
-        self.entries.len() > VISIBLE
+        self.entries.len() > VISIBLE - 1
     }
     fn page_start(&self) -> usize {
         if self.overflow() {
@@ -172,7 +171,11 @@ impl Shelf {
         (slot < self.visible().len()).then(|| self.page_start() + slot)
     }
     pub fn slot_count(&self) -> usize {
-        (self.visible().len() + usize::from(self.overflow())).max(1)
+        if self.overflow() {
+            VISIBLE
+        } else {
+            self.visible().len().max(1)
+        }
     }
     pub fn next_page(&mut self) -> bool {
         if !self.overflow() {

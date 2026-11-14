@@ -46,9 +46,7 @@ pub(super) fn faded(
     drawn
 }
 
-/// The hanging handle (design T3, always open since U5), drawn after the body clip is popped because it lies
-/// below the body: a body-coloured shape with the notch's own concave ears, then a labelled cell per tab; the
-/// selected one has an accent wash and the one under the pointer a lighter one.
+/// The compact dot rail draws below the body, with the same capsule silhouette.
 pub(super) fn rail(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -92,11 +90,6 @@ pub(super) fn rail(
         let alpha = if p.rim.is_some() { 1.0 } else { alpha };
         let fill = context.CreateSolidColorBrush(&color(Rgba(red, green, blue, alpha)), None)?;
         context.FillGeometry(&outline, &fill, None);
-        // A dark-ink (Light) rail gets a hairline so its edge reads on a white backdrop.
-        if p.ink.0 < 128 {
-            let edge = context.CreateSolidColorBrush(&with_alpha(p.ink, 0.22), None)?;
-            context.DrawGeometry(&outline, &edge, scale, None);
-        }
         // While the handle grows out of the panel its items stay inside it.
         context.PushAxisAlignedClip(&shape, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     }
@@ -134,8 +127,7 @@ fn squashed(cell: D2D_RECT_F, (sx, sy): (f32, f32)) -> D2D_RECT_F {
     }
 }
 
-/// The handle's cells: a glyph over the name. One accent capsule (the indicator) slides between them and
-/// squashes as it lands, a hovered cell's ink wash fades in and out, and a pressed cell shrinks a little.
+/// Quiet dots at rest; the hovered dot lends room to its glyph and name.
 fn items(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -146,74 +138,77 @@ fn items(
 ) -> Result<()> {
     let scale = scene.dpi as f32 / 96.0;
     let reveal = motion::reveal(scene.progress);
-    let name = rail_font(scale);
-    let cell_at = |position: f32| {
-        let item = layout::rail_slot(hang, scene.dpi, position);
-        D2D_RECT_F {
-            left: surface.left + item.x as f32,
-            top: surface.top + item.y as f32,
-            right: surface.left + (item.x + item.width) as f32,
-            bottom: surface.top + (item.y + item.height) as f32,
-        }
+    let rect = |item: Bounds| D2D_RECT_F {
+        left: surface.left + item.x as f32,
+        top: surface.top + item.y as f32,
+        right: surface.left + (item.x + item.width) as f32,
+        bottom: surface.top + (item.y + item.height) as f32,
     };
     let capsule = |cell: D2D_RECT_F, colour: D2D1_COLOR_F| -> Result<()> {
-        // SAFETY: a brush on the frame's own device context.
+        // SAFETY: the brush and rounded fill belong to the live frame context.
         unsafe {
             let brush = context.CreateSolidColorBrush(&colour, None)?;
             context.FillRoundedRectangle(&rounded(cell, (cell.bottom - cell.top) / 2.0), &brush);
         }
         Ok(())
     };
-    let press = 1.0 - 0.07 * handle.press;
-    let pressed = |position: usize| {
-        if handle.hover == Some(position) {
-            press
-        } else {
-            1.0
+    for (index, &tab) in handle.tabs.iter().enumerate() {
+        let cell = rect(layout::rail_item(hang, scene.dpi, handle.layout, index));
+        let expansion = handle.layout.expansion[index].clamp(0.0, 1.0);
+        let active = index == handle.layout.active;
+        capsule(
+            cell,
+            with_alpha(p.ink, p.ink_alpha((0.32 - 0.22 * expansion) * reveal)),
+        )?;
+        if expansion <= 0.65 {
+            continue;
         }
-    };
-    let (wash_at, wash) = handle.wash;
-    if wash > 0.0 && wash_at < handle.tabs.len() && (handle.ind - wash_at as f32).abs() >= 0.5 {
-        let cell = squashed(
-            cell_at(wash_at as f32),
-            (pressed(wash_at), pressed(wash_at)),
+        let alpha = motion::smooth((expansion - 0.65) / 0.35) * reveal;
+        let ink = with_alpha(
+            if active { p.rail_selected_ink() } else { p.ink },
+            p.ink_alpha(alpha),
         );
-        capsule(cell, with_alpha(p.ink, p.ink_alpha(0.10 * wash * reveal)))?;
-    }
-    // Stretched and low at the start of the slide, settling through a small overshoot on arrival.
-    let (sx, sy) = (1.12 - 0.12 * handle.pop, 0.88 + 0.12 * handle.pop);
-    let here = handle.ind.round() as usize;
-    let hold = pressed(here);
-    capsule(
-        squashed(cell_at(handle.ind), (sx * hold, sy * hold)),
-        with_alpha(p.accent, p.ink_alpha(0.22 * reveal)),
-    )?;
-    for (position, &tab) in handle.tabs.iter().enumerate() {
-        let cell = cell_at(position as f32);
-        let active = (handle.ind - position as f32).abs() < 0.5;
-        let hovered = handle.hover == Some(position);
-        let ink = if active {
-            with_alpha(p.rail_selected_ink(), p.ink_alpha(reveal))
-        } else {
-            with_alpha(p.ink, p.ink_alpha(if hovered { 1.0 } else { 0.8 } * reveal))
-        };
-        // The glyph sits 3 DIP under the cell's top, the name in the 14 DIP below it.
-        let (top, side) = (cell.top + 3.0 * scale, 14.0 * scale);
-        let middle = (cell.left + cell.right) / 2.0;
+        // A horizontal glyph/name pair keeps the expanded capsule only 24 DIP high.
         glyphs::draw(
             context,
-            pixel_square(middle - side / 2.0, top, side),
+            pixel_square(
+                cell.left + 8.0 * scale,
+                cell.top + (cell.bottom - cell.top - 16.0 * scale) / 2.0,
+                16.0 * scale,
+            ),
             Glyph::tab(tab),
             ink,
         )?;
-        let label = D2D_RECT_F {
-            top: top + side + 0.5 * scale,
-            bottom: cell.bottom,
-            ..cell
-        };
-        draw_text(context, tab.name(), &name, label, ink)?;
+        draw_text(
+            context,
+            tab.name(),
+            &rail_font(scale),
+            D2D_RECT_F {
+                left: cell.left + 28.0 * scale,
+                right: cell.right - 6.0 * scale,
+                ..cell
+            },
+            with_alpha(p.ink, p.ink_alpha(alpha)),
+        )?;
     }
-    Ok(())
+    // The accent indicator travels through the current moving centres on the existing slide clock.
+    let mut indicator = rect(layout::rail_slot(
+        hang,
+        scene.dpi,
+        handle.layout,
+        handle.ind,
+    ));
+    if indicator.bottom - indicator.top > 9.0 * scale {
+        indicator.top = indicator.bottom - 3.0 * scale;
+        let inset = (10.0 * scale).min((indicator.right - indicator.left) / 4.0);
+        indicator.left += inset;
+        indicator.right -= inset;
+    }
+    let press = 1.0 - 0.07 * handle.press;
+    capsule(
+        squashed(indicator, ((1.06 - 0.06 * handle.pop) * press, press)),
+        with_alpha(p.accent, p.ink_alpha(reveal)),
+    )
 }
 
 /// What a page draws with: the frame's context, the body's corner, the scale, the page's reveal and the palette.
@@ -300,10 +295,7 @@ impl Page<'_> {
     /// A page button: a filled capsule. The one primary action of a page is a solid accent capsule with dark ink;
     /// the others are a faint ink fill with ink text.
     fn chip(&self, rect: D2D_RECT_F, label: &str) -> Result<()> {
-        let primary = matches!(
-            label,
-            "Focus" | "Pause" | "Resume" | "Add files" | "Set city"
-        );
+        let primary = matches!(label, "Focus" | "Pause" | "Resume");
         let (fill, ink) = if primary {
             (self.accent(1.0), self.on_accent())
         } else {
@@ -537,51 +529,57 @@ fn shelf_page(g: &Page, scene: &NotchScene) -> Result<()> {
     let empty = scene.shelf.first().is_some_and(|slot| slot.add);
     if empty {
         let zone = g.slot(layout::shelf_zone(scene.dpi));
-        drop_zone(g.context, zone, g.scale, g.ink(0.35))?;
+        g.tile(zone)?;
+        drop_zone(g.context, zone, g.scale, g.ink(0.22))?;
         glyphs::draw(
             g.context,
-            pixel_square(
-                zone.left + 16.0 * g.scale,
-                zone.top + 18.0 * g.scale,
-                20.0 * g.scale,
-            ),
-            Glyph::Add,
-            g.ink(0.8),
+            g.at(layout::PAD + 20.0, 56.0, 20.0, 20.0),
+            Glyph::Shelf,
+            g.ink(0.7),
         )?;
-        let at = |dy: f32, h: f32| g.at(layout::PAD + 48.0, layout::BODY_Y + dy, 190.0, h);
         g.text(
             "Drop a file here.",
             &g.font(13.0, SEMI, LEAD),
-            at(9.0, 18.0),
+            g.at(layout::PAD + 56.0, 48.0, 250.0, 20.0),
             g.ink(0.95),
         )?;
         g.text(
             "It will wait.",
             &g.font(11.0, NORMAL, LEAD),
-            at(28.0, 16.0),
+            g.at(layout::PAD + 56.0, 70.0, 250.0, 16.0),
             g.ink(0.6),
         )?;
-        g.chip(
-            g.at(
-                layout::PAD + 328.0 - 16.0 - 66.0,
-                layout::BODY_Y + 16.0,
-                66.0,
-                layout::CHIP_H,
-            ),
-            "Add files",
-        )?;
-    } else {
-        g.chip(g.slot(layout::shelf_action(scene.dpi, false)), "Add files")?;
     }
-    shelf_row(g.context, scene, g.body, g.scale, g.p)?;
+    shelf_tools(g, scene)?;
+    shelf_row(g.context, scene, g.body, g.scale, g.p)
+}
+
+/// Secondary actions appear on page hover, away from the focal row.
+fn shelf_tools(g: &Page, scene: &NotchScene) -> Result<()> {
+    if scene.shelf_hover {
+        let slot = g.slot(layout::shelf_action(scene.dpi, false));
+        if scene.clips {
+            g.text("Clear", &g.font(10.5, NORMAL, MIDDLE), slot, g.ink(0.7))?;
+        } else {
+            glyphs::draw(
+                g.context,
+                pixel_square(
+                    (slot.left + slot.right) / 2.0 - 8.0 * g.scale,
+                    slot.top + g.scale,
+                    16.0 * g.scale,
+                ),
+                Glyph::Add,
+                g.ink(0.7),
+            )?;
+        }
+    }
     if scene.shelf_undo {
         g.chip(g.slot(layout::shelf_action(scene.dpi, true)), "Undo")?;
     }
     Ok(())
 }
 
-/// The Shelf header's capsule switch, Files | Copied: a soft track, the chosen half an accent wash like the
-/// tab rail's indicator.
+/// The Files | Copied switch stays neutral so the focal row leads.
 fn shelf_switch(g: &Page, scene: &NotchScene) -> Result<()> {
     let half = |index: usize| g.slot(layout::shelf_switch(scene.dpi, index));
     let (files, copied) = (half(0), half(1));
@@ -596,19 +594,15 @@ fn shelf_switch(g: &Page, scene: &NotchScene) -> Result<()> {
     for (index, rect, label) in [(0, files, "Files"), (1, copied, "Copied")] {
         let on = (index == 1) == scene.clips;
         if on {
-            g.fill(rect, None, g.accent(0.22))?;
+            g.fill(rect, None, g.ink(0.10))?;
         }
-        let ink = if on {
-            with_alpha(g.p.rail_selected_ink(), g.p.ink_alpha(g.reveal))
-        } else {
-            g.ink(0.8)
-        };
-        g.text(label, &g.font(11.0, SEMI, MIDDLE), rect, ink)?;
+        let ink = if on { g.ink(0.95) } else { g.ink(0.8) };
+        g.text(label, &g.font(10.5, NORMAL, MIDDLE), rect, ink)?;
     }
     Ok(())
 }
 
-/// The Copied list: Clear in the header action slot and the clips as capsules on the file grid; empty is a soft
+/// The Copied list: secondary hover actions and two clips; empty is a soft
 /// tile with a short line (no outline: only the drop zone has one).
 fn copied_page(g: &Page, scene: &NotchScene) -> Result<()> {
     if scene.shelf.is_empty() {
@@ -638,7 +632,7 @@ fn copied_page(g: &Page, scene: &NotchScene) -> Result<()> {
             g.ink(0.6),
         );
     }
-    g.chip(g.slot(layout::shelf_action(scene.dpi, false)), "Clear")?;
+    shelf_tools(g, scene)?;
     shelf_row(g.context, scene, g.body, g.scale, g.p)
 }
 
@@ -1292,18 +1286,21 @@ mod tests {
     #[test]
     fn seven_rail_labels_fit_at_enlarged_effective_dpi() {
         for dpi in [96, 144, 192, 240, 288, 336, 432] {
-            let rail = layout::Rail {
+            let mut rail = layout::Rail {
                 count: Tab::ALL.len(),
                 active: 0,
+                expansion: [0.0; 7],
             };
             let window = (layout::NOTCH_WINDOW.0 as f32 * dpi as f32 / 96.0).round() as i32;
-            let bounds = layout::rail_bounds(window, dpi, 1.0, false, rail).unwrap();
             let font = rail_font(dpi as f32 / 96.0);
             for (index, tab) in Tab::ALL.into_iter().enumerate() {
-                let cell = layout::rail_item(bounds, dpi, index);
+                rail.expansion.fill(0.0);
+                rail.expansion[index] = 1.0;
+                let bounds = layout::rail_bounds(window, dpi, 1.0, false, rail).unwrap();
+                let cell = layout::rail_item(bounds, dpi, rail, index);
                 let label = super::super::text_width(tab.name(), &font).unwrap();
                 assert!(
-                    label + 6.0 * dpi as f32 / 96.0 <= cell.width as f32,
+                    label + 34.0 * dpi as f32 / 96.0 <= cell.width as f32,
                     "{tab:?} at {dpi}: {label}"
                 );
                 assert!(cell.x + cell.width <= window);
