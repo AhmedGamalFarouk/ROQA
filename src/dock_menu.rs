@@ -28,10 +28,12 @@ use windows::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
     NewInstance,
-    Close,
+    Close(WindowKey),
     CloseAll,
     Pin,
     Unpin,
+    RemoveShelf,
+    UndoShelf,
     /// The app menu (right-click on the notch or the dock outside an app slot).
     Settings,
     Quit,
@@ -42,10 +44,12 @@ impl Item {
     pub fn label(self) -> &'static str {
         match self {
             Item::NewInstance => "New instance",
-            Item::Close => "Close window",
+            Item::Close(_) => "Close window",
             Item::CloseAll => "Close all windows",
             Item::Pin => "Pin to dock",
             Item::Unpin => "Unpin from dock",
+            Item::RemoveShelf => "Remove from Shelf",
+            Item::UndoShelf => "Undo removal",
             Item::Settings => "Settings",
             Item::Quit => "Quit ROQA",
             Item::Restore(_) => "Window",
@@ -61,9 +65,9 @@ pub fn items(item: &DockItem, pins: &Pins) -> Vec<Item> {
     if launchable {
         list.push(Item::NewInstance);
     }
-    match item.windows.len() {
-        0 => {}
-        1 => list.push(Item::Close),
+    match item.windows.as_slice() {
+        [] => {}
+        [key] => list.push(Item::Close(*key)),
         _ => list.push(Item::CloseAll),
     }
     if dock::pinned_as(item, pins).is_some() {
@@ -74,19 +78,19 @@ pub fn items(item: &DockItem, pins: &Pins) -> Vec<Item> {
     list
 }
 
-fn items_match(a: &[Item], b: &[Item]) -> bool {
-    a.len() == b.len()
-        && a.iter().zip(b).all(|(x, y)| match (x, y) {
-            (Item::Close, Item::CloseAll) | (Item::CloseAll, Item::Close) => true,
-            (x, y) => x == y,
-        })
-}
-
 /// Whether a menu opened for `identity` with `shown` actions still describes `now`, the dock's item in
 /// that slot. False once the slot holds another app or its actions changed (its last window closed, a pin
 /// changed), which ends the menu.
-pub fn describes(identity: &Identity, shown: &[Item], now: Option<&DockItem>, pins: &Pins) -> bool {
-    now.is_some_and(|now| now.identity == *identity && items_match(shown, &items(now, pins)))
+pub fn describes(
+    identity: &Identity,
+    shown: &[Item],
+    windows: &[WindowKey],
+    now: Option<&DockItem>,
+    pins: &Pins,
+) -> bool {
+    now.is_some_and(|now| {
+        now.identity == *identity && now.windows == windows && shown == items(now, pins)
+    })
 }
 
 /// Where the menu window goes (physical pixels): centred over `slot_x`, its bottom edge on the dock's top
@@ -130,6 +134,7 @@ pub struct Spec {
     pub dock: HWND,
     pub slot: usize,
     pub identity: Identity,
+    pub windows: Vec<WindowKey>,
     pub items: Vec<Item>,
     pub dock_bounds: Bounds,
     pub work: Bounds,
@@ -152,6 +157,7 @@ pub struct Menu {
     dock: HWND,
     pub slot: usize,
     pub identity: Identity,
+    pub windows: Vec<WindowKey>,
     items: Vec<Item>,
     titles: Vec<String>,
     icons: Vec<Option<Arc<IconPixels>>>,
@@ -198,6 +204,7 @@ impl Menu {
             dock: spec.dock,
             slot: spec.slot,
             identity: spec.identity,
+            windows: spec.windows,
             items: spec.items,
             titles: spec.titles,
             icons: spec.icons,
@@ -321,7 +328,7 @@ mod tests {
         let running1 = dock_item(app.clone(), &[1]);
         assert_eq!(
             items(&running1, &none),
-            [Item::NewInstance, Item::Close, Item::Pin]
+            [Item::NewInstance, Item::Close(key_of(1)), Item::Pin]
         );
         // Running (2 windows) and pinned: Unpin replaces Pin.
         assert_eq!(
@@ -338,10 +345,10 @@ mod tests {
         let packaged = dock_item(Identity::Application("Contoso.Mail!App".into()), &[3]);
         assert_eq!(
             items(&packaged, &none),
-            [Item::NewInstance, Item::Close, Item::Pin]
+            [Item::NewInstance, Item::Close(key_of(3)), Item::Pin]
         );
         let unknown = dock_item(Identity::Unavailable(9), &[9]);
-        assert_eq!(items(&unknown, &none), [Item::Close]);
+        assert_eq!(items(&unknown, &none), [Item::Close(key_of(9))]);
     }
 
     #[test]
@@ -395,20 +402,68 @@ mod tests {
         let app = exe(r"c:\app.exe");
         let pins = Pins::default();
         let shown = items(&dock_item(app.clone(), &[1]), &pins);
-        let same = dock_item(app.clone(), &[1, 7]);
-        // More windows in the same app change nothing; the slot gone, another app or other actions do.
-        assert!(describes(&app, &shown, Some(&same), &pins));
-        assert!(!describes(&app, &shown, None, &pins));
+        let same = dock_item(app.clone(), &[1]);
+        let expanded = dock_item(app.clone(), &[1, 7]);
+        let replaced = dock_item(app.clone(), &[7]);
+        assert!(!describes(
+            &app,
+            &shown,
+            &[key_of(1)],
+            Some(&expanded),
+            &pins
+        ));
+        assert!(!describes(
+            &app,
+            &shown,
+            &[key_of(1)],
+            Some(&replaced),
+            &pins
+        ));
+        assert!(describes(&app, &shown, &[key_of(1)], Some(&same), &pins));
+        assert!(!describes(&app, &shown, &[key_of(1)], None, &pins));
         let other = dock_item(exe(r"c:\other.exe"), &[1]);
-        assert!(!describes(&app, &shown, Some(&other), &pins));
+        assert!(!describes(&app, &shown, &[key_of(1)], Some(&other), &pins));
         let closed = dock_item(app.clone(), &[]);
-        assert!(!describes(&app, &shown, Some(&closed), &pins));
-        assert!(!describes(&app, &shown, Some(&same), &pinned(&app)));
+        assert!(!describes(&app, &shown, &[key_of(1)], Some(&closed), &pins));
+        assert!(!describes(
+            &app,
+            &shown,
+            &[key_of(1)],
+            Some(&same),
+            &pinned(&app)
+        ));
+    }
+
+    #[test]
+    fn a_close_all_menu_expires_when_the_group_changes_but_keeps_multiple_windows() {
+        let app = exe(r"c:\app.exe");
+        let pins = Pins::default();
+        let original = dock_item(app.clone(), &[1, 2]);
+        let shown = items(&original, &pins);
+        let expanded = dock_item(app.clone(), &[1, 2, 3]);
+        let replaced = dock_item(app.clone(), &[1, 3]);
+        for changed in [&expanded, &replaced] {
+            assert_eq!(shown, items(changed, &pins));
+            assert!(!describes(
+                &app,
+                &shown,
+                &original.windows,
+                Some(changed),
+                &pins
+            ));
+        }
+        assert!(describes(
+            &app,
+            &shown,
+            &original.windows,
+            Some(&original),
+            &pins
+        ));
     }
 
     #[test]
     fn restore_rows_show_the_window_title_and_other_rows_their_label() {
-        let items = [Item::Restore(key_of(4)), Item::Close];
+        let items = [Item::Restore(key_of(4)), Item::Close(key_of(4))];
         let titles = vec!["Report".to_string()];
         assert_eq!(row_label(&items, &titles, 0), "Report");
         // No title for the row (a fixed-label menu): the action's own label.

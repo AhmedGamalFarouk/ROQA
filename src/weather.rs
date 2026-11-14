@@ -527,8 +527,34 @@ impl Feed {
         }
         c.open || !idle()
     }
+    pub fn expire(&mut self, now: Instant) {
+        if let Some((id, since)) = self.inflight
+            && now >= since + DEAD
+        {
+            self.request_failed(id, now);
+        }
+    }
+
+    pub fn request_failed(&mut self, id: u64, now: Instant) {
+        self.finish(
+            id,
+            Outcome {
+                place: None,
+                result: Err(Fail::Network),
+            },
+            now,
+        );
+    }
+
+    pub fn fetching(&self) -> bool {
+        self.inflight.is_some()
+    }
+
     pub fn start(&mut self, now: Instant, detect: bool, city: &str) -> Job {
         self.next_id += 1;
+        if self.report.is_none() && self.last_fail.is_some() {
+            self.rev = self.rev.wrapping_add(1);
+        }
         self.inflight = Some((self.next_id, now));
         let held = self.place.as_ref();
         let locate = detect && (self.redetect || held.is_none_or(|place| !place.detected));
@@ -587,6 +613,7 @@ pub struct View {
     pub footer: String,
     /// Shown instead of the data when there is none.
     pub message: Option<&'static str>,
+    pub set_city: bool,
 }
 
 /// Whole degrees from tenths of a degree Celsius.
@@ -613,14 +640,16 @@ pub fn view(
 ) -> View {
     let (Some(report), Some(place)) = (&feed.report, &feed.place) else {
         let message = match feed.last_fail {
-            _ if !configured => "Set your city in Settings",
-            Some(Fail::Unlocated) => "Location not found. Set your city in Settings",
+            _ if !configured => "Set a city for local weather",
+            Some(_) if feed.fetching() => "Retrying weather…",
+            Some(Fail::Unlocated) => "Location not found",
             Some(_) => "Weather unavailable",
             None => "Loading weather…",
         };
         return View {
             title: "Weather".to_owned(),
             message: Some(message),
+            set_city: !configured || (!feed.fetching() && feed.last_fail == Some(Fail::Unlocated)),
             ..View::default()
         };
     };
@@ -647,6 +676,7 @@ pub fn view(
             .collect(),
         footer,
         message: None,
+        set_city: false,
     }
 }
 
@@ -954,33 +984,22 @@ mod tests {
     }
 
     #[test]
-    fn one_job_at_a_time_and_a_dead_one_is_replaced() {
-        let t0 = Instant::now();
+    fn expired_request_surfaces_failure_and_rejects_a_late_answer() {
+        let now = Instant::now();
         let mut feed = Feed::new(None, None, false);
-        let first = feed.start(t0, false, "Cairo");
-        assert!(!feed.wants(&ctx(0), t0 + Duration::from_secs(59), || false));
-        assert!(
-            feed.wants(&ctx(0), t0 + DEAD, || false),
-            "given up after a minute"
-        );
-        let second = feed.start(t0 + DEAD, false, "Cairo");
+        let first = feed.start(now, false, "Cairo");
+        feed.expire(now + DEAD - Duration::from_secs(1));
+        assert!(feed.fetching());
+        feed.expire(now + DEAD);
+        assert!(!feed.fetching());
+        assert_eq!(feed.last_fail, Some(Fail::Network));
+        assert!(!feed.wants(&ctx(0), now + DEAD, || false));
+        assert!(feed.wants(&ctx(0), now + DEAD + backoff(1), || false));
         let late = Outcome {
             place: None,
             result: Ok(report(1)),
         };
-        assert!(
-            !feed.finish(first.id, late, t0 + DEAD),
-            "the old answer is ignored"
-        );
-        assert!(feed.report.is_none());
-        // A reset also drops the job in flight and the back-off.
-        feed.reset(false);
-        let stale = Outcome {
-            place: None,
-            result: Ok(report(2)),
-        };
-        assert!(!feed.finish(second.id, stale, t0 + DEAD));
-        assert!(feed.wants(&ctx(0), t0 + DEAD, || false));
+        assert!(!feed.finish(first.id, late, now + DEAD));
     }
 
     #[test]
@@ -1023,10 +1042,8 @@ mod tests {
         assert!(feed.place.is_none() && feed.report.is_none());
         let label = |h: u8| h.to_string();
         let page = view(&feed, true, false, 0, &label);
-        assert_eq!(
-            page.message,
-            Some("Location not found. Set your city in Settings")
-        );
+        assert!(page.set_city);
+        assert_eq!(page.message, Some("Location not found"));
     }
 
     #[test]
@@ -1035,12 +1052,14 @@ mod tests {
         let empty = Feed::new(None, None, false);
         assert_eq!(
             view(&empty, false, false, 0, &label).message,
-            Some("Set your city in Settings")
+            Some("Set a city for local weather")
         );
         assert_eq!(
             view(&empty, true, false, 0, &label).message,
             Some("Loading weather…")
         );
+        assert!(view(&empty, false, false, 0, &label).set_city);
+        assert!(!view(&empty, true, false, 0, &label).set_city);
         let mut failed = Feed::new(None, None, false);
         let job = failed.start(Instant::now(), false, "x");
         failed.finish(
@@ -1056,6 +1075,14 @@ mod tests {
             Some("Weather unavailable")
         );
 
+        assert!(!view(&failed, true, false, 0, &label).set_city);
+        let revision = failed.rev;
+        failed.start(Instant::now() + Duration::from_secs(900), false, "x");
+        assert_ne!(failed.rev, revision);
+        let retrying = view(&failed, true, false, 0, &label);
+        assert_eq!(retrying.message, Some("Retrying weather…"));
+        assert!(!retrying.set_city);
+
         let mut data = report(1_000);
         data.hours = vec![Hour {
             hour: 15,
@@ -1064,6 +1091,7 @@ mod tests {
         }];
         let feed = Feed::new(Some(place()), Some(data), false);
         let page = view(&feed, true, false, 1_000 + 2 * 3600 + 5, &label);
+        assert!(!page.set_city);
         assert_eq!(
             (page.title.as_str(), page.temp.as_str(), page.range.as_str()),
             ("Cairo", "20°", "H 25°  L 15°")

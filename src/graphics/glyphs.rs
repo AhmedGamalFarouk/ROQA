@@ -44,13 +44,15 @@ pub enum Glyph {
     Search,
     TaskView,
     Chevron,
+    Expand,
     Desktop,
+    Charging,
     Add,
     More,
     /// A shelf entry whose system icon did not load.
     File,
 }
-const ALL: [Glyph; 30] = [
+const ALL: [Glyph; 32] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -77,7 +79,9 @@ const ALL: [Glyph; 30] = [
     Glyph::Search,
     Glyph::TaskView,
     Glyph::Chevron,
+    Glyph::Expand,
     Glyph::Desktop,
+    Glyph::Charging,
     Glyph::Add,
     Glyph::More,
     Glyph::File,
@@ -180,16 +184,16 @@ impl Glyph {
             Glyph::Start => {
                 "M5 5h5.5v5.5H5zM13.5 5H19v5.5h-5.5zM5 13.5h5.5V19H5zM13.5 13.5H19V19h-5.5z"
             }
-            Glyph::Apps => {
-                "M5.25 5.25h1.5v1.5h-1.5zM11.25 5.25h1.5v1.5h-1.5zM17.25 5.25h1.5v1.5h-1.5zM5.25 11.25h1.5v1.5h-1.5zM11.25 11.25h1.5v1.5h-1.5zM17.25 11.25h1.5v1.5h-1.5zM5.25 17.25h1.5v1.5h-1.5zM11.25 17.25h1.5v1.5h-1.5zM17.25 17.25h1.5v1.5h-1.5z"
-            }
+            Glyph::Apps => "M4 6h16v12H4zM4 10h16M9 10v8",
             Glyph::Limits => "M4 18a9 9 0 1 1 16 0M12 13l4-5M6 14H4M18 14h2M7 7l1.4 1.4M12 4v2",
             Glyph::Search => "M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13zM15.4 15.4L20.5 20.5",
             Glyph::TaskView => {
                 "M9 7.5h9a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2zM4 15V7a2 2 0 0 1 2-2h9"
             }
             Glyph::Chevron => "M6 15l6-6 6 6",
-            Glyph::Desktop => "M12 4v16",
+            Glyph::Expand => "M6 9l6 6 6-6",
+            Glyph::Desktop => "M3 5h18v12H3zM8 21h8M12 17v4",
+            Glyph::Charging => "M13 2L5 13h6l-1 9 9-12h-6z",
             Glyph::Add => "M12 4v16M4 12h16",
             Glyph::More => "M5 12h.01M12 12h.01M19 12h.01",
             Glyph::File => "M7 3.5h7l4 4v13H7zM14 3.5v4h4",

@@ -106,6 +106,16 @@ pub(super) fn rail(
     drawn
 }
 
+fn rail_font(scale: f32) -> Font {
+    Font {
+        family: TEXT_FONT,
+        size: 11.0 * scale,
+        weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        designator: 1.0,
+        align: DWRITE_TEXT_ALIGNMENT_CENTER,
+    }
+}
+
 /// The handle's tab names and their selected and hover washes.
 fn items(
     context: &ID2D1DeviceContext,
@@ -117,13 +127,7 @@ fn items(
 ) -> Result<()> {
     let scale = scene.dpi as f32 / 96.0;
     let reveal = motion::reveal(scene.progress);
-    let name = Font {
-        family: TEXT_FONT,
-        size: 10.0 * scale,
-        weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
-        designator: 1.0,
-        align: DWRITE_TEXT_ALIGNMENT_CENTER,
-    };
+    let name = rail_font(scale);
     for (position, &tab) in handle.tabs.iter().enumerate() {
         let item = layout::rail_item(hang, scene.dpi, position);
         let cell = D2D_RECT_F {
@@ -147,12 +151,9 @@ fn items(
             }
         }
         let ink = if active {
-            with_alpha(glyphs::active_ink(p), p.ink_alpha(reveal))
+            with_alpha(p.rail_selected_ink(), p.ink_alpha(reveal))
         } else {
-            with_alpha(
-                p.ink,
-                p.ink_alpha(if hovered { 0.95 } else { 0.62 } * reveal),
-            )
+            with_alpha(p.ink, p.ink_alpha(if hovered { 1.0 } else { 0.8 } * reveal))
         };
         draw_text(context, tab.name(), &name, cell, ink)?;
     }
@@ -291,6 +292,28 @@ pub(super) fn page(
         },
         Tab::Shelf => {
             shelf_row(context, scene, body, scale, p)?;
+            if !scene.shelf.first().is_some_and(|slot| slot.add) {
+                pill(
+                    context,
+                    scene,
+                    body,
+                    layout::shelf_action(scene.dpi, false),
+                    "Add files",
+                    reveal,
+                    p,
+                )?;
+            }
+            if scene.shelf_undo {
+                pill(
+                    context,
+                    scene,
+                    body,
+                    layout::shelf_action(scene.dpi, true),
+                    "Undo",
+                    reveal,
+                    p,
+                )?;
+            }
             if scene.shelf.first().is_some_and(|slot| slot.add) {
                 draw_text(
                     context,
@@ -402,7 +425,7 @@ fn widgets_page(
                         }
                     }
                     let colour = if i == today {
-                        with_alpha((255, 255, 255), reveal)
+                        with_alpha(p.ink_on_accent(), p.ink_alpha(reveal))
                     } else {
                         ink(0.9)
                     };
@@ -452,11 +475,10 @@ fn widgets_page(
                 }
                 let charging = reading.is_some_and(|r| r.flag & 8 != 0);
                 if charging {
-                    draw_text(
+                    glyphs::draw(
                         context,
-                        "?",
-                        &font(18.0, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER),
-                        at(31.0, 44.0, 22.0, 24.0),
+                        at(31.0, 45.0, 22.0, 22.0),
+                        Glyph::Charging,
                         with_alpha(p.accent, p.ink_alpha(reveal)),
                     )?;
                 }
@@ -570,9 +592,12 @@ fn weather_page(
             context,
             message,
             &font,
-            at(16.0, 32.0, width, 16.0),
-            ink(0.6),
+            at(16.0, 30.0, width, 17.0),
+            ink(0.85),
         )?;
+        if !view.set_city {
+            return Ok(());
+        }
         return pill(
             context,
             scene,
@@ -692,9 +717,12 @@ fn prayer_page(
             context,
             message,
             &font(TEXT_FONT, 12.0, normal, lead),
-            at(16.0, 32.0, width, 16.0),
-            ink(0.6),
+            at(16.0, 30.0, width, 17.0),
+            ink(0.85),
         )?;
+        if !view.set_city {
+            return Ok(());
+        }
         return pill(
             context,
             scene,
@@ -1020,4 +1048,31 @@ pub(super) fn draw_privacy(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seven_rail_labels_fit_at_enlarged_effective_dpi() {
+        for dpi in [96, 144, 192, 240, 288, 336, 432] {
+            let rail = layout::Rail {
+                count: Tab::ALL.len(),
+                active: 0,
+            };
+            let window = (layout::NOTCH_WINDOW.0 as f32 * dpi as f32 / 96.0).round() as i32;
+            let bounds = layout::rail_bounds(window, dpi, 1.0, false, rail).unwrap();
+            let font = rail_font(dpi as f32 / 96.0);
+            for (index, tab) in Tab::ALL.into_iter().enumerate() {
+                let cell = layout::rail_item(bounds, dpi, index);
+                let label = super::super::text_width(tab.name(), &font).unwrap();
+                assert!(
+                    label + 6.0 * dpi as f32 / 96.0 <= cell.width as f32,
+                    "{tab:?} at {dpi}: {label}"
+                );
+                assert!(cell.x + cell.width <= window);
+            }
+        }
+    }
 }

@@ -233,6 +233,14 @@ impl Shelf {
         found
     }
 
+    pub fn restore(&mut self, index: usize, entry: Entry) -> bool {
+        if self.entries.len() >= self.cap || self.has(&entry.path) {
+            return false;
+        }
+        self.entries.insert(index.min(self.entries.len()), entry);
+        true
+    }
+
     /// An activation found the target gone (or present again): true when the shown state changed.
     pub fn set_missing(&mut self, index: usize, missing: bool) -> bool {
         let Some(entry) = self.entries.get_mut(index) else {
@@ -411,6 +419,26 @@ mod tests {
         assert!(!shelf.remove(5));
         assert!(shelf.remove(0));
         assert_eq!(paths(&shelf), [r"\\srv\share\b.txt"]);
+    }
+
+    #[test]
+    fn undo_restores_the_entry_in_order_without_displacing_or_duplicating_other_entries() {
+        let mut shelf = Shelf::default();
+        shelf.set_cap(3);
+        shelf.add_all(&[r"C:\a.txt", r"C:\b.txt", r"C:\c.txt"]);
+        let removed = shelf.entries()[1].clone();
+        assert!(shelf.remove(1));
+        shelf.add_all(&[r"C:\new.txt"]);
+        assert!(!shelf.restore(1, removed.clone()));
+        assert_eq!(paths(&shelf), [r"C:\new.txt", r"C:\a.txt", r"C:\c.txt"]);
+
+        assert!(shelf.remove(0));
+        assert!(shelf.restore(1, removed.clone()));
+        assert_eq!(paths(&shelf), [r"C:\a.txt", r"C:\b.txt", r"C:\c.txt"]);
+
+        assert!(shelf.remove(0));
+        assert!(!shelf.restore(1, removed));
+        assert_eq!(paths(&shelf), [r"C:\b.txt", r"C:\c.txt"]);
     }
 
     #[test]

@@ -157,7 +157,7 @@ pub fn items_with_pins(model: &WindowModel, pins: &Pins, desktop_only: bool) -> 
 /// picker; the minimized-apps chevron and the show-desktop strip sit at the right end.
 pub const BTN_DIPS: i32 = 44;
 pub const SEP_DIPS: i32 = 8;
-pub const STRIP_DIPS: i32 = 12;
+pub const STRIP_DIPS: i32 = 26;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
@@ -642,6 +642,16 @@ pub fn close(windows: &[WindowKey]) {
     }
 }
 
+/// Executes a dock action and describes the recovery when Windows declines it.
+pub fn action_failure(action: Action) -> Option<&'static str> {
+    let (succeeded, message) = match action {
+        Action::Launch(target) => (launch(&target), "Windows couldn't open this app."),
+        Action::Activate(_) => (perform(action), "Can't switch. Try the Windows taskbar."),
+        Action::Minimize(_) => (perform(action), "Windows couldn't minimize this window."),
+    };
+    (!succeeded).then_some(message)
+}
+
 /// Returns false when the target is gone or Windows refused foreground; never forces focus.
 pub fn perform(action: Action) -> bool {
     let (Action::Activate(key) | Action::Minimize(key)) = action else {
@@ -913,6 +923,22 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_activation_points_to_the_windows_taskbar() {
+        let missing = WindowKey {
+            handle: 0,
+            process: 0,
+        };
+        assert_eq!(
+            action_failure(Action::Activate(missing)),
+            Some("Can't switch. Try the Windows taskbar.")
+        );
+        assert_eq!(
+            action_failure(Action::Minimize(missing)),
+            Some("Windows couldn't minimize this window.")
+        );
+    }
+
+    #[test]
     fn title_indicators_and_group_badges() {
         assert_eq!(title_badge("(3) Mail"), Badge::Count(3));
         assert_eq!(title_badge("Chat [2]"), Badge::Count(2));
@@ -1134,8 +1160,11 @@ mod tests {
         assert_eq!(at(8 + 88 + 8), Some(Hit::Slot(0)));
         assert_eq!(at(8 + 88 + 8 + 56), Some(Hit::Slot(1)));
         assert_eq!(at(8 + 88 + 8 + 112), None); // the tail separator
-        assert_eq!(at(width - 12 - 44), Some(Hit::Button(Button::Minimized)));
-        assert_eq!(at(width - 12), Some(Hit::Button(Button::Desktop)));
+        assert_eq!(
+            at(width - STRIP_DIPS - 44),
+            Some(Hit::Button(Button::Minimized))
+        );
+        assert_eq!(at(width - STRIP_DIPS), Some(Hit::Button(Button::Desktop)));
         assert_eq!(at(width - 1), Some(Hit::Button(Button::Desktop)));
         // Without a strip the chevron ends one pad from the edge.
         let b = only(Button::Minimized);
@@ -1255,8 +1284,8 @@ mod tests {
         // Lead: pad 8 + two buttons 88 = 96, then half of the 8 separator.
         let [lead, tail] = separators(Buttons::default(), width, 96);
         assert_eq!(lead, Some(8 + 88 + 4));
-        // Tail: separator 8, chevron 44, strip 12 from the right edge.
-        assert_eq!(tail, Some(width - (8 + 44 + 12) + 4));
+        // Tail: separator 8, chevron 44, the desktop control at the right edge.
+        assert_eq!(tail, Some(width - (8 + 44 + STRIP_DIPS) + 4));
         assert_eq!(separators(N, width, 96), [None, None]);
         assert_eq!(separators(only(Button::Start), width, 96)[1], None);
         assert_eq!(separators(only(Button::Desktop), width, 96)[0], None);

@@ -72,7 +72,7 @@ fn with_notice(height: f32, shown: f32) -> f32 {
 }
 /// `shape` with at least the page's height, and the media panel's width for such a page (its columns need it).
 /// The plain panel (`notice_row`) and a tall page also grow while a notice shows, for its own row under the
-/// page; only the media panel's Media page keeps its notice in the pocket under the cover.
+/// page. The media panel reserves a full-width row below its playback controls.
 fn tall(shape: NotchShape, notice_row: bool) -> NotchShape {
     let page = f32::from(PAGE_HEIGHT.load(Relaxed));
     let shown = f32::from(NOTICE_SHOWN.load(Relaxed)) / 1000.0;
@@ -80,7 +80,7 @@ fn tall(shape: NotchShape, notice_row: bool) -> NotchShape {
         height: if notice_row || page > 0.0 {
             with_notice(shape.height.max(page), shown)
         } else {
-            shape.height
+            shape.height + MEDIA_NOTICE_ROOM * shown
         },
         width: if page == 140.0 {
             420.0
@@ -270,7 +270,7 @@ const MEDIA_CONTROLS: [(f32, f32, f32, f32); 4] = [
     (100.0, 100.0, 24.0, 16.0),
 ];
 /// The volume level bar's hit box, right of the mute toggle and ending before the settings button.
-const VOLUME_BAR: (f32, f32, f32, f32) = (132.0, 100.0, 188.0, 16.0);
+const VOLUME_BAR: (f32, f32, f32, f32) = (132.0, 100.0, 174.0, 16.0);
 
 fn scaled_bounds((x, y, width, height): (f32, f32, f32, f32), dpi: u32) -> Bounds {
     Bounds {
@@ -351,7 +351,7 @@ pub fn gear_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, 
     if motion::reveal(progress) < 1.0 {
         return false;
     }
-    let (g, slack) = (gear(dpi, media), scaled(4.0, dpi));
+    let (g, slack) = (gear(dpi, media), scaled(6.0, dpi));
     let body = notch_body(window_width, dpi, notch_shape(progress, media));
     let x = x - body.left;
     (g.x - slack..g.x + g.width + slack).contains(&x)
@@ -359,7 +359,7 @@ pub fn gear_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, 
 }
 
 /// The Limits page's Refresh button beside its title, in DIPs from the body's left and top edges.
-const REFRESH: (f32, f32, f32, f32) = (96.0, 11.0, 76.0, 15.0);
+const REFRESH: (f32, f32, f32, f32) = (96.0, 6.0, 76.0, 25.0);
 pub fn refresh(dpi: u32) -> Bounds {
     scaled_bounds(REFRESH, dpi)
 }
@@ -368,6 +368,29 @@ pub fn refresh(dpi: u32) -> Bounds {
 pub fn refresh_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, y: i32) -> bool {
     on_slot(refresh(dpi), window_width, dpi, progress, media, x, y)
 }
+pub fn shelf_action(dpi: u32, undo: bool) -> Bounds {
+    scaled_bounds((if undo { 160.0 } else { 80.0 }, 4.0, 76.0, 25.0), dpi)
+}
+
+pub fn shelf_action_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    (x, y): (i32, i32),
+    undo: bool,
+) -> bool {
+    on_slot(
+        shelf_action(dpi, undo),
+        window_width,
+        dpi,
+        progress,
+        media,
+        x,
+        y,
+    )
+}
+
 /// The page buttons (the timer's presets, the empty Weather and Prayer "Set city"): 48 x 22 DIP pills 52
 /// apart from x 16, y 48, in DIPs from the body's left and top edges. `beside`: the Timer page's controls
 /// while a countdown shows, 48 x 22 pills 52 apart from x 156 at y 34, right of the digits.
@@ -390,16 +413,12 @@ pub fn page_button_at(
     (count, beside): (usize, bool),
     (x, y): (i32, i32),
 ) -> Option<usize> {
+    let vertical_padding = scaled(3.0, dpi);
     (0..count).find(|&i| {
-        on_slot(
-            page_button(i, beside, dpi),
-            window_width,
-            dpi,
-            progress,
-            media,
-            x,
-            y,
-        )
+        let mut target = page_button(i, beside, dpi);
+        target.y -= vertical_padding;
+        target.height += 2 * vertical_padding;
+        on_slot(target, window_width, dpi, progress, media, x, y)
     })
 }
 fn on_slot(
@@ -477,17 +496,12 @@ pub fn timer_pill(dpi: u32) -> Bounds {
     scaled_bounds(TIMER_PILL, dpi)
 }
 
-/// The power pill's text slot (features B1, PROVISIONAL, no design review), in DIPs from the body's left and
-/// top edges: x, y, width, height. Plain panel: its own row, 6 under the Timer pills (the panel grows by
-/// `NOTICE_ROOM` for it, leaving 10 below; centred). Media panel: the
-/// timer's pocket under the 72 DIP cover and left of the controls (from x 100), leading-aligned.
-const POWER_NOTICE: [(f32, f32, f32, f32); 2] =
-    [(12.0, 76.0, 296.0, 14.0), (16.0, 92.0, 84.0, 16.0)];
-
-/// Whether the notice sits in the media panel's pocket under the cover (the Media page), not in a row of its own.
-pub fn notice_in_pocket(media: bool) -> bool {
-    media && PAGE_HEIGHT.load(Relaxed) == 0
-}
+/// Notice rows end before the Settings target. On Media the row starts below playback controls.
+const MEDIA_NOTICE_ROOM: f32 = 28.0;
+const POWER_NOTICE: [(f32, f32, f32, f32); 2] = [
+    (12.0, 76.0, 268.0, 14.0),
+    (12.0, MEDIA_EXPANDED.height + 4.0, 308.0, 14.0),
+];
 
 /// The power pill's text slot in pixels from the body's left and top edges. A tall page (Limits) puts it in its
 /// own row 6 under the page, like the plain panel, spanning the page's width.
@@ -496,7 +510,7 @@ pub fn power_notice(media: bool, dpi: u32) -> Bounds {
 }
 fn notice_slot(media: bool, page: u16, dpi: u32) -> Bounds {
     if page > 0 {
-        let width = MEDIA_EXPANDED.width - 24.0;
+        let width = MEDIA_EXPANDED.width - 52.0;
         return scaled_bounds((12.0, f32::from(page) - 16.0, width, 14.0), dpi);
     }
     scaled_bounds(POWER_NOTICE[usize::from(media)], dpi)
@@ -582,7 +596,15 @@ pub fn media_control_at(
 ) -> Option<usize> {
     media_controls(dpi)
         .into_iter()
-        .position(|control| panel_offset(window_width, dpi, progress, control, (x, y)).is_some())
+        .enumerate()
+        .position(|(index, control)| {
+            let target = if index == 3 {
+                scaled_bounds((96.0, 98.0, 32.0, 22.0), dpi)
+            } else {
+                control
+            };
+            panel_offset(window_width, dpi, progress, target, (x, y)).is_some()
+        })
 }
 
 /// Where a window point falls along the progress bar, from 0 at its left edge towards 1.
@@ -605,10 +627,10 @@ pub const RAIL_EARS: f32 = 6.0;
 const RAIL_PAD_X: f32 = 8.0;
 const RAIL_PAD_Y: f32 = 4.0;
 /// A tab cell's width (fits the longest name, "Weather", at 10 DIP) and height, and the gap between cells.
-const RAIL_CELL: (f32, f32) = (44.0, 22.0);
+const RAIL_CELL: (f32, f32) = (55.0, 24.0);
 const RAIL_GAP: f32 = 2.0;
 
-/// The handle's full size in DIPs: 290 x 30 for six tabs.
+/// The handle's full size in DIPs: 413 x 32 for seven tabs.
 pub fn rail_size(rail: Rail) -> (f32, f32) {
     let count = rail.count as f32;
     (
@@ -726,6 +748,15 @@ pub fn attached_radius(bounds: Bounds, dpi: u32) -> f32 {
     (dock::px(dock::RADIUS_DIPS, dpi) as f32)
         .min(bounds.height as f32)
         .min(bounds.width as f32 / 2.0)
+}
+
+/// Scale the entire notch together so the outer tabs remain reachable on narrow displays.
+pub fn notch_dpi(work: Bounds, monitor_dpi: u32, text_factor: f64) -> u32 {
+    let requested = (f64::from(monitor_dpi) * text_factor).round() as u32;
+    let width_limit = work.width.max(1) as u64 * 96 / NOTCH_WINDOW.0 as u64;
+    // Reserve the two 12 DIP margins used by placement when computing the height budget.
+    let height_limit = work.height.max(1) as u64 * 96 / (NOTCH_WINDOW.1 + 24) as u64;
+    requested.min(width_limit.min(height_limit) as u32).max(1)
 }
 
 /// The floating placement, as the tests across modules use it.
@@ -1129,15 +1160,15 @@ mod tests {
 
     #[test]
     fn a_drag_clamps_to_the_bar_and_the_gear_sits_clear_of_every_control() {
-        // Body x 40..400: the bar spans 172..360. Left of it is silent, right of it full, whatever the row.
+        // Body x 40..400: the bar spans 172..346. Left of it is silent, right of it full, whatever the row.
         let drag = |progress, x| volume_fraction(440, 96, progress, x);
         assert_eq!(drag(1.0, 0), Some(0.0));
         assert_eq!(drag(1.0, 172), Some(0.0));
-        assert_eq!(drag(1.0, 359), Some(1.0));
+        assert_eq!(drag(1.0, 345), Some(1.0));
         assert_eq!(drag(1.0, 435), Some(1.0));
         assert_eq!(drag(0.0, 200), None, "closed");
-        let middle = drag(1.0, 265).unwrap();
-        assert!((middle - 93.0 / 187.0).abs() < 1e-6);
+        let middle = drag(1.0, 258).unwrap();
+        assert!((middle - 86.0 / 173.0).abs() < 1e-6);
         // The gear is inside both panels, off the volume bar and the mute toggle, and clickable only open.
         for dpi in [96, 144, 192] {
             let window = scaled(440.0, dpi);
@@ -1159,7 +1190,10 @@ mod tests {
                 assert!(!gear_at(window, dpi, 1.0, media, x - scaled(40.0, dpi), y));
                 if media {
                     let bar = volume_bar(dpi);
-                    assert!(bar.x + bar.width + scaled(4.0, dpi) <= g.x, "{dpi}");
+                    assert!(
+                        bar.x + bar.width + scaled(16.0, dpi) <= g.x - scaled(6.0, dpi),
+                        "{dpi}"
+                    );
                     assert!(media_controls(dpi).iter().all(|c| c.x + c.width <= g.x));
                 }
             }
@@ -1258,12 +1292,12 @@ mod tests {
 
     #[test]
     fn volume_bar_maps_its_first_and_last_pixel_to_silent_and_full() {
-        // Body x 40..400: the bar spans 172..360 and 100..116 at 100 %, below the mute toggle's row.
+        // Body x 40..400: the bar spans 172..346 and 100..116 at 100 %, beside the mute toggle.
         let at = |progress, x, y| volume_at(440, 96, progress, x, y);
         assert_eq!(at(1.0, 172, 100), Some(0.0));
-        assert_eq!(at(1.0, 359, 115), Some(1.0));
-        assert_eq!(at(1.0, 172 + 187 / 2, 108), Some(93.0 / 187.0));
-        for (x, y) in [(171, 108), (360, 108), (200, 99), (200, 116)] {
+        assert_eq!(at(1.0, 345, 115), Some(1.0));
+        assert_eq!(at(1.0, 172 + 173 / 2, 108), Some(86.0 / 173.0));
+        for (x, y) in [(171, 108), (346, 108), (200, 99), (200, 116)] {
             assert_eq!(at(1.0, x, y), None, "{x}, {y}");
         }
         assert_eq!(media_control_at(440, 96, 1.0, 140, 100), Some(3));
@@ -1421,7 +1455,10 @@ mod tests {
         for dpi in [96, 144, 192, 240] {
             for media in [false, true] {
                 let shape = if media {
-                    MEDIA_EXPANDED
+                    NotchShape {
+                        height: MEDIA_EXPANDED.height + MEDIA_NOTICE_ROOM,
+                        ..MEDIA_EXPANDED
+                    }
                 } else {
                     NOTCH_EXPANDED
                 };
@@ -1476,6 +1513,24 @@ mod tests {
     }
 
     #[test]
+    fn notices_leave_room_for_the_settings_target() {
+        for (media, page, width) in [
+            (false, 0, NOTCH_EXPANDED.width),
+            (true, 0, MEDIA_EXPANDED.width),
+            (true, limits_height(3), MEDIA_EXPANDED.width),
+        ] {
+            for dpi in [96, 120, 144, 192, 240] {
+                let notice = notice_slot(media, page, dpi);
+                let settings_left = scaled(width - 16.0 - GEAR_SIZE, dpi) - scaled(6.0, dpi);
+                assert!(
+                    notice.x + notice.width < settings_left,
+                    "{media} {page} {dpi}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_tall_page_gets_its_notice_row_under_its_content_inside_the_grown_panel() {
         let page = limits_height(3);
         let notice = notice_slot(true, page, 96);
@@ -1525,7 +1580,16 @@ mod tests {
             };
             assert!(fits(power_notice(false, dpi), NOTCH_EXPANDED), "{dpi}");
             let media = power_notice(true, dpi);
-            assert!(fits(media, MEDIA_EXPANDED), "{dpi}");
+            assert!(
+                fits(
+                    media,
+                    NotchShape {
+                        height: MEDIA_EXPANDED.height + MEDIA_NOTICE_ROOM,
+                        ..MEDIA_EXPANDED
+                    }
+                ),
+                "{dpi}"
+            );
             let cover = scaled_bounds((16.0, 14.0, 72.0, 72.0), dpi);
             let others = media_controls(dpi).into_iter().chain([
                 cover,
@@ -1611,10 +1675,32 @@ mod tests {
     }
 
     #[test]
-    fn the_handle_fits_every_tab_name_and_stays_narrower_than_the_panel() {
+    fn scaled_notch_keeps_the_seven_tab_rail_on_narrow_work_areas() {
+        let work = Bounds {
+            x: 0,
+            y: 0,
+            width: 1024,
+            height: 768,
+        };
+        assert_eq!(notch_dpi(work, 96, 1.5), 144);
+        let dpi = notch_dpi(work, 192, 2.25);
+        let window = placement(work, dpi, SurfaceKind::Notch, 0);
+        let rail = rail(7, 0);
+        let row = rail_bounds(window.width, dpi, 1.0, true, rail).unwrap();
+        for index in 0..rail.count {
+            let cell = rail_item(row, dpi, index);
+            assert!(cell.x >= 0 && cell.x + cell.width <= window.width);
+            assert!(cell.y >= 0 && cell.y + cell.height <= window.height);
+        }
+    }
+
+    #[test]
+    fn the_handle_reserves_label_width_for_all_seven_tabs() {
         let (six_w, six_h) = rail_size(rail(6, 0));
-        assert_eq!((six_w, six_h), (290.0, 30.0));
-        assert!(six_w <= NOTCH_EXPANDED.width);
+        assert_eq!((six_w, six_h), (356.0, 32.0));
+        let (seven_w, seven_h) = rail_size(rail(7, 0));
+        assert_eq!((seven_w, seven_h), (413.0, 32.0));
+        assert!(seven_w < NOTCH_WINDOW.0 as f32);
         assert!(rail_size(rail(3, 0)).0 < rail_size(rail(5, 0)).0);
     }
 
@@ -1628,7 +1714,7 @@ mod tests {
                 height: scaled(NOTCH_WINDOW.1 as f32, dpi),
             };
             for media in [false, true] {
-                let r = rail(6, 2);
+                let r = rail(7, 2);
                 // Collapsed or barely open: no handle.
                 for progress in [-0.09, 0.0, 0.07, 0.35] {
                     assert_eq!(rail_bounds(window.width, dpi, progress, media, r), None);

@@ -236,18 +236,32 @@ impl Settings {
     }
 
     /// Pushes the settings that live outside the host's own state: animation pace, click-to-open, pill size, hotkey.
-    pub fn apply_globals(&self) {
+    pub fn apply_globals(&self) -> Option<&'static str> {
         crate::motion::configure(self.anim_fast, self.open_click);
         crate::layout::set_pill_percent(self.notch_size);
-        if self.hotkey_picker {
-            crate::hotkey::register_picker(self.hotkey_combo);
+        let picker = if self.hotkey_picker {
+            crate::hotkey::register_picker(self.hotkey_combo)
         } else {
             crate::hotkey::unregister_picker();
-        }
-        if self.hotkey_audio {
-            crate::hotkey::register_audio(self.hotkey_audio_combo);
+            true
+        };
+        let audio = if self.hotkey_audio {
+            crate::hotkey::register_audio(self.hotkey_audio_combo)
         } else {
             crate::hotkey::unregister_audio();
+            true
+        };
+        match (picker, audio) {
+            (false, false) => {
+                Some("Windows rejected both shortcuts. Choose different combinations.")
+            }
+            (false, true) => {
+                Some("Windows rejected the window picker shortcut. Choose a different combination.")
+            }
+            (true, false) => {
+                Some("Windows rejected the audio shortcut. Choose a different combination.")
+            }
+            (true, true) => None,
         }
     }
 

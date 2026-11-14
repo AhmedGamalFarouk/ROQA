@@ -45,6 +45,7 @@ use windows::{
             Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
             Controls::*,
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow},
+            Input::KeyboardAndMouse::SetFocus,
             WindowsAndMessaging::*,
         },
     },
@@ -270,8 +271,8 @@ const PAGES: &[Page] = &[
                     r(
                         DOCK_BADGES,
                         C,
-                        "Show notification badges",
-                        "Based on window titles",
+                        "Show estimated notification badges",
+                        "Counts are inferred from window titles",
                     ),
                 ],
             },
@@ -1541,6 +1542,23 @@ impl SettingsWindow {
         Ok(())
     }
 
+    pub fn focus_city(&mut self) -> Result<()> {
+        let page = self
+            .items
+            .iter()
+            .find(|item| item.h == self.h(CITY))
+            .map_or(0, |item| usize::from(item.page));
+        self.show_page(page)?;
+        // SAFETY: both controls belong to this live dialog. Respect foreground restrictions.
+        unsafe {
+            SendMessageW(self.side, LB_SETCURSEL, Some(WPARAM(page)), None);
+            if GetForegroundWindow() == self.window {
+                let _ = SetFocus(Some(self.h(CITY)));
+            }
+        }
+        Ok(())
+    }
+
     /// Shows page `page`: only its controls are visible (hidden ones stay out of the way), scrolled to the top.
     fn show_page(&mut self, page: usize) -> Result<()> {
         self.page = page.min(PAGES.len() - 1);
@@ -1829,8 +1847,19 @@ impl SettingsWindow {
                         }
                     }
                     (RESET, _) if notification == BN_CLICKED => {
-                        self.show(&Settings::default());
-                        self.commit()?;
+                        // SAFETY: the live settings dialog owns this confirmation.
+                        let answer = unsafe {
+                            MessageBoxW(
+                                Some(self.window),
+                                w!("Restore ROQA settings to their defaults?"),
+                                w!("Reset to defaults"),
+                                MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION,
+                            )
+                        };
+                        if answer == IDYES {
+                            self.show(&Settings::default());
+                            self.commit()?;
+                        }
                     }
                     (CLOSE, _) => {
                         self.commit()?; // an edit still being typed is kept

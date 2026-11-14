@@ -198,6 +198,7 @@ pub struct NotchScene<'a> {
     pub notice: Option<&'a str>,
     /// The file shelf's visible entries (S6, PROVISIONAL); empty draws nothing.
     pub shelf: &'a [ShelfSlot<'a>],
+    pub shelf_undo: bool,
     /// The page the open panel shows. Media is the media and clock panel; the others draw their own content.
     pub tab: Tab,
     pub widgets: crate::widgets::WidgetConfig,
@@ -954,11 +955,23 @@ fn settings_button(
         body.top + gear.y as f32,
         gear.width as f32,
     );
+    let scale = scene.dpi as f32 / 96.0;
+    let background = D2D_RECT_F {
+        left: square.left - 4.0 * scale,
+        top: square.top - 4.0 * scale,
+        right: square.right + 4.0 * scale,
+        bottom: square.bottom + 4.0 * scale,
+    };
+    // SAFETY: the brush is local to the live drawing context.
+    unsafe {
+        let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, 0.12 * reveal), None)?;
+        context.FillRoundedRectangle(&rounded(background, 8.0 * scale), &brush);
+    }
     glyphs::draw(
         context,
         square,
         Glyph::Gear,
-        with_alpha(p.ink, p.ink_alpha(0.55 * reveal)),
+        with_alpha(p.ink, p.ink_alpha(0.9 * reveal)),
     )
 }
 
@@ -982,6 +995,19 @@ fn media_page(
         return media_text(context, &media_plan(scene, track, body, clock), art, p);
     }
     let open = motion::smooth(scene.progress);
+    let cue = (1.0 - motion::reveal(scene.progress)) * (1.0 - tab_art::eyes_shown(scene));
+    if cue > 0.0 {
+        glyphs::draw(
+            context,
+            pixel_square(
+                body.right - 29.0 * scale,
+                body.top + 8.0 * scale,
+                14.0 * scale,
+            ),
+            Glyph::Expand,
+            with_alpha(p.ink, p.ink_alpha(0.68 * cue)),
+        )?;
+    }
     let row = |middle: f32, half: f32| D2D_RECT_F {
         left: body.left + 12.0 * scale,
         top: body.top + (middle - half) * scale,
@@ -1093,22 +1119,16 @@ fn notice_text(
     let Some(text) = scene.notice.filter(|_| reveal > 0.0) else {
         return Ok(());
     };
-    let media = layout::notice_in_pocket(scene.track.is_some());
-    let slot = layout::power_notice(media, scene.dpi);
+    let slot = layout::power_notice(scene.track.is_some(), scene.dpi);
     let left = body.left + slot.x as f32;
     // The notice rises 5 DIP into place as it fades in.
     let top = body.top + slot.y as f32 + (1.0 - scene.fx.notice) * 5.0 * scale;
     let font = Font {
         family: TEXT_FONT,
-        // The plain panel has the room for a larger line; the media pocket under the cover does not.
-        size: if media { 11.0 } else { 12.0 } * scale,
+        size: 12.0 * scale,
         weight: DWRITE_FONT_WEIGHT_NORMAL,
         designator: 1.0,
-        align: if media {
-            DWRITE_TEXT_ALIGNMENT_LEADING
-        } else {
-            DWRITE_TEXT_ALIGNMENT_CENTER
-        },
+        align: DWRITE_TEXT_ALIGNMENT_CENTER,
     };
     let rect = D2D_RECT_F {
         left,
@@ -1935,7 +1955,7 @@ fn right_to_left(text: &str) -> bool {
 }
 
 /// UTF-16 ranges before the first and after the last digit of a formatted time, such as " pm" in
-/// "9:50 pm" or "오후 " in "오후 10:00". Any script's digits count, so the user-locale format is kept.
+/// "9:50 pm" or "ì˜¤í›„ " in "ì˜¤í›„ 10:00". Any script's digits count, so the user-locale format is kept.
 fn designator_ranges(text: &[u16]) -> Vec<DWRITE_TEXT_RANGE> {
     let mut digits = None::<(usize, usize)>;
     let mut offset = 0;
@@ -2068,7 +2088,7 @@ fn draw_button(
     glyphs::draw(context, square, shape, with_alpha(p.glyph, 1.0))
 }
 
-/// The show-desktop strip: a thin bar down the dock's far end, brighter under the pointer.
+/// The monitor marks the show-desktop control at the dock's far end.
 fn glyph_desktop(
     context: &ID2D1DeviceContext,
     cell: &D2D_RECT_F,
@@ -2076,7 +2096,7 @@ fn glyph_desktop(
     px: &dyn Fn(i32) -> f32,
     p: &Palette,
 ) -> Result<()> {
-    let side = px(24);
+    let side = px(18).min(cell.right - cell.left);
     let square = pixel_square(
         (cell.left + cell.right - side) / 2.0,
         (cell.top + cell.bottom - side) / 2.0,
@@ -2086,7 +2106,7 @@ fn glyph_desktop(
         context,
         square,
         Glyph::Desktop,
-        tint(p.track(0.4 + 0.3 * hover)),
+        with_alpha(p.glyph, p.ink_alpha(0.72 + 0.28 * hover)),
     )
 }
 
@@ -2191,14 +2211,14 @@ fn draw_slot(
         }
         if slot.badge != dock::Badge::None {
             let label = match slot.badge {
-                dock::Badge::Count(n) if n >= 100 => Some("99+".to_owned()),
-                dock::Badge::Count(n) => Some(n.to_string()),
+                dock::Badge::Count(n) if n >= 100 => Some("~99+".to_owned()),
+                dock::Badge::Count(n) => Some(format!("~{n}")),
                 _ => None,
             };
             let width = px(match label.as_deref() {
-                Some("99+") => 25,
-                Some(s) if s.len() > 1 => 20,
-                Some(_) => 16,
+                Some("~99+") => 30,
+                Some(s) if s.len() > 2 => 24,
+                Some(_) => 18,
                 None => 9,
             });
             let height = if label.is_some() { px(16) } else { px(9) };
@@ -2611,6 +2631,7 @@ mod media_tests {
             timer: None,
             notice: None,
             shelf: &[],
+            shelf_undo: false,
             widgets: crate::widgets::WidgetConfig::default(),
             tab: Tab::Media,
             rail: None,
@@ -2650,6 +2671,7 @@ mod media_tests {
                 timer: None,
                 notice: None,
                 shelf: &[],
+                shelf_undo: false,
                 widgets: crate::widgets::WidgetConfig::default(),
                 tab: Tab::Media,
                 rail: None,
@@ -2897,6 +2919,7 @@ mod media_tests {
                 timer: None,
                 notice: None,
                 shelf: &[],
+                shelf_undo: false,
                 widgets: crate::widgets::WidgetConfig::default(),
                 tab: Tab::Media,
                 rail: None,
@@ -2958,6 +2981,7 @@ mod media_tests {
                     timer: None,
                     notice: None,
                     shelf: &[],
+                    shelf_undo: false,
                     widgets: crate::widgets::WidgetConfig::default(),
                     tab: Tab::Media,
                     rail: None,
@@ -3007,6 +3031,7 @@ mod media_tests {
             timer: None,
             notice: None,
             shelf: &[],
+            shelf_undo: false,
             widgets: crate::widgets::WidgetConfig::default(),
             tab: Tab::Media,
             rail: None,
@@ -3043,10 +3068,10 @@ mod media_tests {
         let level = |percent, muted| Some(Level { percent, muted });
         let panel = volume(&song, "9:50 pm", 1.0, 96, level(40, false));
         let bar = panel.volume.unwrap();
-        // Bar x 172..360 in the body at 40; 6 DIP thick, centred in 100..116; the thumb sits on the fill end.
-        assert_eq!(bar.track.rect, rect(172.0, 105.0, 360.0, 111.0));
-        assert_eq!(bar.fill.rect, rect(172.0, 105.0, 172.0 + 75.0, 111.0));
-        assert_eq!(bar.thumb, (247.0, 108.0, 4.5));
+        // Bar x 172..346 in the body at 40; 6 DIP thick, centred in 100..116; the thumb sits on the fill end.
+        assert_eq!(bar.track.rect, rect(172.0, 105.0, 346.0, 111.0));
+        assert_eq!(bar.fill.rect, rect(172.0, 105.0, 172.0 + 70.0, 111.0));
+        assert_eq!(bar.thumb, (242.0, 108.0, 4.5));
         assert!(bar.readout.is_none());
         assert_eq!((bar.track_alpha, bar.fill_alpha), (VOLUME_TRACK, 1.0));
         assert_eq!(

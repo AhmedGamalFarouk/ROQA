@@ -120,6 +120,27 @@ mod tests {
     }
 
     #[test]
+    fn work_area_resize_replaces_the_notch_at_a_scale_that_fits() {
+        let primary = monitor("primary", 0, 0, 96);
+        let secondary = monitor("secondary", 1920, 0, 192);
+        let mut narrowed = secondary.clone();
+        narrowed.work.width = 1024;
+        let old_dpi = crate::layout::notch_dpi(secondary.work, secondary.dpi, 2.25);
+        let (release, place) = diff(&[primary.clone(), secondary], &[primary, narrowed.clone()]);
+        assert_eq!(release, ["secondary"]);
+        assert_eq!(place, [narrowed.clone()]);
+        let new_dpi = crate::layout::notch_dpi(narrowed.work, narrowed.dpi, 2.25);
+        assert!(new_dpi < old_dpi);
+        let notch = placement(narrowed.work, new_dpi, SurfaceKind::Notch, 0);
+        let rail = crate::layout::Rail {
+            count: 7,
+            active: 6,
+        };
+        let rail = crate::layout::rail_bounds(notch.width, new_dpi, 1.0, true, rail).unwrap();
+        assert!(rail.x >= 0 && rail.x + rail.width <= notch.width);
+    }
+
+    #[test]
     fn map_keeps_the_arrangement_inside_the_box() {
         // Secondary left of and higher than the primary, mixed sizes.
         let rects = [b(0, 0, 1920, 1080), b(-2560, -360, 2560, 1440)];

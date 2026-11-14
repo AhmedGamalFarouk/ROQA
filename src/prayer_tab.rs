@@ -136,6 +136,7 @@ pub struct Row {
 pub struct View {
     /// Shown instead of the data when there is none.
     pub message: Option<&'static str>,
+    pub set_city: bool,
     pub next: String,
     pub left: String,
     pub hijri: String,
@@ -178,6 +179,7 @@ pub fn view(
     let (next_name, short) = (ahead.name(), countdown(left));
     View {
         message: None,
+        set_city: false,
         next: next_name.to_owned(),
         left: short,
         hijri,

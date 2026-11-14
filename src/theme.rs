@@ -287,6 +287,33 @@ impl Palette {
             high_contrast: Some((track, gray)),
         }
     }
+    pub fn ink_on_accent(&self) -> Rgb {
+        self.contrasting_ink(self.accent, self.on_ink)
+    }
+
+    pub fn rail_selected_ink(&self) -> Rgb {
+        let Rgba(r, g, b, _) = self.body;
+        let fill = over(self.accent, self.ink_alpha(0.22), (r, g, b));
+        self.contrasting_ink(
+            fill,
+            if self.high_contrast.is_some() {
+                self.on_ink
+            } else {
+                self.accent
+            },
+        )
+    }
+
+    fn contrasting_ink(&self, fill: Rgb, preferred: Rgb) -> Rgb {
+        if contrast(preferred, fill) >= 4.5 {
+            return preferred;
+        }
+        [self.ink, self.on_ink, (0, 0, 0), (255, 255, 255)]
+            .into_iter()
+            .max_by(|&a, &b| contrast(a, fill).total_cmp(&contrast(b, fill)))
+            .unwrap_or(preferred)
+    }
+
     /// Every body fill a text or accent colour must read on: the gradient stops, or the one flat fill.
     pub fn fills(&self) -> [Rgba; 3] {
         match self.sheen {
@@ -396,6 +423,36 @@ fn contrast(a: Rgb, b: Rgb) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_tab_and_current_date_read_on_their_actual_fills() {
+        let themes = [
+            Theme::Classic,
+            Theme::Light,
+            Theme::Midnight,
+            Theme::Frosted,
+            Theme::Liquid,
+        ];
+        let palettes = themes
+            .into_iter()
+            .flat_map(|theme| {
+                [
+                    theme.palette(),
+                    theme.palette_with((0, 120, 212)),
+                    theme.palette_with((240, 160, 50)),
+                ]
+            })
+            .chain([
+                Palette::contrast((0, 0, 0), (255, 255, 0), (0, 0, 0), (128, 128, 128)),
+                Palette::contrast((255, 255, 255), (0, 0, 0), (255, 255, 255), (128, 128, 128)),
+            ]);
+        for palette in palettes {
+            let Rgba(r, g, b, _) = palette.body;
+            let wash = over(palette.accent, palette.ink_alpha(0.22), (r, g, b));
+            assert!(contrast(palette.rail_selected_ink(), wash) >= 4.5);
+            assert!(contrast(palette.ink_on_accent(), palette.accent) >= 4.5);
+        }
+    }
 
     #[test]
     fn high_contrast_is_opaque_and_uses_only_supplied_system_colours() {

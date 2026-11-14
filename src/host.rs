@@ -674,6 +674,7 @@ impl Surface {
             timer: timer.as_ref(),
             notice,
             shelf: &slots,
+            shelf_undo: shelf.removed.is_some(),
             tab: page,
             widgets: pages.widgets,
             rail: rail.map(|layout| RailScene {
@@ -984,6 +985,7 @@ fn edit_pins(
 /// The shelf and what drawing it needs beyond the list: the system icons delivered so far for its visible
 /// entries, and whether they must be asked for again (the list changed, or the panel was never open).
 struct ShelfView {
+    removed: Option<(usize, shelf::Entry)>,
     shelf: Shelf,
     icons: Vec<Option<Arc<IconPixels>>>,
     stale: bool,
@@ -1048,6 +1050,7 @@ struct Desktop {
     /// File references, drawn in the expanded notch; drops arrive through `drops` and are applied by
     /// `refresh_shelf`, so the drop target touches no host state.
     shelf: ShelfView,
+
     drops: Drops,
     /// An icon finished this pass (`refresh_dock` collected it).
     icons_arrived: bool,
@@ -1149,7 +1152,9 @@ impl Desktop {
         let now = Instant::now();
         let devices: Vec<String> = monitors.iter().map(|m| m.device.clone()).collect();
         let settings = store.settings.clone().keep_one_monitor(&devices);
-        settings.apply_globals();
+        if let Some(failure) = settings.apply_globals() {
+            eprintln!("Settings: {failure}");
+        }
         let mut shelf = Shelf::from_store(&store);
         if shelf.set_cap(settings.shelf_cap) {
             shelf.write_to(&mut store); // the cut list leaves the file with its next write
@@ -1190,6 +1195,7 @@ impl Desktop {
             dock_generation: None,
             pins: Pins::from_store(&store),
             shelf: ShelfView {
+                removed: None,
                 shelf,
                 icons: Vec::new(),
                 stale: true,
@@ -1280,7 +1286,7 @@ impl Desktop {
         }
         let dpi = match kind {
             // The notch's effective DPI: monitor DPI times the Windows text-size factor.
-            SurfaceKind::Notch => (f64::from(monitor.dpi) * self.text_factor).round() as u32,
+            SurfaceKind::Notch => layout::notch_dpi(monitor.work, monitor.dpi, self.text_factor),
             SurfaceKind::Dock => monitor.dpi,
         };
         let mut surface = Surface::create(
@@ -1506,6 +1512,7 @@ impl Desktop {
                 self.pending.mark(now);
             }
         }
+        self.weather.expire(now);
         let (on, prayer) = (
             self.pages.tabs.on(Tab::Weather),
             self.pages.tabs.on(Tab::Prayer),
@@ -1531,7 +1538,10 @@ impl Desktop {
         let idle = || weather_os::idle_secs() >= weather_os::IDLE_AFTER_SECS;
         if self.weather.wants(&ctx, now, idle) {
             let job = self.weather.start(now, detect, &self.settings.city);
-            self.weather_io.spawn(job);
+            let id = job.id;
+            if !self.weather_io.spawn(job) {
+                self.weather.request_failed(id, now);
+            }
         }
         // The text is rebuilt when the data or the minute (the age) changed, and only while it shows.
         let current = |key: &Option<(u32, String)>| {
@@ -1650,12 +1660,16 @@ impl Desktop {
         if shown {
             let key = (self.clock.clone(), self.weather.rev, method, shift);
             if self.pages.prayer_key.as_ref() != Some(&key) {
-                let message = if !weather::configured(self.settings.detect, &self.settings.city) {
-                    "Set your city in Settings"
-                } else if self.weather.last_fail == Some(weather::Fail::Unlocated) {
-                    "Location not found. Set your city in Settings"
-                } else {
-                    "Finding your location…"
+                let configured = weather::configured(self.settings.detect, &self.settings.city);
+                let (message, set_city) = match self.weather.last_fail {
+                    _ if !configured => ("Set a city for prayer times", true),
+                    Some(_) if self.weather.fetching() => ("Retrying location lookup…", false),
+                    Some(weather::Fail::Unlocated) => ("Location not found", true),
+                    Some(_) => ("Couldn't load your location", false),
+                    None => (
+                        "Finding your locationÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦",
+                        false,
+                    ),
                 };
                 self.pages.prayer = prayer_tab::view(
                     params.as_ref(),
@@ -1664,6 +1678,7 @@ impl Desktop {
                     prayer_os::hijri(local.ymd).unwrap_or_default(),
                     &prayer_os::time_label,
                 );
+                self.pages.prayer.set_city = params.is_none() && set_city;
                 self.pages.prayer_key = Some(key);
                 self.request_notches(Repaint::Full, |s| motion::reveal(s.motion.value(now)) > 0.0);
             }
@@ -2185,7 +2200,11 @@ impl Desktop {
             return Ok(());
         }
         let old = std::mem::replace(&mut self.settings, next);
-        self.settings.apply_globals();
+        if let Some(failure) = self.settings.apply_globals()
+            && let Some(window) = &self.settings_window
+        {
+            window.say(failure)?;
+        }
         self.water_due = None; // the schedule follows the new hours
         // A new theme, pill size or accent mode is fixed when a surface is created, so they rebuild the surfaces.
         let restyle = old.theme != self.settings.theme
@@ -2548,15 +2567,7 @@ impl Desktop {
                     .get(slot - 1)
                     .and_then(|item| dock::action(item, dock::foreground_key()))
                 {
-                    // A refused or stale target is left alone; the catalog repaints the dock on the next event.
-                    match action {
-                        dock::Action::Launch(target) => {
-                            dock::launch(&target);
-                        }
-                        action => {
-                            dock::perform(action);
-                        }
-                    }
+                    self.run_dock_action(action);
                 }
                 Ok(())
             }
@@ -2565,6 +2576,11 @@ impl Desktop {
                 Ok(())
             }
             None => Ok(()),
+        }
+    }
+    fn run_dock_action(&mut self, action: dock::Action) {
+        if let Some(failure) = dock::action_failure(action) {
+            self.show_notice(failure.into(), Instant::now());
         }
     }
     /// A taskbar button: the shell shortcut it stands for (sent on this click only), or the minimized list.
@@ -2621,6 +2637,7 @@ impl Desktop {
         let spec = dock_menu::Spec {
             dock: hwnd,
             slot: 0,
+            windows: Vec::new(),
             identity: Identity::Unavailable(0),
             items: windows.iter().map(|w| Item::Restore(w.key)).collect(),
             dock_bounds: bounds,
@@ -2664,12 +2681,12 @@ impl Desktop {
         });
     }
     /// Middle-click on a dock slot launches a new instance when the app can be launched.
-    fn middle_click_slot(&self, slot: usize) {
+    fn middle_click_slot(&mut self, slot: usize) {
         if let Some(index) = slot.checked_sub(1)
             && let Some(item) = self.dock_items.get(index)
             && let Some(launch) = crate::pins::launch_target(&item.identity)
         {
-            dock::launch(&launch);
+            self.run_dock_action(dock::Action::Launch(launch));
         }
     }
     /// Right-click on a dock slot opens its menu above it (the picker slot has none). It needs the
@@ -2704,6 +2721,7 @@ impl Desktop {
             dock: hwnd,
             slot,
             identity: item.identity.clone(),
+            windows: item.windows.clone(),
             items: dock_menu::items(item, &self.pins),
             dock_bounds: dock.bounds,
             work,
@@ -2730,6 +2748,10 @@ impl Desktop {
     /// Right-click on the notch, or on the dock outside an app slot: Settings and Quit, below the notch or
     /// above the dock. Needs the foreground like the slot menu.
     fn open_app_menu(&mut self, hwnd: HWND, lparam: LPARAM) {
+        self.open_context_menu(hwnd, lparam, None);
+    }
+
+    fn open_context_menu(&mut self, hwnd: HWND, lparam: LPARAM, shelf_path: Option<String>) {
         self.dismiss_preview();
         self.close_menu();
         let Some(surface) = self
@@ -2752,15 +2774,25 @@ impl Desktop {
             let shape = layout::notch_shape(surface.motion.value(Instant::now()), media);
             surface.bounds.y + (shape.height * surface.dpi as f32 / 96.0).round() as i32
         });
+        let mut items = if shelf_path.is_some() {
+            vec![Item::RemoveShelf]
+        } else {
+            dock_menu::APP_ITEMS.to_vec()
+        };
+        let shelf_menu = surface.kind() == SurfaceKind::Notch && self.page() == Tab::Shelf;
+        if shelf_menu && self.shelf.removed.is_some() {
+            items.push(Item::UndoShelf);
+        }
         let spec = dock_menu::Spec {
             dock: hwnd,
             slot: 0,
-            identity: crate::window_model::Identity::Unavailable(0),
-            items: dock_menu::APP_ITEMS.to_vec(),
+            windows: Vec::new(),
+            identity: shelf_path.map_or(Identity::Unavailable(0), Identity::Executable),
+            items,
             dock_bounds: surface.bounds,
             work,
             dpi: surface.dpi,
-            app: "ROQA".into(),
+            app: if shelf_menu { "Shelf" } else { "ROQA" }.into(),
             titles: Vec::new(),
             icons: Vec::new(),
             x: surface.bounds.x + point(lparam).0,
@@ -2824,8 +2856,14 @@ impl Desktop {
                 // SAFETY: a scalar quit request to this thread's own message loop.
                 Item::Quit => unsafe { PostQuitMessage(0) },
                 Item::Restore(key) => {
-                    dock::perform(dock::Action::Activate(key));
+                    self.run_dock_action(dock::Action::Activate(key));
                 }
+                Item::RemoveShelf => {
+                    if let Identity::Executable(path) = &menu.identity {
+                        self.remove_shelf_entry(path);
+                    }
+                }
+                Item::UndoShelf => self.undo_shelf_removal(),
                 _ => {}
             }
             return;
@@ -2833,20 +2871,33 @@ impl Desktop {
         let target = self
             .dock_items
             .get(menu.slot - 1)
-            .filter(|target| target.identity == menu.identity)
+            .filter(|target| {
+                dock_menu::describes(
+                    &menu.identity,
+                    menu.items(),
+                    &menu.windows,
+                    Some(target),
+                    &self.pins,
+                )
+            })
             .cloned();
         let Some(target) = target else {
             return;
         };
         match item {
-            Item::Close | Item::CloseAll => dock::close(&target.windows),
+            Item::Close(key) => dock::close(&[key]),
+            Item::CloseAll => dock::close(&menu.windows),
             Item::NewInstance => {
                 if let Some(launch) = crate::pins::launch_target(&target.identity) {
-                    dock::launch(&launch);
+                    self.run_dock_action(dock::Action::Launch(launch));
                 }
             }
             Item::Pin | Item::Unpin => self.toggle_pin(Some(menu.slot)),
-            Item::Settings | Item::Quit | Item::Restore(_) => {}
+            Item::Settings
+            | Item::Quit
+            | Item::Restore(_)
+            | Item::RemoveShelf
+            | Item::UndoShelf => {}
         }
     }
     /// Ends the open menu once it no longer describes the dock (its slot changed, or a full-screen app hid
@@ -2865,6 +2916,7 @@ impl Desktop {
                 || dock_menu::describes(
                     &menu.identity,
                     menu.items(),
+                    &menu.windows,
                     self.dock_items.get(menu.slot - 1),
                     &self.pins,
                 ));
@@ -2948,7 +3000,7 @@ impl Desktop {
                     }
                 }
                 DropEvent::Files(paths) if self.pages.tabs.on(Tab::Shelf) => {
-                    self.change_shelf(|shelf| shelf.add_all(&paths) > 0)
+                    self.add_shelf_files(&paths)
                 }
                 DropEvent::Files(_) => {}
             }
@@ -2993,9 +3045,25 @@ impl Desktop {
     /// Opens the picker; a finished one whose completion wake was lost is collected instead of stranding it.
     fn start_file_picker(&mut self) {
         if let Some(paths) = self.file_picker.start() {
-            self.change_shelf(|shelf| shelf.add_all(&paths) > 0);
+            self.add_shelf_files(&paths);
         }
     }
+    fn add_shelf_files(&mut self, paths: &[String]) {
+        let before = self.shelf.shelf.entries().len();
+        let mut displaced = 0;
+        self.change_shelf(|shelf| {
+            let added = shelf.add_all(paths);
+            displaced = before + added - shelf.entries().len();
+            added > 0
+        });
+        if displaced > 0 {
+            self.show_notice(
+                format!("Shelf full. Older entries removed: {displaced}"),
+                Instant::now(),
+            );
+        }
+    }
+
     fn change_shelf(&mut self, edit: impl FnOnce(&mut Shelf) -> bool) {
         let now = Instant::now();
         if edit_shelf(
@@ -3047,10 +3115,15 @@ impl Desktop {
         }
         if found {
             shelf_os::open(&path, reveal, network);
+        } else {
+            self.show_notice(
+                "File missing. Add it from its new location.".into(),
+                Instant::now(),
+            );
         }
     }
-    /// Right-click on a drawn shelf entry removes it. Returns whether it was consumed.
-    fn remove_shelf_at(&mut self, hwnd: HWND, lparam: LPARAM) -> bool {
+    /// Opens the Shelf context menu for a drawn entry.
+    fn shelf_menu_at(&mut self, hwnd: HWND, lparam: LPARAM) -> bool {
         let notch = self
             .surfaces
             .iter()
@@ -3058,11 +3131,56 @@ impl Desktop {
         let Some(index) = notch.and_then(|notch| self.shelf_slot_at(notch, lparam)) else {
             return false;
         };
-        if let Some(index) = self.shelf.shelf.absolute(index) {
-            self.change_shelf(|shelf| shelf.remove(index));
-        }
+        let Some(entry) = self
+            .shelf
+            .shelf
+            .absolute(index)
+            .and_then(|index| self.shelf.shelf.entries().get(index))
+        else {
+            return false;
+        };
+        let path = entry.path.clone();
+        self.open_context_menu(hwnd, lparam, Some(path));
         true
     }
+
+    fn remove_shelf_entry(&mut self, path: &str) {
+        let Some(index) = self
+            .shelf
+            .shelf
+            .entries()
+            .iter()
+            .position(|entry| entry.path == path)
+        else {
+            return;
+        };
+        self.shelf.removed = Some((index, self.shelf.shelf.entries()[index].clone()));
+        self.change_shelf(|shelf| shelf.remove(index));
+        self.show_notice(
+            "Removed from Shelf. Select Undo to restore.".into(),
+            Instant::now(),
+        );
+    }
+
+    fn undo_shelf_removal(&mut self) {
+        if let Some((index, entry)) = self.shelf.removed.take() {
+            let mut restored = false;
+            self.change_shelf(|shelf| {
+                restored = shelf.restore(index, entry.clone());
+                restored
+            });
+            if restored {
+                self.show_notice("Restored to Shelf.".into(), Instant::now());
+            } else {
+                self.shelf.removed = Some((index, entry));
+                self.show_notice(
+                    "Cannot restore. Check Shelf space and duplicates.".into(),
+                    Instant::now(),
+                );
+            }
+        }
+    }
+
     /// Milliseconds until the debounced store write is due; `INFINITE` with no unwritten change.
     fn store_wait(&self) -> u32 {
         let now = Instant::now();
@@ -3170,18 +3288,39 @@ impl Desktop {
         let beside = view.as_ref().is_some_and(|view| !view.done);
         let buttons = match page {
             Tab::Timer => (controls.len(), beside),
-            Tab::Weather | Tab::Prayer => (1, false),
+            Tab::Weather if self.pages.weather.set_city => (1, false),
+            Tab::Prayer if self.pages.prayer.set_city => (1, false),
             _ => (0, false),
         };
         if let Some(button) = layout::page_button_at(width, dpi, progress, live, buttons, (x, y)) {
             if page != Tab::Timer {
-                let _ = self.open_settings();
+                let opened = self.open_settings().and_then(|()| {
+                    if let Some(window) = &mut self.settings_window {
+                        window.focus_city()?;
+                    }
+                    Ok(())
+                });
+                if let Err(error) = opened {
+                    eprintln!("Settings: {error}");
+                }
             } else {
                 self.timer_press(controls[button], now);
             }
             return true;
         }
         if page == Tab::Shelf {
+            if self.shelf.removed.is_some()
+                && layout::shelf_action_at(width, dpi, progress, live, (x, y), true)
+            {
+                self.undo_shelf_removal();
+                return true;
+            }
+            if !self.shelf.shelf.is_empty()
+                && layout::shelf_action_at(width, dpi, progress, live, (x, y), false)
+            {
+                self.start_file_picker();
+                return true;
+            }
             if let Some(index) = self.shelf_slot_at(notch, lparam) {
                 // SAFETY: reads this thread's keyboard state as of the message being handled.
                 let reveal = unsafe { GetKeyState(VK_CONTROL.0.into()) } < 0;
@@ -3218,7 +3357,7 @@ impl Desktop {
                 if self.file_picker.for_sound {
                     self.choose_sound(paths);
                 } else {
-                    self.change_shelf(|shelf| shelf.add_all(&paths) > 0);
+                    self.add_shelf_files(&paths);
                 }
             }
             return Ok(());
@@ -3937,7 +4076,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 continue;
             }
             if message.message == WM_RBUTTONUP
-                && desktop.remove_shelf_at(message.hwnd, message.lParam)
+                && desktop.shelf_menu_at(message.hwnd, message.lParam)
             {
                 continue;
             }
@@ -4050,6 +4189,7 @@ mod clock_wait_tests {
     #[test]
     fn a_shelf_edit_marks_the_store_dirty_once_and_only_when_it_changed() {
         let mut view = ShelfView {
+            removed: None,
             shelf: Shelf::default(),
             icons: Vec::new(),
             stale: false,
