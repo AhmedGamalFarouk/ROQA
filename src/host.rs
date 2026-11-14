@@ -212,11 +212,18 @@ impl Pages {
         if let Some(left) = self.pomo.left
             && view.as_ref().is_none_or(|view| view.done)
         {
-            return Some(timer::View::paused(left, self.pomo.title(true)));
+            return Some(timer::View::paused(
+                left,
+                self.pomo.total,
+                self.pomo.title(true),
+                self.pomo.cycle(),
+            ));
         }
         view.map(|mut view| {
             if view.tagged {
                 view.label = self.pomo.title(false);
+                view.total = self.pomo.total;
+                view.cycle = Some(self.pomo.cycle());
             }
             view
         })
@@ -3129,8 +3136,16 @@ impl Desktop {
         if self.page() != Tab::Shelf {
             return None;
         }
-        layout::shelf_at(surface.bounds.width, surface.dpi, progress, media, x, y)
-            .filter(|&index| index < self.shelf.shelf.slot_count())
+        layout::shelf_at(
+            surface.bounds.width,
+            surface.dpi,
+            progress,
+            media,
+            self.shelf.shelf.is_empty(),
+            x,
+            y,
+        )
+        .filter(|&index| index < self.shelf.shelf.slot_count())
     }
     /// A user activation of shelf entry `index`: open it, or with `reveal` select it in Explorer. The only
     /// existence check in the shelf's life happens here, never for a UNC path (`shelf_os::open` runs that
@@ -3363,6 +3378,17 @@ impl Desktop {
                 && layout::shelf_action_at(width, dpi, progress, live, (x, y), false)
             {
                 self.start_file_picker();
+                return true;
+            }
+            if let Some(index) = layout::shelf_remove_at(width, dpi, progress, x, y)
+                && let Some(entry) = self
+                    .shelf
+                    .shelf
+                    .absolute(index)
+                    .and_then(|index| self.shelf.shelf.entries().get(index))
+            {
+                let path = entry.path.clone();
+                self.remove_shelf_entry(&path);
                 return true;
             }
             if let Some(index) = self.shelf_slot_at(notch, lparam) {

@@ -22,8 +22,8 @@ pub const NOTCH: NotchShape = NotchShape {
     ears: 10.0,
 };
 pub const NOTCH_EXPANDED: NotchShape = NotchShape {
-    width: 320.0,
-    height: 92.0,
+    width: 360.0,
+    height: 128.0,
     radius: 28.0,
     ears: 14.0,
 };
@@ -34,15 +34,25 @@ pub const MEDIA_NOTCH: NotchShape = NotchShape {
     width: 262.0,
     ..NOTCH
 };
-pub const MEDIA_EXPANDED: NotchShape = NotchShape {
-    width: 360.0,
-    height: 120.0,
-    ..NOTCH_EXPANDED
-};
+pub const MEDIA_EXPANDED: NotchShape = NOTCH_EXPANDED;
+
+/// The one grid every tab page sits on, in DIPs from the body's left and top edges. Pages differ in content, never
+/// in padding: a 16 side margin, a header row (title left, clock right, one action just before the clock), the
+/// content from `BODY_Y` on, an 8 gutter between elements, 24 high chips and 14 radius tiles (the panel's 28
+/// radius less a 14 inset). The footer line and the settings button share the bottom row.
+pub const PAD: f32 = 16.0;
+pub const HEAD_Y: f32 = 10.0;
+pub const HEAD_H: f32 = 18.0;
+pub const BODY_Y: f32 = 38.0;
+pub const GUTTER: f32 = 8.0;
+pub const CHIP_H: f32 = 24.0;
+pub const TILE_RADIUS: f32 = 14.0;
+/// The 420 wide page (Widgets).
+pub const WIDE_W: f32 = 420.0;
 /// The notch HWND never moves or resizes: the media panel and ears plus room for the open
 /// overshoot and the soft shadow, keeping the plain panel's 40 DIP of side and 44 DIP of bottom
 /// shadow room (the window is 208 DIP tall so the Limits page, its notice row and the rail below fit). `notch_region` bounds body input; a separate transparent HWND draws the shadow.
-pub const NOTCH_WINDOW: (i32, i32) = (440, 208);
+pub const NOTCH_WINDOW: (i32, i32) = (440, 216);
 /// Pointer slop around the drawn body that still counts as hovering it.
 const NOTCH_HOVER_SLOP: f32 = 4.0;
 
@@ -54,7 +64,7 @@ pub fn set_page_height(dips: u16) {
 }
 /// The Limits page's tool rows: the first at y 38 DIPs, `LIMITS_ROW` apart (two lines each: the used values, then
 /// the reset times and the freshness).
-pub const LIMITS_TOP: f32 = 38.0;
+pub const LIMITS_TOP: f32 = 44.0;
 pub const LIMITS_ROW: f32 = 30.0;
 /// The Limits page's panel height for `rows` tool rows: the rows and room for the gear under the last.
 pub fn limits_height(rows: usize) -> u16 {
@@ -84,7 +94,7 @@ fn tall(shape: NotchShape, notice_row: bool) -> NotchShape {
             shape.height + MEDIA_NOTICE_ROOM * shown
         },
         width: if page == 140.0 {
-            420.0
+            WIDE_W
         } else if page > 0.0 {
             MEDIA_EXPANDED.width
         } else {
@@ -124,7 +134,7 @@ pub fn notch_shape(progress: f32, media: bool) -> NotchShape {
     let from = pill(from, to, PILL_PERCENT.load(Relaxed));
     NotchShape {
         width: lerp(from.width, to.width, progress).min(if PAGE_HEIGHT.load(Relaxed) == 140 {
-            420.0
+            WIDE_W
         } else {
             f32::MAX
         }),
@@ -264,14 +274,17 @@ pub fn notch_hit(
 /// Previous, play/pause and next in the media panel's controls row (direction B), then the volume
 /// row's mute toggle (`audio::MUTE`), in DIPs from the body's left and top edges: x, y, width,
 /// height.
+/// The transport sits in one 28 high row under the progress row: previous and next as capsules, play/pause a wider
+/// accent one, then the mute toggle.
+pub const MEDIA_COLUMN: f32 = 108.0;
 const MEDIA_CONTROLS: [(f32, f32, f32, f32); 4] = [
-    (100.0, 66.0, 28.0, 32.0),
-    (148.0, 66.0, 32.0, 32.0),
-    (200.0, 66.0, 28.0, 32.0),
-    (100.0, 100.0, 24.0, 16.0),
+    (MEDIA_COLUMN, 84.0, 32.0, 28.0),
+    (146.0, 84.0, 48.0, 28.0),
+    (200.0, 84.0, 32.0, 28.0),
+    (244.0, 88.0, 24.0, 20.0),
 ];
 /// The volume level bar's hit box, right of the mute toggle and ending before the settings button.
-const VOLUME_BAR: (f32, f32, f32, f32) = (132.0, 100.0, 174.0, 16.0);
+const VOLUME_BAR: (f32, f32, f32, f32) = (272.0, 88.0, 46.0, 20.0);
 
 fn scaled_bounds((x, y, width, height): (f32, f32, f32, f32), dpi: u32) -> Bounds {
     Bounds {
@@ -341,10 +354,11 @@ pub fn gear(dpi: u32, media: bool) -> Bounds {
 /// border is all that stays translucent.
 pub const BACKING_INSET: f32 = 2.0;
 /// A page's footer line (Weather's attribution, Prayer's Hijri date), in DIPs from the body's left and top
-/// edges: x, y, width, height for the plain and the media panel. Its bottom is 12 above the body's bottom.
-const FOOTER: [(f32, f32, f32, f32); 2] = [(16.0, 67.0, 288.0, 13.0), (16.0, 95.0, 328.0, 13.0)];
-pub fn footer(media: bool) -> (f32, f32, f32, f32) {
-    FOOTER[usize::from(media)]
+/// edges: x, y, width, height, the same on the plain and the media panel. Its bottom is 12 above the body's
+/// bottom and it ends before the settings button.
+const FOOTER: (f32, f32, f32, f32) = (PAD, 103.0, 300.0, 13.0);
+pub fn footer(_media: bool) -> (f32, f32, f32, f32) {
+    FOOTER
 }
 
 /// Whether a window point is on the settings button (a little slack around it); false while the panel is closed.
@@ -359,11 +373,11 @@ pub fn gear_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, 
         && (g.y - slack..g.y + g.height + slack).contains(&y)
 }
 
-/// The Limits page's Refresh button beside its title, in DIPs from the body's left and top edges.
-// Ends at y 25, above the 5h/Weekly headers (y 27).
-const REFRESH: (f32, f32, f32, f32) = (96.0, 5.0, 70.0, 20.0);
+/// The header row's one action (Limits' Refresh, Shelf's Add files), centred on the header's middle line and
+/// ending 8 before the clock. Ends at y 29, above the Limits column labels (y 30).
+const ACTION: (f32, f32, f32, f32) = (192.0, 9.0, 72.0, 20.0);
 pub fn refresh(dpi: u32) -> Bounds {
-    scaled_bounds(REFRESH, dpi)
+    scaled_bounds(ACTION, dpi)
 }
 
 /// Whether a window point is on the Refresh button; false while the panel is closed.
@@ -371,7 +385,15 @@ pub fn refresh_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i3
     on_slot(refresh(dpi), window_width, dpi, progress, media, x, y)
 }
 pub fn shelf_action(dpi: u32, undo: bool) -> Bounds {
-    scaled_bounds((if undo { 160.0 } else { 80.0 }, 4.0, 76.0, 25.0), dpi)
+    // Add files takes the header action; Undo sits in the grid's free cell (row two, right), short of the gear.
+    scaled_bounds(
+        if undo {
+            (shelf_cell(1).0, shelf_cell(2).1, 140.0, SHELF_CELL_H)
+        } else {
+            ACTION
+        },
+        dpi,
+    )
 }
 
 pub fn shelf_action_at(
@@ -393,15 +415,16 @@ pub fn shelf_action_at(
     )
 }
 
-/// The page buttons (the timer's presets, the empty Weather and Prayer "Set city"): 48 x 22 DIP pills 52
-/// apart from x 16, y 48, in DIPs from the body's left and top edges. `beside`: the Timer page's controls
-/// while a countdown shows, 48 x 22 pills 52 apart from x 156 at y 34, right of the digits.
+/// The page buttons (the timer's presets, the empty Weather and Prayer "Set city"): 58 x 24 capsules 66
+/// apart from x 16, y 68, in DIPs from the body's left and top edges, five across the content width.
+/// `beside`: the Timer page's controls while a countdown shows, 56 x 24 capsules 64 apart from x 152 at y 40,
+/// right of the digits.
 pub fn page_button(index: usize, beside: bool, dpi: u32) -> Bounds {
     scaled_bounds(
         if beside {
-            (156.0 + 52.0 * index as f32, 34.0, 48.0, 22.0)
+            (152.0 + 64.0 * index as f32, 40.0, 56.0, CHIP_H)
         } else {
-            (16.0 + 52.0 * index as f32, 48.0, 48.0, 22.0)
+            (PAD + 66.0 * index as f32, 68.0, 58.0, CHIP_H)
         },
         dpi,
     )
@@ -444,7 +467,7 @@ fn on_slot(
 /// The visualizer slot right of the controls row (slice 7, provisional), in DIPs from the body's
 /// left and top edges: `BARS` bars `METER_BAR` wide, spread across it and bottom-aligned, ending 16
 /// before the body's right edge and centred on the controls row.
-const METER: (f32, f32, f32, f32) = (312.0, 72.0, 32.0, 20.0);
+const METER: (f32, f32, f32, f32) = (312.0, 32.0, 32.0, 20.0);
 const METER_BAR: f32 = 4.0;
 
 /// The visualizer slot in pixels from the body's left and top edges, and each bar's width.
@@ -465,12 +488,12 @@ const TIMER_PILL: (f32, f32, f32, f32) = (108.0, 8.0, 30.0, 14.0);
 
 /// The pages other than Media (Timer, Shelf), in DIPs from the body's left and top edges: a title row, the
 /// Timer page's big value under it, and a small clock at the top right (right-aligned, 16 from the edge).
-const PAGE_TITLE: (f32, f32, f32, f32) = (16.0, 12.0, 160.0, 16.0);
-const PAGE_VALUE: (f32, f32, f32, f32) = (16.0, 30.0, 136.0, 32.0);
-const PAGE_CLOCK: (f32, f32, f32, f32) = (0.0, 11.0, 100.0, 16.0);
-const PAGE_CLOCK_MARGIN: f32 = 16.0;
-/// The Shelf page's hint beside the empty shelf's add slot.
-const SHELF_HINT: (f32, f32, f32, f32) = (112.0, 40.0, 192.0, 16.0);
+/// The title ends before the mascot's eyes (centred, 171 to 189) and the action slot starts after them.
+const PAGE_TITLE: (f32, f32, f32, f32) = (PAD, HEAD_Y, 150.0, HEAD_H);
+const PAGE_VALUE: (f32, f32, f32, f32) = (PAD, 34.0, 132.0, 36.0);
+const PAGE_CLOCK: (f32, f32, f32, f32) = (0.0, HEAD_Y, 72.0, HEAD_H);
+/// The mascot's resting eyes in the header, centred on the panel: their box in DIPs from the body's left edge.
+pub const HEAD_EYES: (f32, f32) = (18.0, 18.0);
 
 pub fn page_title(dpi: u32) -> Bounds {
     scaled_bounds(PAGE_TITLE, dpi)
@@ -478,23 +501,43 @@ pub fn page_title(dpi: u32) -> Bounds {
 pub fn page_value(dpi: u32) -> Bounds {
     scaled_bounds(PAGE_VALUE, dpi)
 }
-/// The empty shelf's dashed drop zone around the add slot and its hint.
-pub fn shelf_zone(dpi: u32) -> Bounds {
-    scaled_bounds((16.0, 30.0, 288.0, 38.0), dpi)
-}
-pub fn shelf_hint(dpi: u32) -> Bounds {
-    scaled_bounds(SHELF_HINT, dpi)
-}
-/// The page clock for the plain or media panel.
-pub fn page_clock(media: bool, dpi: u32) -> Bounds {
-    let width = if media {
-        MEDIA_EXPANDED
+/// The panel's width on the current page (the 420 wide Widgets page, else the plain 360).
+pub fn panel_width() -> f32 {
+    if PAGE_HEIGHT.load(Relaxed) == 140 {
+        WIDE_W
     } else {
-        NOTCH_EXPANDED
+        NOTCH_EXPANDED.width
     }
-    .width;
+}
+/// The empty shelf's dashed drop zone, the whole content width; it is the add slot's hit box too.
+pub fn shelf_zone(dpi: u32) -> Bounds {
+    scaled_bounds((PAD, BODY_Y, NOTCH_EXPANDED.width - 2.0 * PAD, 56.0), dpi)
+}
+/// The page clock, right-aligned 16 from the page's right edge.
+pub fn page_clock(_media: bool, dpi: u32) -> Bounds {
     let (_, y, w, h) = PAGE_CLOCK;
-    scaled_bounds((width - PAGE_CLOCK_MARGIN - w, y, w, h), dpi)
+    scaled_bounds((panel_width() - PAD - w, y, w, h), dpi)
+}
+/// The header row's rects on a page `width` wide, in DIPs: title, eyes box, action, clock. They never overlap.
+#[cfg(test)]
+pub fn header_rects(width: f32) -> [(f32, f32, f32, f32); 4] {
+    let (_, y, w, h) = PAGE_CLOCK;
+    [
+        PAGE_TITLE,
+        (
+            width / 2.0 - HEAD_EYES.0 / 2.0,
+            HEAD_Y,
+            HEAD_EYES.0,
+            HEAD_EYES.1,
+        ),
+        (
+            width - PAD - w - GUTTER - ACTION.2,
+            ACTION.1,
+            ACTION.2,
+            ACTION.3,
+        ),
+        (width - PAD - w, y, w, h),
+    ]
 }
 
 /// The plain pill's minutes slot in pixels from the body's left and top edges.
@@ -505,7 +548,7 @@ pub fn timer_pill(dpi: u32) -> Bounds {
 /// Notice rows end before the Settings target. On Media the row starts below playback controls.
 const MEDIA_NOTICE_ROOM: f32 = 28.0;
 const POWER_NOTICE: [(f32, f32, f32, f32); 2] = [
-    (12.0, 76.0, 268.0, 14.0),
+    (12.0, NOTCH_EXPANDED.height - 16.0, 308.0, 14.0),
     (12.0, MEDIA_EXPANDED.height + 4.0, 308.0, 14.0),
 ];
 
@@ -522,25 +565,48 @@ fn notice_slot(media: bool, page: u16, dpi: u32) -> Bounds {
     scaled_bounds(POWER_NOTICE[usize::from(media)], dpi)
 }
 
-/// The file shelf's `shelf::VISIBLE` square slots (slice S6, PROVISIONAL, no design review), each
-/// `SHELF_SLOT` DIPs with the slot origin of the panel kind's first one, in DIPs from the body's left and
-/// top edges, then one slot further right per entry. On the Shelf page, under the title, on both panel kinds.
-/// Each slot draws a 20 DIP system icon with the file name under it.
-const SHELF_ORIGIN: [(f32, f32); 2] = [(16.0, 30.0), (16.0, 30.0)];
-const SHELF_SLOT: (f32, f32) = (96.0, 36.0);
-
-/// A shelf slot in pixels from the body's left and top edges, for the plain or media panel.
-pub fn shelf_slot(media: bool, index: usize, dpi: u32) -> Bounds {
-    let (x, y) = SHELF_ORIGIN[usize::from(media)];
-    scaled_bounds(
-        (
-            x + SHELF_SLOT.0 * index as f32,
-            y,
-            SHELF_SLOT.0,
-            SHELF_SLOT.1,
-        ),
-        dpi,
+/// The file shelf's `shelf::VISIBLE` file capsules in a two column grid under the header (156 x 28 DIPs, an 8
+/// gutter), left to right then down, in DIPs from the body's left and top edges, on both panel kinds. Each draws
+/// a 16 DIP system icon, the name and a remove target at its right end.
+const SHELF_CELL_W: f32 = 156.0;
+const SHELF_CELL_H: f32 = 28.0;
+/// The origin of grid cell `index`.
+fn shelf_cell(index: usize) -> (f32, f32) {
+    (
+        PAD + (SHELF_CELL_W + GUTTER) * (index % 2) as f32,
+        BODY_Y + (SHELF_CELL_H + GUTTER) * (index / 2) as f32,
     )
+}
+
+/// A shelf slot in pixels from the body's left and top edges.
+pub fn shelf_slot(_media: bool, index: usize, dpi: u32) -> Bounds {
+    let (x, y) = shelf_cell(index);
+    scaled_bounds((x, y, SHELF_CELL_W, SHELF_CELL_H), dpi)
+}
+
+/// A file capsule's remove target: its right-most 24 DIPs, in pixels from the body's left and top edges.
+pub fn shelf_remove(index: usize, dpi: u32) -> Bounds {
+    let (x, y) = shelf_cell(index);
+    scaled_bounds((x + SHELF_CELL_W - 26.0, y, 26.0, SHELF_CELL_H), dpi)
+}
+
+/// The shelf slot whose remove target is under a window point; the caller ignores slots that are not files.
+pub fn shelf_remove_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    x: i32,
+    y: i32,
+) -> Option<usize> {
+    if motion::reveal(progress) < 1.0 {
+        return None;
+    }
+    let body = notch_body(window_width, dpi, notch_shape(progress, false));
+    (0..crate::shelf::VISIBLE).find(|&index| {
+        let target = shelf_remove(index, dpi);
+        (target.x..target.x + target.width).contains(&(x - body.left))
+            && (target.y..target.y + target.height).contains(&y)
+    })
 }
 
 /// The shelf slot under a window point at `progress`; none while the panel rows are not drawn. The caller
@@ -550,6 +616,7 @@ pub fn shelf_at(
     dpi: u32,
     progress: f32,
     media: bool,
+    empty: bool,
     x: i32,
     y: i32,
 ) -> Option<usize> {
@@ -557,6 +624,13 @@ pub fn shelf_at(
         return None;
     }
     let body = notch_body(window_width, dpi, notch_shape(progress, media));
+    // The empty shelf's whole drop zone is its one add slot.
+    if empty {
+        let zone = shelf_zone(dpi);
+        return ((zone.x..zone.x + zone.width).contains(&(x - body.left))
+            && (zone.y..zone.y + zone.height).contains(&y))
+        .then_some(0);
+    }
     (0..crate::shelf::VISIBLE).find(|&index| {
         let slot = shelf_slot(media, index, dpi);
         let (x, y) = (x - body.left - slot.x, y - slot.y);
@@ -566,7 +640,10 @@ pub fn shelf_at(
 
 /// The progress bar's target in the media panel (slice 4, provisional), in DIPs from the body's
 /// left and top edges: the drawn 4 DIP bar is centred in it, between the elapsed and total times.
-const MEDIA_PROGRESS: (f32, f32, f32, f32) = (140.0, 50.0, 164.0, 14.0);
+const MEDIA_PROGRESS: (f32, f32, f32, f32) = (148.0, 64.0, 156.0, 14.0);
+/// The elapsed and total time slots either side of the bar, same row.
+pub const MEDIA_TIMES: [(f32, f32, f32, f32); 2] =
+    [(MEDIA_COLUMN, 64.0, 36.0, 14.0), (308.0, 64.0, 36.0, 14.0)];
 
 /// The progress bar's target in pixels from the body's left and top edges; like the controls, it
 /// keeps its panel place while the body morphs.
@@ -605,7 +682,7 @@ pub fn media_control_at(
         .enumerate()
         .position(|(index, control)| {
             let target = if index == 3 {
-                scaled_bounds((96.0, 98.0, 32.0, 22.0), dpi)
+                scaled_bounds((240.0, 86.0, 32.0, 24.0), dpi)
             } else {
                 control
             };
@@ -1023,7 +1100,7 @@ mod tests {
                 x: 1480,
                 y: 0,
                 width: 880,
-                height: 416
+                height: 432
             }
         );
     }
@@ -1038,9 +1115,9 @@ mod tests {
         };
         // (dpi, window, media pill, media panel) in physical pixels.
         for (dpi, window, pill, panel) in [
-            (96, (440, 208), (262, 30), (360, 120)),
-            (144, (660, 312), (393, 45), (540, 180)),
-            (192, (880, 416), (524, 60), (720, 240)),
+            (96, (440, 216), (262, 30), (360, 128)),
+            (144, (660, 324), (393, 45), (540, 192)),
+            (192, (880, 432), (524, 60), (720, 256)),
         ] {
             let bounds = placement(work, dpi, SurfaceKind::Notch, 0);
             assert_eq!((bounds.width, bounds.height), window);
@@ -1089,25 +1166,26 @@ mod tests {
 
     #[test]
     fn media_controls_hit_only_their_drawn_rows_once_revealed() {
-        // 360 x 120 panel centred in the 440 DIP window: body x 40..400.
+        // 360 x 128 panel centred in the 440 DIP window: body x 40..400, the transport row y 84..112.
         let at = |progress, x, y| media_control_at(440, 96, progress, x, y);
-        assert_eq!(at(1.0, 140, 66), Some(0));
-        assert_eq!(at(1.0, 167, 97), Some(0));
-        assert_eq!(at(1.0, 168, 80), None); // The gap between previous and play/pause.
-        assert_eq!(at(1.0, 188, 80), Some(1));
-        assert_eq!(at(1.0, 219, 80), Some(1));
-        assert_eq!(at(1.0, 240, 80), Some(2));
-        assert_eq!(at(1.0, 268, 80), None);
-        assert_eq!(at(1.0, 240, 65), None);
-        assert_eq!(at(1.0, 240, 98), None);
+        assert_eq!(at(1.0, 148, 84), Some(0));
+        assert_eq!(at(1.0, 179, 111), Some(0));
+        assert_eq!(at(1.0, 180, 100), None); // The gap between previous and play/pause.
+        assert_eq!(at(1.0, 186, 100), Some(1));
+        assert_eq!(at(1.0, 233, 100), Some(1));
+        assert_eq!(at(1.0, 240, 100), Some(2));
+        assert_eq!(at(1.0, 271, 100), Some(2));
+        assert_eq!(at(1.0, 272, 100), None);
+        assert_eq!(at(1.0, 240, 83), None);
+        assert_eq!(at(1.0, 240, 112), None);
         // Collapsed, swelling or barely open: the row is not drawn, so nothing is hit.
         for progress in [0.0, 0.07, 0.35] {
             assert_eq!(at(progress, 188, 15), None);
         }
         // Opening: only the part of a chip the body already shows is a target.
         let body = notch_body(440, 96, notch_shape(0.6, true));
-        assert!(body.height < 98);
-        let left = body.left + 148;
+        assert!(body.height > 84 && body.height < 112);
+        let left = body.left + 146;
         assert_eq!(at(0.6, left + 1, body.height - 1), Some(1));
         assert_eq!(at(0.6, left + 1, body.height), None);
         // Scaled with the notch DPI, which includes the text-size factor.
@@ -1129,12 +1207,12 @@ mod tests {
 
     #[test]
     fn the_progress_bar_maps_clicks_to_its_fraction_beside_the_controls() {
-        // Body x 40..400 at 100 %: bar from 180 to 344, rows 50..64; controls from 66.
+        // Body x 40..400 at 100 %: bar from 188 to 344, rows 64..78; controls from 84.
         let seek = |progress, x, y| media_seek_at(440, 96, progress, x, y);
-        assert_eq!(seek(1.0, 180, 57), Some(0.0));
-        assert_eq!(seek(1.0, 221, 50), Some(0.25));
-        assert_eq!(seek(1.0, 343, 63), Some(163.0 / 164.0));
-        for (x, y) in [(179, 57), (344, 57), (221, 49), (221, 64), (188, 80)] {
+        assert_eq!(seek(1.0, 188, 71), Some(0.0));
+        assert_eq!(seek(1.0, 227, 64), Some(0.25));
+        assert_eq!(seek(1.0, 343, 77), Some(155.0 / 156.0));
+        for (x, y) in [(187, 71), (344, 71), (227, 63), (227, 78), (188, 100)] {
             assert_eq!(seek(1.0, x, y), None, "{x} {y}");
         }
         // No point is both a control and the bar, at any scale.
@@ -1158,23 +1236,23 @@ mod tests {
             assert_eq!(seek(progress, 221, 57), None);
         }
         let body = notch_body(440, 96, notch_shape(0.36, true));
-        assert!(body.height > 50 && body.height < 64);
-        let left = body.left + 140;
+        assert!(body.height > 64 && body.height < 78);
+        let left = body.left + 148;
         assert_eq!(seek(0.36, left, body.height - 1), Some(0.0));
         assert_eq!(seek(0.36, left, body.height), None);
     }
 
     #[test]
     fn a_drag_clamps_to_the_bar_and_the_gear_sits_clear_of_every_control() {
-        // Body x 40..400: the bar spans 172..346. Left of it is silent, right of it full, whatever the row.
+        // Body x 40..400: the bar spans 312..358. Left of it is silent, right of it full, whatever the row.
         let drag = |progress, x| volume_fraction(440, 96, progress, x);
         assert_eq!(drag(1.0, 0), Some(0.0));
-        assert_eq!(drag(1.0, 172), Some(0.0));
-        assert_eq!(drag(1.0, 345), Some(1.0));
+        assert_eq!(drag(1.0, 312), Some(0.0));
+        assert_eq!(drag(1.0, 357), Some(1.0));
         assert_eq!(drag(1.0, 435), Some(1.0));
         assert_eq!(drag(0.0, 200), None, "closed");
-        let middle = drag(1.0, 258).unwrap();
-        assert!((middle - 86.0 / 173.0).abs() < 1e-6);
+        let middle = drag(1.0, 334).unwrap();
+        assert!((middle - 22.0 / 45.0).abs() < 1e-6);
         // The gear is inside both panels, off the volume bar and the mute toggle, and clickable only open.
         for dpi in [96, 144, 192] {
             let window = scaled(440.0, dpi);
@@ -1197,7 +1275,7 @@ mod tests {
                 if media {
                     let bar = volume_bar(dpi);
                     assert!(
-                        bar.x + bar.width + scaled(16.0, dpi) <= g.x - scaled(6.0, dpi),
+                        bar.x + bar.width + scaled(4.0, dpi) <= g.x - scaled(4.0, dpi),
                         "{dpi}"
                     );
                     assert!(media_controls(dpi).iter().all(|c| c.x + c.width <= g.x));
@@ -1245,7 +1323,7 @@ mod tests {
             assert!(backing_depth(shape, cx, cy) >= 6.0 + 8.0, "{media} gear");
         }
         // The check itself: a point on the bottom curve's edge is not inside.
-        assert!(backing_depth(NOTCH_EXPANDED, 16.0, 91.0) < 6.0);
+        assert!(backing_depth(NOTCH_EXPANDED, 16.0, NOTCH_EXPANDED.height - 1.0) < 6.0);
     }
 
     #[test]
@@ -1254,12 +1332,12 @@ mod tests {
         assert_eq!(with_notice(92.0, 0.5), 96.0);
         assert_eq!(with_notice(92.0, 1.0), 92.0 + NOTICE_ROOM);
         assert_eq!(with_notice(92.0, 3.0), 92.0 + NOTICE_ROOM, "clamped");
-        let (_, y, _, h) = (0.0, 76.0, 0.0, 14.0);
+        let (_, y, _, h) = (0.0, NOTCH_EXPANDED.height - 16.0, 0.0, 14.0);
         let notice = power_notice(false, 96);
         assert_eq!((notice.y as f32, notice.height as f32), (y, h));
-        // Pills end at 70: 6 above the row; 10 below it once the panel has grown.
+        // Pills end at 92: well above the row; 10 below it once the panel has grown.
         let pill = page_button(0, false, 96);
-        assert_eq!(notice.y - (pill.y + pill.height), 6);
+        assert!(notice.y - (pill.y + pill.height) >= 6);
         assert_eq!(NOTCH_EXPANDED.height + NOTICE_ROOM - (y + h), 10.0);
         // Grown, with the rail below and the open overshoot, it still fits the window.
         let tallest = NOTCH.height + (NOTCH_EXPANDED.height + NOTICE_ROOM - NOTCH.height) * 1.07;
@@ -1276,7 +1354,7 @@ mod tests {
 
     #[test]
     fn the_limits_page_grows_with_its_rows_and_still_fits_the_window_with_the_rail() {
-        assert_eq!(limits_height(3), 150);
+        assert_eq!(limits_height(3), 156);
         assert!(limits_height(2) < limits_height(3));
         // Three rows, open overshoot (progress 1.07) and the rail below stay inside the notch window.
         let shape = NOTCH_EXPANDED.height;
@@ -1298,16 +1376,16 @@ mod tests {
 
     #[test]
     fn volume_bar_maps_its_first_and_last_pixel_to_silent_and_full() {
-        // Body x 40..400: the bar spans 172..346 and 100..116 at 100 %, beside the mute toggle.
+        // Body x 40..400: the bar spans 312..358 and 88..108 at 100 %, beside the mute toggle.
         let at = |progress, x, y| volume_at(440, 96, progress, x, y);
-        assert_eq!(at(1.0, 172, 100), Some(0.0));
-        assert_eq!(at(1.0, 345, 115), Some(1.0));
-        assert_eq!(at(1.0, 172 + 173 / 2, 108), Some(86.0 / 173.0));
-        for (x, y) in [(171, 108), (346, 108), (200, 99), (200, 116)] {
+        assert_eq!(at(1.0, 312, 88), Some(0.0));
+        assert_eq!(at(1.0, 357, 107), Some(1.0));
+        assert_eq!(at(1.0, 312 + 22, 98), Some(22.0 / 45.0));
+        for (x, y) in [(311, 98), (358, 98), (330, 87), (330, 108)] {
             assert_eq!(at(1.0, x, y), None, "{x}, {y}");
         }
-        assert_eq!(media_control_at(440, 96, 1.0, 140, 100), Some(3));
-        assert_eq!(media_control_at(440, 96, 1.0, 172, 108), None);
+        assert_eq!(media_control_at(440, 96, 1.0, 290, 100), Some(3));
+        assert_eq!(media_control_at(440, 96, 1.0, 330, 100), None);
         // Collapsed or barely open, the row is not drawn.
         for progress in [0.0, 0.07, 0.35] {
             assert_eq!(at(progress, 200, 108), None);
@@ -1399,7 +1477,7 @@ mod tests {
         }
         // Independent review's concrete regression point, 10 px beside the plain panel, moved with
         // the window's 20 px wider sides.
-        assert!(!notch_hit(440, 96, 1.0, false, None, 50, 40));
+        assert!(!notch_hit(440, 96, 1.0, false, None, 30, 40));
         assert!(
             !notch_rows(
                 Bounds {
@@ -1414,7 +1492,7 @@ mod tests {
                 None
             )
             .iter()
-            .any(|r| r.y == 40 && r.x <= 50)
+            .any(|r| r.y == 40 && r.x <= 30)
         );
     }
 
@@ -1479,7 +1557,7 @@ mod tests {
                     (page_title(dpi), page_value(dpi), page_clock(media, dpi));
                 let notice = power_notice(media, dpi);
                 let shelf = shelf_slot(media, 0, dpi);
-                for slot in [title, value, clock, notice, shelf, shelf_hint(dpi)] {
+                for slot in [title, value, clock, notice, shelf] {
                     assert!(fits(slot), "{dpi} {media}");
                 }
                 // Timer page: title, value, clock and the notice row never share a pixel.
@@ -1500,8 +1578,8 @@ mod tests {
                         assert!(!beside || !hit(button, value), "{dpi} {media}");
                     }
                 }
-                // Shelf page: the add slot, its hint, the title and the clock.
-                let shelf_page = [title, clock, shelf, shelf_hint(dpi)];
+                // Shelf page: the first file capsule, the title and the clock.
+                let shelf_page = [title, clock, shelf];
                 for (a, first) in shelf_page.iter().enumerate() {
                     for second in &shelf_page[a + 1..] {
                         assert!(!hit(*first, *second), "{dpi} {media}");
@@ -1655,22 +1733,22 @@ mod tests {
                         body.left + slot.x + slot.width / 2,
                         slot.y + slot.height / 2,
                     );
-                    assert_eq!(shelf_at(width, dpi, 1.0, media, x, y), Some(index));
+                    assert_eq!(shelf_at(width, dpi, 1.0, media, false, x, y), Some(index));
                     assert_eq!(media_control_at(width, dpi, 1.0, x, y), None);
                     assert_eq!(media_seek_at(width, dpi, 1.0, x, y), None);
                     assert_eq!(volume_at(width, dpi, 1.0, x, y), None);
                     // Just outside either edge, and above or below.
                     assert_ne!(
-                        shelf_at(width, dpi, 1.0, media, body.left + slot.x - 1, y),
+                        shelf_at(width, dpi, 1.0, media, false, body.left + slot.x - 1, y),
                         Some(index)
                     );
-                    assert_eq!(shelf_at(width, dpi, 1.0, media, x, slot.y - 1), None);
+                    assert_eq!(shelf_at(width, dpi, 1.0, media, false, x, slot.y - 1), None);
                     assert_eq!(
-                        shelf_at(width, dpi, 1.0, media, x, slot.y + slot.height),
+                        shelf_at(width, dpi, 1.0, media, false, x, slot.y + slot.height),
                         None
                     );
                     // Not drawn while the panel is closed.
-                    assert_eq!(shelf_at(width, dpi, 0.0, media, x, y), None);
+                    assert_eq!(shelf_at(width, dpi, 0.0, media, false, x, y), None);
                 }
             }
         }
@@ -1794,7 +1872,7 @@ mod tests {
             true,
             Some(rail(1, 0)),
         );
-        assert_eq!(rows.len(), 120, "just the panel");
+        assert_eq!(rows.len(), 128, "just the panel");
     }
 
     #[test]
@@ -1830,5 +1908,135 @@ mod tests {
                 None
             );
         }
+    }
+
+    type Rect = (f32, f32, f32, f32);
+    fn overlap(a: Rect, b: Rect) -> bool {
+        a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+    }
+    fn dips(slot: Bounds, dpi: u32) -> Rect {
+        let k = dpi as f32 / 96.0;
+        (
+            slot.x as f32 / k,
+            slot.y as f32 / k,
+            slot.width as f32 / k,
+            slot.height as f32 / k,
+        )
+    }
+
+    #[test]
+    fn the_header_row_is_one_grid_with_no_overlap_on_every_page_width() {
+        for width in [NOTCH_EXPANDED.width, WIDE_W] {
+            let rects = header_rects(width);
+            for (a, first) in rects.iter().enumerate() {
+                // Inside the panel's margins and above the content.
+                assert!(
+                    first.0 >= PAD && first.0 + first.2 <= width - PAD + 0.01,
+                    "{width} {a}"
+                );
+                assert!(first.1 >= 0.0 && first.1 + first.3 <= BODY_Y, "{width} {a}");
+                for second in &rects[a + 1..] {
+                    assert!(!overlap(*first, *second), "{width}: {first:?} {second:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn limits_refresh_clears_the_header_and_the_column_labels() {
+        // The Limits page's own header: title, clock, and the window labels (y 30, 12 high) under it.
+        let labels: [Rect; 2] = [(96.0, 30.0, 100.0, 12.0), (224.0, 30.0, 100.0, 12.0)];
+        for dpi in [96, 120, 144, 192, 240] {
+            let button = dips(refresh(dpi), dpi);
+            let title = dips(page_title(dpi), dpi);
+            let clock = dips(page_clock(true, dpi), dpi);
+            let first_row = LIMITS_TOP;
+            // Close to exact at every scale (whole-pixel rounding).
+            let near = |a: f32, b: f32| (a - b).abs() < 1.0;
+            assert!(near(button.1 + button.3, 29.0), "{dpi} {button:?}");
+            for other in [title, clock].into_iter().chain(labels) {
+                assert!(
+                    !overlap(
+                        (
+                            button.0 + 0.5,
+                            button.1 + 0.5,
+                            button.2 - 1.0,
+                            button.3 - 1.0
+                        ),
+                        other
+                    ),
+                    "{dpi}: {button:?} against {other:?}"
+                );
+            }
+            assert!(labels.iter().all(|label| label.1 + label.3 <= first_row));
+            // The first row's text starts under the button too.
+            assert!(button.1 + button.3 <= first_row);
+        }
+        // The Limits panel is 360 wide: the button also clears the page clock's slot there.
+        assert!(!overlap(ACTION, header_rects(360.0)[3]));
+    }
+
+    #[test]
+    fn the_media_panel_places_cover_text_progress_transport_and_gear_without_overlap() {
+        let panel = |shape: NotchShape| (0.0, 0.0, shape.width, shape.height);
+        let controls = MEDIA_CONTROLS;
+        let mut rects: Vec<Rect> = controls.to_vec();
+        rects.extend([
+            VOLUME_BAR,
+            MEDIA_PROGRESS,
+            MEDIA_TIMES[0],
+            MEDIA_TIMES[1],
+            METER,
+        ]);
+        let g = gear(96, true);
+        rects.push((g.x as f32, g.y as f32, g.width as f32, g.height as f32));
+        for (a, first) in rects.iter().enumerate() {
+            let outer = panel(MEDIA_EXPANDED);
+            assert!(
+                first.0 >= 0.0
+                    && first.1 >= 0.0
+                    && first.0 + first.2 <= outer.2
+                    && first.1 + first.3 <= outer.3,
+                "{first:?}"
+            );
+            for second in &rects[a + 1..] {
+                assert!(!overlap(*first, *second), "{first:?} {second:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn shelf_capsules_form_a_grid_whose_remove_targets_are_their_own() {
+        let window = scaled(440.0, 96);
+        for index in 0..crate::shelf::VISIBLE {
+            let cell = shelf_slot(false, index, 96);
+            let cross = shelf_remove(index, 96);
+            assert!(cross.x >= cell.x && cross.x + cross.width <= cell.x + cell.width);
+            assert!(cross.y == cell.y && cross.height == cell.height);
+            let body = notch_body(window, 96, notch_shape(1.0, false));
+            let (x, y) = (
+                body.left + cross.x + cross.width / 2,
+                cross.y + cross.height / 2,
+            );
+            assert_eq!(shelf_remove_at(window, 96, 1.0, x, y), Some(index));
+            // The capsule's name side is not a remove target.
+            assert_eq!(
+                shelf_remove_at(window, 96, 1.0, body.left + cell.x + 40, y),
+                None
+            );
+            // Undo takes the grid's free cell and clears the gear.
+            let undo = shelf_action(96, true);
+            assert!(!hit(undo, cell) || index == 3);
+            assert!(!hit(undo, gear(96, false)));
+        }
+        // An empty shelf is one zone: any point in it adds.
+        let zone = shelf_zone(96);
+        let body = notch_body(window, 96, notch_shape(1.0, false));
+        let (x, y) = (
+            body.left + zone.x + zone.width - 4,
+            zone.y + zone.height - 4,
+        );
+        assert_eq!(shelf_at(window, 96, 1.0, false, true, x, y), Some(0));
+        assert_eq!(shelf_at(window, 96, 1.0, false, true, x, zone.y - 2), None);
     }
 }

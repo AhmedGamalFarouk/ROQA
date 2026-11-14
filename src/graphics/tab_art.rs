@@ -175,9 +175,136 @@ fn items(
     Ok(())
 }
 
-/// A page other than Media (`tab`, and whether it is the one leaving a switch): its title, a small clock at the top right and its content, all at `reveal` so
-/// they arrive as the pill's content leaves. The Timer page shows the soonest countdown big; the Shelf page
-/// shows the shelf's slots.
+/// What a page draws with: the frame's context, the body's corner, the scale, the page's reveal and the palette.
+/// Everything is placed in DIPs from the body's corner on the shared grid (`layout`: 16 margins, the header row, the
+/// content from `BODY_Y`, 8 gutters, 24 high chips, 14 radius tiles), so no page measures its own padding.
+struct Page<'a> {
+    context: &'a ID2D1DeviceContext,
+    body: &'a D2D_RECT_F,
+    scale: f32,
+    reveal: f32,
+    dpi: u32,
+    p: &'a Palette,
+}
+
+const LEAD: DWRITE_TEXT_ALIGNMENT = DWRITE_TEXT_ALIGNMENT_LEADING;
+const MIDDLE: DWRITE_TEXT_ALIGNMENT = DWRITE_TEXT_ALIGNMENT_CENTER;
+const NORMAL: DWRITE_FONT_WEIGHT = DWRITE_FONT_WEIGHT_NORMAL;
+const SEMI: DWRITE_FONT_WEIGHT = DWRITE_FONT_WEIGHT_SEMI_BOLD;
+const BOLD: DWRITE_FONT_WEIGHT = DWRITE_FONT_WEIGHT_BOLD;
+
+impl Page<'_> {
+    fn ink(&self, alpha: f32) -> D2D1_COLOR_F {
+        with_alpha(self.p.ink, self.p.ink_alpha(alpha * self.reveal))
+    }
+    fn accent(&self, alpha: f32) -> D2D1_COLOR_F {
+        with_alpha(self.p.accent, self.p.ink_alpha(alpha * self.reveal))
+    }
+    fn on_accent(&self) -> D2D1_COLOR_F {
+        with_alpha(self.p.ink_on_accent(), self.p.ink_alpha(self.reveal))
+    }
+    /// A rect from DIPs off the body's corner.
+    fn at(&self, x: f32, y: f32, w: f32, h: f32) -> D2D_RECT_F {
+        D2D_RECT_F {
+            left: self.body.left + x * self.scale,
+            top: self.body.top + y * self.scale,
+            right: self.body.left + (x + w) * self.scale,
+            bottom: self.body.top + (y + h) * self.scale,
+        }
+    }
+    /// A layout slot, already in pixels from the body's corner.
+    fn slot(&self, slot: Bounds) -> D2D_RECT_F {
+        D2D_RECT_F {
+            left: self.body.left + slot.x as f32,
+            top: self.body.top + slot.y as f32,
+            right: self.body.left + (slot.x + slot.width) as f32,
+            bottom: self.body.top + (slot.y + slot.height) as f32,
+        }
+    }
+    fn font(&self, size: f32, weight: DWRITE_FONT_WEIGHT, align: DWRITE_TEXT_ALIGNMENT) -> Font {
+        Font {
+            family: TEXT_FONT,
+            size: size * self.scale,
+            weight,
+            designator: 1.0,
+            align,
+        }
+    }
+    /// Display face, tabular digits first (the time's am/pm is smaller).
+    fn display(&self, size: f32, weight: DWRITE_FONT_WEIGHT, align: DWRITE_TEXT_ALIGNMENT) -> Font {
+        Font {
+            family: DISPLAY_FONT,
+            designator: TIME_DESIGNATOR,
+            ..self.font(size, weight, align)
+        }
+    }
+    fn text(&self, text: &str, font: &Font, rect: D2D_RECT_F, colour: D2D1_COLOR_F) -> Result<()> {
+        draw_text(self.context, text, font, rect, colour)
+    }
+    /// A filled rounded rect, a capsule without a radius (in DIPs).
+    fn fill(&self, rect: D2D_RECT_F, radius: Option<f32>, colour: D2D1_COLOR_F) -> Result<()> {
+        let radius = radius.map_or((rect.bottom - rect.top) / 2.0, |dips| dips * self.scale);
+        // SAFETY: a brush and a fill on the frame's own device context.
+        unsafe {
+            let brush = self.context.CreateSolidColorBrush(&colour, None)?;
+            self.context
+                .FillRoundedRectangle(&rounded(rect, radius), &brush);
+        }
+        Ok(())
+    }
+    /// A soft tile on the grid's 14 radius.
+    fn tile(&self, rect: D2D_RECT_F) -> Result<()> {
+        self.fill(rect, Some(layout::TILE_RADIUS), self.ink(0.07))
+    }
+    /// A page button: a filled capsule. The one primary action of a page is a solid accent capsule with dark ink;
+    /// the others are a faint ink fill with ink text.
+    fn chip(&self, rect: D2D_RECT_F, label: &str) -> Result<()> {
+        let primary = matches!(
+            label,
+            "Focus" | "Pause" | "Resume" | "Add files" | "Set city"
+        );
+        let (fill, ink) = if primary {
+            (self.accent(1.0), self.on_accent())
+        } else {
+            (self.ink(0.14), self.ink(0.9))
+        };
+        self.fill(rect, None, fill)?;
+        self.text(label, &self.font(11.0, SEMI, MIDDLE), rect, ink)
+    }
+    /// A page's one-line message, with the "Set city" chip under it when the page needs a place.
+    fn message(&self, text: &str, set_city: bool) -> Result<()> {
+        self.text(
+            text,
+            &self.font(12.0, NORMAL, LEAD),
+            self.at(layout::PAD, layout::BODY_Y, 328.0, 18.0),
+            self.ink(0.85),
+        )?;
+        if set_city {
+            self.chip(
+                self.slot(layout::page_button(0, false, self.dpi)),
+                "Set city",
+            )?;
+        }
+        Ok(())
+    }
+    /// The footer line, unless the power notice has its row.
+    fn footer(&self, scene: &NotchScene, text: &str, alpha: f32) -> Result<()> {
+        if scene.notice.is_some() || text.is_empty() {
+            return Ok(());
+        }
+        let (x, y, w, h) = layout::footer(scene.track.is_some());
+        self.text(
+            text,
+            &self.font(FOOTER_SIZE, NORMAL, LEAD),
+            self.at(x, y, w, h),
+            self.ink(alpha),
+        )
+    }
+}
+
+/// A page other than Media (`tab`, and whether it is the one leaving a switch): the shared header (title, the
+/// mascot's resting eyes, a small clock at the top right) and its content, all at `reveal` so they arrive as the
+/// pill's content leaves.
 pub(super) fn page(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -191,19 +318,13 @@ pub(super) fn page(
         return Ok(());
     }
     let media = scene.track.is_some();
-    let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha * reveal));
-    let rect = |slot: Bounds| D2D_RECT_F {
-        left: body.left + slot.x as f32,
-        top: body.top + slot.y as f32,
-        right: body.left + (slot.x + slot.width) as f32,
-        bottom: body.top + (slot.y + slot.height) as f32,
-    };
-    let font = |family, size: f32, weight, designator, align| Font {
-        family,
-        size: size * scale,
-        weight,
-        designator,
-        align,
+    let g = Page {
+        context,
+        body,
+        scale,
+        reveal,
+        dpi: scene.dpi,
+        p,
     };
     // A tab switch slides the page in from the side it came from: the title and clock first, the content a
     // beat later (the stagger).
@@ -229,33 +350,22 @@ pub(super) fn page(
             None => tab.name(),
         },
     };
-    draw_text(
-        context,
+    g.text(
         title,
-        &font(
-            TEXT_FONT,
-            13.0,
-            DWRITE_FONT_WEIGHT_SEMI_BOLD,
-            1.0,
-            DWRITE_TEXT_ALIGNMENT_LEADING,
-        ),
-        rect(layout::page_title(scene.dpi)),
-        ink(1.0),
+        &g.font(13.0, SEMI, LEAD),
+        g.slot(layout::page_title(scene.dpi)),
+        g.ink(1.0),
     )?;
-    draw_text(
-        context,
+    g.text(
         scene.time,
-        &font(
-            TEXT_FONT,
-            12.0,
-            DWRITE_FONT_WEIGHT_NORMAL,
-            TIME_DESIGNATOR,
-            DWRITE_TEXT_ALIGNMENT_TRAILING,
-        ),
-        rect(layout::page_clock(media, scene.dpi)),
-        ink(0.6),
+        &Font {
+            designator: TIME_DESIGNATOR,
+            ..g.font(12.0, NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING)
+        },
+        g.slot(layout::page_clock(media, scene.dpi)),
+        g.ink(0.6),
     )?;
-    // The mascot keeps a small watch beside the title, leaning to a running countdown.
+    // The mascot keeps a small watch in the header's middle, leaning to a running countdown.
     if let Some(frame) = scene.eyes {
         let toward =
             if tab == Tab::Timer && scene.timer.is_some_and(|view| !view.done && !view.paused) {
@@ -263,132 +373,163 @@ pub(super) fn page(
             } else {
                 0.0
             };
-        panel_eyes(context, body, scale, reveal, (frame, toward), p)?;
+        let middle = (body.right - body.left) / scale / 2.0;
+        let eyes = (middle, layout::HEAD_Y + layout::HEAD_EYES.1 / 2.0, 0.55);
+        panel_eyes(context, body, scale, reveal, frame, (eyes, toward), p)?;
     }
     slide(0.25);
     match tab {
-        Tab::Timer => match scene.timer.filter(|view| !view.done) {
-            Some(view) => {
-                draw_text(
-                    context,
-                    &view.panel,
-                    &font(
-                        DISPLAY_FONT,
-                        30.0,
-                        DWRITE_FONT_WEIGHT_BOLD,
-                        TIME_DESIGNATOR,
-                        DWRITE_TEXT_ALIGNMENT_LEADING,
-                    ),
-                    rect(layout::page_value(scene.dpi)),
-                    ink(if view.paused { 0.55 } else { 1.0 }),
-                )?;
-                // Running reads as a lit accent capsule under the digits, paused as a faint one (static).
-                let state = D2D_RECT_F {
-                    left: body.left + 18.0 * scale,
-                    top: body.top + 66.0 * scale,
-                    right: body.left + 42.0 * scale,
-                    bottom: body.top + 69.0 * scale,
-                };
-                // SAFETY: a brush and a fill on the frame's own device context.
-                unsafe {
-                    let lit = if view.paused {
-                        ink(0.25)
-                    } else {
-                        with_alpha(p.accent, p.ink_alpha(reveal))
-                    };
-                    let brush = context.CreateSolidColorBrush(&lit, None)?;
-                    context.FillRoundedRectangle(&rounded(state, 1.5 * scale), &brush);
-                }
-                for (index, control) in crate::timer::controls(Some(view)).iter().enumerate() {
-                    let slot = layout::page_button(index, true, scene.dpi);
-                    pill(context, scene, body, slot, &control.label(), reveal, p)?;
-                }
-                Ok(())
-            }
-            None => {
-                // Idle, or the last one just finished: the preset buttons start the next.
-                let line = if scene.timer.is_some() {
-                    "Done. Rest a little."
-                } else {
-                    "Pick a time"
-                };
-                let mut slot = layout::page_value(scene.dpi);
-                slot.height /= 2;
-                draw_text(
-                    context,
-                    line,
-                    &font(
-                        DISPLAY_FONT,
-                        15.0,
-                        DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                        1.0,
-                        DWRITE_TEXT_ALIGNMENT_LEADING,
-                    ),
-                    rect(slot),
-                    ink(1.0),
-                )?;
-                for (index, control) in crate::timer::controls(scene.timer).iter().enumerate() {
-                    let slot = layout::page_button(index, false, scene.dpi);
-                    pill(context, scene, body, slot, &control.label(), reveal, p)?;
-                }
-                Ok(())
-            }
-        },
-        Tab::Shelf => {
-            if scene.shelf.first().is_some_and(|slot| slot.add) {
-                drop_zone(
-                    context,
-                    rect(layout::shelf_zone(scene.dpi)),
-                    scale,
-                    ink(0.35),
-                )?;
-            }
-            shelf_row(context, scene, body, scale, p)?;
-            if !scene.shelf.first().is_some_and(|slot| slot.add) {
-                pill(
-                    context,
-                    scene,
-                    body,
-                    layout::shelf_action(scene.dpi, false),
-                    "Add files",
-                    reveal,
-                    p,
-                )?;
-            }
-            if scene.shelf_undo {
-                pill(
-                    context,
-                    scene,
-                    body,
-                    layout::shelf_action(scene.dpi, true),
-                    "Undo",
-                    reveal,
-                    p,
-                )?;
-            }
-            if scene.shelf.first().is_some_and(|slot| slot.add) {
-                draw_text(
-                    context,
-                    "Drop a file here. It will wait.",
-                    &font(
-                        TEXT_FONT,
-                        11.0,
-                        DWRITE_FONT_WEIGHT_NORMAL,
-                        1.0,
-                        DWRITE_TEXT_ALIGNMENT_LEADING,
-                    ),
-                    rect(layout::shelf_hint(scene.dpi)),
-                    ink(0.6),
-                )?;
-            }
-            Ok(())
-        }
-        Tab::Weather => weather_page(context, scene, body, scale, reveal, p),
-        Tab::Prayer => prayer_page(context, scene, body, scale, reveal, p),
-        Tab::Limits => limits_page(context, scene, body, scale, reveal, p),
-        Tab::Widgets => widgets_page(context, scene, body, scale, reveal, p),
+        Tab::Timer => timer_page(&g, scene),
+        Tab::Shelf => shelf_page(&g, scene),
+        Tab::Weather => weather_page(&g, scene),
+        Tab::Prayer => prayer_page(&g, scene),
+        Tab::Limits => limits_page(&g, scene),
+        Tab::Widgets => widgets_page(&g, scene),
         _ => Ok(()),
     }
+}
+
+/// "25 min", "1 h 30 min": a countdown's full length for the caption under its capsule.
+fn length(total: u64) -> String {
+    match total {
+        0..60 => format!("{total} s"),
+        60..3600 => format!("{} min", total.div_ceil(60)),
+        _ if total % 3600 < 60 => format!("{} h", total / 3600),
+        _ => format!("{} h {} min", total / 3600, total % 3600 / 60),
+    }
+}
+
+/// The Timer page. Running or paused: the digits at the left, the controls right of them, the progress capsule
+/// across the grid (a Pomodoro draws its round as segments, focus long, breaks short, the last one the long
+/// break) and the countdown's full length under it. Idle or just finished: one line and the presets as capsules.
+fn timer_page(g: &Page, scene: &NotchScene) -> Result<()> {
+    let Some(view) = scene.timer.filter(|view| !view.done) else {
+        // Idle, or the last one just finished: the preset buttons start the next.
+        let line = if scene.timer.is_some() {
+            "Done. Rest a little."
+        } else {
+            "Pick a time"
+        };
+        g.text(
+            line,
+            &g.display(15.0, SEMI, LEAD),
+            g.at(layout::PAD, layout::BODY_Y, 328.0, 22.0),
+            g.ink(1.0),
+        )?;
+        for (index, control) in crate::timer::controls(scene.timer).iter().enumerate() {
+            let slot = layout::page_button(index, false, scene.dpi);
+            g.chip(g.slot(slot), &control.label())?;
+        }
+        return Ok(());
+    };
+    g.text(
+        &view.panel,
+        &g.display(30.0, BOLD, LEAD),
+        g.slot(layout::page_value(scene.dpi)),
+        g.ink(if view.paused { 0.55 } else { 1.0 }),
+    )?;
+    for (index, control) in crate::timer::controls(Some(view)).iter().enumerate() {
+        let slot = layout::page_button(index, true, scene.dpi);
+        g.chip(g.slot(slot), &control.label())?;
+    }
+    timer_bar(g, view)?;
+    g.text(
+        &format!("of {}", length(view.total)),
+        &g.font(11.0, NORMAL, LEAD),
+        g.at(layout::PAD, 92.0, 200.0, 14.0),
+        g.ink(0.6),
+    )
+}
+
+/// The countdown's capsule: one track with its fill, or for a Pomodoro the round's segments (focus 4 units, a
+/// short break 2, the closing long break 3) where finished ones are full, the current one fills with the time
+/// gone and the rest wait. Paused dims the fill.
+fn timer_bar(g: &Page, view: &crate::timer::View) -> Result<()> {
+    let (y, height, gap) = (80.0, 6.0, 4.0);
+    let width = layout::NOTCH_EXPANDED.width - 2.0 * layout::PAD;
+    let elapsed = view.elapsed();
+    let (current, count) = view
+        .cycle
+        .map_or((0, 1), |(at, count)| (usize::from(at), usize::from(count)));
+    let weight = |index: usize| match (view.cycle, index) {
+        (None, _) => 1.0,
+        (_, index) if index % 2 == 0 => 4.0,
+        (_, index) if index + 1 == count => 3.0,
+        _ => 2.0,
+    };
+    let unit = (width - gap * (count - 1) as f32) / (0..count).map(weight).sum::<f32>();
+    let lit = g.accent(if view.paused { 0.5 } else { 1.0 });
+    let mut left = layout::PAD;
+    for index in 0..count {
+        let segment = g.at(left, y, unit * weight(index), height);
+        g.fill(segment, None, g.ink(0.16))?;
+        let share = match index.cmp(&current) {
+            std::cmp::Ordering::Less => 1.0,
+            std::cmp::Ordering::Equal => elapsed,
+            std::cmp::Ordering::Greater => 0.0,
+        };
+        if share > 0.0 {
+            // A started segment never draws narrower than a capsule's own height.
+            let wide = (segment.right - segment.left) * share;
+            let part = D2D_RECT_F {
+                right: segment.left + wide.max(height * g.scale),
+                ..segment
+            };
+            g.fill(part, None, lit)?;
+        }
+        left += unit * weight(index) + gap;
+    }
+    Ok(())
+}
+
+/// The Shelf page: empty, a soft dashed drop zone with its hint and an Add files capsule; otherwise Add files in
+/// the header's action slot, the file capsules in a two column grid and, after a removal, Undo in the grid's
+/// free cell.
+fn shelf_page(g: &Page, scene: &NotchScene) -> Result<()> {
+    let empty = scene.shelf.first().is_some_and(|slot| slot.add);
+    if empty {
+        let zone = g.slot(layout::shelf_zone(scene.dpi));
+        drop_zone(g.context, zone, g.scale, g.ink(0.35))?;
+        glyphs::draw(
+            g.context,
+            pixel_square(
+                zone.left + 16.0 * g.scale,
+                zone.top + 18.0 * g.scale,
+                20.0 * g.scale,
+            ),
+            Glyph::Add,
+            g.ink(0.8),
+        )?;
+        let at = |dy: f32, h: f32| g.at(layout::PAD + 48.0, layout::BODY_Y + dy, 190.0, h);
+        g.text(
+            "Drop a file here.",
+            &g.font(13.0, SEMI, LEAD),
+            at(9.0, 18.0),
+            g.ink(0.95),
+        )?;
+        g.text(
+            "It will wait.",
+            &g.font(11.0, NORMAL, LEAD),
+            at(28.0, 16.0),
+            g.ink(0.6),
+        )?;
+        g.chip(
+            g.at(
+                layout::PAD + 328.0 - 16.0 - 66.0,
+                layout::BODY_Y + 16.0,
+                66.0,
+                layout::CHIP_H,
+            ),
+            "Add files",
+        )?;
+    } else {
+        g.chip(g.slot(layout::shelf_action(scene.dpi, false)), "Add files")?;
+    }
+    shelf_row(g.context, scene, g.body, g.scale, g.p)?;
+    if scene.shelf_undo {
+        g.chip(g.slot(layout::shelf_action(scene.dpi, true)), "Undo")?;
+    }
+    Ok(())
 }
 
 /// The empty shelf's soft drop zone: a dashed r14 outline, the one outline in the grammar.
@@ -419,43 +560,28 @@ fn drop_zone(
             Some(&dashes),
         )?;
         let brush = context.CreateSolidColorBrush(&colour, None)?;
-        context.DrawRoundedRectangle(&rounded(zone, 14.0 * scale), &brush, 1.5 * scale, &style);
+        context.DrawRoundedRectangle(
+            &rounded(zone, layout::TILE_RADIUS * scale),
+            &brush,
+            1.5 * scale,
+            &style,
+        );
     }
     Ok(())
 }
 
-fn widgets_page(
-    context: &ID2D1DeviceContext,
-    scene: &NotchScene,
-    body: &D2D_RECT_F,
-    scale: f32,
-    reveal: f32,
-    p: &Palette,
-) -> Result<()> {
+/// The Widgets page: two tiles of one size on the grid (190 x 72, the 14 radius, an 8 gutter), each with one
+/// accent: today in the week, the battery ring.
+fn widgets_page(g: &Page, scene: &NotchScene) -> Result<()> {
     use crate::widgets::WidgetKind;
     let kinds = [scene.widgets.slot_left, scene.widgets.slot_right];
     for (index, kind) in kinds.into_iter().enumerate() {
-        let x = body.left + (38.0 + index as f32 * 182.0) * scale;
-        let y = body.top + 31.0 * scale;
-        let at = |dx: f32, dy: f32, w: f32, h: f32| D2D_RECT_F {
-            left: x + dx * scale,
-            top: y + dy * scale,
-            right: x + (dx + w) * scale,
-            bottom: y + (dy + h) * scale,
-        };
-        let font = |size, weight, align| Font {
-            family: TEXT_FONT,
-            size: size * scale,
-            weight,
-            designator: 1.0,
-            align,
-        };
-        let ink = |alpha| with_alpha(p.ink, p.ink_alpha(alpha * reveal));
-        // SAFETY: the brush belongs to the live drawing context.
-        unsafe {
-            let fill = context.CreateSolidColorBrush(&with_alpha(p.ink, 0.07 * reveal), None)?;
-            context.FillRoundedRectangle(&rounded(at(0.0, 0.0, 162.0, 96.0), 14.0 * scale), &fill);
-        }
+        let (x, y) = (
+            layout::PAD + (WIDGET_TILE.0 + layout::GUTTER) * index as f32,
+            layout::BODY_Y,
+        );
+        let at = |dx: f32, dy: f32, w: f32, h: f32| g.at(x + dx, y + dy, w, h);
+        g.tile(at(0.0, 0.0, WIDGET_TILE.0, WIDGET_TILE.1))?;
         match kind {
             WidgetKind::WeekCalendar => {
                 // SAFETY: GetLocalTime returns a value and needs no resources.
@@ -467,64 +593,35 @@ fn widgets_page(
                     date.wDayOfWeek,
                 );
                 let today = usize::from((date.wDayOfWeek + 6) % 7);
-                // The date heads the tile, the week strip sits in its lower two thirds: no empty band.
-                draw_text(
-                    context,
+                // The date heads the tile, the week strip sits under it: no empty band.
+                g.text(
                     scene.date,
-                    &font(
-                        12.0,
-                        DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                        DWRITE_TEXT_ALIGNMENT_LEADING,
-                    ),
-                    at(14.0, 13.0, 134.0, 16.0),
-                    ink(0.9),
+                    &g.font(12.0, SEMI, LEAD),
+                    at(14.0, 8.0, 162.0, 16.0),
+                    g.ink(0.9),
                 )?;
                 for (i, (label, day)) in ["M", "T", "W", "T", "F", "S", "S"]
                     .into_iter()
                     .zip(days)
                     .enumerate()
                 {
-                    let dx = 11.0 + i as f32 * 20.0;
-                    draw_text(
-                        context,
+                    let dx = 11.0 + i as f32 * 24.0;
+                    g.text(
                         label,
-                        &font(
-                            9.0,
-                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                            DWRITE_TEXT_ALIGNMENT_CENTER,
-                        ),
-                        at(dx, 42.0, 19.0, 15.0),
-                        ink(0.55),
+                        &g.font(9.0, SEMI, MIDDLE),
+                        at(dx, 27.0, 22.0, 12.0),
+                        g.ink(0.55),
                     )?;
+                    let cell = at(dx + 1.0, 42.0, 20.0, 20.0);
                     if i == today {
-                        // SAFETY: brush and rounded rectangle are local to this frame.
-                        unsafe {
-                            let accent = context.CreateSolidColorBrush(
-                                &with_alpha(p.accent, p.ink_alpha(reveal)),
-                                None,
-                            )?;
-                            context.FillRoundedRectangle(
-                                &rounded(at(dx, 60.0, 19.0, 19.0), 9.5 * scale),
-                                &accent,
-                            );
-                        }
+                        g.fill(cell, None, g.accent(1.0))?;
                     }
                     let colour = if i == today {
-                        with_alpha(p.ink_on_accent(), p.ink_alpha(reveal))
+                        g.on_accent()
                     } else {
-                        ink(0.9)
+                        g.ink(0.9)
                     };
-                    draw_text(
-                        context,
-                        &day.to_string(),
-                        &font(
-                            10.0,
-                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                            DWRITE_TEXT_ALIGNMENT_CENTER,
-                        ),
-                        at(dx, 60.0, 19.0, 19.0),
-                        colour,
-                    )?;
+                    g.text(&day.to_string(), &g.font(10.0, SEMI, MIDDLE), cell, colour)?;
                 }
             }
             WidgetKind::Battery => {
@@ -533,27 +630,27 @@ fn widgets_page(
                 let percent = reading.map_or(0, |r| r.percent);
                 // SAFETY: brushes and line segments use the live context; no geometry is retained.
                 unsafe {
-                    let track = context.CreateSolidColorBrush(&ink(0.18), None)?;
-                    let accent = context
-                        .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(reveal)), None)?;
+                    let track = g.context.CreateSolidColorBrush(&g.ink(0.18), None)?;
+                    let accent = g.context.CreateSolidColorBrush(&g.accent(1.0), None)?;
                     let point = |angle: f32| Vector2 {
-                        X: x + (46.0 + 27.0 * angle.cos()) * scale,
-                        Y: y + (48.0 + 27.0 * angle.sin()) * scale,
+                        X: g.body.left + (x + 38.0 + 22.0 * angle.cos()) * g.scale,
+                        Y: g.body.top + (y + 36.0 + 22.0 * angle.sin()) * g.scale,
                     };
-                    for step in 0..60 {
-                        let a = -std::f32::consts::FRAC_PI_2
-                            + step as f32 * std::f32::consts::TAU / 60.0;
-                        let b = -std::f32::consts::FRAC_PI_2
-                            + (step + 1) as f32 * std::f32::consts::TAU / 60.0;
-                        context.DrawLine(
-                            point(a),
-                            point(b),
-                            if step * 100 < usize::from(percent) * 60 {
+                    const STEPS: usize = 48;
+                    for step in 0..STEPS {
+                        let turn = |n: usize| {
+                            -std::f32::consts::FRAC_PI_2
+                                + n as f32 * std::f32::consts::TAU / STEPS as f32
+                        };
+                        g.context.DrawLine(
+                            point(turn(step)),
+                            point(turn(step + 1)),
+                            if step * 100 < usize::from(percent) * STEPS {
                                 &accent
                             } else {
                                 &track
                             },
-                            4.0 * scale,
+                            4.0 * g.scale,
                             None,
                         );
                     }
@@ -561,19 +658,18 @@ fn widgets_page(
                 let charging = reading.is_some_and(|r| r.flag & 8 != 0);
                 if charging {
                     glyphs::draw(
-                        context,
-                        at(34.0, 36.0, 24.0, 24.0),
+                        g.context,
+                        at(26.0, 24.0, 24.0, 24.0),
                         Glyph::Charging,
-                        with_alpha(p.accent, p.ink_alpha(reveal)),
+                        g.accent(1.0),
                     )?;
                 }
                 if let Some(r) = reading {
-                    draw_text(
-                        context,
+                    g.text(
                         &format!("{}%", r.percent),
-                        &font(22.0, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING),
-                        at(86.0, 28.0, 70.0, 28.0),
-                        ink(1.0),
+                        &g.display(24.0, BOLD, LEAD),
+                        at(76.0, 12.0, 104.0, 28.0),
+                        g.ink(1.0),
                     )?;
                 }
                 let status = match reading {
@@ -583,393 +679,206 @@ fn widgets_page(
                     Some(r) if r.ac == 0 => "On battery",
                     _ => "Unknown",
                 };
-                draw_text(
-                    context,
+                g.text(
                     status,
-                    &font(
-                        9.5,
-                        DWRITE_FONT_WEIGHT_NORMAL,
-                        DWRITE_TEXT_ALIGNMENT_LEADING,
-                    ),
+                    &g.font(11.0, NORMAL, LEAD),
                     if reading.is_some() {
-                        at(86.0, 58.0, 70.0, 17.0)
+                        at(76.0, 42.0, 104.0, 16.0)
                     } else {
-                        at(86.0, 40.0, 70.0, 17.0)
+                        at(76.0, 28.0, 104.0, 16.0)
                     },
-                    ink(0.6),
+                    g.ink(0.6),
                 )?;
             }
         }
     }
     Ok(())
 }
+/// A Widgets tile: 190 x 72 DIPs, two across the 420 wide page.
+const WIDGET_TILE: (f32, f32) = (190.0, 72.0);
 
-/// A page button (`layout::page_button`): a filled capsule. The one primary action of a page is a solid accent
-/// capsule with dark ink; the others are a faint ink fill with ink text.
-fn pill(
-    context: &ID2D1DeviceContext,
-    scene: &NotchScene,
-    body: &D2D_RECT_F,
-    slot: Bounds,
-    label: &str,
-    reveal: f32,
-    p: &Palette,
-) -> Result<()> {
-    let scale = scene.dpi as f32 / 96.0;
-    let square = D2D_RECT_F {
-        left: body.left + slot.x as f32,
-        top: body.top + slot.y as f32,
-        right: body.left + (slot.x + slot.width) as f32,
-        bottom: body.top + (slot.y + slot.height) as f32,
-    };
-    let primary = matches!(
-        label,
-        "Focus" | "Pause" | "Resume" | "Add files" | "Set city"
-    );
-    let (fill, ink) = if primary {
-        (
-            with_alpha(p.accent, p.ink_alpha(reveal)),
-            with_alpha(p.ink_on_accent(), p.ink_alpha(reveal)),
-        )
-    } else {
-        (
-            with_alpha(p.ink, p.ink_alpha(0.14 * reveal)),
-            with_alpha(p.ink, p.ink_alpha(0.9 * reveal)),
-        )
-    };
-    // SAFETY: a brush and a fill on the frame's own device context.
-    unsafe {
-        let brush = context.CreateSolidColorBrush(&fill, None)?;
-        context.FillRoundedRectangle(&rounded(square, (square.bottom - square.top) / 2.0), &brush);
-    }
-    let font = Font {
-        family: TEXT_FONT,
-        size: 11.0 * scale,
-        weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
-        designator: 1.0,
-        align: DWRITE_TEXT_ALIGNMENT_CENTER,
-    };
-    draw_text(context, label, &font, square, ink)
-}
-
-/// The Weather page (design J "Hero"): a condition picture and the big temperature at the left with the day's
-/// range and the condition beside them, the next hours as columns at the right, and the attribution as the
-/// footer (the power notice takes its row while it shows). The columns are three in the plain panel and four
-/// in the wider media one; with no data one line says why. Positions are DIPs from the body's corner.
-fn weather_page(
-    context: &ID2D1DeviceContext,
-    scene: &NotchScene,
-    body: &D2D_RECT_F,
-    scale: f32,
-    reveal: f32,
-    p: &Palette,
-) -> Result<()> {
+/// The Weather page: the condition glyph and the big temperature at the left with the condition and the day's range
+/// under them, the next hours as columns on one soft tile at the right (four, on both panel kinds), and the
+/// attribution as the footer. With no data one line says why.
+fn weather_page(g: &Page, scene: &NotchScene) -> Result<()> {
     let Some(view) = scene.weather else {
         return Ok(());
     };
-    let media = scene.track.is_some();
-    let width = if media { 328.0 } else { 288.0 };
-    let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha * reveal));
-    let at = |x: f32, y: f32, w: f32, h: f32| D2D_RECT_F {
-        left: body.left + x * scale,
-        top: body.top + y * scale,
-        right: body.left + (x + w) * scale,
-        bottom: body.top + (y + h) * scale,
-    };
-    let font = |family, size: f32, weight, align| Font {
-        family,
-        size: size * scale,
-        weight,
-        designator: 1.0,
-        align,
-    };
-    let (lead, middle) = (DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_CENTER);
-    let normal = DWRITE_FONT_WEIGHT_NORMAL;
     if let Some(message) = view.message {
-        let font = font(TEXT_FONT, 12.0, normal, lead);
-        draw_text(
-            context,
-            message,
-            &font,
-            at(16.0, 30.0, width, 17.0),
-            ink(0.85),
-        )?;
-        if !view.set_city {
-            return Ok(());
-        }
-        return pill(
-            context,
-            scene,
-            body,
-            layout::page_button(0, false, scene.dpi),
-            "Set city",
-            reveal,
-            p,
-        );
+        return g.message(message, view.set_city);
     }
     glyphs::draw(
-        context,
-        at(16.0, 33.0, 28.0, 28.0),
+        g.context,
+        g.at(layout::PAD, 40.0, 36.0, 36.0),
         Glyph::weather(view.icon),
-        ink(1.0),
+        g.ink(1.0),
     )?;
-    let temp = font(DISPLAY_FONT, 30.0, DWRITE_FONT_WEIGHT_BOLD, lead);
-    draw_text(
-        context,
+    g.text(
         &view.temp,
-        &temp,
-        at(50.0, 28.0, 56.0, 36.0),
-        ink(1.0),
+        &g.display(34.0, BOLD, LEAD),
+        g.at(60.0, 36.0, 108.0, 42.0),
+        g.ink(1.0),
     )?;
-    let small = font(TEXT_FONT, 11.0, normal, lead);
-    draw_text(
-        context,
-        &view.range,
-        &small,
-        at(108.0, 33.0, 72.0, 14.0),
-        ink(0.8),
-    )?;
-    draw_text(
-        context,
+    g.text(
         view.cond,
-        &small,
-        at(108.0, 48.0, 72.0, 14.0),
-        ink(0.6),
+        &g.font(12.0, NORMAL, LEAD),
+        g.at(layout::PAD, 80.0, 96.0, 16.0),
+        g.ink(0.8),
     )?;
-    let columns = if media { 4 } else { 3 };
+    g.text(
+        &view.range,
+        &g.font(11.0, NORMAL, LEAD),
+        g.at(110.0, 80.0, 60.0, 16.0),
+        g.ink(0.6),
+    )?;
     // The hours sit together on one soft tile, so the strip reads as a unit.
-    let (first, pitch) = if media { (182.0, 40.0) } else { (178.0, 37.0) };
-    // SAFETY: a brush and a fill on the frame's own device context.
-    unsafe {
-        let wash = context.CreateSolidColorBrush(&ink(0.07), None)?;
-        let tile = at(first - 3.0, 26.0, pitch * columns as f32 + 6.0, 44.0);
-        context.FillRoundedRectangle(&rounded(tile, 14.0 * scale), &wash);
-    }
-    for (index, cell) in view.hours.iter().take(columns).enumerate() {
-        // The plain panel's columns end before the gear at its bottom right corner.
-        let (first, pitch) = if media { (182.0, 40.0) } else { (178.0, 37.0) };
-        let x = first + pitch * index as f32;
-        let label = font(TEXT_FONT, 10.0, normal, middle);
-        draw_text(
-            context,
+    const PITCH: f32 = 42.0;
+    let tile_x = layout::PAD + 328.0 - 4.0 * PITCH;
+    g.tile(g.at(tile_x, 36.0, 4.0 * PITCH, 60.0))?;
+    for (index, cell) in view.hours.iter().take(4).enumerate() {
+        let x = tile_x + PITCH * index as f32;
+        g.text(
             &cell.label,
-            &label,
-            at(x, 29.0, pitch, 12.0),
-            ink(0.6),
+            &g.font(10.0, NORMAL, MIDDLE),
+            g.at(x, 42.0, PITCH, 12.0),
+            g.ink(0.6),
         )?;
         glyphs::draw(
-            context,
-            at(x + (pitch - 12.0) / 2.0, 41.0, 12.0, 12.0),
+            g.context,
+            g.at(x + (PITCH - 14.0) / 2.0, 56.0, 14.0, 14.0),
             Glyph::weather(cell.icon),
-            ink(0.85),
+            g.ink(0.85),
         )?;
-        let value = font(TEXT_FONT, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, middle);
-        draw_text(
-            context,
+        g.text(
             &cell.temp,
-            &value,
-            at(x, 53.0, pitch, 13.0),
-            ink(1.0),
+            &g.font(12.0, SEMI, MIDDLE),
+            g.at(x, 73.0, PITCH, 14.0),
+            g.ink(1.0),
         )?;
     }
-    if scene.notice.is_some() {
-        return Ok(());
-    }
-    let (x, y, w, h) = layout::footer(media);
-    draw_text(
-        context,
-        &view.footer,
-        &font(TEXT_FONT, FOOTER_SIZE, normal, lead),
-        at(x, y, w, h),
-        ink(0.45),
-    )
+    g.footer(scene, &view.footer, 0.45)
 }
 
 /// The footer line's size (DIPs): a step above the old 10, in a 13 DIP row (`layout::footer`).
 const FOOTER_SIZE: f32 = 11.0;
 
-/// The Prayer page: the next prayer and its countdown at the left, the five times as columns at the right with
-/// the current one on a wash, and the Hijri date as the footer (the notice takes its row while it shows).
-fn prayer_page(
-    context: &ID2D1DeviceContext,
-    scene: &NotchScene,
-    body: &D2D_RECT_F,
-    scale: f32,
-    reveal: f32,
-    p: &Palette,
-) -> Result<()> {
+/// The Prayer page: the next prayer's name and the countdown as the hero at the left with the Hijri date under
+/// them, the sun arc across its five stops at the right, and the five times as capsule chips along the bottom
+/// (the next one in the accent wash, the current one brighter).
+fn prayer_page(g: &Page, scene: &NotchScene) -> Result<()> {
     let Some(view) = scene.prayer else {
         return Ok(());
     };
-    let media = scene.track.is_some();
-    let width = if media { 328.0 } else { 288.0 };
-    let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha * reveal));
-    let at = |x: f32, y: f32, w: f32, h: f32| D2D_RECT_F {
-        left: body.left + x * scale,
-        top: body.top + y * scale,
-        right: body.left + (x + w) * scale,
-        bottom: body.top + (y + h) * scale,
-    };
-    let font = |family, size: f32, weight, align| Font {
-        family,
-        size: size * scale,
-        weight,
-        designator: 1.0,
-        align,
-    };
-    let (lead, middle) = (DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_CENTER);
-    let normal = DWRITE_FONT_WEIGHT_NORMAL;
     if let Some(message) = view.message {
-        draw_text(
-            context,
-            message,
-            &font(TEXT_FONT, 12.0, normal, lead),
-            at(16.0, 30.0, width, 17.0),
-            ink(0.85),
-        )?;
-        if !view.set_city {
-            return Ok(());
-        }
-        return pill(
-            context,
-            scene,
-            body,
-            layout::page_button(0, false, scene.dpi),
-            "Set city",
-            reveal,
-            p,
-        );
+        return g.message(message, view.set_city);
     }
-    // Wide enough for "Maghrib" at the name size, so no name is cut.
-    let column = if media { 44.0 } else { 40.0 };
-    let left = 16.0 + width - column * view.rows.len() as f32;
-    sun_arc(context, (body, scale, reveal), (left, column, view), p)?;
-    let name = font(DISPLAY_FONT, 18.0, DWRITE_FONT_WEIGHT_BOLD, lead);
-    draw_text(
-        context,
+    g.text(
         &view.next,
-        &name,
-        at(16.0, 29.0, left - 20.0, 24.0),
-        ink(1.0),
+        &g.display(24.0, BOLD, LEAD),
+        g.at(layout::PAD, 28.0, 176.0, 26.0),
+        g.ink(1.0),
     )?;
-    let small = font(TEXT_FONT, 11.0, normal, lead);
-    draw_text(
-        context,
+    g.text(
         &view.left,
-        &small,
-        at(16.0, 52.0, left - 20.0, 14.0),
-        ink(0.7),
+        &g.display(14.0, SEMI, LEAD),
+        g.at(layout::PAD, 54.0, 176.0, 18.0),
+        g.accent(1.0),
     )?;
-    for (index, row) in view.rows.iter().enumerate() {
-        let x = left + column * index as f32;
-        // The wash marks the prayer the headline names (the next); the current one is only brighter and bolder.
-        if row.name == view.next {
-            // SAFETY: a brush and a fill on the frame's own device context.
-            unsafe {
-                let wash = context.CreateSolidColorBrush(
-                    &with_alpha(p.accent, p.ink_alpha(0.22 * reveal)),
-                    None,
-                )?;
-                // A capsule behind the name and time under its stop.
-                context.FillRoundedRectangle(
-                    &rounded(at(x + 1.0, 41.0, column - 2.0, 26.0), 13.0 * scale),
-                    &wash,
-                );
-            }
-        }
-        let weight = if row.current {
-            DWRITE_FONT_WEIGHT_SEMI_BOLD
-        } else {
-            normal
-        };
-        let alpha = if row.current { 1.0 } else { 0.6 };
-        draw_text(
-            context,
-            row.name,
-            &font(TEXT_FONT, 9.5, normal, middle),
-            at(x, 43.0, column, 12.0),
-            ink(alpha),
-        )?;
-        draw_text(
-            context,
-            &row.time,
-            &font(TEXT_FONT, 11.0, weight, middle),
-            at(x, 53.0, column, 14.0),
-            ink(if row.current { 1.0 } else { 0.85 }),
-        )?;
-    }
-    if scene.notice.is_some() || view.hijri.is_empty() {
-        return Ok(());
-    }
-    let (x, y, w, h) = layout::footer(media);
-    draw_text(
-        context,
+    g.text(
         &view.hijri,
-        &font(TEXT_FONT, FOOTER_SIZE, normal, lead),
-        at(x, y, w, h),
-        ink(0.6),
-    )
+        &g.font(10.5, NORMAL, LEAD),
+        g.at(layout::PAD, 72.0, 176.0, 14.0),
+        g.ink(0.55),
+    )?;
+    sun_arc(g, view)?;
+    // Five chips share the content width, a 6 gap apart.
+    let count = view.rows.len().max(1) as f32;
+    let width = (328.0 - 6.0 * (count - 1.0)) / count;
+    for (index, row) in view.rows.iter().enumerate() {
+        let chip = g.at(
+            layout::PAD + (width + 6.0) * index as f32,
+            92.0,
+            width,
+            26.0,
+        );
+        let fill = if row.name == view.next {
+            g.accent(0.25)
+        } else if row.current {
+            g.ink(0.14)
+        } else {
+            g.ink(0.07)
+        };
+        g.fill(chip, None, fill)?;
+        let alpha = if row.current || row.name == view.next {
+            1.0
+        } else {
+            0.6
+        };
+        let (left, top) = (chip.left, chip.top);
+        let line = |dy: f32, h: f32| D2D_RECT_F {
+            left,
+            top: top + dy * g.scale,
+            right: chip.right,
+            bottom: top + (dy + h) * g.scale,
+        };
+        g.text(
+            row.name,
+            &g.font(9.5, NORMAL, MIDDLE),
+            line(2.0, 12.0),
+            g.ink(alpha),
+        )?;
+        let weight = if row.current { SEMI } else { NORMAL };
+        g.text(
+            &row.time,
+            &g.font(11.0, weight, MIDDLE),
+            line(12.0, 13.0),
+            g.ink(if row.current { 1.0 } else { 0.85 }),
+        )?;
+    }
+    Ok(())
 }
 
-/// The five prayer stops on a shallow arc over their columns, with the sun on it: the part it has passed in the
+/// The five prayer stops on a shallow arc beside the hero, with the sun on it: the part it has passed in the
 /// accent, the rest faint. The sun is the one glow in the system (a halo under the disc).
-fn sun_arc(
-    context: &ID2D1DeviceContext,
-    (body, scale, reveal): (&D2D_RECT_F, f32, f32),
-    (left, column, view): (f32, f32, &crate::prayer_tab::View),
-    p: &Palette,
-) -> Result<()> {
-    // Stop `u` (0 to 1) along the arc: x over the first to the last column's middle, y a parabola 7 DIP high.
-    let first = left + column / 2.0;
+fn sun_arc(g: &Page, view: &crate::prayer_tab::View) -> Result<()> {
+    // Stop `u` (0 to 1) along the arc: x from 206 to 336, y a parabola 22 DIP high over a base at 66.
     let point = |u: f32| Vector2 {
-        X: body.left + (first + u * column * 4.0) * scale,
-        Y: body.top + (38.0 - 7.0 * (1.0 - (2.0 * u - 1.0).powi(2))) * scale,
+        X: g.body.left + (206.0 + u * 130.0) * g.scale,
+        Y: g.body.top + (66.0 - 22.0 * (1.0 - (2.0 * u - 1.0).powi(2))) * g.scale,
     };
     let sun = view.sun.clamp(0.0, 1.0);
-    let colour = |passed: bool| {
-        if passed {
-            with_alpha(p.accent, p.ink_alpha(0.55 * reveal))
-        } else {
-            with_alpha(p.ink, p.ink_alpha(0.22 * reveal))
-        }
-    };
     // SAFETY: brushes and shapes live for this draw on the frame's own device context.
     unsafe {
         let (passed, ahead) = (
-            context.CreateSolidColorBrush(&colour(true), None)?,
-            context.CreateSolidColorBrush(&colour(false), None)?,
+            g.context.CreateSolidColorBrush(&g.accent(0.6), None)?,
+            g.context.CreateSolidColorBrush(&g.ink(0.22), None)?,
         );
         const STEPS: usize = 24;
         for step in 0..STEPS {
             let (a, b) = (step as f32 / STEPS as f32, (step + 1) as f32 / STEPS as f32);
             let brush = if b <= sun { &passed } else { &ahead };
-            context.DrawLine(point(a), point(b), brush, 1.5 * scale, None);
+            g.context
+                .DrawLine(point(a), point(b), brush, 2.0 * g.scale, None);
         }
         for stop in 0..5 {
-            let at = point(stop as f32 / 4.0);
-            let brush = if stop as f32 / 4.0 <= sun {
-                &passed
-            } else {
-                &ahead
-            };
-            context.FillEllipse(
+            let u = stop as f32 / 4.0;
+            g.context.FillEllipse(
                 &D2D1_ELLIPSE {
-                    point: at,
-                    radiusX: 2.5 * scale,
-                    radiusY: 2.5 * scale,
+                    point: point(u),
+                    radiusX: 3.0 * g.scale,
+                    radiusY: 3.0 * g.scale,
                 },
-                brush,
+                if u <= sun { &passed } else { &ahead },
             );
         }
         let at = point(sun);
-        for (radius, alpha) in [(8.0, 0.18), (3.5, 1.0)] {
-            let brush = context
-                .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(alpha * reveal)), None)?;
-            context.FillEllipse(
+        for (radius, alpha) in [(9.0, 0.18), (4.0, 1.0)] {
+            let brush = g.context.CreateSolidColorBrush(&g.accent(alpha), None)?;
+            g.context.FillEllipse(
                 &D2D1_ELLIPSE {
                     point: at,
-                    radiusX: radius * scale,
-                    radiusY: radius * scale,
+                    radiusX: radius * g.scale,
+                    radiusY: radius * g.scale,
                 },
                 &brush,
             );
@@ -982,136 +891,104 @@ fn sun_arc(
 /// 10.5; "resets Sun 08:59" is about 90 DIP, inside the 112 its line has.
 const SECONDARY: f32 = 11.0;
 
-/// The Limits page: a Refresh button beside the title and two lines per tool: the name, then for each window a thin
-/// bar with its used `NN%`; under them the name's "as of" (or the age when stale) and each window's "resets
-/// HH:MM". A window that has reset says so, a hidden one draws nothing, and a tool without a reading says why.
-/// Stale rows are dimmed and say so in text.
-fn limits_page(
-    context: &ID2D1DeviceContext,
-    scene: &NotchScene,
-    body: &D2D_RECT_F,
-    scale: f32,
-    reveal: f32,
-    p: &Palette,
-) -> Result<()> {
+/// The Limits page: Refresh in the header's action slot and two lines per tool: the name, then for each window a
+/// capsule bar with its used `NN%`; under them the name's "as of" (or the age when stale) and each window's "resets
+/// HH:MM". The fullest window is the page's one accent, the rest are quiet. A window that has reset says so, a
+/// hidden one draws nothing, and a tool without a reading says why. Stale rows are dimmed and say so in text.
+fn limits_page(g: &Page, scene: &NotchScene) -> Result<()> {
     use crate::limits::Line;
     let Some(view) = scene.limits else {
         return Ok(());
     };
-    let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha * reveal));
-    let at = |x: f32, y: f32, w: f32, h: f32| D2D_RECT_F {
-        left: body.left + x * scale,
-        top: body.top + y * scale,
-        right: body.left + (x + w) * scale,
-        bottom: body.top + (y + h) * scale,
-    };
-    let font = |size: f32, weight, align| Font {
-        family: TEXT_FONT,
-        size: size * scale,
-        weight,
-        designator: 1.0,
-        align,
-    };
-    let lead = DWRITE_TEXT_ALIGNMENT_LEADING;
-    let normal = DWRITE_FONT_WEIGHT_NORMAL;
-    // The Refresh button: a faint capsule.
-    let button = layout::refresh(scene.dpi);
-    let square = D2D_RECT_F {
-        left: body.left + button.x as f32,
-        top: body.top + button.y as f32,
-        right: body.left + (button.x + button.width) as f32,
-        bottom: body.top + (button.y + button.height) as f32,
-    };
-    // SAFETY: a brush and an outline on the frame's own device context.
-    unsafe {
-        let brush = context.CreateSolidColorBrush(&ink(0.14), None)?;
-        context.FillRoundedRectangle(&rounded(square, (square.bottom - square.top) / 2.0), &brush);
-    }
-    draw_text(
-        context,
+    g.chip(
+        g.slot(layout::refresh(scene.dpi)),
         if view.refreshing {
             "Refreshing"
         } else {
             "Refresh"
         },
-        &font(10.0, normal, DWRITE_TEXT_ALIGNMENT_CENTER),
-        square,
-        ink(0.8),
     )?;
-    let accent = |alpha: f32| with_alpha(p.accent, p.ink_alpha(alpha * reveal));
     // Columns in DIPs from the body's left (the page is 360 wide): the name, then per window a bar and its used
     // value on the first line and "resets ..." under it, the name's "as of" under the name.
-    const WINDOWS: [f32; 2] = [88.0, 204.0];
+    const WINDOWS: [f32; 2] = [96.0, 224.0];
     for (label, x) in ["5h used", "Weekly used"].into_iter().zip(WINDOWS) {
-        draw_text(
-            context,
+        g.text(
             label,
-            &font(SECONDARY, normal, lead),
-            at(x, 27.0, 90.0, 12.0),
-            ink(0.6),
+            &g.font(SECONDARY, NORMAL, LEAD),
+            g.at(x, 30.0, 100.0, 12.0),
+            g.ink(0.6),
         )?;
     }
+    let fullest = view
+        .rows
+        .iter()
+        .filter(|row| !row.stale)
+        .flat_map(|row| [&row.h5, &row.wk])
+        .filter_map(|line| match line {
+            Line::Used { pct, .. } => Some(*pct),
+            _ => None,
+        })
+        .max();
     for (index, row) in view.rows.iter().enumerate() {
         let y = layout::LIMITS_TOP + layout::LIMITS_ROW * index as f32;
         let dim = if row.stale { 0.5 } else { 1.0 };
-        draw_text(
-            context,
+        g.text(
             row.name,
-            &font(11.5, DWRITE_FONT_WEIGHT_SEMI_BOLD, lead),
-            at(14.0, y, 70.0, 16.0),
-            ink(dim),
+            &g.font(11.5, SEMI, LEAD),
+            g.at(layout::PAD, y, 76.0, 16.0),
+            g.ink(dim),
         )?;
         if let Some(why) = row.why {
-            draw_text(
-                context,
+            g.text(
                 why,
-                &font(11.5, normal, lead),
-                at(WINDOWS[0], y, 250.0, 16.0),
-                ink(0.6),
+                &g.font(11.5, NORMAL, LEAD),
+                g.at(WINDOWS[0], y, 248.0, 16.0),
+                g.ink(0.6),
             )?;
             continue;
         }
         for (line, x) in [&row.h5, &row.wk].into_iter().zip(WINDOWS) {
             let (text, reset) = match line {
                 Line::Used { pct, reset } => {
-                    // SAFETY: brushes and fills on the frame's own device context.
-                    unsafe {
-                        let track = context.CreateSolidColorBrush(&ink(0.18 * dim), None)?;
-                        let fill = context.CreateSolidColorBrush(&accent(dim), None)?;
-                        let bar = at(x, y + 5.0, 44.0, 6.0);
-                        context.FillRoundedRectangle(&rounded(bar, 3.0 * scale), &track);
-                        let mut part = bar;
-                        // A used window never draws narrower than a capsule's own height.
-                        part.right = bar.left
-                            + ((bar.right - bar.left) * f32::from(*pct) / 100.0).max(6.0 * scale);
-                        context.FillRoundedRectangle(&rounded(part, 3.0 * scale), &fill);
-                    }
+                    let bar = g.at(x, y + 5.0, 56.0, 6.0);
+                    g.fill(bar, None, g.ink(0.18 * dim))?;
+                    let mut part = bar;
+                    // A used window never draws narrower than a capsule's own height.
+                    part.right = bar.left
+                        + ((bar.right - bar.left) * f32::from(*pct) / 100.0).max(6.0 * g.scale);
+                    let focal = Some(*pct) == fullest && !row.stale;
+                    g.fill(
+                        part,
+                        None,
+                        if focal {
+                            g.accent(1.0)
+                        } else {
+                            g.ink(0.55 * dim)
+                        },
+                    )?;
                     (format!("{pct}%"), format!("resets {reset}"))
                 }
                 Line::Reset { reset } => ("reset".to_owned(), format!("at {reset}")),
                 Line::Hidden => continue,
             };
-            draw_text(
-                context,
+            g.text(
                 &text,
-                &font(11.5, normal, lead),
-                at(x + 50.0, y, 38.0, 16.0),
-                ink(0.9 * dim),
+                &g.font(11.5, NORMAL, LEAD),
+                g.at(x + 62.0, y, 40.0, 16.0),
+                g.ink(0.9 * dim),
             )?;
-            draw_text(
-                context,
+            g.text(
                 &reset,
-                &font(SECONDARY, normal, lead),
-                at(x, y + 15.0, 112.0, 14.0),
-                ink(0.6 * dim),
+                &g.font(SECONDARY, NORMAL, LEAD),
+                g.at(x, y + 15.0, 112.0, 14.0),
+                g.ink(0.6 * dim),
             )?;
         }
-        draw_text(
-            context,
+        g.text(
             &row.as_of,
-            &font(SECONDARY, normal, lead),
-            at(14.0, y + 15.0, 72.0, 14.0),
-            ink(0.55),
+            &g.font(SECONDARY, NORMAL, LEAD),
+            g.at(layout::PAD, y + 15.0, 76.0, 14.0),
+            g.ink(0.55),
         )?;
     }
     Ok(())
@@ -1211,20 +1088,21 @@ pub(super) fn draw_eyes(
     Ok(())
 }
 
-/// Two small resting eyes in the open panel's title row, in the accent at the page's reveal: static, so they
-/// cost nothing; `toward` shifts them (DIPs) to look at the page's content.
-fn panel_eyes(
+/// Resting eyes in the open panel, in the accent at the page's reveal: static, so they cost nothing. `spot` is
+/// the pair's centre (DIPs from the body's corner) and its size factor on the base capsule; `toward` shifts them
+/// (DIPs) to look at the page's content.
+pub(super) fn panel_eyes(
     context: &ID2D1DeviceContext,
     body: &D2D_RECT_F,
     scale: f32,
     alpha: f32,
-    (frame, toward): (eyes::Frame, f32),
+    frame: eyes::Frame,
+    ((cx, cy, k), toward): ((f32, f32, f32), f32),
     p: &Palette,
 ) -> Result<()> {
     if alpha <= 0.0 {
         return Ok(());
     }
-    const K: f32 = 0.55;
     let Eye {
         w,
         h,
@@ -1232,14 +1110,14 @@ fn panel_eyes(
         top,
         bottom,
     } = eyes::eye(frame.mood, eyes::Pose::Rest);
-    let (w, h) = (w * K * scale, h * K * scale);
-    let y = body.top + (20.0 + dy * K) * scale;
+    let (w, h) = (w * k * scale, h * k * scale);
+    let y = body.top + (cy + dy * k) * scale;
     // SAFETY: a brush and fills on the frame's own device context; each clip is popped in its iteration.
     unsafe {
         let brush =
             context.CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(alpha)), None)?;
         for side in [-1.0f32, 1.0] {
-            let x = body.left + (150.0 + side * eyes::GAP * K / 2.0 + toward) * scale;
+            let x = body.left + (cx + side * eyes::GAP * k / 2.0 + toward) * scale;
             let capsule = D2D_RECT_F {
                 left: x - w / 2.0,
                 top: y - h / 2.0,

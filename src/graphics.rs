@@ -1017,13 +1017,16 @@ fn media_page(
             with_alpha(p.ink, p.ink_alpha(0.68 * cue)),
         )?;
     }
+    // The clock and date keep the left zone and the mascot sits in the right one with the status under it; the
+    // pill's own clock is the same text centred, so opening only slides it left (the zone's right edge moves in).
+    let zone = 130.0 * open;
     let row = |middle: f32, half: f32| D2D_RECT_F {
         left: body.left + 12.0 * scale,
         top: body.top + (middle - half) * scale,
-        right: body.right - 12.0 * scale,
+        right: body.right - (12.0 + zone) * scale,
         bottom: body.top + (middle + half) * scale,
     };
-    let size = 15.0 + 15.0 * open;
+    let size = 15.0 + 17.0 * open;
     let clock = Font {
         // Text optical size for the small pill clock, Display once it is large.
         family: if size < 20.0 { TEXT_FONT } else { DISPLAY_FONT },
@@ -1036,7 +1039,7 @@ fn media_page(
         context,
         scene.time,
         &clock,
-        row(15.0 + 14.0 * open, 24.0),
+        row(15.0 + 36.0 * open, 24.0),
         with_alpha(p.ink, p.ink_alpha(1.0 - tab_art::eyes_shown(scene))),
     )?;
     let date = motion::reveal(scene.progress);
@@ -1054,10 +1057,25 @@ fn media_page(
         context,
         scene.date,
         &font,
-        row(58.0 - 6.0 * (1.0 - date), 10.0),
+        row(82.0 - 6.0 * (1.0 - date), 10.0),
         with_alpha(p.ink, p.ink_alpha(0.60 * date)),
     )?;
-    // PROVISIONAL: why there is no media notch, under the date, 11 DIP at the date's opacity.
+    // The mascot rests beside the clock; its status line sits under it, 11 DIP at the date's opacity.
+    let centre = layout::NOTCH_EXPANDED.width - 16.0 - 56.0;
+    let eyes_y = if let Some(frame) = scene.eyes {
+        tab_art::panel_eyes(
+            context,
+            body,
+            scale,
+            date,
+            frame,
+            ((centre, 56.0, 1.0), 0.0),
+            p,
+        )?;
+        72.0
+    } else {
+        60.0
+    };
     match status {
         Some(line) => draw_text(
             context,
@@ -1066,7 +1084,12 @@ fn media_page(
                 size: 11.0 * scale,
                 ..font
             },
-            row(72.0, 6.0),
+            D2D_RECT_F {
+                left: body.left + (centre - 56.0) * scale,
+                top: body.top + (eyes_y + 14.0) * scale,
+                right: body.left + (centre + 56.0) * scale,
+                bottom: body.top + (eyes_y + 30.0) * scale,
+            },
             with_alpha(p.ink, p.ink_alpha(0.60 * date)),
         ),
         None => Ok(()),
@@ -1179,12 +1202,13 @@ fn notice_text(
     )
 }
 
-/// Side of a shelf icon inside its slot, in DIPs.
-const SHELF_ICON: f32 = 20.0;
+/// Side of a shelf icon inside its capsule, in DIPs.
+const SHELF_ICON: f32 = 16.0;
 
-/// PROVISIONAL (S6): the shelf's entries in their `layout::shelf_slot` cells, faded in with the panel. A
-/// missing target is dimmed like a disabled control. The tiny icon bitmaps are uploaded per paint, which only
-/// an open panel does.
+/// The shelf's entries as file capsules in their `layout::shelf_slot` cells, faded in with the panel: the system
+/// icon, the name and a remove cross at the right end. A missing target is dimmed like a disabled control. The
+/// empty page's drop zone (`tab_art`) draws the add slot itself. The tiny icon bitmaps are uploaded per paint,
+/// which only an open panel does.
 // shortcut: up to `shelf::VISIBLE` bitmap uploads per full paint of an open panel; cache them per canvas
 // like the art if a trace shows it.
 fn shelf_row(
@@ -1199,47 +1223,84 @@ fn shelf_row(
         return Ok(());
     }
     let media = scene.track.is_some();
-    for (index, slot) in scene.shelf.iter().enumerate() {
+    let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha));
+    for (index, slot) in scene.shelf.iter().enumerate().filter(|(_, slot)| !slot.add) {
         let cell = layout::shelf_slot(media, index, scene.dpi);
-        let side = (SHELF_ICON * scale).round();
-        let inset = ((cell.width as f32 - side) / 2.0).round();
-        let square = pixel_square(
-            body.left + (cell.x as f32 + inset),
-            body.top + (cell.y as f32 + 2.0 * scale),
-            side,
-        );
-        let alpha = reveal * if slot.missing { DISABLED } else { 1.0 };
-        let shape = rounded(square, 3.0 * scale);
-        let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha));
-        let name = match (slot.add, slot.more) {
-            (true, _) => "Add",
-            (_, true) => "More",
-            _ => slot.name,
-        };
-        let font = Font {
-            family: TEXT_FONT,
-            size: 10.0 * scale,
-            weight: DWRITE_FONT_WEIGHT_NORMAL,
-            designator: 1.0,
-            align: DWRITE_TEXT_ALIGNMENT_CENTER,
-        };
         let (left, top) = (body.left + cell.x as f32, body.top + cell.y as f32);
-        let line = D2D_RECT_F {
-            top: square.bottom + 2.0 * scale,
-            left: left + 2.0 * scale,
-            right: left + cell.width as f32 - 2.0 * scale,
+        let rect = D2D_RECT_F {
+            left,
+            top,
+            right: left + cell.width as f32,
             bottom: top + cell.height as f32,
         };
-        draw_text(context, name, &font, line, ink(0.8 * alpha))?;
-        if slot.add || slot.more {
-            let glyph = if slot.add { Glyph::Add } else { Glyph::More };
-            glyphs::draw(context, square, glyph, ink(reveal))?;
-        } else if let Some(icon) = slot.icon {
+        let alpha = reveal * if slot.missing { DISABLED } else { 1.0 };
+        // SAFETY: a brush and a fill on the frame's own device context.
+        unsafe {
+            let brush = context.CreateSolidColorBrush(&ink(0.10 * reveal), None)?;
+            context.FillRoundedRectangle(&rounded(rect, cell.height as f32 / 2.0), &brush);
+        }
+        let side = (SHELF_ICON * scale).round();
+        let square = pixel_square(
+            left + 10.0 * scale,
+            top + ((cell.height as f32 - side) / 2.0).round(),
+            side,
+        );
+        let name = if slot.more { "More" } else { slot.name };
+        let font = Font {
+            family: TEXT_FONT,
+            size: 11.5 * scale,
+            weight: DWRITE_FONT_WEIGHT_NORMAL,
+            designator: 1.0,
+            align: DWRITE_TEXT_ALIGNMENT_LEADING,
+        };
+        let line = D2D_RECT_F {
+            left: left + 32.0 * scale,
+            right: rect.right - if slot.more { 12.0 } else { 28.0 } * scale,
+            ..rect
+        };
+        draw_text(context, name, &font, line, ink(0.9 * alpha))?;
+        if slot.more {
+            glyphs::draw(context, square, Glyph::More, ink(reveal))?;
+            continue;
+        }
+        if let Some(icon) = slot.icon {
             let bitmap = upload(context, icon)?;
-            fill_art(context, &shape, icon.width, &bitmap, alpha)?;
+            fill_art(
+                context,
+                &rounded(square, 3.0 * scale),
+                icon.width,
+                &bitmap,
+                alpha,
+            )?;
         } else {
             // No icon yet, or the shell had none: a file glyph instead of an empty square.
             glyphs::draw(context, square, Glyph::File, ink(0.6 * alpha))?;
+        }
+        // The remove cross, centred in its target (`layout::shelf_remove`).
+        let target = layout::shelf_remove(index, scene.dpi);
+        let (cx, cy) = (
+            body.left + (target.x + target.width / 2) as f32,
+            body.top + (target.y + target.height / 2) as f32,
+        );
+        let arm = 3.5 * scale;
+        // SAFETY: a brush and two strokes on the frame's own device context.
+        unsafe {
+            let brush = context.CreateSolidColorBrush(&ink(0.6 * reveal), None)?;
+            for (from, to) in [((-arm, -arm), (arm, arm)), ((-arm, arm), (arm, -arm))] {
+                context.DrawLine(
+                    Vector2 {
+                        X: cx + from.0,
+                        Y: cy + from.1,
+                    },
+                    Vector2 {
+                        X: cx + to.0,
+                        Y: cy + to.1,
+                    },
+                    &brush,
+                    1.5 * scale,
+                    None,
+                );
+            }
         }
     }
     Ok(())
@@ -1248,7 +1309,7 @@ fn shelf_row(
 /// Fill of the cover slot when the track has no album art; art fills the same geometry.
 const COVER_FILL: f32 = 0.20;
 /// Side of the panel cover, the largest drawn album art; the host decodes art for it.
-pub const COVER_DIPS: f32 = 72.0;
+pub const COVER_DIPS: f32 = 80.0;
 
 /// One text element of the media notch, in physical pixels.
 struct Line<'a> {
@@ -1303,7 +1364,7 @@ struct VolumeBar {
 /// The visualizer's bars: secondary, decorative content, white 60 % like the artist.
 const METER_FILL: f32 = 0.60;
 /// The bar's drawn thickness in DIPs, centred in its hit box.
-const VOLUME_THICKNESS: f32 = 6.0;
+const VOLUME_THICKNESS: f32 = 4.0;
 /// The thumb's radius at rest, under the pointer and while pressed, in DIPs.
 const THUMB: [f32; 3] = [4.5, 6.0, 7.5];
 /// The bar's track: white 40 % is about 3.7 : 1 on black, the non-text contrast a target needs.
@@ -1318,7 +1379,10 @@ struct Chip {
     rect: D2D_RECT_F,
     glyph: D2D_RECT_F,
     shape: Glyph,
+    /// The primary action: a solid accent capsule.
     filled: bool,
+    /// A transport capsule (previous, play/pause, next); the mute toggle is a bare glyph.
+    capsule: bool,
     alpha: f32,
     /// The player does not accept it now: high contrast draws it in the system grey-text colour.
     disabled: bool,
@@ -1365,11 +1429,11 @@ fn media_plan<'a>(
     let at = |pill: f32, panel: f32| pill + (panel - pill) * open;
     // The close spring's undershoot briefly makes the pill shorter than 30: keep its row centred.
     let middle = (layout::notch_shape(scene.progress, true).height / 2.0).min(15.0);
-    // Cover: 20 at (10, middle - 10), radius 5 -> COVER_DIPS at (16, 14), radius 10. Glyph: 10 -> 24.
+    // Cover: 20 at (10, middle - 10), radius 5 -> COVER_DIPS at (16, 24), radius 14. Glyph: 10 -> 24.
     let size = (at(20.0, COVER_DIPS) * scale).round();
     let cover = pixel_square(
         body.left + at(10.0, 16.0) * scale,
-        body.top + at(middle - 10.0, 14.0) * scale,
+        body.top + at(middle - 10.0, 24.0) * scale,
         size,
     );
     let glyph = (at(10.0, 24.0) * scale).round();
@@ -1391,10 +1455,10 @@ fn media_plan<'a>(
             alpha: 1.0 - open,
         }
     });
-    // Clock: trailing edge 14 -> 16 from the right, centre middle -> 19. Title: from 38 -> 100,
-    // ending 8 -> 6 before the clock, centre middle -> 21.
+    // Clock: trailing edge 14 -> 16 from the right, centre middle -> 19. Title: from 38 -> 108,
+    // ending 8 -> 6 before the clock, centre middle -> 30 (15 DIP, hierarchy over the artist).
     let end = body.right - at(14.0, 16.0) * scale;
-    let leading = body.left + at(38.0, 100.0) * scale;
+    let leading = body.left + at(38.0, layout::MEDIA_COLUMN) * scale;
     let title = (leading, (end - clock - at(8.0, 6.0) * scale).max(leading));
     let row = |(left, right): (f32, f32), middle: f32, half: f32| D2D_RECT_F {
         left,
@@ -1423,27 +1487,32 @@ fn media_plan<'a>(
         Line {
             text: track.title.as_str().into(),
             font: font(
-                at(12.0, 13.0),
+                at(12.0, 15.0),
                 if open < 0.5 {
                     DWRITE_FONT_WEIGHT_NORMAL
                 } else {
                     DWRITE_FONT_WEIGHT_SEMI_BOLD
                 },
             ),
-            rect: row(title, at(middle, 21.0), 12.0),
+            rect: row(title, at(middle, 30.0), 12.0),
             alpha: at(0.85, 1.0) * dim * title_fade,
         },
         Line {
             text: track.artist.as_str().into(),
             font: font(12.0, DWRITE_FONT_WEIGHT_NORMAL),
-            rect: row(title, 38.0 + 6.0 * (1.0 - artist), 10.0),
+            rect: row(
+                // The artist lane ends before the visualizer slot (312).
+                (title.0, (body.left + 304.0 * scale).max(title.0)),
+                50.0 + 6.0 * (1.0 - artist),
+                10.0,
+            ),
             alpha: 0.60 * artist,
         },
     ];
     let bar = progress_row(&mut lines, scene, body);
     let chips = media_chips(scene, track, body);
     MediaPlan {
-        cover: rounded(cover, at(5.0, 10.0) * scale),
+        cover: rounded(cover, at(5.0, layout::TILE_RADIUS) * scale),
         art: scene.art.map(|(_, pixels)| pixels),
         badge,
         glyph: pixel_square(cover.left + inset, cover.top + inset, glyph),
@@ -1518,7 +1587,7 @@ fn progress_row(
     let played = scene.played.filter(|_| reveal > 0.0)?;
     let scale = scene.dpi as f32 / 96.0;
     let target = layout::media_progress(scene.dpi);
-    let thickness = (4.0 * scale).round();
+    let thickness = (6.0 * scale).round();
     let left = body.left + target.x as f32;
     let top = (body.top + target.y as f32 + (target.height as f32 - thickness) / 2.0).round();
     let track = D2D_RECT_F {
@@ -1532,9 +1601,17 @@ fn progress_row(
         ..track
     };
     let [elapsed, total] = played.times();
-    for (text, from, to, align) in [
-        (elapsed, 100.0, 136.0, DWRITE_TEXT_ALIGNMENT_LEADING),
-        (total, 308.0, 344.0, DWRITE_TEXT_ALIGNMENT_TRAILING),
+    for (text, (from, y, w, h), align) in [
+        (
+            elapsed,
+            layout::MEDIA_TIMES[0],
+            DWRITE_TEXT_ALIGNMENT_LEADING,
+        ),
+        (
+            total,
+            layout::MEDIA_TIMES[1],
+            DWRITE_TEXT_ALIGNMENT_TRAILING,
+        ),
     ] {
         lines.push(Line {
             text: text.into(),
@@ -1547,9 +1624,9 @@ fn progress_row(
             },
             rect: D2D_RECT_F {
                 left: body.left + from * scale,
-                top: body.top + 49.0 * scale,
-                right: body.left + to * scale,
-                bottom: body.top + 65.0 * scale,
+                top: body.top + (y - 1.0) * scale,
+                right: body.left + (from + w) * scale,
+                bottom: body.top + (y + h + 1.0) * scale,
             },
             alpha: 0.60 * reveal,
         });
@@ -1659,6 +1736,7 @@ fn media_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip
                 ),
                 shape,
                 filled,
+                capsule: index < PLAY_PAUSE + 2,
                 alpha: reveal * if enabled[index] { 1.0 } else { DISABLED },
                 disabled: !enabled[index],
             }
@@ -1723,21 +1801,26 @@ fn media_text(
     }
     for chip in &plan.chips {
         let color = tint(p.ink_dim(chip.disabled, chip.alpha));
-        if chip.filled {
+        if chip.capsule {
             let radius = (chip.rect.bottom - chip.rect.top) / 2.0;
+            // The primary play/pause is a solid accent capsule, the others a faint ink one.
+            let fill = if chip.filled {
+                with_alpha(p.accent, p.ink_alpha(chip.alpha))
+            } else {
+                with_alpha(p.ink, p.ink_alpha(0.12 * chip.alpha))
+            };
             // SAFETY: as above.
             unsafe {
-                let circle = context.CreateSolidColorBrush(
-                    &with_alpha(p.accent, p.ink_alpha(0.22 * chip.alpha)),
-                    None,
-                )?;
+                let circle = context.CreateSolidColorBrush(&fill, None)?;
                 context.FillRoundedRectangle(&rounded(chip.rect, radius), &circle);
             }
+        }
+        if chip.filled {
             glyphs::draw(
                 context,
                 chip.glyph,
                 chip.shape,
-                with_alpha(glyphs::active_ink(p), p.ink_alpha(chip.alpha)),
+                with_alpha(p.ink_on_accent(), p.ink_alpha(chip.alpha)),
             )?;
         } else {
             glyphs::draw(context, chip.glyph, chip.shape, color)?;
@@ -2735,9 +2818,9 @@ mod media_tests {
         assert_eq!(badge.glyph, rect(115.0, 21.0, 121.0, 27.0));
         assert_eq!(badge.alpha, 1.0);
         let (cover, drawn, badge) = planned(1.0);
-        // The panel cover, 72 at (16, 14), has no badge: its play/pause control shows the state.
+        // The panel cover, 80 at (16, 24), has no badge: its play/pause control shows the state.
         let left = body(96, 1.0).left;
-        assert_eq!(cover.rect, rect(left + 16.0, 14.0, left + 88.0, 86.0));
+        assert_eq!(cover.rect, rect(left + 16.0, 24.0, left + 96.0, 104.0));
         assert!(drawn && badge.is_none());
         assert!(plan(&song, "9:50 pm", 0.0, 96).badge.is_none());
     }
@@ -2806,23 +2889,24 @@ mod media_tests {
     fn expanded_panel_places_cover_title_artist_and_clock_above_the_reserved_rows() {
         let song = track("Song", "Artist", true);
         let plan = plan(&song, "9:50 pm", 1.0, 96);
-        // 360 x 120 body at x 40..400: cover 72 at (16, 14), title column from 100.
-        assert_eq!(plan.cover.rect, rect(56.0, 14.0, 128.0, 86.0));
-        assert_eq!(plan.cover.radiusX, 10.0);
-        assert_eq!(plan.glyph, rect(80.0, 38.0, 104.0, 62.0));
+        // 360 x 128 body at x 40..400: cover 80 at (16, 24), title column from 108.
+        assert_eq!(plan.cover.rect, rect(56.0, 24.0, 136.0, 104.0));
+        assert_eq!(plan.cover.radiusX, 14.0);
+        assert_eq!(plan.glyph, rect(84.0, 52.0, 108.0, 76.0));
         let title_end = 384.0 - clock_width("9:50 pm", 1.0, 96) - 6.0;
         assert_eq!(
             lines(&plan),
             [
-                ("9:50 pm", rect(128.0, 7.0, 384.0, 31.0), 12.0, 0.60),
-                ("Song", rect(140.0, 9.0, title_end, 33.0), 13.0, 1.0),
-                ("Artist", rect(140.0, 28.0, title_end, 48.0), 12.0, 0.60),
+                ("9:50 pm", rect(136.0, 7.0, 384.0, 31.0), 12.0, 0.60),
+                ("Song", rect(148.0, 18.0, title_end, 42.0), 15.0, 1.0),
+                // The artist lane ends before the visualizer slot.
+                ("Artist", rect(148.0, 40.0, 344.0, 60.0), 12.0, 0.60),
             ]
         );
         assert_eq!(plan.lines[0].font.weight, DWRITE_FONT_WEIGHT_NORMAL);
         assert_eq!(plan.lines[1].font.weight, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-        // Text stays above the progress, controls and volume rows (from 50 DIP).
-        assert!(plan.lines.iter().all(|line| line.rect.bottom <= 50.0));
+        // Text stays above the progress, controls and volume rows (from 63 DIP).
+        assert!(plan.lines.iter().all(|line| line.rect.bottom <= 63.0));
     }
 
     #[test]
@@ -2832,7 +2916,7 @@ mod media_tests {
             track.controls = [false, true, true];
         }
         let panel = plan(&song, "9:50 pm", 1.0, 96);
-        // Body x 40..400; controls at 100, 148 and 200 DIP from its left, 66..98 from its top.
+        // Body x 40..400; controls at 108, 146 and 200 DIP from its left, 84..112 from its top.
         let drawn: Vec<_> = panel
             .chips
             .iter()
@@ -2842,30 +2926,30 @@ mod media_tests {
             drawn,
             [
                 (
-                    rect(140.0, 66.0, 168.0, 98.0),
-                    rect(145.0, 73.0, 163.0, 91.0),
+                    rect(148.0, 84.0, 180.0, 112.0),
+                    rect(155.0, 89.0, 173.0, 107.0),
                     Glyph::Previous,
                     false,
                     DISABLED
                 ),
                 (
-                    rect(188.0, 66.0, 220.0, 98.0),
-                    rect(196.0, 74.0, 212.0, 90.0),
+                    rect(186.0, 84.0, 234.0, 112.0),
+                    rect(202.0, 90.0, 218.0, 106.0),
                     Glyph::Pause,
                     true,
                     1.0
                 ),
                 (
-                    rect(240.0, 66.0, 268.0, 98.0),
-                    rect(245.0, 73.0, 263.0, 91.0),
+                    rect(240.0, 84.0, 272.0, 112.0),
+                    rect(247.0, 89.0, 265.0, 107.0),
                     Glyph::Next,
                     false,
                     1.0
                 ),
                 // Mute, disabled here: the scene has no audio endpoint.
                 (
-                    rect(140.0, 100.0, 164.0, 116.0),
-                    rect(144.0, 100.0, 160.0, 116.0),
+                    rect(284.0, 88.0, 308.0, 108.0),
+                    rect(287.0, 89.0, 305.0, 107.0),
                     Glyph::Speaker,
                     false,
                     DISABLED
@@ -2878,7 +2962,7 @@ mod media_tests {
         let reveal = motion::reveal(0.6);
         assert!(reveal > 0.0 && reveal < 1.0);
         let body = body(96, 0.6);
-        assert_eq!(opening.chips[1].rect.left, body.left + 148.0);
+        assert_eq!(opening.chips[1].rect.left, body.left + 146.0);
         assert_eq!(opening.chips[1].alpha, reveal);
         assert_eq!(opening.chips[0].alpha, reveal * DISABLED);
     }
@@ -2892,22 +2976,22 @@ mod media_tests {
             filled: 41,
         };
         let panel = played(&song, "9:50 pm", 1.0, 96, Some(row));
-        // Body x 40..400: elapsed from 100, bar 140..304 centred on y 57, total trailing at 344.
+        // Body x 40..400: elapsed from 108, bar 148..304 centred on y 71, total trailing at 344.
         let ([track, fill], alpha) = panel.bar.expect("a bar");
-        assert_eq!(track.rect, rect(180.0, 55.0, 344.0, 59.0));
-        assert_eq!(fill.rect, rect(180.0, 55.0, 221.0, 59.0));
-        assert_eq!((track.radiusX, alpha), (2.0, 1.0));
+        assert_eq!(track.rect, rect(188.0, 68.0, 344.0, 74.0));
+        assert_eq!(fill.rect, rect(188.0, 68.0, 229.0, 74.0));
+        assert_eq!((track.radiusX, alpha), (3.0, 1.0));
         assert_eq!(
             lines(&panel)[3..],
             [
-                ("1:23", rect(140.0, 49.0, 176.0, 65.0), 11.0, 0.60),
-                ("4:56", rect(348.0, 49.0, 384.0, 65.0), 11.0, 0.60),
+                ("1:23", rect(148.0, 63.0, 184.0, 79.0), 11.0, 0.60),
+                ("4:56", rect(348.0, 63.0, 384.0, 79.0), 11.0, 0.60),
             ]
         );
         let total = &panel.lines[4].font;
         assert_eq!(total.align, DWRITE_TEXT_ALIGNMENT_TRAILING);
         // Above the controls row and inside the body at every scale.
-        assert!(panel.chips.iter().all(|chip| chip.rect.top >= 65.0));
+        assert!(panel.chips.iter().all(|chip| chip.rect.top >= 79.0));
         for dpi in [144, 192] {
             let panel = played(&song, "9:50 pm", 1.0, dpi, Some(row));
             let body = body(dpi, 1.0);
@@ -2976,8 +3060,8 @@ mod media_tests {
         let lefts = bars.map(|bar| bar.rect.left - body.left);
         assert_eq!(lefts, [312.0, 319.0, 326.0, 333.0, 340.0]);
         assert_eq!(bars[4].rect.right - body.left, 344.0);
-        assert!(bars.iter().all(|bar| bar.rect.bottom - body.top == 92.0));
-        assert_eq!(bars[1].rect.top - body.top, 72.0);
+        assert!(bars.iter().all(|bar| bar.rect.bottom - body.top == 52.0));
+        assert_eq!(bars[1].rect.top - body.top, 32.0);
         assert_eq!(bars[0].rect.bottom - bars[0].rect.top, 4.0);
         assert_eq!(meter(0.6).unwrap().1, METER_FILL * motion::reveal(0.6));
         assert!(meter(0.0).is_none());
@@ -3103,10 +3187,10 @@ mod media_tests {
         let level = |percent, muted| Some(Level { percent, muted });
         let panel = volume(&song, "9:50 pm", 1.0, 96, level(40, false));
         let bar = panel.volume.unwrap();
-        // Bar x 172..346 in the body at 40; 6 DIP thick, centred in 100..116; the thumb sits on the fill end.
-        assert_eq!(bar.track.rect, rect(172.0, 105.0, 346.0, 111.0));
-        assert_eq!(bar.fill.rect, rect(172.0, 105.0, 172.0 + 70.0, 111.0));
-        assert_eq!(bar.thumb, (242.0, 108.0, 4.5));
+        // Bar x 312..358 in the body at 40; 4 DIP thick, centred in 88..108; the thumb sits on the fill end.
+        assert_eq!(bar.track.rect, rect(312.0, 96.0, 358.0, 100.0));
+        assert_eq!(bar.fill.rect, rect(312.0, 96.0, 312.0 + 18.0, 100.0));
+        assert_eq!(bar.thumb, (330.0, 98.0, 4.5));
         assert!(bar.readout.is_none());
         assert_eq!((bar.track_alpha, bar.fill_alpha), (VOLUME_TRACK, 1.0));
         assert_eq!(
@@ -3119,7 +3203,7 @@ mod media_tests {
         assert_eq!(muted.volume.unwrap().fill_alpha, MUTED_FILL);
         let unavailable = volume(&song, "9:50 pm", 1.0, 96, None);
         let bar = unavailable.volume.unwrap();
-        assert_eq!((bar.fill.rect.right, bar.fill_alpha), (172.0, DISABLED));
+        assert_eq!((bar.fill.rect.right, bar.fill_alpha), (312.0, DISABLED));
         // The row is not drawn while collapsed.
         assert!(
             volume(&song, "9:50 pm", 0.0, 96, level(40, false))
@@ -3154,10 +3238,10 @@ mod media_tests {
                 let plan = plan(&song, "9:50 pm", progress, dpi);
                 let (clock, title) = (plan.lines[0].rect, plan.lines[1].rect);
                 assert_eq!(clock.right, body.right - (14.0 + 2.0 * open) * scale);
-                assert_eq!(title.left, body.left + (38.0 + 62.0 * open) * scale);
-                assert_eq!(plan.lines[1].font.size, (12.0 + open) * scale);
+                assert_eq!(title.left, body.left + (38.0 + 70.0 * open) * scale);
+                assert_eq!(plan.lines[1].font.size, (12.0 + 3.0 * open) * scale);
                 let cover = plan.cover.rect;
-                assert_eq!(cover.right - cover.left, (20.0 + 52.0 * open) * scale);
+                assert_eq!(cover.right - cover.left, (20.0 + 60.0 * open) * scale);
                 for item in plan.lines.iter().map(|l| l.rect).chain([cover]) {
                     assert!(item.left >= body.left && item.right <= body.right, "{dpi}");
                     assert!(item.top >= body.top && item.bottom <= body.bottom, "{dpi}");

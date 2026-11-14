@@ -53,6 +53,8 @@ pub struct Pomo {
     pub left: Option<u64>,
     /// Focus sessions per round as of the last start or advance (0: not yet seen, so the default).
     per_round: u16,
+    /// The running or paused phase's full length in seconds, as of the last start (`track`).
+    pub total: u64,
 }
 
 impl Pomo {
@@ -64,6 +66,24 @@ impl Pomo {
     /// Remembers the round length for `title`.
     pub fn track(&mut self, c: &Config) {
         self.per_round = c[3];
+        self.total = self.secs(c);
+    }
+
+    /// The round as segments, focus then break in turn and a long break last: the current segment and the count
+    /// (`2 * sessions`), for the Timer page's cycle capsule.
+    pub fn cycle(&self) -> (u8, u8) {
+        let n = if self.per_round == 0 {
+            DEFAULT[3]
+        } else {
+            self.per_round
+        };
+        let finished = self.done % n;
+        let current = match self.phase {
+            Phase::Focus => 2 * finished,
+            Phase::Short => 2 * finished.saturating_sub(1) + 1,
+            Phase::Long => 2 * n - 1,
+        };
+        (current as u8, (2 * n) as u8)
     }
 
     /// The page title: "Focus 2 of 4", "Short break" or "Long break", with "paused" after it while paused.
@@ -174,5 +194,20 @@ mod tests {
         ] {
             assert!(!is_start_status(line), "{line}");
         }
+    }
+
+    #[test]
+    fn the_cycle_is_focus_and_break_segments_ending_in_the_long_break() {
+        let c = [25, 5, 15, 2];
+        let mut p = Pomo::default();
+        p.track(&c);
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            seen.push(p.cycle());
+            p.advance(&c);
+        }
+        // Focus, short, focus, long, then the round starts over.
+        assert_eq!(seen, [(0, 4), (1, 4), (2, 4), (3, 4), (0, 4)]);
+        assert_eq!(p.total, 1500);
     }
 }

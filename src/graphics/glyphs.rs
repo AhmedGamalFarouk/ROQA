@@ -96,14 +96,6 @@ const ALL: [Glyph; 34] = [
 const GRID: f32 = 24.0;
 const STROKE: f32 = 1.75;
 
-pub(super) fn active_ink(palette: &Palette) -> (u8, u8, u8) {
-    if palette.high_contrast.is_some() {
-        palette.on_ink
-    } else {
-        palette.accent
-    }
-}
-
 impl Glyph {
     /// The speaker for a level: silent or muted shows no waves, up to a third one wave, above it two.
     pub fn speaker(percent: u8, muted: bool) -> Glyph {
@@ -476,18 +468,6 @@ pub(super) fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn active_ink_stays_visible_when_high_contrast_makes_the_wash_opaque() {
-        let palette = crate::theme::Theme::Classic.palette();
-        assert_eq!(active_ink(&palette), palette.accent);
-        let contrast = Palette {
-            high_contrast: Some(((128, 128, 128), (128, 128, 128))),
-            ..palette
-        };
-        assert_eq!(active_ink(&contrast), contrast.on_ink);
-        assert_ne!(active_ink(&contrast), contrast.accent);
-    }
 
     #[test]
     fn geometry_bounds_include_arcs_and_strokes_at_every_scale() {

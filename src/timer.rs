@@ -63,6 +63,9 @@ const CLOCK_SLACK: u64 = 2;
 struct Timer {
     deadline: Instant,
     expiry: u64,
+    /// The countdown's full length in seconds, for the progress capsule. Not stored: after a restart it is the
+    /// time left then, so the capsule starts empty (shortcut: store it if that matters).
+    total: u64,
     /// A Pomodoro phase's name (not stored: after a restart it is a plain timer).
     tag: Option<&'static str>,
 }
@@ -92,11 +95,16 @@ pub struct View {
     pub paused: bool,
     /// The Pomodoro's phase line (the page title); empty for a plain timer.
     pub label: String,
+    /// Seconds left and the countdown's full length, for the progress capsule.
+    pub left: u64,
+    pub total: u64,
+    /// A Pomodoro's current segment and segment count (`pomo::Pomo::cycle`); the host fills it for tagged phases.
+    pub cycle: Option<(u8, u8)>,
 }
 
 impl View {
-    /// The page for a paused Pomodoro phase with `left` seconds remaining.
-    pub fn paused(left: u64, label: String) -> Self {
+    /// The page for a paused Pomodoro phase with `left` of `total` seconds remaining.
+    pub fn paused(left: u64, total: u64, label: String, cycle: (u8, u8)) -> Self {
         Self {
             pill: format!("{}m", left.div_ceil(60)),
             panel: clock(left),
@@ -105,7 +113,17 @@ impl View {
             tagged: true,
             paused: true,
             label,
+            left,
+            total,
+            cycle: Some(cycle),
         }
+    }
+    /// The share of the countdown already gone, 0 to 1.
+    pub fn elapsed(&self) -> f32 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        (1.0 - self.left as f32 / self.total as f32).clamp(0.0, 1.0)
     }
 }
 
@@ -153,6 +171,7 @@ impl Timers {
                 Some(Timer {
                     deadline,
                     expiry,
+                    total: left,
                     tag: None,
                 })
             })
@@ -185,6 +204,7 @@ impl Timers {
         self.list.push(Timer {
             deadline: now + Duration::from_secs(seconds),
             expiry: wall.saturating_add(seconds),
+            total: seconds,
             tag,
         });
         crate::sort::by(&mut self.list, |a, b| a.deadline.cmp(&b.deadline));
@@ -314,6 +334,9 @@ impl Timers {
             tagged: self.list.first().is_some_and(|timer| timer.tag.is_some()),
             paused: false,
             label: String::new(),
+            left: soonest,
+            total: self.list.first().map_or(0, |timer| timer.total),
+            cycle: None,
         })
     }
 }
@@ -564,7 +587,7 @@ mod tests {
             controls(running.as_ref()),
             [Ctl::Pause, Ctl::Skip, Ctl::Cancel]
         );
-        let paused = View::paused(90, "Focus, paused".to_owned());
+        let paused = View::paused(90, 1500, "Focus, paused".to_owned(), (0, 8));
         assert_eq!(
             controls(Some(&paused)),
             [Ctl::Resume, Ctl::Skip, Ctl::Cancel]
@@ -575,5 +598,19 @@ mod tests {
         assert!(timers.take_done(now + secs(61)));
         let done = timers.view(now + secs(61));
         assert_eq!(controls(done.as_ref()).len(), 5);
+    }
+
+    #[test]
+    fn the_view_reports_the_share_of_the_countdown_gone() {
+        let now = Instant::now();
+        let mut timers = Timers::default();
+        assert!(timers.start(600, WALL, now));
+        let view = timers.view(now + secs(150)).unwrap();
+        assert_eq!((view.left, view.total), (450, 600));
+        assert!((view.elapsed() - 0.25).abs() < 0.001);
+        // A restored timer has no stored length: it starts at its time left.
+        let restored = Timers::restore(&[WALL + 90], WALL, now);
+        assert_eq!(restored.view(now).unwrap().elapsed(), 0.0);
+        assert_eq!(View::paused(30, 0, String::new(), (0, 8)).elapsed(), 0.0);
     }
 }
