@@ -528,17 +528,10 @@ const PAGES: &[Page] = &[
         ],
     },
 ];
-/// One flat tile colour and one Segoe MDL2 Assets glyph per sidebar page (gear, palette, monitor, task view,
-/// sun, moon, stopwatch, info).
-const TILES: [(u32, &str); 8] = [
-    (0x8e8e93, "\u{e713}"),
-    (0xaf52de, "\u{e790}"),
-    (0x0a84ff, "\u{e7f4}"),
-    (0x30b0c7, "\u{e7c4}"),
-    (0xff9f0a, "\u{e706}"),
-    (0x30c85e, "\u{e708}"),
-    (0xff453a, "\u{e916}"),
-    (0x636366, "\u{e946}"),
+/// One Segoe MDL2 Assets glyph per sidebar page (gear, palette, monitor, task view, sun, moon, stopwatch,
+/// info), drawn in one ink.
+const TILES: [&str; 8] = [
+    "\u{e713}", "\u{e790}", "\u{e7f4}", "\u{e7c4}", "\u{e706}", "\u{e708}", "\u{e916}", "\u{e946}",
 ];
 
 struct Item {
@@ -670,18 +663,9 @@ fn high_contrast() -> bool {
     read.is_ok() && hc.dwFlags & HCF_HIGHCONTRASTON == HCF_HIGHCONTRASTON
 }
 
-/// The accent the shell shows (the personalised one, not the old Aero tint), or the reference green when it
-/// cannot be read; on the dark cards a too dark accent is lightened so a switch that is on still reads.
+/// ROQA's one accent: Lamp on the dark window, its deeper form on the light one (5:1 on white).
 fn accent(dark: bool) -> u32 {
-    let key = w!(r"Software\Microsoft\Windows\DWM");
-    let c = reg(key, w!("AccentColor")).map_or(0x30c85e, swap);
-    let at = |s: u32| c >> s & 255;
-    if dark && (at(16) * 299 + at(8) * 587 + at(0) * 114) / 1000 < 110 {
-        return (0..3).fold(0, |o, n| {
-            o | (at(8 * n) + (255 - at(8 * n)) * 2 / 5) << (8 * n)
-        });
-    }
-    c & 0xff_ffff
+    if dark { 0xffb454 } else { 0x9a5200 }
 }
 
 /// The tokens of `design-language.md`: dark or light with the system accent, or the system colours in
@@ -829,7 +813,7 @@ fn paint(dc: HDC, window: HWND, p: &Paint) {
     }
 }
 
-/// A sidebar row: the selected one is a lighter rounded fill, each page has a flat coloured tile with its initial.
+/// A sidebar row: the selected one is a lighter rounded fill, each page has a glyph in one ink (the accent when selected).
 fn draw_side(item: &DRAWITEMSTRUCT, p: &Paint) {
     let px = |v: i32| (v as f64 * p.scale).round() as i32;
     let Some(page) = PAGES.get(item.itemID as usize) else {
@@ -852,10 +836,9 @@ fn draw_side(item: &DRAWITEMSTRUCT, p: &Paint) {
     unsafe {
         fill(dc, row, p.pal.side);
         if item.itemState.0 & ODS_SELECTED.0 != 0 {
-            round(dc, cell, px(8), p.pal.sel, p.pal.sel);
+            round(dc, cell, (cell.bottom - cell.top) / 2, p.pal.sel, p.pal.sel);
         }
-        let (colour, glyph) = TILES[item.itemID as usize % 8];
-        round(dc, tile, px(5), colour, colour);
+        let glyph = TILES[item.itemID as usize % 8];
         SetBkMode(dc, TRANSPARENT);
         // The glyph comes from the icon font, made for this paint and deleted at once.
         let mut face = LOGFONTW {
@@ -872,7 +855,12 @@ fn draw_side(item: &DRAWITEMSTRUCT, p: &Paint) {
         }
         let icons = CreateFontIndirectW(&face);
         let old = SelectObject(dc, icons.into());
-        write(dc, glyph, tile, 0xffffff, DT_CENTER | DT_NOPREFIX);
+        let ink = if item.itemState.0 & ODS_SELECTED.0 != 0 {
+            p.pal.accent
+        } else {
+            p.pal.text
+        };
+        write(dc, glyph, tile, ink, DT_CENTER | DT_NOPREFIX);
         SelectObject(dc, old);
         let _ = DeleteObject(icons.into());
         SelectObject(dc, p.font.into());

@@ -237,6 +237,10 @@ impl Timers {
         }
     }
 
+    /// A countdown is running (the mascot leans towards it).
+    pub fn running(&self) -> bool {
+        !self.list.is_empty()
+    }
     /// A completion's alert is showing (the mascot is surprised while it does).
     pub fn finished(&self) -> bool {
         self.alert.is_some()

@@ -147,7 +147,8 @@ fn items(
             // SAFETY: a brush on the frame's own device context.
             unsafe {
                 let brush = context.CreateSolidColorBrush(&wash, None)?;
-                context.FillRoundedRectangle(&rounded(cell, 7.0 * scale), &brush);
+                context
+                    .FillRoundedRectangle(&rounded(cell, (cell.bottom - cell.top) / 2.0), &brush);
             }
         }
         let ink = if active {
@@ -267,7 +268,7 @@ pub(super) fn page(
                 // Idle, or the last one just finished: the preset buttons start the next.
                 let line = scene
                     .timer
-                    .map_or("Start a timer", |view| view.panel.as_str());
+                    .map_or("Pick a time", |view| view.panel.as_str());
                 let mut slot = layout::page_value(scene.dpi);
                 slot.height /= 2;
                 draw_text(
@@ -317,7 +318,7 @@ pub(super) fn page(
             if scene.shelf.first().is_some_and(|slot| slot.add) {
                 draw_text(
                     context,
-                    "Add files, or drop them here",
+                    "Drop a file here. It will wait.",
                     &font(
                         TEXT_FONT,
                         11.0,
@@ -368,21 +369,9 @@ fn widgets_page(
         let ink = |alpha| with_alpha(p.ink, p.ink_alpha(alpha * reveal));
         // SAFETY: the brush belongs to the live drawing context.
         unsafe {
-            let fill =
-                context.CreateSolidColorBrush(&with_alpha((255, 255, 255), 0.06 * reveal), None)?;
+            let fill = context.CreateSolidColorBrush(&with_alpha(p.ink, 0.07 * reveal), None)?;
             context.FillRoundedRectangle(&rounded(at(0.0, 0.0, 162.0, 96.0), 14.0 * scale), &fill);
         }
-        let title = match kind {
-            WidgetKind::WeekCalendar => "THIS WEEK",
-            WidgetKind::Battery => "BATTERY",
-        };
-        draw_text(
-            context,
-            title,
-            &font(8.6, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING),
-            at(12.0, 8.0, 138.0, 14.0),
-            ink(0.45),
-        )?;
         match kind {
             WidgetKind::WeekCalendar => {
                 // SAFETY: GetLocalTime returns a value and needs no resources.
@@ -514,7 +503,8 @@ fn widgets_page(
     Ok(())
 }
 
-/// A page button (`layout::page_button`): an outlined pill with its label in the accent colour.
+/// A page button (`layout::page_button`): a filled capsule. The one primary action of a page is a solid accent
+/// capsule with dark ink; the others are a faint ink fill with ink text.
 fn pill(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -531,11 +521,25 @@ fn pill(
         right: body.left + (slot.x + slot.width) as f32,
         bottom: body.top + (slot.y + slot.height) as f32,
     };
-    // SAFETY: a brush and an outline on the frame's own device context.
+    let primary = matches!(
+        label,
+        "Focus" | "Pause" | "Resume" | "Add files" | "Set city"
+    );
+    let (fill, ink) = if primary {
+        (
+            with_alpha(p.accent, p.ink_alpha(reveal)),
+            with_alpha(p.ink_on_accent(), p.ink_alpha(reveal)),
+        )
+    } else {
+        (
+            with_alpha(p.ink, p.ink_alpha(0.14 * reveal)),
+            with_alpha(p.ink, p.ink_alpha(0.9 * reveal)),
+        )
+    };
+    // SAFETY: a brush and a fill on the frame's own device context.
     unsafe {
-        let brush = context
-            .CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(0.6 * reveal)), None)?;
-        context.DrawRoundedRectangle(&rounded(square, 6.0 * scale), &brush, scale, None);
+        let brush = context.CreateSolidColorBrush(&fill, None)?;
+        context.FillRoundedRectangle(&rounded(square, (square.bottom - square.top) / 2.0), &brush);
     }
     let font = Font {
         family: TEXT_FONT,
@@ -544,13 +548,7 @@ fn pill(
         designator: 1.0,
         align: DWRITE_TEXT_ALIGNMENT_CENTER,
     };
-    draw_text(
-        context,
-        label,
-        &font,
-        square,
-        with_alpha(p.accent, p.ink_alpha(reveal)),
-    )
+    draw_text(context, label, &font, square, ink)
 }
 
 /// The Weather page (design J "Hero"): a condition picture and the big temperature at the left with the day's
@@ -838,7 +836,7 @@ fn limits_page(
     };
     let lead = DWRITE_TEXT_ALIGNMENT_LEADING;
     let normal = DWRITE_FONT_WEIGHT_NORMAL;
-    // The Refresh button: an outlined label.
+    // The Refresh button: a faint capsule.
     let button = layout::refresh(scene.dpi);
     let square = D2D_RECT_F {
         left: body.left + button.x as f32,
@@ -848,13 +846,13 @@ fn limits_page(
     };
     // SAFETY: a brush and an outline on the frame's own device context.
     unsafe {
-        let brush = context.CreateSolidColorBrush(&ink(0.3), None)?;
-        context.DrawRoundedRectangle(&rounded(square, 6.0 * scale), &brush, scale, None);
+        let brush = context.CreateSolidColorBrush(&ink(0.14), None)?;
+        context.FillRoundedRectangle(&rounded(square, (square.bottom - square.top) / 2.0), &brush);
     }
     draw_text(
         context,
         if view.refreshing {
-            "Refreshing..."
+            "Refreshing"
         } else {
             "Refresh"
         },
@@ -986,16 +984,25 @@ pub(super) fn draw_eyes(
     // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw and
     // every clip pushed below is popped in the same iteration.
     unsafe {
-        let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(alpha)), None)?;
+        let brush =
+            context.CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(alpha)), None)?;
         for side in [-1.0f32, 1.0] {
             let middle_x = body.left + eye_centre(media, (body.right - body.left) / scale) * scale;
             let centre_x = middle_x + (side * eyes::GAP / 2.0 + frame.look) * scale;
+            // Wave: the right eye hops 5 DIPs and tilts 22 degrees about its centre.
+            let wave = frame.pose == eyes::Pose::Wave && side > 0.0;
+            let centre_y = if wave {
+                centre_y - 5.0 * scale
+            } else {
+                centre_y
+            };
             let capsule = D2D_RECT_F {
                 left: centre_x - w / 2.0,
                 top: centre_y - h / 2.0,
                 right: centre_x + w / 2.0,
                 bottom: centre_y + h / 2.0,
             };
+
             let lids = D2D_RECT_F {
                 top: capsule.top + top * h,
                 bottom: capsule.bottom - bottom * h,
@@ -1005,7 +1012,19 @@ pub(super) fn draw_eyes(
                 continue;
             }
             context.PushAxisAlignedClip(&lids, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            if wave {
+                context.SetTransform(&Matrix3x2::rotation_around(
+                    22.0,
+                    Vector2 {
+                        X: centre_x,
+                        Y: centre_y,
+                    },
+                ));
+            }
             context.FillRoundedRectangle(&rounded(capsule, w.min(h) / 2.0), &brush);
+            if wave {
+                context.SetTransform(&Matrix3x2::identity());
+            }
             context.PopAxisAlignedClip();
         }
     }

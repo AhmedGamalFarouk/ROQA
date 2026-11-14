@@ -678,7 +678,7 @@ pub fn perform(action: Action) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::motion::{EASE_OUT, Tween};
+    use crate::motion::{SETTLE, Tween};
     use std::time::Instant;
 
     #[test]
@@ -703,14 +703,14 @@ mod tests {
         let mut slide = Tween::rest(0.0);
         let start = Instant::now();
         assert_eq!(super::slide_offset(slide.value(start), 64), 64);
-        slide.retarget(1.0, super::SLIDE_TIME, EASE_OUT);
+        slide.retarget(1.0, super::SLIDE_TIME, SETTLE);
         // Past its end the tween sits exactly on 1 and reports no running frames, so nothing keeps ticking.
         let end = Instant::now() + super::SLIDE_TIME * 2;
         assert_eq!(slide.value(end), 1.0);
         assert!(!slide.running(end));
         assert_eq!(super::slide_offset(slide.value(end), 64), 0);
         // Leaving again starts from where it is, so an interruption never jumps.
-        slide.retarget(0.0, super::SLIDE_TIME, EASE_OUT);
+        slide.retarget(0.0, super::SLIDE_TIME, SETTLE);
         assert!(slide.running(Instant::now()));
     }
 

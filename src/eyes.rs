@@ -27,6 +27,12 @@ pub enum Pose {
     Rest,
     Squash,
     Stretch,
+    /// The pointer arrived: wide and a little flat, sitting low (brand "squash on hover").
+    Bump,
+    /// Lids sliding down for a doze.
+    Doze,
+    /// The right eye hops and tilts (drawn by `tab_art::draw_eyes`); the shape is the rest one.
+    Wave,
 }
 
 /// No input for this long counts as long idle.
@@ -94,16 +100,19 @@ pub fn eye(mood: Mood, pose: Pose) -> Eye {
         Mood::Adhan => (1.2, 0.9, 0.0, 0.25, 0.25),
         Mood::Rain => (0.9, 1.0, 2.0, 0.4, 0.0),
     };
-    let (px, py) = match pose {
-        Pose::Rest => (1.0, 1.0),
-        Pose::Squash => (1.3, 0.1),
-        Pose::Stretch => (0.86, 1.14),
+    // Pose factors: width, height, extra dy and extra top lid.
+    let (px, py, pdy, ptop) = match pose {
+        Pose::Rest | Pose::Wave => (1.0, 1.0, 0.0, 0.0),
+        Pose::Squash => (1.1, 0.12, 0.0, 0.0),
+        Pose::Stretch => (0.86, 1.14, 0.0, 0.0),
+        Pose::Bump => (1.28, 0.82, 2.0, 0.0),
+        Pose::Doze => (1.15, 0.5, 3.0, 0.2),
     };
     Eye {
         w: BASE.0 * sx * px,
         h: BASE.1 * sy * py,
-        dy,
-        top,
+        dy: dy + pdy,
+        top: top + ptop,
         bottom,
     }
 }
@@ -114,6 +123,9 @@ type Step = (f32, f32, bool, Pose, u64);
 const R: Pose = Pose::Rest;
 const SQ: Pose = Pose::Squash;
 const ST: Pose = Pose::Stretch;
+const BP: Pose = Pose::Bump;
+const DZ: Pose = Pose::Doze;
+const WV: Pose = Pose::Wave;
 /// A blink anticipates with a stretch, squashes and overshoots back (U3). The last step of every show is the
 /// resting one: it ends the show.
 const BLINK: [Step; 10] = [
@@ -148,6 +160,23 @@ const SMILE: [Step; 7] = [
     (1.0, 0.0, true, R, 900),
     (0.6, 0.0, true, R, 60),
     (0.3, 0.0, true, R, 60),
+    (0.0, 0.0, false, R, 0),
+];
+/// Doze: the eyes open, the lids slide down and hold, then they fade. No loop.
+const DOZE: [Step; 6] = [
+    (0.3, 0.0, false, R, 60),
+    (0.7, 0.0, false, R, 60),
+    (1.0, 0.0, false, R, 500),
+    (1.0, 0.0, false, DZ, 1400),
+    (0.5, 0.0, false, DZ, 60),
+    (0.0, 0.0, false, R, 0),
+];
+/// The pointer arrived while the eyes show: a quick squash, then back to rest and out.
+const BUMP: [Step; 5] = [
+    (1.0, 0.0, false, BP, 90),
+    (1.0, 0.0, false, R, 700),
+    (0.6, 0.0, false, R, 60),
+    (0.3, 0.0, false, R, 60),
     (0.0, 0.0, false, R, 0),
 ];
 /// A mood event (happy or surprised): fade in squashing, overshoot, hold, fade out.
@@ -187,13 +216,16 @@ const RAIN: [Step; 6] = [
 ];
 
 /// Waking up (start-up, resume, back from sleepy): the eyes open from a squash, stretch, smile and fade.
-const WAKE: [Step; 9] = [
+/// then wave: the right eye hops twice.
+const WAKE: [Step; 11] = [
     (0.4, 0.0, false, SQ, 80),
     (1.0, 0.0, false, SQ, 120),
     (1.0, 0.0, false, ST, 120),
     (1.0, 0.0, false, R, 250),
-    (1.0, 0.0, true, SQ, 100),
-    (1.0, 0.0, true, R, 800),
+    (1.0, 0.0, true, WV, 140),
+    (1.0, 0.0, true, R, 140),
+    (1.0, 0.0, true, WV, 140),
+    (1.0, 0.0, true, R, 300),
     (0.6, 0.0, true, R, 60),
     (0.3, 0.0, true, R, 60),
     (0.0, 0.0, false, R, 0),
@@ -225,6 +257,8 @@ pub struct Eyes {
     run: Option<Run>,
     next_show: Instant,
     seed: u32,
+    /// Horizontal lean (DIPs) the eyes hold while shown: towards a running timer (+) or the media tile (-).
+    lean: f32,
 }
 
 impl Default for Eyes {
@@ -244,6 +278,7 @@ impl Eyes {
             run: None,
             next_show: now,
             seed: seed | 1,
+            lean: 0.0,
         };
         eyes.next_show = now + eyes.gap();
         eyes
@@ -270,7 +305,7 @@ impl Eyes {
             mood: if smile { Mood::Happy } else { self.mood },
             pose,
             alpha,
-            look,
+            look: look + self.lean,
         })
     }
     fn start(&mut self, steps: &'static [Step], now: Instant) {
@@ -299,6 +334,20 @@ impl Eyes {
         self.start(show, now);
         true
     }
+    /// The eyes lean `dx` DIPs (a timer runs: +7, media plays: -8, else 0); takes effect on the next frame
+    /// painted, never starts one.
+    pub fn set_lean(&mut self, dx: f32) {
+        self.lean = dx;
+    }
+    /// The pointer entered the pill: while the eyes are fully shown they squash and settle. True when it
+    /// started (a repaint is needed).
+    pub fn poke(&mut self, now: Instant) -> bool {
+        if self.mood == Mood::Adhan || !self.run.is_some_and(|run| run.steps[run.at].0 >= 1.0) {
+            return false;
+        }
+        self.start(&BUMP, now);
+        true
+    }
     /// Plays the wake animation now, replacing any show; true (a repaint is needed).
     pub fn wake(&mut self, now: Instant) -> bool {
         self.start(&WAKE, now);
@@ -311,7 +360,7 @@ impl Eyes {
         let Some(mut run) = self.run else {
             if now >= self.next_show {
                 self.next_show = now + self.gap();
-                let shows: [&'static [Step]; 3] = [&BLINK, &LOOK, &SMILE];
+                let shows: [&'static [Step]; 4] = [&BLINK, &LOOK, &SMILE, &DOZE];
                 let pick = shows[self.roll() as usize % shows.len()];
                 self.start(pick, now);
             }
@@ -442,6 +491,24 @@ mod tests {
     }
 
     #[test]
+    fn hover_squashes_only_shown_eyes_and_lean_shifts_the_look() {
+        let t0 = Instant::now();
+        let mut eyes = Eyes::new(t0, 11);
+        assert!(!eyes.poke(t0), "hidden eyes do not react");
+        eyes.start(&WAKE, t0);
+        assert!(!eyes.poke(t0), "mid fade-in does not react");
+        eyes.tick(eyes.due());
+        assert!(eyes.poke(t0));
+        assert_eq!(eyes.frame().unwrap().pose, Pose::Bump);
+        eyes.set_lean(7.0);
+        assert_eq!(eyes.frame().unwrap().look, 7.0);
+        let bump = eye(Mood::Idle, Pose::Bump);
+        assert!(bump.w > 9.5 * 1.2 && bump.h < 18.0 * 0.9 && bump.dy > 0.0);
+        let doze = eye(Mood::Idle, Pose::Doze);
+        assert!(doze.h <= 9.0 && doze.top > 0.0 && doze.dy > 0.0);
+    }
+
+    #[test]
     fn every_eye_fits_the_30_dip_pill_lane() {
         for mood in [
             Mood::Idle,
@@ -451,7 +518,14 @@ mod tests {
             Mood::Adhan,
             Mood::Rain,
         ] {
-            for pose in [Pose::Rest, Pose::Squash, Pose::Stretch] {
+            for pose in [
+                Pose::Rest,
+                Pose::Squash,
+                Pose::Stretch,
+                Pose::Bump,
+                Pose::Doze,
+                Pose::Wave,
+            ] {
                 let e = eye(mood, pose);
                 assert!(e.w > 0.0 && e.h > 0.0);
                 assert!(

@@ -29,13 +29,14 @@ fn paced(fast: bool, duration: Duration, curve: Curve) -> (Duration, Curve) {
             damping,
             frequency: frequency / FAST_SCALE,
         },
-        bezier => bezier,
+        // Reduced motion: no overshoot.
+        Curve::Bezier(x1, y1, x2, y2) => Curve::Bezier(x1, y1.min(1.0), x2, y2.min(1.0)),
     };
     (duration.mul_f32(FAST_SCALE), curve)
 }
 /// A deadline length at the chosen speed (the hover intent).
 pub fn time(duration: Duration) -> Duration {
-    paced(FAST.load(Relaxed), duration, EASE_OUT).0
+    paced(FAST.load(Relaxed), duration, SETTLE).0
 }
 
 /// Easing from 0 to 1. Values may leave 0..1 to overshoot; a tween always lands exactly on its target.
@@ -57,13 +58,14 @@ pub const CLOSE: Curve = Curve::Spring {
     damping: 0.64,
     frequency: 17.0,
 };
-/// Small state feedback (dock hover, hover-intent swell).
-pub const EASE_OUT: Curve = Curve::Bezier(0.2, 0.9, 0.3, 1.0);
-/// Dock hover pop: a steady rise that lands about 1.5 % past its rest and settles. The lift and growth are only
-/// 5 DIP and 10 %, so a curve that is steep in the middle (the earlier (0.45, 0.0, 0.3, 1.3) was 10 % to 90 % in
-/// 94 ms of 260) reads as ~100 ms of motion; this one is 5 % at ~22 ms and 95 % at ~190 ms, at most ~10 % of the
-/// travel in any 16 ms frame.
-pub const POP: Curve = Curve::Bezier(0.3, 0.1, 0.55, 1.15);
+/// settle: fades, hover out, value changes (brand curve 1, 260 ms).
+pub const SETTLE: Curve = Curve::Bezier(0.2, 0.9, 0.3, 1.0);
+/// pop: hover grow, squash recover, greet (brand curve 2, 360 ms): about 6 % overshoot.
+pub const POP: Curve = Curve::Bezier(0.34, 1.45, 0.5, 1.0);
+/// pop's time.
+pub const POP_TIME: Duration = Duration::from_millis(360);
+/// slide: tab and page switches, notices (brand curve 3, `PAGE_TIME`).
+pub const SLIDE: Curve = Curve::Bezier(0.3, 0.0, 0.15, 1.0);
 /// A tab switch (slide and fade) and a notice's entry.
 pub const PAGE_TIME: Duration = Duration::from_millis(240);
 pub const OPEN_TIME: Duration = Duration::from_millis(500);
@@ -143,7 +145,7 @@ impl Tween {
             to: value,
             start: Instant::now(),
             duration: Duration::ZERO,
-            curve: EASE_OUT,
+            curve: SETTLE,
         }
     }
     /// Always animates, like Nusa: by user decision (2026-11-09) the Windows "Animation effects"
@@ -200,7 +202,7 @@ mod tests {
         let normal = OPEN.ease(0.5, OPEN_TIME);
         assert!((c.ease(0.5, d) - normal).abs() < 1e-4);
         assert_eq!(paced(false, OPEN_TIME, OPEN), (OPEN_TIME, OPEN));
-        assert_eq!(paced(true, HOVER_IN_TIME, EASE_OUT).1, EASE_OUT);
+        assert_eq!(paced(true, HOVER_IN_TIME, SETTLE).1, SETTLE);
     }
 
     fn samples(curve: Curve, duration: Duration) -> Vec<f32> {
@@ -214,7 +216,7 @@ mod tests {
         for (curve, duration) in [
             (OPEN, OPEN_TIME),
             (CLOSE, CLOSE_TIME),
-            (EASE_OUT, HOVER_IN_TIME),
+            (SETTLE, HOVER_IN_TIME),
         ] {
             let values = samples(curve, duration);
             assert!(values[0].abs() < 1e-4);
@@ -230,42 +232,29 @@ mod tests {
         assert!(open > 1.05 && open < 1.09, "open overshoot {open}");
         let close = peak(CLOSE, CLOSE_TIME);
         assert!(close > 1.05 && close < 1.10, "close undershoot {close}");
-        let pop = peak(POP, HOVER_IN_TIME);
-        assert!(pop > 1.005 && pop < 1.05, "hover pop {pop}");
-        assert!((samples(POP, HOVER_IN_TIME)[200] - 1.0).abs() < 0.01);
-        let ease = samples(EASE_OUT, HOVER_IN_TIME);
+        let pop = peak(POP, POP_TIME);
+        assert!(pop > 1.03 && pop < 1.10, "pop overshoot {pop}");
+        assert!((samples(POP, POP_TIME)[200] - 1.0).abs() < 0.01);
+        // Reduced motion keeps the shape but never overshoots.
+        let (_, calm) = paced(true, POP_TIME, POP);
+        assert!(samples(calm, POP_TIME).into_iter().all(|v| v <= 1.0 + 1e-4));
+        assert!(samples(SLIDE, PAGE_TIME)[200] > 0.99);
+        let ease = samples(SETTLE, HOVER_IN_TIME);
         assert!(ease.windows(2).all(|pair| pair[1] >= pair[0] - 1e-5) && ease[100] > 0.8);
-    }
-
-    /// The first sample at or past `fraction` of the travel, as a share of the duration.
-    fn when(values: &[f32], fraction: f32) -> f32 {
-        values.iter().position(|&v| v >= fraction).unwrap() as f32 / (values.len() - 1) as f32
-    }
-
-    #[test]
-    fn the_dock_pop_moves_visibly_across_most_of_its_duration() {
-        let values = samples(POP, HOVER_IN_TIME);
-        // Starts at rest and moves from the first frames on (5 % of the travel by a tenth of the run)...
-        assert!(values[0].abs() < 1e-4 && when(&values, 0.05) < 0.13);
-        // ...and 5 % to 95 % spans over 60 % of the 260 ms (the old curve: 10 % to 90 % in 36 %).
-        assert!(when(&values, 0.95) - when(&values, 0.05) > 0.6, "span");
-        assert!(values[134] < 0.9, "{}", values[134]);
-        // No 16 ms frame (12 of 200 samples across 260 ms) covers more than an eighth of the travel.
-        assert!(values.windows(13).all(|w| w[12] - w[0] < 0.125));
     }
 
     #[test]
     fn a_restarted_tween_shows_its_rest_value_on_the_first_frame() {
         let started = Instant::now();
         let mut tween = Tween::rest(0.0);
-        tween.retarget(1.0, HOVER_IN_TIME, POP);
+        tween.retarget(1.0, POP_TIME, POP);
         // The first frame lands 40 ms after the retarget: without the restart it is already into the curve.
         let late = started + Duration::from_millis(40);
         assert!(tween.value(late) > 0.0);
         tween.restart(late);
         assert!(tween.value(late).abs() < 1e-4);
         assert!(tween.value(late + Duration::from_millis(100)) > 0.1);
-        assert_eq!(tween.value(late + HOVER_IN_TIME), 1.0);
+        assert_eq!(tween.value(late + POP_TIME), 1.0);
     }
 
     #[test]
@@ -280,19 +269,19 @@ mod tests {
         // A settled tween is not running and a switch's tween stops at its end.
         let mut tween = Tween::rest(1.0);
         assert!(!tween.running(Instant::now()));
-        tween.retarget(0.0, Duration::ZERO, EASE_OUT);
+        tween.retarget(0.0, Duration::ZERO, SETTLE);
         assert!(!tween.running(Instant::now()));
     }
 
     #[test]
     fn tween_interrupts_from_current_value_and_lands_on_target() {
         let mut tween = Tween::rest(0.0);
-        tween.retarget(1.0, Duration::from_secs(10), EASE_OUT);
+        tween.retarget(1.0, Duration::from_secs(10), SETTLE);
         assert!(tween.running(Instant::now()));
         let midway = tween.value(Instant::now());
-        tween.retarget(0.0, Duration::from_secs(10), EASE_OUT);
+        tween.retarget(0.0, Duration::from_secs(10), SETTLE);
         assert!((tween.value(tween.start) - midway).abs() < 0.05);
-        tween.retarget(1.0, Duration::ZERO, EASE_OUT);
+        tween.retarget(1.0, Duration::ZERO, SETTLE);
         assert!(!tween.running(Instant::now()));
         assert_eq!(tween.value(Instant::now()), 1.0);
     }

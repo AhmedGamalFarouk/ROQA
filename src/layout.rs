@@ -359,7 +359,8 @@ pub fn gear_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, 
 }
 
 /// The Limits page's Refresh button beside its title, in DIPs from the body's left and top edges.
-const REFRESH: (f32, f32, f32, f32) = (96.0, 6.0, 76.0, 25.0);
+// Ends at y 25, above the 5h/Weekly headers (y 27).
+const REFRESH: (f32, f32, f32, f32) = (96.0, 5.0, 70.0, 20.0);
 pub fn refresh(dpi: u32) -> Bounds {
     scaled_bounds(REFRESH, dpi)
 }

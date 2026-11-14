@@ -7,6 +7,10 @@ pub struct Rgba(pub u8, pub u8, pub u8, pub f32);
 
 pub type Rgb = (u8, u8, u8);
 
+/// The one ROQA accent, Lamp, on every dark surface; Light takes the deeper `LAMP_LIGHT` (5:1 on its body).
+pub const LAMP: Rgb = (255, 180, 84);
+pub const LAMP_LIGHT: Rgb = (154, 82, 0);
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     /// The notch body and the dock bar at rest, one flat fill.
@@ -92,7 +96,7 @@ impl Theme {
     }
 
     /// The palette with the system `accent` on its fills and rings. Any accent under `ACCENT_CONTRAST` against
-    /// the body over a white or a black backdrop (a Glass body is translucent) keeps ink instead, like the text
+    /// the body over a white or a black backdrop (a Glass body is translucent) keeps Lamp instead, like the text
     /// rule in the tests. Light deepens the accent (`deepen`) so the selected tab and chip read as an accent
     /// wash with dark accent text, not as a disabled grey.
     pub fn palette_with(self, accent: Rgb) -> Palette {
@@ -108,7 +112,7 @@ impl Theme {
             })
         });
         Palette {
-            accent: if reads { accent } else { palette.ink },
+            accent: if reads { accent } else { palette.accent },
             ..palette
         }
     }
@@ -120,7 +124,7 @@ impl Theme {
                 body: Rgba(0, 0, 0, 1.0),
                 dock_hover: Rgba(20, 20, 22, 1.0),
                 ink: (255, 255, 255),
-                accent: (255, 255, 255),
+                accent: LAMP,
                 on_ink: (0, 0, 0),
                 glyph: (220, 225, 232),
                 tile: Rgba(58, 58, 64, 1.0),
@@ -133,7 +137,7 @@ impl Theme {
                 body: Rgba(236, 238, 242, 1.0),
                 dock_hover: Rgba(226, 229, 234, 1.0),
                 ink: (20, 22, 26),
-                accent: (20, 22, 26),
+                accent: LAMP_LIGHT,
                 on_ink: (255, 255, 255),
                 glyph: (52, 56, 64),
                 tile: Rgba(198, 202, 209, 1.0),
@@ -146,7 +150,7 @@ impl Theme {
                 body: Rgba(11, 16, 32, 1.0),
                 dock_hover: Rgba(22, 30, 56, 1.0),
                 ink: (232, 238, 255),
-                accent: (232, 238, 255),
+                accent: LAMP,
                 on_ink: (11, 16, 32),
                 glyph: (190, 205, 255),
                 tile: Rgba(40, 50, 84, 1.0),
@@ -159,7 +163,7 @@ impl Theme {
                 body: Rgba(16, 20, 32, 0.74),
                 dock_hover: Rgba(16, 20, 32, 0.88),
                 ink: (255, 255, 255),
-                accent: (255, 255, 255),
+                accent: LAMP,
                 on_ink: (10, 14, 22),
                 glyph: (235, 240, 250),
                 tile: Rgba(255, 255, 255, 0.16),
@@ -172,7 +176,7 @@ impl Theme {
                 body: Rgba(16, 24, 42, 0.76),
                 dock_hover: Rgba(16, 24, 42, 0.88),
                 ink: (255, 255, 255),
-                accent: (255, 255, 255),
+                accent: LAMP,
                 on_ink: (10, 14, 22),
                 glyph: (235, 240, 250),
                 tile: Rgba(255, 255, 255, 0.16),
@@ -552,31 +556,33 @@ mod tests {
     }
 
     #[test]
-    fn the_accent_colours_fills_and_rings_only_where_it_reads() {
+    fn lamp_is_the_one_accent_and_a_system_accent_replaces_it_only_where_it_reads() {
         let blue = (0, 120, 215);
-        // Light takes a deeper accent where it reads (the selected tab is an accent wash, not grey), else ink.
+        for theme in Theme::ALL {
+            let want = if theme == Theme::Light {
+                LAMP_LIGHT
+            } else {
+                LAMP
+            };
+            assert_eq!(theme.palette().accent, want, "{theme:?}");
+        }
+        // Light deepens a chosen accent; a bright one that cannot read on it falls back to Lamp's deep form.
         assert_eq!(Theme::Light.palette_with(blue).accent, (0, 96, 172));
-        assert_eq!(
-            Theme::Light.palette_with((255, 196, 0)).accent,
-            (20, 22, 26)
-        );
-        assert_eq!(Theme::Light.palette().accent, (20, 22, 26));
-        // High contrast and the plain themes' own palettes keep ink.
-        assert_eq!(Theme::Classic.palette().accent, (255, 255, 255));
+        assert_eq!(Theme::Light.palette_with((255, 196, 0)).accent, LAMP_LIGHT);
+        // High contrast keeps the system colours.
         let high = Palette::contrast((1, 2, 3), (250, 251, 252), (4, 5, 6), (7, 8, 9));
         assert_eq!(high.accent, high.ink);
         assert_eq!(high.accent_dim(true, 0.3), ((7, 8, 9), 1.0));
         assert_eq!(high.accent_dim(false, 0.3), (high.ink, 1.0));
-        // A bright accent shows on the dark bodies; a dark one falls back to ink.
+        // A bright system accent shows on the dark bodies; a dark one falls back to Lamp.
         let bright = (255, 196, 0);
         assert_eq!(Theme::Classic.palette_with(bright).accent, bright);
         assert_eq!(Theme::Midnight.palette_with(bright).accent, bright);
         for dark in [(0, 0, 0), (10, 10, 30)] {
-            let (classic, midnight) = (Theme::Classic.palette(), Theme::Midnight.palette());
-            assert_eq!(Theme::Classic.palette_with(dark).accent, classic.ink);
-            assert_eq!(Theme::Midnight.palette_with(dark).accent, midnight.ink);
+            assert_eq!(Theme::Classic.palette_with(dark).accent, LAMP);
+            assert_eq!(Theme::Midnight.palette_with(dark).accent, LAMP);
         }
-        // The chosen accent always reads over the worst backdrop, whatever the system gives.
+        // Lamp and any chosen accent read over the worst backdrop.
         for theme in Theme::ALL {
             let p = theme.palette();
             for accent in [
@@ -588,28 +594,19 @@ mod tests {
                 (200, 30, 30),
             ] {
                 let chosen = theme.palette_with(accent).accent;
-                let shown = if theme == Theme::Light {
-                    deepen(accent)
-                } else {
-                    accent
-                };
-                assert!(chosen == p.ink || chosen == shown, "{theme:?}");
-                if chosen != p.ink {
-                    for (Rgba(r, g, b, alpha), backdrop) in p
-                        .fills()
-                        .into_iter()
-                        .flat_map(|fill| [(fill, (255, 255, 255)), (fill, (0, 0, 0))])
-                    {
-                        let body = over((r, g, b), alpha, backdrop);
-                        assert!(
-                            contrast(chosen, body) >= ACCENT_CONTRAST,
-                            "{theme:?} {chosen:?}"
-                        );
-                    }
+                for (Rgba(r, g, b, alpha), backdrop) in p
+                    .fills()
+                    .into_iter()
+                    .flat_map(|fill| [(fill, (255, 255, 255)), (fill, (0, 0, 0))])
+                {
+                    let body = over((r, g, b), alpha, backdrop);
+                    assert!(
+                        contrast(chosen, body) >= ACCENT_CONTRAST,
+                        "{theme:?} {chosen:?}"
+                    );
                 }
             }
         }
-        // Muted still dims the accent, by alpha.
         let classic = Theme::Classic.palette_with(bright);
         assert_eq!(classic.accent_dim(false, 0.5), (bright, 0.5));
     }
@@ -680,5 +677,6 @@ mod tests {
         let custom_accent = (0, 120, 215);
         let tinted_classic = system_palette(Theme::Classic, Some(custom_accent));
         assert_eq!(tinted_classic.accent, custom_accent);
+        assert_eq!(Theme::Classic.palette().accent, LAMP);
     }
 }

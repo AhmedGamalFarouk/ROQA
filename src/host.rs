@@ -443,10 +443,10 @@ impl Surface {
             // while it leaves just turns the slide around.
             if !visible && !self.leaving {
                 (self.leaving, self.live) = (true, true);
-                self.slide.retarget(0.0, dock::SLIDE_TIME, motion::EASE_OUT);
+                self.slide.retarget(0.0, dock::SLIDE_TIME, motion::SETTLE);
             } else if visible && self.leaving {
                 (self.leaving, self.live) = (false, true);
-                self.slide.retarget(1.0, dock::SLIDE_TIME, motion::EASE_OUT);
+                self.slide.retarget(1.0, dock::SLIDE_TIME, motion::SETTLE);
             }
             if self.leaving || visible {
                 return;
@@ -473,7 +473,7 @@ impl Surface {
         }
         if visible && matches!(self.role, Role::Dock { .. }) {
             // The dock was painted below its window (slide 0): it rises over `SLIDE_TIME`.
-            self.slide.retarget(1.0, dock::SLIDE_TIME, motion::EASE_OUT);
+            self.slide.retarget(1.0, dock::SLIDE_TIME, motion::SETTLE);
             self.live = true;
         }
         if !visible {
@@ -568,8 +568,7 @@ impl Surface {
             self.page_dir = dir;
             self.page_from = Tab::ALL.get(self.page_at).copied();
             self.page_fx = Tween::rest(0.0);
-            self.page_fx
-                .retarget(1.0, motion::PAGE_TIME, motion::EASE_OUT);
+            self.page_fx.retarget(1.0, motion::PAGE_TIME, motion::SLIDE);
             self.live = true;
         }
         self.page_at = page.index();
@@ -589,7 +588,7 @@ impl Surface {
                 };
                 self.notice_fx = Tween::rest(from);
                 self.notice_fx
-                    .retarget(to, motion::PAGE_TIME, motion::EASE_OUT);
+                    .retarget(to, motion::PAGE_TIME, motion::SLIDE);
                 self.live = true;
             } else {
                 self.notice_fx = Tween::rest(if self.notice_on { 1.0 } else { 0.0 });
@@ -611,7 +610,7 @@ impl Surface {
             self.volume_fill = Tween::rest(level); // the thumb follows the pointer without lag
         } else {
             self.volume_fill
-                .retarget(level, VOLUME_EASE, motion::EASE_OUT);
+                .retarget(level, VOLUME_EASE, motion::SETTLE);
         }
         let volume_fill = self.volume_fill.value(now);
         // Only a revealed panel row reads the time; a collapsed notch draws no progress.
@@ -733,7 +732,7 @@ impl Surface {
             // Click mode: the pill only swells (and never shrinks an open panel); a click opens it.
             if swells(self.motion.target()) {
                 self.motion
-                    .retarget(NOTCH_SWELL, motion::INTENT_TIME, motion::EASE_OUT);
+                    .retarget(NOTCH_SWELL, motion::INTENT_TIME, motion::SETTLE);
             }
         } else if self.motion.value(Instant::now()) > NOTCH_SWELL {
             // Re-entered while still closing: reopen directly.
@@ -741,7 +740,7 @@ impl Surface {
         } else {
             *intent = Some(Instant::now() + motion::time(motion::INTENT_TIME));
             self.motion
-                .retarget(NOTCH_SWELL, motion::INTENT_TIME, motion::EASE_OUT);
+                .retarget(NOTCH_SWELL, motion::INTENT_TIME, motion::SETTLE);
         }
         self.live = true;
     }
@@ -752,13 +751,20 @@ impl Surface {
         };
         let ease = |tween: &mut Tween, on: bool, curve| {
             let (target, duration) = if on {
-                (1.0, motion::HOVER_IN_TIME)
+                (
+                    1.0,
+                    if curve == motion::POP {
+                        motion::POP_TIME
+                    } else {
+                        motion::HOVER_IN_TIME
+                    },
+                )
             } else {
                 (0.0, motion::HOVER_OUT_TIME)
             };
             tween.retarget(target, duration, curve);
         };
-        ease(&mut self.motion, inside, motion::EASE_OUT);
+        ease(&mut self.motion, inside, motion::SETTLE);
         for (index, tween) in slots.iter_mut().enumerate() {
             ease(tween, slot == Some(index), motion::POP);
         }
@@ -1832,9 +1838,17 @@ impl Desktop {
                 }),
             hour: self.pages.hour,
         };
+        let lean = if self.timers.running() {
+            7.0
+        } else if facts.playing {
+            -8.0
+        } else {
+            0.0
+        };
         let Some(eyes) = &mut self.pages.eyes else {
             return INFINITE;
         };
+        eyes.set_lean(lean);
         let changed = eyes.set_mood(eyes::mood(facts), now) | eyes.tick(now);
         let due = eyes.due();
         if changed {
@@ -3475,7 +3489,16 @@ impl Desktop {
                     let rail = self.pages.rail(media);
                     let over = layout::notch_hit(width, surface.dpi, progress, media, rail, x, y);
                     // While a menu is open the notch does not open under it.
+                    let was = matches!(surface.role, Role::Notch { engaged: true, .. });
                     surface.set_notch_hover(over && self.menu.is_none());
+                    if over
+                        && !was
+                        && progress < 0.1
+                        && let Some(eyes) = &mut self.pages.eyes
+                        && eyes.poke(now)
+                    {
+                        surface.request(Repaint::Full);
+                    }
                     // The tab cell under the pointer washes lighter.
                     let tab = rail.and_then(|rail| {
                         layout::rail_tab_at(width, surface.dpi, progress, media, rail, (x, y))

@@ -965,7 +965,10 @@ fn settings_button(
     // SAFETY: the brush is local to the live drawing context.
     unsafe {
         let brush = context.CreateSolidColorBrush(&with_alpha(p.ink, 0.12 * reveal), None)?;
-        context.FillRoundedRectangle(&rounded(background, 8.0 * scale), &brush);
+        context.FillRoundedRectangle(
+            &rounded(background, (background.bottom - background.top) / 2.0),
+            &brush,
+        );
     }
     glyphs::draw(
         context,
@@ -2074,7 +2077,7 @@ fn draw_button(
                 bottom: centre.1 + half_h,
             };
             let brush = context.CreateSolidColorBrush(&tint(p.track(0.12 * hover)), None)?;
-            context.FillRoundedRectangle(&rounded(chip, px(10)), &brush);
+            context.FillRoundedRectangle(&rounded(chip, half_h), &brush);
         }
     }
     let side = px(22);
@@ -2190,7 +2193,7 @@ fn draw_slot(
                 bottom: center_y + half,
             };
             let brush = context.CreateSolidColorBrush(&tint(p.track(0.12 * slot.hover)), None)?;
-            context.FillRoundedRectangle(&rounded(highlight, px(12)), &brush);
+            context.FillRoundedRectangle(&rounded(highlight, half), &brush);
         }
         if slot.picker {
             glyphs::draw(context, frame, Glyph::Apps, with_alpha(p.glyph, 1.0))?;
