@@ -260,7 +260,10 @@ impl Menu {
     fn create(graphics: &Graphics, palette: Palette, spec: Spec, hover: bool) -> Result<Self> {
         let dpi = spec.dpi;
         let visible_rows = visible_rows(dpi, spec.work, spec.items.len());
-        let (size, _) = list_layout(dpi, visible_rows);
+        let (mut size, _) = list_layout(dpi, visible_rows);
+        if hover && spec.items == [Item::Label] {
+            size.0 = crate::graphics::dock_label_width(&spec.app, dpi)? + dock::px(16, dpi);
+        }
         let slot_x = spec.x;
         let bounds = match spec.below {
             Some(bottom) => place_below(slot_x, bottom, spec.work, size),
@@ -463,7 +466,8 @@ impl Menu {
         if self.drawn == Some(self.selected) && !self.reveal.running(now) {
             return Ok(());
         }
-        let (_, panel) = list_layout(self.dpi, self.visible_rows);
+        let (_, mut panel) = list_layout(self.dpi, self.visible_rows);
+        panel.width = self.bounds.width - 2 * panel.x;
         let rows: Vec<ListRow> = self
             .items
             .iter()

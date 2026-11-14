@@ -257,6 +257,19 @@ const DISPLAY_FONT: PCWSTR = w!("Segoe UI Variable Display");
 /// The time's digits lead; "pm" and similar designators sit smaller beside them.
 const TIME_DESIGNATOR: f32 = 0.72;
 
+/// Dock labels share a 190 DIP text cap and 48 DIP budget for row insets and pixel rounding.
+pub fn dock_label_width(label: &str, dpi: u32) -> Result<i32> {
+    let scale = dpi as f32 / 96.0;
+    let font = Font {
+        family: TEXT_FONT,
+        size: 13.0 * scale,
+        weight: DWRITE_FONT_WEIGHT_NORMAL,
+        designator: 1.0,
+        align: DWRITE_TEXT_ALIGNMENT_LEADING,
+    };
+    Ok((text_width(label, &font)?.min(190.0 * scale) + 48.0 * scale).ceil() as i32)
+}
+
 /// What an edge slider's pill shows; `layout` is in surface pixels.
 pub struct SliderScene<'a> {
     pub dpi: u32,
@@ -1030,7 +1043,7 @@ fn media_page(
         return media_text(context, &media_plan(scene, track, body, clock), art, p);
     }
     let open = motion::smooth(scene.progress);
-    let cue = (1.0 - motion::reveal(scene.progress)) * (1.0 - tab_art::eyes_shown(scene));
+    let cue = (1.0 - motion::reveal(scene.progress)) * tab_art::clock_shown(scene);
     if cue > 0.0 {
         glyphs::draw(
             context,
@@ -1066,7 +1079,7 @@ fn media_page(
         scene.time,
         &clock,
         row(15.0 + 36.0 * open, 24.0),
-        with_alpha(p.ink, p.ink_alpha(1.0 - tab_art::eyes_shown(scene))),
+        with_alpha(p.ink, p.ink_alpha(tab_art::clock_shown(scene))),
     )?;
     let date = motion::reveal(scene.progress);
     if date <= 0.0 {
@@ -1482,7 +1495,7 @@ fn media_plan<'a>(
     let dim = if track.playing { 1.0 } else { 0.60 };
     let artist = motion::reveal(scene.progress);
     // The title makes way while the mascot's eyes are in its lane.
-    let title_fade = 1.0 - tab_art::eyes_shown(scene);
+    let title_fade = tab_art::clock_shown(scene);
     let mut lines = vec![
         Line {
             text: scene.time.into(),
@@ -2317,10 +2330,10 @@ fn draw_slot(
         }
         if !slot.mini.is_empty() {
             let brush = context.CreateSolidColorBrush(&tint(p.track(0.16)), None)?;
-            context.FillRoundedRectangle(&rounded(frame, size / 2.0), &brush);
-            let side = size * 0.36;
+            context.FillRoundedRectangle(&rounded(frame, size * 0.3), &brush);
             for (index, icon) in slot.mini.iter().take(4).enumerate() {
-                let (column, row, _) = dock::mini_cell(index).unwrap();
+                let (column, row, fraction) = dock::mini_cell(index).unwrap();
+                let side = size * fraction;
                 let left = frame.left + size * column;
                 let top = frame.top + size * row;
                 let mini = D2D_RECT_F {

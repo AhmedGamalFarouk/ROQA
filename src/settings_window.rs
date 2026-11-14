@@ -30,7 +30,7 @@ use crate::{
 use std::cell::RefCell;
 use windows::{
     Win32::{
-        Foundation::{COLORREF, HANDLE, HWND, LPARAM, RECT, WPARAM},
+        Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::{
             Dwm::{
                 DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -38,15 +38,13 @@ use windows::{
             },
             Gdi::*,
         },
-        System::{
-            Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
-            SystemInformation::GetTickCount64,
-        },
+        System::SystemInformation::GetTickCount64,
         UI::{
             Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
             Controls::*,
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow},
             Input::KeyboardAndMouse::SetFocus,
+            Shell::{DefSubclassProc, SetWindowSubclass},
             WindowsAndMessaging::*,
         },
     },
@@ -635,28 +633,6 @@ fn system(index: SYS_COLOR_INDEX) -> u32 {
     // SAFETY: scalar query.
     swap(unsafe { GetSysColor(index) })
 }
-/// One DWORD under HKEY_CURRENT_USER (read when the window opens and on a settings change, never polled).
-fn reg(key: PCWSTR, name: PCWSTR) -> Option<u32> {
-    let (mut value, mut size) = (0u32, 4u32);
-    // SAFETY: reads one DWORD into a local.
-    let read = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            key,
-            name,
-            RRF_RT_REG_DWORD,
-            None,
-            Some((&mut value as *mut u32).cast()),
-            Some(&mut size),
-        )
-    };
-    read.is_ok().then_some(value)
-}
-/// Windows app mode is dark.
-fn dark() -> bool {
-    let key = w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-    reg(key, w!("AppsUseLightTheme")) == Some(0)
-}
 fn high_contrast() -> bool {
     let mut hc = HIGHCONTRASTW {
         cbSize: size_of::<HIGHCONTRASTW>() as u32,
@@ -674,14 +650,8 @@ fn high_contrast() -> bool {
     read.is_ok() && hc.dwFlags & HCF_HIGHCONTRASTON == HCF_HIGHCONTRASTON
 }
 
-/// ROQA's one accent: Lamp on the dark window, its deeper form on the light one (5:1 on white).
-fn accent(dark: bool) -> u32 {
-    if dark { 0xffb454 } else { 0x9a5200 }
-}
-
-/// The tokens of `design-language.md`: dark or light with the system accent, or the system colours in
-/// high contrast.
-fn palette() -> Pal {
+/// Settings consumes the active ROQA surface, ink and accent tokens.
+fn palette(settings: &Settings) -> Pal {
     if high_contrast() {
         let (window, text, select) = (
             system(COLOR_WINDOW),
@@ -705,24 +675,47 @@ fn palette() -> Pal {
             dark: false,
         };
     }
-    let dark = dark();
-    let pick = |dark_value: u32, light_value: u32| if dark { dark_value } else { light_value };
-    let text = pick(0xf2f2f4, 0x16171a);
+    let tokens = crate::theme::system_palette(
+        settings.theme,
+        settings
+            .match_accent
+            .then(crate::theme::windows_accent_color)
+            .flatten(),
+    );
+    let pack =
+        |(r, g, b): crate::theme::Rgb| (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+    let opaque = |crate::theme::Rgba(r, g, b, _)| pack((r, g, b));
+    let body = opaque(tokens.body);
+    let mix = |colour: crate::theme::Rgba| {
+        let crate::theme::Rgba(r, g, b, alpha) = colour;
+        let channel = |v: u8, shift: u32| {
+            ((f32::from(v) * alpha + ((body >> shift) & 255u32) as f32 * (1.0 - alpha)).round()
+                as u32)
+                << shift
+        };
+        channel(r, 16) | channel(g, 8) | channel(b, 0)
+    };
+    let dark = settings.theme != Theme::Light;
+    let tile = mix(tokens.tile);
     Pal {
-        side: pick(0x19191b, 0xececef),
-        content: pick(0x1d1d1f, 0xf6f6f8),
-        card: pick(0x28282a, 0xffffff),
-        line: pick(0x333336, 0xe4e4e8),
-        field: pick(0x4a4a4e, 0xc4c4ca),
-        sel: pick(0x2d2d30, 0xffffff),
-        text,
-        dim: pick(0x8e8e93, 0x6a6b72),
-        accent: accent(dark),
-        off: pick(0x48484c, 0xc9c9ce),
-        thumb: 0xffffff,
-        // Dark ink on Lamp (10:1); white on the light window's deep Lamp (5:1).
-        on_accent: pick(0x14161a, 0xffffff),
-        seltext: text,
+        side: opaque(tokens.dock_hover),
+        content: body,
+        card: mix(crate::theme::Rgba(
+            tokens.ink.0,
+            tokens.ink.1,
+            tokens.ink.2,
+            0.08,
+        )),
+        line: tile,
+        field: tile,
+        sel: tile,
+        text: pack(tokens.ink),
+        dim: pack(tokens.glyph),
+        accent: pack(tokens.accent),
+        off: tile,
+        thumb: pack(tokens.ink),
+        on_accent: if dark { body } else { 0xffffff },
+        seltext: pack(tokens.ink),
         dark,
     }
 }
@@ -756,6 +749,7 @@ unsafe fn write(dc: HDC, text: &str, mut r: RECT, colour: u32, flags: DRAW_TEXT_
     let mut text: Vec<u16> = text.encode_utf16().collect();
     // SAFETY: draws a local buffer into the caller's live DC.
     unsafe {
+        SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, rgb(colour));
         // A mirrored window (right-to-left UI) reads its text right to left too.
         let reading = if GetLayout(dc) & LAYOUT_RTL.0 != 0 {
@@ -865,7 +859,7 @@ fn draw_side(item: &DRAWITEMSTRUCT, p: &Paint) {
         } else {
             p.pal.text
         };
-        draw_settings_glyph(dc, tile, glyph, ink);
+        draw_settings_glyph(dc, tile, glyph, swap(ink));
         SelectObject(dc, p.font.into());
         let name = RECT {
             left: tile.right + px(12),
@@ -1046,7 +1040,15 @@ fn draw_push(note: &NMCUSTOMDRAW, p: &Paint) {
     };
     // SAFETY: the DC and rectangle come from this custom-draw notification.
     unsafe {
-        fill(dc, r, p.pal.card);
+        fill(
+            dc,
+            r,
+            if GetDlgCtrlID(h) as usize == CLOSE {
+                p.pal.content
+            } else {
+                p.pal.card
+            },
+        );
         round(dc, r, (r.bottom - r.top) / 2, fill_colour, ring);
         SetBkMode(dc, TRANSPARENT);
         SelectObject(dc, p.font.into());
@@ -1178,6 +1180,22 @@ unsafe extern "system" fn settings_proc(
                 let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
                 if item.CtlType == ODT_COMBOBOX {
                     draw_combo(item, p);
+                } else if item.CtlType == ODT_BUTTON {
+                    let note = NMCUSTOMDRAW {
+                        hdr: NMHDR {
+                            hwndFrom: item.hwndItem,
+                            ..Default::default()
+                        },
+                        hdc: item.hDC,
+                        rc: item.rcItem,
+                        uItemState: if item.itemState.0 & ODS_SELECTED.0 != 0 {
+                            CDIS_SELECTED
+                        } else {
+                            Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    draw_push(&note, p);
                 } else {
                     draw_side(item, p);
                 }
@@ -1191,6 +1209,129 @@ unsafe extern "system" fn settings_proc(
         // SAFETY: forwards the same arguments to the shared dialog procedure.
         None => unsafe { dialog_proc(hwnd, message, wparam, lparam) },
     }
+}
+
+/// Draw after the default window procedure has finished its native nonclient paint.
+unsafe extern "system" fn frame_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _: usize,
+    _: usize,
+) -> LRESULT {
+    // SAFETY: owned dialog's subclass chain retains all native input and caption behavior.
+    let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+    if matches!(
+        message,
+        WM_NCPAINT
+            | WM_NCACTIVATE
+            | WM_PAINT
+            | WM_VSCROLL
+            | WM_NCMOUSEMOVE
+            | WM_NCLBUTTONDOWN
+            | WM_NCLBUTTONUP
+    ) {
+        PAINT.with(|cell| {
+            let guard = cell.borrow();
+            let Some(p) = guard.as_ref() else {
+                return;
+            };
+            // SAFETY: live dialog, local scrollbar geometry and a window DC released below.
+            unsafe {
+                let mut bar = SCROLLBARINFO {
+                    cbSize: size_of::<SCROLLBARINFO>() as u32,
+                    ..Default::default()
+                };
+                if GetScrollBarInfo(hwnd, OBJID_VSCROLL, &mut bar).is_ok()
+                    && bar.rgstate[0] & 0x8000 == 0
+                {
+                    let mut window = RECT::default();
+                    let _ = GetWindowRect(hwnd, &mut window);
+                    let dc = GetWindowDC(Some(hwnd));
+                    let track = RECT {
+                        left: bar.rcScrollBar.left - window.left,
+                        right: bar.rcScrollBar.right - window.left,
+                        top: bar.rcScrollBar.top - window.top,
+                        bottom: bar.rcScrollBar.bottom - window.top,
+                    };
+                    fill(dc, track, p.pal.content);
+                    let inset = ((track.right - track.left) / 3).max(2);
+                    let thumb = RECT {
+                        left: track.left + inset,
+                        right: track.right - inset,
+                        top: track.top + bar.xyThumbTop,
+                        bottom: track.top + bar.xyThumbBottom,
+                    };
+                    round(
+                        dc,
+                        thumb,
+                        (thumb.right - thumb.left) / 2,
+                        p.pal.off,
+                        p.pal.off,
+                    );
+                    ReleaseDC(Some(hwnd), dc);
+                }
+            }
+        });
+    }
+    result
+}
+
+/// Paint only the closed native combo; Windows retains its list, selection and mouse behavior.
+unsafe extern "system" fn combo_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _: usize,
+    _: usize,
+) -> LRESULT {
+    if message == WM_PAINT {
+        let handled = PAINT.with(|cell| {
+            let guard = cell.borrow();
+            let Some(p) = guard.as_ref() else {
+                return false;
+            };
+            // SAFETY: BeginPaint/EndPaint bracket this owned control's live DC.
+            unsafe {
+                let mut paint = PAINTSTRUCT::default();
+                let dc = BeginPaint(hwnd, &mut paint);
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                fill(dc, rect, p.pal.card);
+                round(dc, rect, (rect.bottom - rect.top) / 2, p.pal.sel, p.pal.sel);
+                let px = |v: i32| (v as f64 * p.scale).round() as i32;
+                let name = RECT {
+                    left: rect.left + px(10),
+                    right: rect.right - px(24),
+                    ..rect
+                };
+                SelectObject(dc, p.font.into());
+                write(
+                    dc,
+                    &text(hwnd, 128),
+                    name,
+                    p.pal.text,
+                    DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
+                );
+                let glyph = RECT {
+                    left: rect.right - px(22),
+                    top: (rect.bottom - px(16)) / 2,
+                    right: rect.right - px(6),
+                    bottom: (rect.bottom + px(16)) / 2,
+                };
+                draw_settings_glyph(dc, glyph, Glyph::Expand, swap(p.pal.text));
+                let _ = EndPaint(hwnd, &paint);
+            }
+            true
+        });
+        if handled {
+            return LRESULT(0);
+        }
+    }
+    // SAFETY: the native subclass chain owns all other combo messages.
+    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
 }
 
 /// A combo row kept inside `len` items; `CB_ERR` (no selection) becomes the first row.
@@ -1336,7 +1477,7 @@ impl SettingsWindow {
             sounds: prayer_os::discover(),
             sound_action: None,
             font: None,
-            pal: palette(),
+            pal: palette(current),
             factor,
             scroll: 0,
             scroll_max: 0,
@@ -1348,6 +1489,10 @@ impl SettingsWindow {
             return_to: foreground_key(),
             closed: false,
         };
+        // SAFETY: the owned dialog keeps this subclass until its HWND is destroyed.
+        unsafe {
+            let _ = SetWindowSubclass(window, Some(frame_proc), 1, 0);
+        }
         this.set_monitors(monitors);
         this.build()?;
         this.fill_sounds(&current.prayer_sound);
@@ -1435,7 +1580,7 @@ impl SettingsWindow {
             )?,
             Kind::Combo(_) => {
                 label = stat(title, LABEL)?;
-                control(
+                let combo = control(
                     window,
                     w!("ComboBox"),
                     "",
@@ -1446,7 +1591,12 @@ impl SettingsWindow {
                         | WS_VSCROLL.0
                         | clip,
                     flat,
-                )?
+                )?;
+                // SAFETY: owned native control, subclass lasts exactly as long as the HWND.
+                unsafe {
+                    let _ = SetWindowSubclass(combo, Some(combo_proc), 1, 0);
+                }
+                combo
             }
             Kind::Edit(_) => {
                 label = stat(title, LABEL)?;
@@ -1635,7 +1785,7 @@ impl SettingsWindow {
             w!("Button"),
             "Close",
             CLOSE,
-            WS_CLIPSIBLINGS.0,
+            WS_CLIPSIBLINGS.0 | BS_OWNERDRAW as u32,
             WINDOW_EX_STYLE(0),
         )?;
         for item in &self.items {
@@ -1871,8 +2021,13 @@ impl SettingsWindow {
             self.say(status)?;
         }
         if next != self.current {
+            let restyle =
+                next.theme != self.current.theme || next.match_accent != self.current.match_accent;
             self.current = next.clone();
             self.change = Some(next);
+            if restyle {
+                self.relayout()?;
+            }
         }
         Ok(())
     }
@@ -2036,7 +2191,7 @@ impl SettingsWindow {
         // SAFETY: owned dialog is live.
         let dpi = unsafe { GetDpiForWindow(self.window) }.max(96);
         let font = PickerFont::create(dpi, self.factor)?;
-        self.pal = palette();
+        self.pal = palette(&self.current);
         let dark = BOOL::from(self.pal.dark);
         // SAFETY: a scalar attribute on our own window; older Windows ignores it.
         unsafe {
@@ -2046,21 +2201,19 @@ impl SettingsWindow {
                 (&dark as *const BOOL).cast(),
                 size_of::<BOOL>() as u32,
             );
-            // Windows 11 shows the accent in the caption of a dark window; make it the sidebar's colour.
+            // Match the caption on every theme change, including a return from dark to Light.
             // Older Windows ignores both attributes.
-            if self.pal.dark {
-                for (attribute, value) in [
-                    (DWMWA_CAPTION_COLOR, self.pal.side),
-                    (DWMWA_TEXT_COLOR, self.pal.text),
-                ] {
-                    let colour = rgb(value);
-                    let _ = DwmSetWindowAttribute(
-                        self.window,
-                        attribute,
-                        (&colour as *const COLORREF).cast(),
-                        size_of::<COLORREF>() as u32,
-                    );
-                }
+            for (attribute, value) in [
+                (DWMWA_CAPTION_COLOR, self.pal.side),
+                (DWMWA_TEXT_COLOR, self.pal.text),
+            ] {
+                let colour = rgb(value);
+                let _ = DwmSetWindowAttribute(
+                    self.window,
+                    attribute,
+                    (&colour as *const COLORREF).cast(),
+                    size_of::<COLORREF>() as u32,
+                );
             }
         }
         // Each child with whether it is an edit or a drop-down (they take the dark "CFD" look).
@@ -2131,8 +2284,16 @@ impl SettingsWindow {
             )?;
         }
         self.layout()?;
-        // SAFETY: our own live window.
-        let _ = unsafe { InvalidateRect(Some(self.window), None, true) };
+        // Children must repaint after PAINT receives the new tokens, not during WM_SETFONT with the old ones.
+        // SAFETY: the dialog and all its children are owned by this settings window.
+        let _ = unsafe {
+            RedrawWindow(
+                Some(self.window),
+                None,
+                None,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME,
+            )
+        };
         Ok(())
     }
 

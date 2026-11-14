@@ -327,9 +327,15 @@ pub fn volume_fraction(window_width: i32, dpi: u32, progress: f32, x: i32) -> Op
 }
 
 /// The settings button in the expanded panel's bottom-right corner, in DIPs from the body's left and top
-/// edges (media panel, plain panel): 16 square, 16 from the right edge and 10 from the bottom, so its disc
+/// edges (media panel, plain panel): 16 square, 16 from the right edge and 18 from the bottom, so its disc
 /// clears the glass backing's rounded corner (`BACKING_INSET`) by 6.
 const GEAR_SIZE: f32 = 16.0;
+/// Five chips leave an eight-DIP gutter before the tune button.
+pub fn prayer_chip(index: usize, dpi: u32) -> Bounds {
+    const WIDTH: f32 = (296.0 - 4.0 * 6.0) / 5.0;
+    scaled_bounds((PAD + (WIDTH + 6.0) * index as f32, 92.0, WIDTH, 26.0), dpi)
+}
+
 pub fn gear(dpi: u32, media: bool) -> Bounds {
     let shape = tall(
         if media {
@@ -342,7 +348,7 @@ pub fn gear(dpi: u32, media: bool) -> Bounds {
     scaled_bounds(
         (
             shape.width - 16.0 - GEAR_SIZE,
-            shape.height - 10.0 - GEAR_SIZE,
+            shape.height - 18.0 - GEAR_SIZE,
             GEAR_SIZE,
             GEAR_SIZE,
         ),
@@ -356,7 +362,7 @@ pub const BACKING_INSET: f32 = 2.0;
 /// A page's footer line (Weather's attribution, Prayer's Hijri date), in DIPs from the body's left and top
 /// edges: x, y, width, height, the same on the plain and the media panel. Its bottom is 12 above the body's
 /// bottom and it ends before the settings button.
-const FOOTER: (f32, f32, f32, f32) = (PAD, 103.0, 300.0, 13.0);
+const FOOTER: (f32, f32, f32, f32) = (PAD + TILE_RADIUS, 103.0, 286.0, 13.0);
 pub fn footer(_media: bool) -> (f32, f32, f32, f32) {
     FOOTER
 }
@@ -2062,6 +2068,32 @@ mod tests {
     }
 
     type Rect = (f32, f32, f32, f32);
+    #[test]
+    fn prayer_chips_clear_each_other_and_the_tune_hit_area() {
+        for dpi in [96, 120, 144, 192, 240] {
+            let tune = gear(dpi, false);
+            let slack = scaled(6.0, dpi);
+            let target = Bounds {
+                x: tune.x - slack,
+                y: tune.y - slack,
+                width: tune.width + 2 * slack,
+                height: tune.height + 2 * slack,
+            };
+            for index in 0..5 {
+                let chip = prayer_chip(index, dpi);
+                assert!(
+                    !overlap(dips(chip, dpi), dips(target, dpi)),
+                    "{dpi}: {index}"
+                );
+                assert!(chip.x >= scaled(PAD, dpi));
+                if index > 0 {
+                    let previous = prayer_chip(index - 1, dpi);
+                    assert!(previous.x + previous.width < chip.x);
+                }
+            }
+        }
+    }
+
     fn overlap(a: Rect, b: Rect) -> bool {
         a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
     }

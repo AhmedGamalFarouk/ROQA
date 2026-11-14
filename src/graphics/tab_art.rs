@@ -895,16 +895,8 @@ fn prayer_page(g: &Page, scene: &NotchScene) -> Result<()> {
         g.ink(0.55),
     )?;
     sun_arc(g, view)?;
-    // Five chips share the content width, a 6 gap apart.
-    let count = view.rows.len().max(1) as f32;
-    let width = (328.0 - 6.0 * (count - 1.0)) / count;
     for (index, row) in view.rows.iter().enumerate() {
-        let chip = g.at(
-            layout::PAD + (width + 6.0) * index as f32,
-            92.0,
-            width,
-            26.0,
-        );
+        let chip = g.slot(layout::prayer_chip(index, scene.dpi));
         let fill = if row.name == view.next {
             g.accent(0.25)
         } else if row.current {
@@ -1039,18 +1031,38 @@ fn limits_page(g: &Page, scene: &NotchScene) -> Result<()> {
         g.text(
             row.name,
             &g.font(11.5, SEMI, LEAD),
-            g.at(layout::PAD, y, 76.0, 16.0),
+            g.at(layout::PAD, y, 72.0, 16.0),
             g.ink(dim),
         )?;
         if let Some(why) = row.why {
+            for x in WINDOWS {
+                g.fill(g.at(x, y + 5.0, 56.0, 6.0), None, g.ink(0.08))?;
+                g.text(
+                    "-",
+                    &g.font(11.5, NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING),
+                    g.at(x + 62.0, y, 40.0, 16.0),
+                    g.ink(0.45),
+                )?;
+            }
+            glyphs::draw(
+                g.context,
+                g.at(334.0, y, 14.0, 14.0),
+                Glyph::More,
+                g.ink(0.6),
+            )?;
             g.text(
                 why,
-                &g.font(11.5, NORMAL, LEAD),
-                g.at(WINDOWS[0], y, 248.0, 16.0),
+                &g.font(SECONDARY, NORMAL, LEAD),
+                g.at(WINDOWS[0], y + 15.0, 248.0, 14.0),
                 g.ink(0.6),
             )?;
             continue;
         }
+        g.fill(
+            g.at(338.0, y + 5.0, 6.0, 6.0),
+            None,
+            g.ink(if row.stale { 0.35 } else { 0.9 }),
+        )?;
         for (line, x) in [&row.h5, &row.wk].into_iter().zip(WINDOWS) {
             let (text, reset) = match line {
                 Line::Used { pct, reset } => {
@@ -1077,7 +1089,7 @@ fn limits_page(g: &Page, scene: &NotchScene) -> Result<()> {
             };
             g.text(
                 &text,
-                &g.font(11.5, NORMAL, LEAD),
+                &g.font(11.5, NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING),
                 g.at(x + 62.0, y, 40.0, 16.0),
                 g.ink(0.9 * dim),
             )?;
@@ -1116,6 +1128,11 @@ pub(super) fn eyes_shown(scene: &NotchScene) -> f32 {
         .map_or(0.0, |frame| frame.alpha * eye_alpha(scene.progress))
 }
 
+/// Fade through a clear midpoint: clock and eyes never share visible pixels.
+pub(super) fn clock_shown(scene: &NotchScene) -> f32 {
+    (1.0 - 2.0 * eyes_shown(scene)).max(0.0)
+}
+
 /// The two capsules for the scene's mood and pose, at the pill's middle. Lids are flat cuts of the capsule
 /// (a clip), not body-coloured overpaint, so they hold on every theme.
 pub(super) fn draw_eyes(
@@ -1126,7 +1143,7 @@ pub(super) fn draw_eyes(
     scale: f32,
     p: &Palette,
 ) -> Result<()> {
-    let alpha = eyes_shown(scene);
+    let alpha = (2.0 * eyes_shown(scene) - 1.0).max(0.0);
     if alpha <= 0.0 {
         return Ok(());
     }

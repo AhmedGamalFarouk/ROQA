@@ -546,9 +546,9 @@ pub fn folder_drop(offset: i32, width: i32, dpi: u32) -> bool {
 pub fn mini_cell(index: usize) -> Option<(f32, f32, f32)> {
     (index < 4).then_some({
         (
-            0.10 + (index % 2) as f32 * 0.44,
-            0.10 + (index / 2) as f32 * 0.44,
-            0.36,
+            0.16 + (index % 2) as f32 * 0.39,
+            0.16 + (index / 2) as f32 * 0.39,
+            0.29,
         )
     })
 }

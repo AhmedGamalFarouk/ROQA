@@ -1,4 +1,4 @@
-//! Pinned apps (M5 S3): a pure, owned, ordered list of identities. No I/O, no thread, no taskbar pin import.
+//! Pinned apps (M5 S3): an owned, ordered list of identities. No thread or taskbar pin import.
 //!
 //! A pin is just an `Identity` (AUMID, or lowercased exe path as the fallback). Its display name and launch
 //! target are derived from it, so the store keeps one string per pin: `app:<aumid>` or `exe:<path>`.
@@ -252,15 +252,43 @@ fn folder_name(name: &str) -> String {
     }
 }
 
-/// Short name for a pin that has no window to take a title from: AUMID package name, or exe file stem.
+/// Shared presentation name for dock labels and folder rows. Missing shell metadata never exposes an AUMID.
 pub fn display_name(identity: &Identity) -> String {
+    if let Identity::Application(id) = identity {
+        use windows::{
+            Win32::{
+                System::Com::CoTaskMemFree,
+                UI::Shell::{IShellItem, SHCreateItemFromParsingName, SIGDN_NORMALDISPLAY},
+            },
+            core::HSTRING,
+        };
+        let target = HSTRING::from(format!(r"shell:AppsFolder\{id}"));
+        // SAFETY: Shell metadata is queried only on demand; its allocated string is always freed.
+        let name = unsafe {
+            SHCreateItemFromParsingName::<_, _, IShellItem>(&target, None)
+                .and_then(|item| item.GetDisplayName(SIGDN_NORMALDISPLAY))
+                .ok()
+                .map(|value| {
+                    let name = value.to_string().unwrap_or_default();
+                    CoTaskMemFree(Some(value.0.cast()));
+                    name
+                })
+        };
+        return name
+            .filter(|name| {
+                !name.is_empty()
+                    && !name.contains(id)
+                    && name != id.split(['!', '_']).next().unwrap_or(id)
+                    && !name.contains('!')
+            })
+            .unwrap_or_else(|| "App".into());
+    }
     let name = match identity {
-        Identity::Application(id) => id.split(['!', '_']).next().unwrap_or(id),
         Identity::Executable(path) => {
             let file = path.rsplit(['\\', '/']).next().unwrap_or(path);
             file.strip_suffix(".exe").unwrap_or(file)
         }
-        Identity::Unavailable(_) => "",
+        _ => "",
     };
     if name.is_empty() { "App" } else { name }.to_string()
 }
@@ -395,11 +423,7 @@ mod tests {
 
     #[test]
     fn names_and_launch_targets() {
-        assert_eq!(
-            display_name(&app("Microsoft.Edge_8wekyb3d8bbwe!App")),
-            "Microsoft.Edge"
-        );
-        assert_eq!(display_name(&app("Contoso.Mail")), "Contoso.Mail");
+        assert_eq!(display_name(&app("ROQA.Missing_123!App")), "App");
         assert_eq!(display_name(&exe(r"c:\tools\edit.exe")), "edit");
         assert_eq!(display_name(&Identity::Unavailable(1)), "App");
         assert_eq!(display_name(&app("!x")), "App");
