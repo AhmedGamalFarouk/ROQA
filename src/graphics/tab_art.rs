@@ -274,14 +274,31 @@ pub(super) fn page(
                     &view.panel,
                     &font(
                         DISPLAY_FONT,
-                        26.0,
+                        30.0,
                         DWRITE_FONT_WEIGHT_BOLD,
-                        1.0,
+                        TIME_DESIGNATOR,
                         DWRITE_TEXT_ALIGNMENT_LEADING,
                     ),
                     rect(layout::page_value(scene.dpi)),
                     ink(if view.paused { 0.55 } else { 1.0 }),
                 )?;
+                // Running reads as a lit accent capsule under the digits, paused as a faint one (static).
+                let state = D2D_RECT_F {
+                    left: body.left + 18.0 * scale,
+                    top: body.top + 66.0 * scale,
+                    right: body.left + 42.0 * scale,
+                    bottom: body.top + 69.0 * scale,
+                };
+                // SAFETY: a brush and a fill on the frame's own device context.
+                unsafe {
+                    let lit = if view.paused {
+                        ink(0.25)
+                    } else {
+                        with_alpha(p.accent, p.ink_alpha(reveal))
+                    };
+                    let brush = context.CreateSolidColorBrush(&lit, None)?;
+                    context.FillRoundedRectangle(&rounded(state, 1.5 * scale), &brush);
+                }
                 for (index, control) in crate::timer::controls(Some(view)).iter().enumerate() {
                     let slot = layout::page_button(index, true, scene.dpi);
                     pill(context, scene, body, slot, &control.label(), reveal, p)?;
@@ -290,23 +307,25 @@ pub(super) fn page(
             }
             None => {
                 // Idle, or the last one just finished: the preset buttons start the next.
-                let line = scene
-                    .timer
-                    .map_or("Pick a time", |view| view.panel.as_str());
+                let line = if scene.timer.is_some() {
+                    "Done. Rest a little."
+                } else {
+                    "Pick a time"
+                };
                 let mut slot = layout::page_value(scene.dpi);
                 slot.height /= 2;
                 draw_text(
                     context,
                     line,
                     &font(
-                        TEXT_FONT,
-                        12.0,
+                        DISPLAY_FONT,
+                        15.0,
                         DWRITE_FONT_WEIGHT_SEMI_BOLD,
                         1.0,
                         DWRITE_TEXT_ALIGNMENT_LEADING,
                     ),
                     rect(slot),
-                    with_alpha(p.accent, p.ink_alpha(reveal)),
+                    ink(1.0),
                 )?;
                 for (index, control) in crate::timer::controls(scene.timer).iter().enumerate() {
                     let slot = layout::page_button(index, false, scene.dpi);
@@ -316,6 +335,14 @@ pub(super) fn page(
             }
         },
         Tab::Shelf => {
+            if scene.shelf.first().is_some_and(|slot| slot.add) {
+                drop_zone(
+                    context,
+                    rect(layout::shelf_zone(scene.dpi)),
+                    scale,
+                    ink(0.35),
+                )?;
+            }
             shelf_row(context, scene, body, scale, p)?;
             if !scene.shelf.first().is_some_and(|slot| slot.add) {
                 pill(
@@ -362,6 +389,39 @@ pub(super) fn page(
         Tab::Widgets => widgets_page(context, scene, body, scale, reveal, p),
         _ => Ok(()),
     }
+}
+
+/// The empty shelf's soft drop zone: a dashed r14 outline, the one outline in the grammar.
+fn drop_zone(
+    context: &ID2D1DeviceContext,
+    zone: D2D_RECT_F,
+    scale: f32,
+    colour: D2D1_COLOR_F,
+) -> Result<()> {
+    use windows::Win32::Graphics::Direct2D::{
+        D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_CUSTOM, D2D1_LINE_JOIN_ROUND,
+        D2D1_STROKE_STYLE_PROPERTIES, ID2D1Factory,
+    };
+    // SAFETY: a factory, a stroke style and a brush local to this draw, on the frame's live context.
+    unsafe {
+        let factory: ID2D1Factory = context.GetFactory()?;
+        let dashes = [0.1_f32, 2.4];
+        let style = factory.CreateStrokeStyle(
+            &D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                dashCap: D2D1_CAP_STYLE_ROUND,
+                lineJoin: D2D1_LINE_JOIN_ROUND,
+                miterLimit: 1.0,
+                dashStyle: D2D1_DASH_STYLE_CUSTOM,
+                dashOffset: 0.0,
+            },
+            Some(&dashes),
+        )?;
+        let brush = context.CreateSolidColorBrush(&colour, None)?;
+        context.DrawRoundedRectangle(&rounded(zone, 14.0 * scale), &brush, 1.5 * scale, &style);
+    }
+    Ok(())
 }
 
 fn widgets_page(
@@ -507,16 +567,17 @@ fn widgets_page(
                         with_alpha(p.accent, p.ink_alpha(reveal)),
                     )?;
                 }
-                let value = reading.map_or_else(|| "--".to_owned(), |r| format!("{}%", r.percent));
-                draw_text(
-                    context,
-                    &value,
-                    &font(22.0, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING),
-                    at(86.0, 28.0, 70.0, 28.0),
-                    ink(1.0),
-                )?;
+                if let Some(r) = reading {
+                    draw_text(
+                        context,
+                        &format!("{}%", r.percent),
+                        &font(22.0, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING),
+                        at(86.0, 28.0, 70.0, 28.0),
+                        ink(1.0),
+                    )?;
+                }
                 let status = match reading {
-                    None => "Unavailable",
+                    None => "No battery here",
                     Some(_) if charging => "Charging",
                     Some(r) if r.ac == 1 => "Plugged in",
                     Some(r) if r.ac == 0 => "On battery",
@@ -530,7 +591,11 @@ fn widgets_page(
                         DWRITE_FONT_WEIGHT_NORMAL,
                         DWRITE_TEXT_ALIGNMENT_LEADING,
                     ),
-                    at(86.0, 58.0, 70.0, 17.0),
+                    if reading.is_some() {
+                        at(86.0, 58.0, 70.0, 17.0)
+                    } else {
+                        at(86.0, 40.0, 70.0, 17.0)
+                    },
                     ink(0.6),
                 )?;
             }
@@ -648,12 +713,12 @@ fn weather_page(
         Glyph::weather(view.icon),
         ink(1.0),
     )?;
-    let temp = font(DISPLAY_FONT, 26.0, DWRITE_FONT_WEIGHT_BOLD, lead);
+    let temp = font(DISPLAY_FONT, 30.0, DWRITE_FONT_WEIGHT_BOLD, lead);
     draw_text(
         context,
         &view.temp,
         &temp,
-        at(50.0, 30.0, 56.0, 32.0),
+        at(50.0, 28.0, 56.0, 36.0),
         ink(1.0),
     )?;
     let small = font(TEXT_FONT, 11.0, normal, lead);
@@ -672,6 +737,14 @@ fn weather_page(
         ink(0.6),
     )?;
     let columns = if media { 4 } else { 3 };
+    // The hours sit together on one soft tile, so the strip reads as a unit.
+    let (first, pitch) = if media { (182.0, 40.0) } else { (178.0, 37.0) };
+    // SAFETY: a brush and a fill on the frame's own device context.
+    unsafe {
+        let wash = context.CreateSolidColorBrush(&ink(0.07), None)?;
+        let tile = at(first - 3.0, 26.0, pitch * columns as f32 + 6.0, 44.0);
+        context.FillRoundedRectangle(&rounded(tile, 14.0 * scale), &wash);
+    }
     for (index, cell) in view.hours.iter().take(columns).enumerate() {
         // The plain panel's columns end before the gear at its bottom right corner.
         let (first, pitch) = if media { (182.0, 40.0) } else { (178.0, 37.0) };
@@ -708,7 +781,7 @@ fn weather_page(
         &view.footer,
         &font(TEXT_FONT, FOOTER_SIZE, normal, lead),
         at(x, y, w, h),
-        ink(0.55),
+        ink(0.45),
     )
 }
 
@@ -1005,11 +1078,13 @@ fn limits_page(
                     unsafe {
                         let track = context.CreateSolidColorBrush(&ink(0.18 * dim), None)?;
                         let fill = context.CreateSolidColorBrush(&accent(dim), None)?;
-                        let bar = at(x, y + 6.0, 44.0, 4.0);
-                        context.FillRoundedRectangle(&rounded(bar, 2.0 * scale), &track);
+                        let bar = at(x, y + 5.0, 44.0, 6.0);
+                        context.FillRoundedRectangle(&rounded(bar, 3.0 * scale), &track);
                         let mut part = bar;
-                        part.right = bar.left + (bar.right - bar.left) * f32::from(*pct) / 100.0;
-                        context.FillRoundedRectangle(&rounded(part, 2.0 * scale), &fill);
+                        // A used window never draws narrower than a capsule's own height.
+                        part.right = bar.left
+                            + ((bar.right - bar.left) * f32::from(*pct) / 100.0).max(6.0 * scale);
+                        context.FillRoundedRectangle(&rounded(part, 3.0 * scale), &fill);
                     }
                     (format!("{pct}%"), format!("resets {reset}"))
                 }

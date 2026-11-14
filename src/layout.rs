@@ -478,6 +478,10 @@ pub fn page_title(dpi: u32) -> Bounds {
 pub fn page_value(dpi: u32) -> Bounds {
     scaled_bounds(PAGE_VALUE, dpi)
 }
+/// The empty shelf's dashed drop zone around the add slot and its hint.
+pub fn shelf_zone(dpi: u32) -> Bounds {
+    scaled_bounds((16.0, 30.0, 288.0, 38.0), dpi)
+}
 pub fn shelf_hint(dpi: u32) -> Bounds {
     scaled_bounds(SHELF_HINT, dpi)
 }
