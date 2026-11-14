@@ -11,6 +11,8 @@ mod audio;
 mod brightness;
 mod catalog_timing;
 mod chan;
+mod clipboard;
+mod clipboard_os;
 mod clock;
 mod diagnostics;
 mod dock;

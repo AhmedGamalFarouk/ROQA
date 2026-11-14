@@ -199,6 +199,8 @@ pub struct NotchScene<'a> {
     /// The file shelf's visible entries (S6, PROVISIONAL); empty draws nothing.
     pub shelf: &'a [ShelfSlot<'a>],
     pub shelf_undo: bool,
+    /// The Shelf shows its Copied list: `shelf` then holds copied text (an empty list is the empty state).
+    pub clips: bool,
     /// The page the open panel shows. Media is the media and clock panel; the others draw their own content.
     pub tab: Tab,
     pub widgets: crate::widgets::WidgetConfig,
@@ -228,6 +230,12 @@ pub struct RailScene<'a> {
     pub layout: layout::Rail,
     pub hover: Option<usize>,
     pub tabs: &'a [Tab],
+    /// The sliding indicator's fractional tab position, its arrival pop (0 to 1, overshoots), the fading
+    /// hover wash (tab, strength) and the press squash (0 to 1).
+    pub ind: f32,
+    pub pop: f32,
+    pub wash: (usize, f32),
+    pub press: f32,
 }
 
 /// One shelf entry: its system icon once the worker delivered it (a plain square until then), and whether
@@ -2750,6 +2758,7 @@ mod media_tests {
             notice: None,
             shelf: &[],
             shelf_undo: false,
+            clips: false,
             widgets: crate::widgets::WidgetConfig::default(),
             tab: Tab::Media,
             rail: None,
@@ -2790,6 +2799,7 @@ mod media_tests {
                 notice: None,
                 shelf: &[],
                 shelf_undo: false,
+                clips: false,
                 widgets: crate::widgets::WidgetConfig::default(),
                 tab: Tab::Media,
                 rail: None,
@@ -3039,6 +3049,7 @@ mod media_tests {
                 notice: None,
                 shelf: &[],
                 shelf_undo: false,
+                clips: false,
                 widgets: crate::widgets::WidgetConfig::default(),
                 tab: Tab::Media,
                 rail: None,
@@ -3101,6 +3112,7 @@ mod media_tests {
                     notice: None,
                     shelf: &[],
                     shelf_undo: false,
+                    clips: false,
                     widgets: crate::widgets::WidgetConfig::default(),
                     tab: Tab::Media,
                     rail: None,
@@ -3151,6 +3163,7 @@ mod media_tests {
             notice: None,
             shelf: &[],
             shelf_undo: false,
+            clips: false,
             widgets: crate::widgets::WidgetConfig::default(),
             tab: Tab::Media,
             rail: None,

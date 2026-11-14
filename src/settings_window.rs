@@ -122,6 +122,7 @@ const HKAUDIO: usize = 200;
 const HKAUDIOCOMBO: usize = 201;
 const MATCH_ACCENT: usize = 199;
 const DOCK_BADGES: usize = 202;
+const CLIP: usize = 203;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -305,6 +306,7 @@ const PAGES: &[Page] = &[
                 rows: &[
                     r(EYES, C, "Mascot eyes", ""),
                     r(PRIVACY, C, "Privacy indicator", ""),
+                    r(CLIP, C, "Keep copied text on the Shelf", ""),
                 ],
             },
             Card {
@@ -1262,6 +1264,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         EDGE_BRIGHTNESS => &mut s.edge_brightness,
         EYES => &mut s.eyes,
         PRIVACY => &mut s.privacy,
+        CLIP => &mut s.clipboard,
         DETECT => &mut s.detect,
         PRAYER => &mut s.prayer_remind,
         LIMCODEX => &mut s.limits_codex,

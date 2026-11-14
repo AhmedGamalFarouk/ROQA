@@ -28,6 +28,8 @@ pub struct Store {
     pub pins: Vec<String>,
     /// File-shelf references, in display order.
     pub shelf: Vec<String>,
+    /// Copied text for the Shelf's Copied list, newest first (`clipboard.rs`).
+    pub clips: Vec<String>,
     /// Running countdown timers as absolute wall-clock expiries (Unix seconds), soonest first.
     pub timers: Vec<u64>,
     /// User settings; version 1 files had none, so they load as the defaults.
@@ -162,6 +164,9 @@ fn parse(text: &str) -> Option<Store> {
         match line.split_once('=') {
             Some(("pin", value)) if !value.is_empty() => store.pins.push(value.into()),
             Some(("shelf", value)) if !value.is_empty() => store.shelf.push(value.into()),
+            Some(("clip", value)) if !value.is_empty() => {
+                store.clips.push(crate::clipboard::decode(value))
+            }
             Some(("timer", value)) => store.timers.extend(value.parse::<u64>()),
             Some(("lasttab", value)) => {
                 store.last_tab = Tab::from_key(value)
@@ -211,6 +216,11 @@ impl Store {
                 out.push_str(value);
                 out.push('\n');
             }
+        }
+        for clip in self.clips.iter().filter(|c| !c.is_empty()) {
+            out.push_str("clip=");
+            out.push_str(&crate::clipboard::encode(clip));
+            out.push('\n');
         }
         for expiry in &self.timers {
             out.push_str(&format!("timer={expiry}\n"));
@@ -291,6 +301,7 @@ mod tests {
                 r"C:\Apps\a=b.exe".into(),
             ],
             shelf: vec![r"C:\Users\me\doc.txt".into()],
+            clips: vec!["two\nlines \\ and = sign".into()],
             timers: vec![1_800_000_000, 1_800_000_060],
             settings: Settings {
                 dock: false,
@@ -372,6 +383,7 @@ mod tests {
             Some(Store {
                 pins: vec!["a".into()],
                 shelf: vec!["b".into()],
+                clips: Vec::new(),
                 timers: vec![77], // unparsable timer values are skipped
                 settings: Settings::default(),
                 last_tab: Tab::Media,

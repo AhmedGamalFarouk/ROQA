@@ -58,6 +58,8 @@ pub struct Settings {
     pub eyes: bool,
     /// The mic and camera dots (features B5); off closes the registry watch.
     pub privacy: bool,
+    /// Remember text copied to the Windows clipboard on the Shelf's Copied list; off removes the listener.
+    pub clipboard: bool,
     /// The weather city as typed (empty is none), the opt-in device location (it wins over the city while
     /// it works) and °C or °F. Nothing is requested until a city is set or detection is on.
     pub city: String,
@@ -126,6 +128,7 @@ impl Default for Settings {
             widgets: WidgetConfig::default(),
             eyes: true,
             privacy: true,
+            clipboard: true,
             city: String::new(),
             detect: false,
             units: Units::Auto,
@@ -297,6 +300,7 @@ impl Settings {
             "edgebri" => flag(value).map(|v| self.edge_brightness = v).is_some(),
             "eyes" => flag(value).map(|v| self.eyes = v).is_some(),
             "privacy" => flag(value).map(|v| self.privacy = v).is_some(),
+            "clipcopy" => flag(value).map(|v| self.clipboard = v).is_some(),
             "detect" => flag(value).map(|v| self.detect = v).is_some(),
             "premind" => flag(value).map(|v| self.prayer_remind = v).is_some(),
             "pmethod" => Method::from_key(value)
@@ -399,7 +403,11 @@ impl Settings {
             self.hotkey_audio_combo.key(),
             u8::from(self.match_accent)
         ));
-        out.push_str(&format!("dockbadge={}\n", u8::from(self.dock_badges)));
+        out.push_str(&format!(
+            "dockbadge={}\nclipcopy={}\n",
+            u8::from(self.dock_badges),
+            u8::from(self.clipboard)
+        ));
         let one_line = |v: &&String| !v.contains(['\n', '\r']);
         out.push_str(&format!(
             "dock={}\nnotch={}\nsound={}\nshelfcap={}\ntheme={}\ndesktop={}\nedgevol={}\nedgebri={}\n",

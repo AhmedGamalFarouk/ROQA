@@ -396,6 +396,34 @@ pub fn shelf_action(dpi: u32, undo: bool) -> Bounds {
     )
 }
 
+/// The Shelf header's Files | Copied switch: one capsule track of two equal halves, 20 high, where the title sits
+/// on other pages. `index` 0 is Files, 1 is Copied.
+const SHELF_SWITCH: (f32, f32, f32, f32) = (PAD, 9.0, 66.0, 20.0);
+pub fn shelf_switch(dpi: u32, index: usize) -> Bounds {
+    let (x, y, w, h) = SHELF_SWITCH;
+    scaled_bounds((x + w * index as f32, y, w, h), dpi)
+}
+/// Which half of the switch (0 Files, 1 Copied) a window point is on.
+pub fn shelf_switch_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    (x, y): (i32, i32),
+) -> Option<usize> {
+    (0..2).find(|&index| {
+        on_slot(
+            shelf_switch(dpi, index),
+            window_width,
+            dpi,
+            progress,
+            media,
+            x,
+            y,
+        )
+    })
+}
+
 pub fn shelf_action_at(
     window_width: i32,
     dpi: u32,
@@ -707,13 +735,14 @@ pub struct Rail {
 }
 
 pub const RAIL_EARS: f32 = 6.0;
+/// The rail's side padding is the grid's 8 gutter; cells sit 4 apart so the indicator capsule has air.
 const RAIL_PAD_X: f32 = 8.0;
 const RAIL_PAD_Y: f32 = 3.0;
 /// A tab cell's width (fits the longest name, "Weather") and height (a glyph over the name), and the gap between cells.
-const RAIL_CELL: (f32, f32) = (55.0, 34.0);
-const RAIL_GAP: f32 = 2.0;
+const RAIL_CELL: (f32, f32) = (52.0, 34.0);
+const RAIL_GAP: f32 = 4.0;
 
-/// The handle's full size in DIPs: 413 x 40 for seven tabs.
+/// The handle's full size in DIPs: 404 x 40 for seven tabs.
 pub fn rail_size(rail: Rail) -> (f32, f32) {
     let count = rail.count as f32;
     (
@@ -757,8 +786,13 @@ pub fn rail_bounds(
 
 /// Handle item `index` in window pixels; they sit left to right inside the handle.
 pub fn rail_item(handle: Bounds, dpi: u32, index: usize) -> Bounds {
+    rail_slot(handle, dpi, index as f32)
+}
+
+/// A cell at a fractional position: the sliding indicator sits between two tabs while it travels.
+pub fn rail_slot(handle: Bounds, dpi: u32, position: f32) -> Bounds {
     Bounds {
-        x: handle.x + scaled(RAIL_PAD_X + index as f32 * (RAIL_CELL.0 + RAIL_GAP), dpi),
+        x: handle.x + scaled(RAIL_PAD_X + position * (RAIL_CELL.0 + RAIL_GAP), dpi),
         y: handle.y + scaled(RAIL_PAD_Y, dpi),
         width: scaled(RAIL_CELL.0, dpi),
         height: scaled(RAIL_CELL.1, dpi),
@@ -1783,7 +1817,7 @@ mod tests {
         let (six_w, six_h) = rail_size(rail(6, 0));
         assert_eq!((six_w, six_h), (356.0, 40.0));
         let (seven_w, seven_h) = rail_size(rail(7, 0));
-        assert_eq!((seven_w, seven_h), (413.0, 40.0));
+        assert_eq!((seven_w, seven_h), (404.0, 40.0));
         assert!(seven_w < NOTCH_WINDOW.0 as f32);
         assert!(rail_size(rail(3, 0)).0 < rail_size(rail(5, 0)).0);
     }

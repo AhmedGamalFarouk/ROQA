@@ -77,6 +77,13 @@ fn wakes(message: u32, wparam: usize, display: Option<(windows::core::GUID, u8)>
 pub const CLASS: windows::core::PCWSTR = w!("ROQA.NativeSurface.1");
 /// Explorer broadcasts this registered message to every top-level window when it (re)creates the
 /// taskbar. 0 until registered, and stays 0 if registration fails.
+/// Posted (once until read) when the clipboard changes; the host reads it if the Copied list is on.
+pub const CLIPBOARD: u32 = WM_APP + 9;
+static CLIP_PENDING: AtomicBool = AtomicBool::new(false);
+/// The host is about to handle a `CLIPBOARD`: the next change posts again.
+pub fn clip_read() {
+    CLIP_PENDING.store(false, Ordering::Release);
+}
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 pub struct WindowClass(HINSTANCE);
@@ -508,6 +515,13 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
                 POWER_PENDING.store(false, Ordering::Release);
             }
             return LRESULT(1); // TRUE grants the broadcast
+        }
+        if message == WM_CLIPBOARDUPDATE {
+            if claim(&CLIP_PENDING) && PostMessageW(None, CLIPBOARD, WPARAM(0), LPARAM(0)).is_err()
+            {
+                CLIP_PENDING.store(false, Ordering::Release);
+            }
+            return LRESULT(0);
         }
         let display = (message == WM_POWERBROADCAST
             && wparam.0 == PBT_POWERSETTINGCHANGE as usize

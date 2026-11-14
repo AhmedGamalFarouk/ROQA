@@ -1,7 +1,8 @@
 use crate::{
     audio::{self, Audio},
     catalog_timing::milliseconds_until,
-    clock,
+    clipboard::{self, Clips},
+    clipboard_os, clock,
     dock::{self, Button, Buttons, DockItem, Hit},
     dock_menu::{self, Event, Item},
     dock_tips::Tips,
@@ -259,6 +260,41 @@ impl Pages {
     }
 }
 
+/// The tab rail's motion on the one clock: the indicator's place (a fractional tab position), its arrival
+/// pop, the hover wash of tab `wash_at` and the press squash. Reduced motion lands every one at once.
+#[derive(Clone, Copy)]
+struct RailFx {
+    ind: Tween,
+    pop: Tween,
+    wash: Tween,
+    wash_at: usize,
+    press: Tween,
+}
+
+impl RailFx {
+    fn new() -> Self {
+        Self {
+            ind: Tween::rest(0.0),
+            pop: Tween::rest(1.0),
+            wash: Tween::rest(0.0),
+            wash_at: 0,
+            press: Tween::rest(0.0),
+        }
+    }
+    fn running(&self, now: Instant) -> bool {
+        [self.ind, self.pop, self.wash, self.press]
+            .iter()
+            .any(|tween| tween.running(now))
+    }
+    fn go(tween: &mut Tween, to: f32, time: Duration, curve: motion::Curve) {
+        tween.retarget(
+            to,
+            if motion::calm() { Duration::ZERO } else { time },
+            curve,
+        );
+    }
+}
+
 struct Surface {
     role: Role,
     canvas: Canvas,
@@ -287,6 +323,7 @@ struct Surface {
     repaint: Repaint,
     /// Notch: the tab cell under the pointer (a position in the visible tabs), for its hover wash.
     tab_hover: Option<usize>,
+    rail_fx: RailFx,
     /// Notch: the pointer on the volume bar (hover, and a captured drag).
     grip: Grip,
     /// Notch: the volume bar's drawn fill (percent), easing toward the real level; a drag sets it at once.
@@ -410,6 +447,7 @@ impl Surface {
             bars: [0; audio::BARS],
             repaint: Repaint::Nothing,
             tab_hover: None,
+            rail_fx: RailFx::new(),
             grip: Grip::default(),
             volume_fill: Tween::rest(0.0),
             page_at: 0,
@@ -488,6 +526,8 @@ impl Surface {
             (self.hovered, self.live, self.motion) = (false, false, Tween::rest(0.0));
             self.slide = Tween::rest(0.0);
             self.tab_hover = None;
+            self.rail_fx.wash = Tween::rest(0.0);
+            self.rail_fx.press = Tween::rest(0.0);
             match &mut self.role {
                 Role::Notch {
                     engaged, intent, ..
@@ -507,6 +547,27 @@ impl Surface {
             self.live = true;
         }
     }
+    /// The tab cell under the pointer: its wash fades in, and the last one's fades out; a release or a
+    /// move off the cell lets go of a press.
+    fn set_tab_hover(&mut self, tab: Option<usize>) {
+        if tab == self.tab_hover {
+            return;
+        }
+        self.tab_hover = tab;
+        let fx = &mut self.rail_fx;
+        RailFx::go(&mut fx.press, 0.0, motion::POP_TIME, motion::POP);
+        match tab {
+            Some(at) => {
+                if fx.wash_at != at {
+                    fx.wash_at = at;
+                    fx.wash = Tween::rest(0.0);
+                }
+                RailFx::go(&mut fx.wash, 1.0, motion::HOVER_IN_TIME, motion::SETTLE);
+            }
+            None => RailFx::go(&mut fx.wash, 0.0, motion::HOVER_OUT_TIME, motion::SETTLE),
+        }
+        self.live = true;
+    }
     fn leave(&mut self) {
         if self.hovered {
             self.hovered = false;
@@ -514,7 +575,7 @@ impl Surface {
                 self.hover_dock(None, false);
             } else {
                 self.set_notch_hover(false);
-                self.tab_hover = None;
+                self.set_tab_hover(None);
             }
         }
     }
@@ -637,6 +698,22 @@ impl Surface {
         };
         let visible = pages.tabs.visible();
         let rail = pages.rail(track.is_some());
+        // The indicator slides to the new tab with a squash that pops on arrival; a closed panel or a
+        // changed tab set puts it in place without a frame.
+        if let Some(rail) = rail {
+            let at = rail.active as f32;
+            let fx = &mut self.rail_fx;
+            if fx.ind.target() != at {
+                if self.visible && progress > 0.9 && !motion::calm() {
+                    RailFx::go(&mut fx.ind, at, motion::PAGE_TIME, motion::SLIDE);
+                    fx.pop = Tween::rest(0.0);
+                    RailFx::go(&mut fx.pop, 1.0, motion::POP_TIME, motion::POP);
+                    self.live = true;
+                } else {
+                    fx.ind = Tween::rest(at);
+                }
+            }
+        }
         // Input and drawing use the same frame progress and shape, without a speculative growth lead.
         let rows = layout::notch_rows(self.bounds, self.dpi, progress, track.is_some(), rail);
         if *area != rows {
@@ -644,21 +721,48 @@ impl Surface {
             *area = rows;
         }
         let shelf_on = pages.tabs.on(Tab::Shelf);
-        let mut slots: Vec<ShelfSlot> = shelf
-            .shelf
-            .visible()
-            .iter()
-            .filter(|_| shelf_on)
-            .enumerate()
-            .map(|(index, entry)| ShelfSlot {
-                icon: shelf.icons.get(index).and_then(|icon| icon.as_deref()),
-                name: &entry.name,
-                missing: entry.check == Check::Missing,
-                more: false,
+        let copied = shelf_on && shelf.copied;
+        let previews: Vec<String> = if copied {
+            shelf
+                .clips
+                .visible()
+                .iter()
+                .map(|t| clipboard::preview(t))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut slots: Vec<ShelfSlot> = if copied {
+            let clip = |name, more| ShelfSlot {
+                icon: None,
+                name,
+                missing: false,
+                more,
                 add: false,
-            })
-            .collect();
-        if shelf_on && (shelf.shelf.overflow() || shelf.shelf.is_empty()) {
+            };
+            let more = shelf.clips.has_more().then(|| clip("", true));
+            previews
+                .iter()
+                .map(|text| clip(text, false))
+                .chain(more)
+                .collect()
+        } else {
+            shelf
+                .shelf
+                .visible()
+                .iter()
+                .filter(|_| shelf_on)
+                .enumerate()
+                .map(|(index, entry)| ShelfSlot {
+                    icon: shelf.icons.get(index).and_then(|icon| icon.as_deref()),
+                    name: &entry.name,
+                    missing: entry.check == Check::Missing,
+                    more: false,
+                    add: false,
+                })
+                .collect()
+        };
+        if shelf_on && !copied && (shelf.shelf.overflow() || shelf.shelf.is_empty()) {
             slots.push(ShelfSlot {
                 icon: None,
                 name: "",
@@ -680,13 +784,18 @@ impl Surface {
             timer: timer.as_ref(),
             notice,
             shelf: &slots,
-            shelf_undo: shelf.removed.is_some(),
+            shelf_undo: shelf.removed.is_some() && !copied,
+            clips: copied,
             tab: page,
             widgets: pages.widgets,
             rail: rail.map(|layout| RailScene {
                 layout,
                 hover: self.tab_hover,
                 tabs: visible.as_slice(),
+                ind: self.rail_fx.ind.value(now),
+                pop: self.rail_fx.pop.value(now),
+                wash: (self.rail_fx.wash_at, self.rail_fx.wash.value(now)),
+                press: self.rail_fx.press.value(now),
             }),
             eyes: pages.eyes.map(|eyes| eyes.scene()),
             privacy: pages.dots.alpha(),
@@ -1000,6 +1109,9 @@ fn edit_pins(
 struct ShelfView {
     removed: Option<(usize, shelf::Entry)>,
     shelf: Shelf,
+    /// The Copied list and whether the Shelf page shows it instead of the files (not persisted).
+    clips: Clips,
+    copied: bool,
     icons: Vec<Option<Arc<IconPixels>>>,
     stale: bool,
 }
@@ -1172,6 +1284,7 @@ impl Desktop {
         if shelf.set_cap(settings.shelf_cap) {
             shelf.write_to(&mut store); // the cut list leaves the file with its next write
         }
+        let clips = Clips::from_store(&store);
         let pages = Pages::new(&settings, store.last_tab);
         let weather = Feed::new(store.place.clone(), store.report.clone(), settings.detect);
         let timers = Timers::restore(&store.timers, timer::wall_now(), now);
@@ -1210,6 +1323,8 @@ impl Desktop {
             shelf: ShelfView {
                 removed: None,
                 shelf,
+                clips,
+                copied: false,
                 icons: Vec::new(),
                 stale: true,
             },
@@ -1325,6 +1440,9 @@ impl Desktop {
                 &self.shelf,
                 &self.pages,
             )?;
+            if self.settings.clipboard {
+                clipboard_os::watch(surface.window.0, true);
+            }
             self.surfaces.push(surface);
         } else {
             self.surfaces.push(surface);
@@ -2093,6 +2211,7 @@ impl Desktop {
                     || surface.volume_fill.running(now)
                     || surface.page_fx.running(now)
                     || surface.notice_fx.running(now)
+                    || surface.rail_fx.running(now)
                     || surface.slide.running(now)
                     || match &surface.role {
                         Role::Notch { intent, .. } => intent.is_some(),
@@ -2257,6 +2376,15 @@ impl Desktop {
             window.say(failure)?;
         }
         self.water_due = None; // the schedule follows the new hours
+        if old.clipboard != self.settings.clipboard {
+            for notch in self
+                .surfaces
+                .iter()
+                .filter(|s| s.kind() == SurfaceKind::Notch)
+            {
+                clipboard_os::watch(notch.window.0, self.settings.clipboard);
+            }
+        }
         // A new theme, pill size or accent mode is fixed when a surface is created, so they rebuild the surfaces.
         let restyle = old.theme != self.settings.theme
             || old.notch_size != self.settings.notch_size
@@ -3100,6 +3228,7 @@ impl Desktop {
         }
     }
     fn add_shelf_files(&mut self, paths: &[String]) {
+        self.shelf.copied = false; // dropped files show on the Files list
         let before = self.shelf.shelf.entries().len();
         let mut displaced = 0;
         self.change_shelf(|shelf| {
@@ -3183,6 +3312,9 @@ impl Desktop {
     }
     /// Opens the Shelf context menu for a drawn entry.
     fn shelf_menu_at(&mut self, hwnd: HWND, lparam: LPARAM) -> bool {
+        if self.shelf.copied {
+            return false;
+        }
         let notch = self
             .surfaces
             .iter()
@@ -3221,6 +3353,71 @@ impl Desktop {
         );
     }
 
+    /// The clipboard changed: keep its text on the Copied list when capture is on. Contents are never logged.
+    fn capture_clip(&mut self) {
+        let hwnd = self
+            .surfaces
+            .iter()
+            .find(|s| s.kind() == SurfaceKind::Notch)
+            .map(|s| s.window.0);
+        if self.settings.clipboard
+            && let Some(hwnd) = hwnd
+            && let Some(text) = clipboard_os::read(hwnd)
+        {
+            self.change_clips(|clips| clips.add(&text));
+        }
+    }
+    /// One edit of the Copied list: a real change marks the store dirty and repaints an open panel.
+    fn change_clips(&mut self, edit: impl FnOnce(&mut Clips) -> bool) {
+        if edit(&mut self.shelf.clips) {
+            if self.shelf.clips.write_to(&mut self.store) {
+                self.pending.mark(Instant::now());
+            }
+            self.request_notches(Repaint::Full, Surface::expanded);
+        }
+    }
+    /// Files | Copied: which list the Shelf page shows.
+    fn set_copied(&mut self, copied: bool) {
+        if self.shelf.copied != copied {
+            self.shelf.copied = copied;
+            self.request_notches(Repaint::Full, Surface::expanded);
+        }
+    }
+    /// A click on the Copied list: Clear, a remove cross, "More" or a clip, which goes back on the clipboard.
+    fn click_clips(&mut self, notch: usize, (x, y): (i32, i32)) -> bool {
+        let surface = &self.surfaces[notch];
+        let (width, dpi, hwnd) = (surface.bounds.width, surface.dpi, surface.window.0);
+        let progress = surface.motion.value(Instant::now());
+        let live = self.pages.track(&self.media).is_some();
+        let clips = &self.shelf.clips;
+        if !clips.is_empty() && layout::shelf_action_at(width, dpi, progress, live, (x, y), false) {
+            self.change_clips(Clips::clear);
+            return true;
+        }
+        if let Some(at) = layout::shelf_remove_at(width, dpi, progress, x, y)
+            .and_then(|slot| clips.absolute(slot))
+        {
+            self.change_clips(|clips| clips.remove(at));
+            return true;
+        }
+        let Some(slot) = layout::shelf_at(width, dpi, progress, live, false, x, y)
+            .filter(|&slot| slot < clips.slot_count())
+        else {
+            return false;
+        };
+        match clips.absolute(slot) {
+            Some(at) => {
+                if !clipboard_os::write(hwnd, &clips.items()[at]) {
+                    self.show_notice("Could not copy.".into(), Instant::now());
+                }
+            }
+            None => self.change_clips(|clips| {
+                clips.next_page();
+                true
+            }),
+        }
+        true
+    }
     fn undo_shelf_removal(&mut self) {
         if let Some((index, entry)) = self.shelf.removed.take() {
             let mut restored = false;
@@ -3294,6 +3491,16 @@ impl Desktop {
         };
         if message.message == WM_LBUTTONUP {
             self.pages.touch();
+            let surface = &mut self.surfaces[notch];
+            if surface.rail_fx.press.target() > 0.0 {
+                RailFx::go(
+                    &mut surface.rail_fx.press,
+                    0.0,
+                    motion::POP_TIME,
+                    motion::POP,
+                );
+                surface.live = true;
+            }
         }
         if message.message == WM_LBUTTONUP && self.surfaces[notch].grip.drag {
             self.surfaces[notch].end_grip();
@@ -3368,6 +3575,13 @@ impl Desktop {
             return true;
         }
         if page == Tab::Shelf {
+            if let Some(index) = layout::shelf_switch_at(width, dpi, progress, live, (x, y)) {
+                self.set_copied(index == 1);
+                return true;
+            }
+            if self.shelf.copied {
+                return self.click_clips(notch, (x, y));
+            }
             if self.shelf.removed.is_some()
                 && layout::shelf_action_at(width, dpi, progress, live, (x, y), true)
             {
@@ -3430,6 +3644,12 @@ impl Desktop {
                     self.add_shelf_files(&paths);
                 }
             }
+            return Ok(());
+        }
+        if message.message == native_window::CLIPBOARD {
+            // One post per burst of changes; cleared before reading so a change during the read posts again.
+            native_window::clip_read();
+            self.capture_clip();
             return Ok(());
         }
         if message.message == native_window::POWER_STATUS {
@@ -3560,7 +3780,7 @@ impl Desktop {
                         layout::rail_tab_at(width, surface.dpi, progress, media, rail, (x, y))
                     });
                     if tab != surface.tab_hover {
-                        surface.tab_hover = tab;
+                        surface.set_tab_hover(tab);
                         surface.request(Repaint::Full);
                     }
                     self.pages.touch();
@@ -3586,6 +3806,16 @@ impl Desktop {
                         }
                     }
                 }
+            }
+            WM_LBUTTONDOWN if surface.tab_hover.is_some() => {
+                RailFx::go(
+                    &mut surface.rail_fx.press,
+                    1.0,
+                    motion::HOVER_IN_TIME / 3,
+                    motion::SETTLE,
+                );
+                surface.request(Repaint::Full);
+                surface.live = true;
             }
             WM_LBUTTONDOWN if volume_ui && matches!(surface.role, Role::Notch { .. }) => {
                 let (x, y) = point(message.lParam);
@@ -4277,6 +4507,8 @@ mod clock_wait_tests {
         let mut view = ShelfView {
             removed: None,
             shelf: Shelf::default(),
+            clips: Clips::default(),
+            copied: false,
             icons: Vec::new(),
             stale: false,
         };
