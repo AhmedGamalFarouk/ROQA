@@ -25,7 +25,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 - Cargo only through `scripts\cargo.ps1 <args>`.
 - Gate: `scripts\verify.ps1` (fmt, clippy -D warnings, tests, locked release build, size gate). A change is not done until it passes.
 - Run: `scripts\run.ps1 start` (builds, then launches) and `scripts\run.ps1 quit`.
-- Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. Do not pipe its output (the restarted ROQA holds the pipe open and the caller hangs): redirect to a file. Capture stores use fixed sample data (weather shows 3 hours, 29 degrees): that is the fixture, not a bug. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
+- Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. Known flaws: the command does not return after it finishes (the restarted ROQA keeps its handles), so run it in the background and stop it once ROQA is back; the Settings pages after Notch still fail to capture. Capture stores use fixed sample data (weather shows 3 hours, 29 degrees): that is the fixture, not a bug. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
 - Reuse a round's stills when `git rev-parse HEAD` and the exe SHA256 match its `provenance.json`.
 
 ## Reading code (token rule)
