@@ -141,6 +141,8 @@ pub struct DockSlot<'a> {
     pub icon: Option<&'a IconPixels>,
     pub mini: Vec<Option<&'a IconPixels>>,
     pub running: bool,
+    /// Open windows in the group: a resting group shows up to three dots, one per window.
+    pub windows: usize,
     pub active: bool,
     pub picker: bool,
     pub badge: dock::Badge,
@@ -2492,17 +2494,25 @@ fn draw_slot(
         if slot.active || slot.running {
             // Focus is a full Lamp capsule; other running groups a softer Lamp dot.
             let (half, bottom) = (px(if slot.active { 6 } else { 2 }), cell.bottom - px(4));
-            let pill = D2D_RECT_F {
-                left: center_x - half,
-                top: bottom - px(3),
-                right: center_x + half,
-                bottom,
-            };
             let brush = context.CreateSolidColorBrush(
                 &tint(p.accent_dim(false, if slot.active { 1.0 } else { 0.7 })),
                 None,
             )?;
-            context.FillRoundedRectangle(&rounded(pill, px(3) / 2.0), &brush);
+            let dots = if slot.active {
+                1
+            } else {
+                slot.windows.clamp(1, 3)
+            };
+            for dot in 0..dots {
+                let x = center_x + (dot as f32 - (dots - 1) as f32 / 2.0) * px(6);
+                let pill = D2D_RECT_F {
+                    left: x - half,
+                    top: bottom - px(3),
+                    right: x + half,
+                    bottom,
+                };
+                context.FillRoundedRectangle(&rounded(pill, px(3) / 2.0), &brush);
+            }
         }
     }
     Ok(())

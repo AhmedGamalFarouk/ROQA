@@ -917,6 +917,7 @@ impl Surface {
             icon: None,
             mini: Vec::new(),
             running: false,
+            windows: 0,
             active: false,
             picker: true,
             badge: dock::Badge::None,
@@ -935,6 +936,7 @@ impl Surface {
                         icon.iter().map(Option::as_deref).collect()
                     },
                     running: !item.windows.is_empty(),
+                    windows: item.windows.len(),
                     active: item.active,
                     picker: false,
                     badge: item.badge,
@@ -1176,6 +1178,10 @@ struct Desktop {
     /// The display language reads right to left: the dock is mirrored (`dock::Buttons::rtl`).
     rtl: bool,
     dock_generation: Option<u64>,
+    /// Windows that asked for attention (a taskbar flash) and have not been activated since; they wear the dot badge.
+    flashing: Vec<usize>,
+    /// The registered `SHELLHOOK` message, 0 when the shell would not take the hook window.
+    shell_hook: u32,
     /// Pinned apps, their persisted form, and the unwritten-change times. Read once at startup; written on
     /// a host-loop deadline (`store_wait`) after a change and once at quit, never by a timer or thread.
     pins: Pins,
@@ -1326,6 +1332,8 @@ impl Desktop {
             dock_items: Vec::new(),
             rtl: dock::system_rtl(),
             dock_generation: None,
+            flashing: Vec::new(),
+            shell_hook: 0,
             pins: Pins::from_store(&store),
             shelf: ShelfView {
                 removed: None,
@@ -2675,6 +2683,23 @@ impl Desktop {
         Ok(())
     }
     /// Rebuilds dock items only when the catalog generation or an icon changed.
+    /// A shell hook event: `code` is the HSHELL value, `window` the handle. A flash marks the window; activating
+    /// or closing it clears the mark. The dock is rebuilt on the next pass when the marks changed.
+    fn note_shell_event(&mut self, code: usize, window: usize) {
+        const DESTROYED: usize = 2;
+        const ACTIVATED: usize = 4;
+        const FLASH: usize = 0x8006;
+        const RUDE_ACTIVATED: usize = 0x8004;
+        let marked = self.flashing.contains(&window);
+        match code {
+            FLASH if !marked => self.flashing.push(window),
+            DESTROYED | ACTIVATED | RUDE_ACTIVATED if marked => {
+                self.flashing.retain(|w| *w != window)
+            }
+            _ => return,
+        }
+        self.dock_generation = None;
+    }
     fn refresh_dock(&mut self, model: &WindowModel) -> Result<()> {
         let icons_arrived = self.icons.collect();
         self.icons_arrived = icons_arrived;
@@ -2684,9 +2709,16 @@ impl Desktop {
         if self.dock_generation != Some(model.generation) {
             self.dock_generation = Some(model.generation);
             let mut items = dock::items_with_pins(model, &self.pins, self.settings.desktop_only);
-            if !self.settings.dock_badges {
-                for item in &mut items {
+            for item in &mut items {
+                if !self.settings.dock_badges {
                     item.badge = dock::Badge::None;
+                } else if !item.active
+                    && item
+                        .windows
+                        .iter()
+                        .any(|key| self.flashing.contains(&key.handle))
+                {
+                    item.badge = item.badge.max(dock::Badge::Dot);
                 }
             }
             let changed = items != self.dock_items;
@@ -4569,6 +4601,7 @@ pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> 
 }
 
 fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog) -> Result<()> {
+    desktop.shell_hook = watch_flashes();
     let mut events = controls.handles();
     let base = events.len();
     loop {
@@ -4627,6 +4660,33 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
         }
         if !drain_messages(desktop, catalog)? || desktop.shown.is_empty() {
             return Ok(());
+        }
+    }
+}
+
+/// Asks the shell to post taskbar events (a window flashing, activating, closing) to a hidden window of this
+/// thread; the loop reads them before dispatch. Returns the `SHELLHOOK` message id, or 0 if refused.
+fn watch_flashes() -> u32 {
+    // SAFETY: a hidden window of the system STATIC class, owned by this thread for the whole run.
+    unsafe {
+        let message = RegisterWindowMessageW(w!("SHELLHOOK"));
+        let window = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("STATIC"),
+            w!(""),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            None,
+            None,
+        );
+        match window {
+            Ok(window) if RegisterShellHookWindow(window).as_bool() => message,
+            _ => 0,
         }
     }
 }
@@ -4699,6 +4759,10 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                     ));
                 }
                 return Ok(false);
+            }
+            if desktop.shell_hook != 0 && message.message == desktop.shell_hook {
+                desktop.note_shell_event(message.wParam.0, message.lParam.0 as usize);
+                continue;
             }
             if catalog.message(&message)? {
                 continue;
