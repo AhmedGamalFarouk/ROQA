@@ -248,7 +248,8 @@ fn codex(job: &Job, active: &AtomicBool) -> Option<(Reading, Stamp)> {
     let now = newest
         .as_ref()
         .map_or(Stamp::default(), |(_, stamp)| *stamp);
-    let ask = job.manual && job.allow_codex;
+    // Codex 0.165 logs empty rate limits, so with permission a due reading asks the app server too.
+    let ask = job.allow_codex && (job.manual || job.due[1]);
     if !ask && !job.manual && !job.due[1] && now == job.prev[1] {
         return None;
     }
@@ -260,6 +261,9 @@ fn codex(job: &Job, active: &AtomicBool) -> Option<(Reading, Stamp)> {
         {
             reading = Err(NO_CODEX);
         }
+    }
+    if reading.is_err() && !job.allow_codex {
+        reading = Err(limits::OFF_CODEX);
     }
     if ask
         && active.load(Ordering::Relaxed)

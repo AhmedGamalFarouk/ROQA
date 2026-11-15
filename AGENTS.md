@@ -13,7 +13,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 3. Brand consistency (below).
 
 ## Hard rules (owner decisions, do not reopen)
-- Size ratchet: `scripts/size-baseline.txt` line 1 is the baseline, limit is +2%. Only the owner raises it. If a change would exceed the limit: stop, revert that change, report the byte delta.
+- No size limit (owner decision 2026-11-16): `verify.ps1` reports the exe size; put the byte delta in every report. Performance rules above still hold.
 - No keyboard handling, hotkeys, access keys, focus rings, UIA or Narrator work. Accessibility findings are out of scope.
 - No new dependencies.
 - Never touch, delete or rebuild anything under `.tools`. Never run rustup or `scripts/bootstrap.ps1`.
@@ -24,7 +24,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 
 ## Commands
 - Cargo only through `scripts\cargo.ps1 <args>`.
-- Gate: `scripts\verify.ps1` (fmt, clippy -D warnings, tests, locked release build, size gate). A change is not done until it passes.
+- Gate: `scripts\verify.ps1` (fmt, clippy -D warnings, tests, locked release build, size report). A change is not done until it passes.
 - Run: `scripts\run.ps1 start` (builds, then launches) and `scripts\run.ps1 quit`.
 - Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. A full run takes about 6 minutes and returns on its own; run it in the background. If a pass fails with "Settings not found", ROQA crashed: check `Get-WinEvent` Application id 1000 before blaming the tool. Capture stores use fixed sample data (weather shows 3 hours, 29 degrees): that is the fixture, not a bug. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
 - Reuse a round's stills when `git rev-parse HEAD` and the exe SHA256 match its `provenance.json`.

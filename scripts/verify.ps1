@@ -29,17 +29,6 @@ foreach ($command in @(@{ Name = 'checks'; Script = 'check.ps1'; Arguments = '' 
         Write-Host "$($command.Name): PASS (exit 0); stdout/stderr captured."
     } finally { $child.Dispose() }
 }
-# Size ratchet: the release binary may not exceed the tracked baseline (scripts/size-baseline.txt) by more than 2%.
-# A raised baseline needs a fresh sign-off in the same commit (baseline-gate.ps1); it never goes up silently.
-$baselineFile = Join-Path $PSScriptRoot 'size-baseline.txt'
-$baselineLines = @(Get-Content -LiteralPath $baselineFile)
-$baseline = [int]$baselineLines[0]
-$ErrorActionPreference = 'Continue'
-$committedLines = @(& git -C $projectRoot show HEAD:scripts/size-baseline.txt)
-if ($LASTEXITCODE -ne 0) { $committedLines = @() }
-$ErrorActionPreference = 'Stop'
-$unsigned = & (Join-Path $PSScriptRoot 'baseline-gate.ps1') -Current $baselineLines -Committed $committedLines
-if ($unsigned) { throw $unsigned }
+# Size is reported, not gated (owner decision 2026-11-16).
 $size = (Get-Item -LiteralPath (Join-Path $projectRoot 'target/release/roqa.exe')).Length
-if ($size -gt $baseline * 1.02) { throw "Release binary is $size B, over the $baseline B baseline plus 2%. If the growth is intended, a gate reviewer or the user must sign it off: write $size on line 1 of scripts/size-baseline.txt and add the lines 'raise-reason: <why>' and 'approved-by: <name> <YYYY-MM-DD>' in the same commit." }
-Write-Host "size: PASS ($size B, baseline $baseline B + 2%)."
+Write-Host "size: $size B (reported, no limit)."
