@@ -15,6 +15,7 @@ Full r07/r09 detail: `cook/archive/ROUNDS-r07-r09.md`. One row per round below; 
 - Light theme amber `#9A5200` is deliberate (contrast).
 - Prayer shows two highlights: one is past, one is next.
 - Frame timestamps in eye bursts are capture sampling, not FPS.
+- Settings on/off toggles stay amber (owner decision 2026-11-16).
 
 ## Never captured so far
 Empty Media, running-app previews (privacy), second monitor, Settings pages after Notch, populated Shelf, idle CPU, FPS.

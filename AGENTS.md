@@ -71,6 +71,6 @@ OPEN: <what is left, risks, decisions for the owner>
 The Chief reads only that final message (`t3_thread_read` limit 1), never a transcript. Anything longer goes in a file whose path is in EVIDENCE. Workers do not start sub-agents.
 
 ## Models (cost rule)
-- Capture, running tests, regression eyeballing, first critic: Gemini 3.8 Flash (provider `antigravity`, model `gemini-3.8-flash-high`). If it stalls (it did twice on 2026-11-15), switch to Codex Luna (`codex`, `gpt-6-luna`, medium) without waiting.
-- Second critic and tie-breaker only when a score is within 0.5 of the 8.5 bar or critics differ by more than 1.0.
+- Capture, running tests, regression eyeballing: Gemini 3.8 Flash (provider `antigravity`, model `gemini-3.8-flash-high`). If it stalls (it did twice on 2026-11-15), switch to Codex Luna (`codex`, `gpt-6-luna`, medium) without waiting.
+- Critics (owner decision 2026-11-16): two per scored round, Sol 6.1 (`codex`, `gpt-6.1-sol`, medium) and Opus 5.5 (`claudeAgent`, `claude-opus-5-5`, medium). Tie-breaker only when they differ by more than 1.0.
 - Code changes: the model the owner names. Codex workers have no ponytail skill: apply "smallest complete change" by hand.
