@@ -2267,16 +2267,53 @@ fn draw_button(
             context.FillRoundedRectangle(&rounded(chip, half_h), &brush);
         }
     }
+    if button == dock::Button::Start {
+        return windows_logo(context, centre, px);
+    }
     let side = px(DOCK_GLYPH);
     let square = pixel_square(centre.0 - side / 2.0, centre.1 - side / 2.0, side);
     let shape = match button {
-        dock::Button::Start => Glyph::Start,
+        dock::Button::Start => unreachable!("drawn above"),
         dock::Button::Search => Glyph::Search,
         dock::Button::TaskView => Glyph::TaskView,
         dock::Button::Desktop => Glyph::Desktop,
         dock::Button::Minimized => Glyph::Chevron,
     };
     glyphs::draw(context, square, shape, with_alpha(p.glyph, 1.0))
+}
+
+/// The Windows 11 logo for the Start button: four equal squares, a gap of a ninth of the side, in Windows blue.
+/// It is a brand mark like an app icon, so it ignores theme and accent. Whole device pixels keep the edges crisp.
+fn windows_logo(
+    context: &ID2D1DeviceContext,
+    centre: (f32, f32),
+    px: &dyn Fn(i32) -> f32,
+) -> Result<()> {
+    let side = px(18).round();
+    let gap = (side / 9.0).round().max(1.0);
+    let square = ((side - gap) / 2.0).floor();
+    let origin = (
+        (centre.0 - (2.0 * square + gap) / 2.0).round(),
+        (centre.1 - (2.0 * square + gap) / 2.0).round(),
+    );
+    // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw.
+    unsafe {
+        let brush = context.CreateSolidColorBrush(&rgba(0x00, 0x78, 0xD4, 1.0), None)?;
+        for (column, row) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+            let left = origin.0 + column * (square + gap);
+            let top = origin.1 + row * (square + gap);
+            context.FillRectangle(
+                &D2D_RECT_F {
+                    left,
+                    top,
+                    right: left + square,
+                    bottom: top + square,
+                },
+                &brush,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The notch outline turned over: rounded top corners, flat bottom flush with the surface's bottom edge.

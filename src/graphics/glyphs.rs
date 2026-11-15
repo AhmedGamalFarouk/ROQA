@@ -40,7 +40,6 @@ pub enum Glyph {
     Timer,
     Shelf,
     Limits,
-    Start,
     /// The dock picker: a grid of nine dots, not the Start panes.
     Apps,
     Search,
@@ -63,7 +62,7 @@ pub enum Glyph {
     /// Settings' About page.
     Info,
 }
-const ALL: [Glyph; 37] = [
+const ALL: [Glyph; 36] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -85,7 +84,6 @@ const ALL: [Glyph; 37] = [
     Glyph::Timer,
     Glyph::Shelf,
     Glyph::Limits,
-    Glyph::Start,
     Glyph::Apps,
     Glyph::Search,
     Glyph::TaskView,
@@ -197,9 +195,6 @@ impl Glyph {
             Glyph::Timer => "M12 6a7.5 7.5 0 1 0 0 15a7.5 7.5 0 1 0 0-15zM12 10v4l3 2M9 2.5h6",
             Glyph::Shelf => {
                 "M3.5 15h17v4a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5zM12 3v11M7.5 9.5L12 14l4.5-4.5"
-            }
-            Glyph::Start => {
-                "M6.5 5h2.5a1.5 1.5 0 0 1 1.5 1.5V9a1.5 1.5 0 0 1-1.5 1.5H6.5A1.5 1.5 0 0 1 5 9V6.5A1.5 1.5 0 0 1 6.5 5zM15 5h2.5A1.5 1.5 0 0 1 19 6.5V9a1.5 1.5 0 0 1-1.5 1.5H15A1.5 1.5 0 0 1 13.5 9V6.5A1.5 1.5 0 0 1 15 5zM6.5 13.5h2.5a1.5 1.5 0 0 1 1.5 1.5v2.5a1.5 1.5 0 0 1-1.5 1.5H6.5A1.5 1.5 0 0 1 5 17.5V15a1.5 1.5 0 0 1 1.5-1.5zM15 13.5h2.5A1.5 1.5 0 0 1 19 15v2.5a1.5 1.5 0 0 1-1.5 1.5H15a1.5 1.5 0 0 1-1.5-1.5V15a1.5 1.5 0 0 1 1.5-1.5z"
             }
             Glyph::Apps => {
                 "M6 4h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM16 4h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM6 14h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2zM16 14h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2z"
