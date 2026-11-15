@@ -262,13 +262,17 @@ impl Menu {
         let visible_rows = visible_rows(dpi, spec.work, spec.items.len());
         let (mut size, _) = list_layout(dpi, visible_rows);
         if hover && spec.items == [Item::Label] {
-            size.0 = crate::graphics::dock_label_width(&spec.app, dpi)? + dock::px(16, dpi);
+            size.0 = crate::graphics::dock_label_width(&spec.app, dpi)? + dock::px(6, dpi);
         }
         let slot_x = spec.x;
-        let bounds = match spec.below {
+        let mut bounds = match spec.below {
             Some(bottom) => place_below(slot_x, bottom, spec.work, size),
             None => place(slot_x, spec.dock_bounds, spec.work, size),
         };
+        if hover && spec.below.is_none() && spec.items == [Item::Label] {
+            // The hover label sits close over its icon, not a whole menu gap above the bar.
+            bounds.y += dock::px(6, dpi);
+        }
         let window = NativeWindow::create_menu(bounds, &format!("{} menu", spec.app))?;
         let surface = Bounds {
             x: 0,

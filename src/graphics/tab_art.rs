@@ -295,9 +295,13 @@ impl Page<'_> {
     /// A page button: a filled capsule. The one primary action of a page is a solid accent capsule with dark ink;
     /// the others are a faint ink fill with ink text.
     fn chip(&self, rect: D2D_RECT_F, label: &str) -> Result<()> {
-        let primary = matches!(label, "Focus" | "Pause" | "Resume");
+        // Presets (Focus among them) are equal choices; only a running timer's Pause or Resume leads.
+        let primary = matches!(label, "Pause" | "Resume");
         let (fill, ink) = if primary {
             (self.accent(1.0), self.on_accent())
+        } else if label == "Focus" {
+            // The Pomodoro preset reads apart from the plain times by its ink, not as a call to action.
+            (self.ink(0.14), self.accent(1.0))
         } else {
             (self.ink(0.14), self.ink(0.9))
         };
@@ -313,10 +317,7 @@ impl Page<'_> {
             self.ink(0.85),
         )?;
         if set_city {
-            self.chip(
-                self.slot(layout::page_button(0, false, self.dpi)),
-                "Set city",
-            )?;
+            self.chip(self.slot(layout::page_button(0, 0, self.dpi)), "Set city")?;
         }
         Ok(())
     }
@@ -336,7 +337,7 @@ impl Page<'_> {
 }
 
 /// A page other than Media (`tab`, and whether it is the one leaving a switch): the shared header (title, the
-/// mascot's resting eyes, a small clock at the top right) and its content, all at `reveal` so they arrive as the
+/// mascot's resting eyes, the tune disc at the top right) and its content, all at `reveal` so they arrive as the
 /// pill's content leaves.
 pub(super) fn page(
     context: &ID2D1DeviceContext,
@@ -350,7 +351,6 @@ pub(super) fn page(
     if reveal <= 0.0 {
         return Ok(());
     }
-    let media = scene.track.is_some();
     let g = Page {
         context,
         body,
@@ -393,15 +393,6 @@ pub(super) fn page(
             g.ink(1.0),
         )?;
     }
-    g.text(
-        scene.time,
-        &Font {
-            designator: TIME_DESIGNATOR,
-            ..g.font(12.0, NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING)
-        },
-        g.slot(layout::page_clock(media, scene.dpi)),
-        g.ink(0.6),
-    )?;
     // The mascot keeps a small watch in the header's middle, leaning to a running countdown.
     if let Some(frame) = scene.eyes {
         let toward =
@@ -454,7 +445,7 @@ fn timer_page(g: &Page, scene: &NotchScene) -> Result<()> {
             g.ink(1.0),
         )?;
         for (index, control) in crate::timer::controls(scene.timer).iter().enumerate() {
-            let slot = layout::page_button(index, false, scene.dpi);
+            let slot = layout::page_button(index, 0, scene.dpi);
             g.chip(g.slot(slot), &control.label())?;
         }
         return Ok(());
@@ -465,8 +456,9 @@ fn timer_page(g: &Page, scene: &NotchScene) -> Result<()> {
         g.slot(layout::page_value(scene.dpi)),
         g.ink(if view.paused { 0.55 } else { 1.0 }),
     )?;
-    for (index, control) in crate::timer::controls(Some(view)).iter().enumerate() {
-        let slot = layout::page_button(index, true, scene.dpi);
+    let controls = crate::timer::controls(Some(view));
+    for (index, control) in controls.iter().enumerate() {
+        let slot = layout::page_button(index, controls.len(), scene.dpi);
         g.chip(g.slot(slot), &control.label())?;
     }
     timer_bar(g, view)?;
@@ -505,7 +497,8 @@ fn timer_bar(g: &Page, view: &crate::timer::View) -> Result<()> {
             std::cmp::Ordering::Equal => elapsed,
             std::cmp::Ordering::Greater => 0.0,
         };
-        if share > 0.0 {
+        // The running segment shows its start at once, so a fresh countdown never reads unstarted.
+        if share > 0.0 || index == current {
             // A started segment never draws narrower than a capsule's own height.
             let wide = (segment.right - segment.left) * share;
             let part = D2D_RECT_F {
@@ -732,31 +725,41 @@ fn widgets_page(g: &Page, scene: &NotchScene) -> Result<()> {
                 let raw = crate::power::Raw::read();
                 let reading = raw.filter(|r| r.flag & 128 == 0 && r.percent <= 100);
                 let percent = reading.map_or(0, |r| r.percent);
-                // SAFETY: brushes and line segments use the live context; no geometry is retained.
-                unsafe {
-                    let track = g.context.CreateSolidColorBrush(&g.ink(0.18), None)?;
-                    let accent = g.context.CreateSolidColorBrush(&g.accent(1.0), None)?;
-                    let point = |angle: f32| Vector2 {
-                        X: g.body.left + (x + 38.0 + 22.0 * angle.cos()) * g.scale,
-                        Y: g.body.top + (y + 36.0 + 22.0 * angle.sin()) * g.scale,
-                    };
-                    const STEPS: usize = 48;
-                    for step in 0..STEPS {
-                        let turn = |n: usize| {
-                            -std::f32::consts::FRAC_PI_2
-                                + n as f32 * std::f32::consts::TAU / STEPS as f32
+                // No battery: a muted glyph and one line, not an empty ring.
+                if reading.is_none() {
+                    glyphs::draw(
+                        g.context,
+                        at(26.0, 24.0, 24.0, 24.0),
+                        Glyph::Charging,
+                        g.ink(0.35),
+                    )?;
+                } else {
+                    // SAFETY: brushes and line segments use the live context; no geometry is retained.
+                    unsafe {
+                        let track = g.context.CreateSolidColorBrush(&g.ink(0.18), None)?;
+                        let accent = g.context.CreateSolidColorBrush(&g.accent(1.0), None)?;
+                        let point = |angle: f32| Vector2 {
+                            X: g.body.left + (x + 38.0 + 22.0 * angle.cos()) * g.scale,
+                            Y: g.body.top + (y + 36.0 + 22.0 * angle.sin()) * g.scale,
                         };
-                        g.context.DrawLine(
-                            point(turn(step)),
-                            point(turn(step + 1)),
-                            if step * 100 < usize::from(percent) * STEPS {
-                                &accent
-                            } else {
-                                &track
-                            },
-                            4.0 * g.scale,
-                            None,
-                        );
+                        const STEPS: usize = 48;
+                        for step in 0..STEPS {
+                            let turn = |n: usize| {
+                                -std::f32::consts::FRAC_PI_2
+                                    + n as f32 * std::f32::consts::TAU / STEPS as f32
+                            };
+                            g.context.DrawLine(
+                                point(turn(step)),
+                                point(turn(step + 1)),
+                                if step * 100 < usize::from(percent) * STEPS {
+                                    &accent
+                                } else {
+                                    &track
+                                },
+                                4.0 * g.scale,
+                                None,
+                            );
+                        }
                     }
                 }
                 let charging = reading.is_some_and(|r| r.flag & 8 != 0);
@@ -1034,35 +1037,16 @@ fn limits_page(g: &Page, scene: &NotchScene) -> Result<()> {
             g.at(layout::PAD, y, 72.0, 16.0),
             g.ink(dim),
         )?;
+        // No reading: the name and one quiet line beside it, no empty bars.
         if let Some(why) = row.why {
-            for x in WINDOWS {
-                g.fill(g.at(x, y + 5.0, 56.0, 6.0), None, g.ink(0.08))?;
-                g.text(
-                    "-",
-                    &g.font(11.5, NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING),
-                    g.at(x + 62.0, y, 40.0, 16.0),
-                    g.ink(0.45),
-                )?;
-            }
-            glyphs::draw(
-                g.context,
-                g.at(334.0, y, 14.0, 14.0),
-                Glyph::More,
-                g.ink(0.6),
-            )?;
             g.text(
                 why,
                 &g.font(SECONDARY, NORMAL, LEAD),
-                g.at(WINDOWS[0], y + 15.0, 248.0, 14.0),
+                g.at(WINDOWS[0], y + 1.0, 248.0, 14.0),
                 g.ink(0.6),
             )?;
             continue;
         }
-        g.fill(
-            g.at(338.0, y + 5.0, 6.0, 6.0),
-            None,
-            g.ink(if row.stale { 0.35 } else { 0.9 }),
-        )?;
         for (line, x) in [&row.h5, &row.wk].into_iter().zip(WINDOWS) {
             let (text, reset) = match line {
                 Line::Used { pct, reset } => {

@@ -543,12 +543,13 @@ pub fn folder_drop(offset: i32, width: i32, dpi: u32) -> bool {
     (offset - width / 2).abs() <= px(14, dpi)
 }
 
+/// A folder tile's 2x2 grid cell (left, top, side as fractions of the tile): a 0.13 inset, 0.08 gutter.
 pub fn mini_cell(index: usize) -> Option<(f32, f32, f32)> {
     (index < 4).then_some({
         (
-            0.16 + (index % 2) as f32 * 0.39,
-            0.16 + (index / 2) as f32 * 0.39,
-            0.29,
+            0.13 + (index % 2) as f32 * 0.41,
+            0.13 + (index / 2) as f32 * 0.41,
+            0.33,
         )
     })
 }

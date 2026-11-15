@@ -416,6 +416,20 @@ impl Canvas {
                     motion::reveal(scene.progress),
                     &p,
                 )?;
+                // The backing would flatten every glass to one tint: put the light back on top of it, Liquid's
+                // baked sheen and lit rim, Frosted's plain rim.
+                let shape = geometry_shape(context, &outline);
+                match self.glass(context)? {
+                    Some(glass) => {
+                        shape(&glass.spec, None);
+                        shape(&glass.rim, Some(1.0));
+                    }
+                    None => {
+                        let rim = p.rim.unwrap_or_default();
+                        let brush = rim_brush(context, p.ink, rim, (body.top, body.bottom))?;
+                        shape(&brush, Some(1.0));
+                    }
+                }
             }
             // SAFETY: context is live between surface BeginDraw/EndDraw; the clip is popped below.
             unsafe {
@@ -574,10 +588,11 @@ impl Canvas {
                     M32: panel.bottom * (1.0 - stretch),
                 });
             }
+            // Every popover shares one radius: the row capsule's (17) plus the list inset (6).
             self.panel(
                 context,
                 panel,
-                (scene.panel.height as f32 / 2.0).min(28.0 * scale),
+                (scene.panel.height as f32 / 2.0).min(23.0 * scale),
             )?;
             let font = Font {
                 family: TEXT_FONT,
@@ -589,11 +604,12 @@ impl Canvas {
             let dot = 6.0 * scale;
             for (index, row) in scene.rows.iter().enumerate() {
                 let cell = surface_rect(rect, row.rect);
-                let (left, middle) = (cell.left + 10.0 * scale, (cell.top + cell.bottom) / 2.0);
+                let (left, middle) = (cell.left + 12.0 * scale, (cell.top + cell.bottom) / 2.0);
                 // SAFETY: live draw context between BeginDraw/EndDraw; brushes are scoped to this draw.
                 unsafe {
                     if scene.hover == Some(index) {
-                        let brush = context.CreateSolidColorBrush(&tint(p.track(0.16)), None)?;
+                        let brush = context
+                            .CreateSolidColorBrush(&tint(p.accent_dim(false, 0.22)), None)?;
                         context.FillRoundedRectangle(
                             &rounded(cell, (cell.bottom - cell.top) / 2.0),
                             &brush,
@@ -611,13 +627,18 @@ impl Canvas {
                         context.FillRoundedRectangle(&rounded(shape, dot / 2.0), &brush);
                     }
                 }
+                // Only a marked row keeps room for its dot; the others start on the inset.
                 let mut text = D2D_RECT_F {
-                    left: left + dot + 8.0 * scale,
+                    left: if row.current {
+                        left + dot + 8.0 * scale
+                    } else {
+                        left
+                    },
                     right: cell.right - 8.0 * scale,
                     ..cell
                 };
                 if let Some(pixels) = row.icon {
-                    let side = 16.0 * scale;
+                    let side = 20.0 * scale;
                     let frame = D2D_RECT_F {
                         left,
                         top: middle - side / 2.0,
@@ -1099,7 +1120,26 @@ fn media_page(
         row(82.0 - 6.0 * (1.0 - date), 10.0),
         with_alpha(p.ink, p.ink_alpha(0.60 * date)),
     )?;
-    // The mascot rests beside the clock; its status line sits under it, 11 DIP at the date's opacity.
+    // The shared header: the page's title at the left (the tune disc takes the right).
+    let title = layout::page_title(scene.dpi);
+    draw_text(
+        context,
+        "Media",
+        &Font {
+            size: 13.0 * scale,
+            weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            align: DWRITE_TEXT_ALIGNMENT_LEADING,
+            ..font
+        },
+        D2D_RECT_F {
+            left: body.left + title.x as f32,
+            top: body.top + title.y as f32,
+            right: body.left + (title.x + title.width) as f32,
+            bottom: body.top + (title.y + title.height) as f32,
+        },
+        with_alpha(p.ink, p.ink_alpha(date)),
+    )?;
+    // The mascot rests beside the clock, or a muted note when it is away; the status line sits under it.
     let centre = layout::NOTCH_EXPANDED.width - 16.0 - 56.0;
     let eyes_y = if let Some(frame) = scene.eyes {
         tab_art::panel_eyes(
@@ -1113,6 +1153,16 @@ fn media_page(
         )?;
         72.0
     } else {
+        glyphs::draw(
+            context,
+            pixel_square(
+                body.left + (centre - 10.0) * scale,
+                body.top + 46.0 * scale,
+                20.0 * scale,
+            ),
+            Glyph::Music,
+            with_alpha(p.ink, p.ink_alpha(0.35 * date)),
+        )?;
         60.0
     };
     match status {
@@ -2209,11 +2259,12 @@ fn draw_button(
                 right: centre.0 + half_w,
                 bottom: centre.1 + half_h,
             };
-            let brush = context.CreateSolidColorBrush(&tint(p.track(0.12 * hover)), None)?;
+            let brush =
+                context.CreateSolidColorBrush(&tint(p.accent_dim(false, 0.18 * hover)), None)?;
             context.FillRoundedRectangle(&rounded(chip, half_h), &brush);
         }
     }
-    let side = px(22);
+    let side = px(24);
     let square = pixel_square(centre.0 - side / 2.0, centre.1 - side / 2.0, side);
     let shape = match button {
         dock::Button::Start => Glyph::Start,
@@ -2232,7 +2283,7 @@ fn glyph_desktop(
     px: &dyn Fn(i32) -> f32,
     p: &Palette,
 ) -> Result<()> {
-    let side = px(18).min(cell.right - cell.left);
+    let side = px(20).min(cell.right - cell.left);
     let square = pixel_square(
         (cell.left + cell.right - side) / 2.0,
         (cell.top + cell.bottom - side) / 2.0,
@@ -2325,13 +2376,16 @@ fn draw_slot(
                 right: center_x + half,
                 bottom: center_y + half,
             };
-            let brush = context.CreateSolidColorBrush(&tint(p.track(0.12 * slot.hover)), None)?;
+            let brush = context
+                .CreateSolidColorBrush(&tint(p.accent_dim(false, 0.18 * slot.hover)), None)?;
             context.FillRoundedRectangle(&rounded(highlight, px(24)), &brush);
         }
         if !slot.mini.is_empty() {
             let brush = context.CreateSolidColorBrush(&tint(p.track(0.16)), None)?;
+            // A squircle (radius = tile radius less the inset) holding a 2x2 grid; empty cells stay as quiet wells.
             context.FillRoundedRectangle(&rounded(frame, size * 0.3), &brush);
-            for (index, icon) in slot.mini.iter().take(4).enumerate() {
+            let well = context.CreateSolidColorBrush(&tint(p.track(0.10)), None)?;
+            for index in 0..4 {
                 let (column, row, fraction) = dock::mini_cell(index).unwrap();
                 let side = size * fraction;
                 let left = frame.left + size * column;
@@ -2341,6 +2395,10 @@ fn draw_slot(
                     top,
                     right: left + side,
                     bottom: top + side,
+                };
+                let Some(icon) = slot.mini.get(index) else {
+                    context.FillRoundedRectangle(&rounded(mini, size * 0.1), &well);
+                    continue;
                 };
                 if let Some(pixels) = icon {
                     context.DrawBitmap(
@@ -2356,7 +2414,7 @@ fn draw_slot(
                 }
             }
         } else if slot.picker {
-            let side = px(24);
+            let side = px(26);
             let glyph = D2D_RECT_F {
                 left: center_x - side / 2.0,
                 top: center_y - side / 2.0,
@@ -2413,7 +2471,7 @@ fn draw_slot(
             }
         }
         if slot.active || slot.running {
-            // Focus uses Lamp; other running groups keep a quiet neutral dot.
+            // Focus is a full Lamp capsule; other running groups a softer Lamp dot.
             let (half, bottom) = (px(if slot.active { 6 } else { 2 }), cell.bottom - px(4));
             let pill = D2D_RECT_F {
                 left: center_x - half,
@@ -2422,11 +2480,7 @@ fn draw_slot(
                 bottom,
             };
             let brush = context.CreateSolidColorBrush(
-                &tint(if slot.active {
-                    p.accent_dim(false, 1.0)
-                } else {
-                    p.ink_dim(false, 0.55)
-                }),
+                &tint(p.accent_dim(false, if slot.active { 1.0 } else { 0.7 })),
                 None,
             )?;
             context.FillRoundedRectangle(&rounded(pill, px(3) / 2.0), &brush);

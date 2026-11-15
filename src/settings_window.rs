@@ -533,12 +533,12 @@ const PAGES: &[Page] = &[
 const TILES: [Glyph; 8] = [
     Glyph::Gear,
     Glyph::Sun,
-    Glyph::Music,
+    Glyph::Notch,
     Glyph::TaskView,
     Glyph::PartlyCloudy,
     Glyph::Prayer,
     Glyph::Limits,
-    Glyph::Widgets,
+    Glyph::Info,
 ];
 
 struct Item {
@@ -596,7 +596,7 @@ struct Pal {
     text: u32,
     dim: u32,
     accent: u32,
-    /// Toggle track when off, toggle thumb, the selected sidebar row's text.
+    /// Toggle track when off; the toggle's knob (white in every theme, the window colour in high contrast).
     off: u32,
     thumb: u32,
     /// Ink on an accent capsule (a toggle's thumb when on, a primary button's text).
@@ -611,6 +611,8 @@ struct Paint {
     scale: f64,
     font: HFONT,
     title_font: HFONT,
+    /// The body font in semibold (a display card's name).
+    bold: HFONT,
     title: (RECT, &'static str),
     labels: Vec<(RECT, &'static str)>,
     /// A card and the y of each divider inside it.
@@ -713,7 +715,7 @@ fn palette(settings: &Settings) -> Pal {
         dim: pack(tokens.glyph),
         accent: pack(tokens.accent),
         off: tile,
-        thumb: pack(tokens.ink),
+        thumb: 0xffffff,
         on_accent: if dark { body } else { 0xffffff },
         seltext: pack(tokens.ink),
         dark,
@@ -947,8 +949,8 @@ fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
             right: thumb + px(18),
             bottom: mid + px(9),
         };
-        let thumb_ink = if on { p.pal.on_accent } else { p.pal.thumb };
-        round(dc, knob, px(9), thumb_ink, thumb_ink);
+        // One knob rule in every theme: the same knob on and off, only the track changes.
+        round(dc, knob, px(9), p.pal.thumb, p.pal.thumb);
         SetBkMode(dc, TRANSPARENT);
         SelectObject(dc, p.font.into());
         write(dc, &text(h, 256), title, p.pal.text, DT_LEFT);
@@ -1091,28 +1093,31 @@ fn draw_tile(note: &NMCUSTOMDRAW, p: &Paint) {
         fill(dc, r, p.pal.card);
         // A capsule-cornered tile, lit by its fill and an accent dot; no outline.
         round(dc, r, px(14), fill_colour, fill_colour);
-        if on {
-            let dot = RECT {
-                left: r.right - px(18),
-                top: r.top + px(8),
-                right: r.right - px(10),
-                bottom: r.top + px(16),
-            };
-            round(dc, dot, px(4), p.pal.accent, p.pal.accent);
-        }
         SetBkMode(dc, TRANSPARENT);
-        SelectObject(dc, p.font.into());
-        let lines = [head.as_str(), rest[0], rest[1]];
-        for (n, line) in lines.into_iter().enumerate() {
-            let top = r.top + px(6) + n as i32 * px(17);
+        // The display's name leads in semibold; its mode and ROQA's state follow, quiet, in one line each.
+        let quiet = if on { p.pal.dim } else { ink };
+        let lines = [
+            (head.as_str(), p.bold, ink),
+            (rest[0], p.font, quiet),
+            (rest[1], p.font, if on { p.pal.accent } else { quiet }),
+        ];
+        for (n, (line, font, colour)) in lines.into_iter().enumerate() {
+            let top = r.top + px(8) + n as i32 * px(18);
             if top + px(17) <= r.bottom {
+                SelectObject(dc, font.into());
                 let at = RECT {
-                    left: r.left + px(8),
+                    left: r.left + px(12),
                     top,
-                    right: r.right - px(6),
+                    right: r.right - px(8),
                     bottom: top + px(17),
                 };
-                write(dc, line, at, ink, DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
+                write(
+                    dc,
+                    line,
+                    at,
+                    colour,
+                    DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS,
+                );
             }
         }
     }
@@ -2370,11 +2375,12 @@ impl SettingsWindow {
             );
             // The title font is made once per body font (a scroll step reuses it).
             let old = PAINT.with(|p| p.take());
-            let title_font = match &old {
-                Some(old) if old.font == handle => old.title_font,
+            let (title_font, bold) = match &old {
+                Some(old) if old.font == handle => (old.title_font, old.bold),
                 _ => {
                     if let Some(old) = &old {
                         let _ = DeleteObject(old.title_font.into());
+                        let _ = DeleteObject(old.bold.into());
                     }
                     let mut face = LOGFONTW::default();
                     GetObjectW(
@@ -2382,9 +2388,10 @@ impl SettingsWindow {
                         size_of::<LOGFONTW>() as i32,
                         Some((&mut face as *mut LOGFONTW).cast()),
                     );
-                    face.lfHeight = face.lfHeight * 3 / 2;
                     face.lfWeight = 600;
-                    CreateFontIndirectW(&face)
+                    let bold = CreateFontIndirectW(&face);
+                    face.lfHeight = face.lfHeight * 3 / 2;
+                    (CreateFontIndirectW(&face), bold)
                 }
             };
             PAINT.with(|p| {
@@ -2393,6 +2400,7 @@ impl SettingsWindow {
                     scale,
                     font: handle,
                     title_font,
+                    bold,
                     title: geometry.title,
                     labels: geometry.labels,
                     cards: geometry.cards,
@@ -2654,6 +2662,8 @@ impl Drop for SettingsWindow {
         if let Some(paint) = PAINT.with(|p| p.take()) {
             // SAFETY: the font is ours alone and the window that used it is destroyed next.
             let _ = unsafe { DeleteObject(paint.title_font.into()) };
+            // SAFETY: as above, ours alone.
+            let _ = unsafe { DeleteObject(paint.bold.into()) };
         }
         // SAFETY: sole owner; destroying the parent synchronously destroys all child controls before the font drops.
         unsafe {

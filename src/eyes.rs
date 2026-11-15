@@ -94,7 +94,8 @@ const BASE: (f32, f32) = (9.5, 18.0);
 pub fn eye(mood: Mood, pose: Pose) -> Eye {
     let (sx, sy, dy, top, bottom) = match mood {
         Mood::Idle => (1.0, 1.0, 0.0, 0.0, 0.0),
-        Mood::Happy => (1.3, 0.72, -0.6, 0.0, 0.4),
+        // Lifted 2 DIP so the lidded base reads as a smile, not as the pill clipping it.
+        Mood::Happy => (1.3, 0.72, -2.6, 0.0, 0.4),
         Mood::Sleepy => (1.2, 0.5, 2.0, 0.2, 0.0),
         Mood::Surprised => (0.85, 1.3, -1.0, 0.0, 0.0),
         Mood::Adhan => (1.2, 0.9, 0.0, 0.25, 0.25),

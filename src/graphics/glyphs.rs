@@ -56,8 +56,12 @@ pub enum Glyph {
     /// The Widgets tab: a tall and two small tiles.
     Widgets,
     Close,
+    /// Settings' Notch page: the notch hanging from the screen edge, with its eyes.
+    Notch,
+    /// Settings' About page.
+    Info,
 }
-const ALL: [Glyph; 35] = [
+const ALL: [Glyph; 37] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -93,6 +97,8 @@ const ALL: [Glyph; 35] = [
     Glyph::Music,
     Glyph::Widgets,
     Glyph::Close,
+    Glyph::Notch,
+    Glyph::Info,
 ];
 /// Grid size and stroke, in grid units.
 const GRID: f32 = 24.0;
@@ -162,10 +168,8 @@ impl Glyph {
             Glyph::Gear => {
                 "M3 7h3M10 7h11M3 17h11M18 17h3M8 5a2 2 0 1 0 0 4a2 2 0 1 0 0-4zM16 15a2 2 0 1 0 0 4a2 2 0 1 0 0-4z"
             }
-            Glyph::Sun => {
-                "M12 8.4a3.6 3.6 0 1 0 0 7.2a3.6 3.6 0 1 0 0-7.2zM12 8.4a3.6 3.6 0 0 1 0 7.2zM12 3v1.8M12 19.2V21M3 12h1.8M19.2 12H21M5.6 5.6l1.3 1.3M17.1 17.1l1.3 1.3M5.6 18.4l1.3-1.3M17.1 6.9l1.3-1.3"
-            }
-            Glyph::Clear => {
+            // The brightness sun and the clear sky are one tracing: rays long enough to read at 16 px.
+            Glyph::Sun | Glyph::Clear => {
                 "M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8zM12 2.8v2M12 19.2v2M2.8 12h2M19.2 12h2M5.5 5.5l1.4 1.4M17.1 17.1l1.4 1.4M5.5 18.5l1.4-1.4M17.1 6.9l1.4-1.4"
             }
             Glyph::PartlyCloudy => {
@@ -193,7 +197,7 @@ impl Glyph {
                 "M3.5 15h17v4a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5zM12 3v11M7.5 9.5L12 14l4.5-4.5"
             }
             Glyph::Start => {
-                "M5 5h5.5v5.5H5zM13.5 5H19v5.5h-5.5zM5 13.5h5.5V19H5zM13.5 13.5H19V19h-5.5z"
+                "M6.5 5h2.5a1.5 1.5 0 0 1 1.5 1.5V9a1.5 1.5 0 0 1-1.5 1.5H6.5A1.5 1.5 0 0 1 5 9V6.5A1.5 1.5 0 0 1 6.5 5zM15 5h2.5A1.5 1.5 0 0 1 19 6.5V9a1.5 1.5 0 0 1-1.5 1.5H15A1.5 1.5 0 0 1 13.5 9V6.5A1.5 1.5 0 0 1 15 5zM6.5 13.5h2.5a1.5 1.5 0 0 1 1.5 1.5v2.5a1.5 1.5 0 0 1-1.5 1.5H6.5A1.5 1.5 0 0 1 5 17.5V15a1.5 1.5 0 0 1 1.5-1.5zM15 13.5h2.5A1.5 1.5 0 0 1 19 15v2.5a1.5 1.5 0 0 1-1.5 1.5H15a1.5 1.5 0 0 1-1.5-1.5V15a1.5 1.5 0 0 1 1.5-1.5z"
             }
             Glyph::Apps => {
                 "M6 4h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM16 4h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM6 14h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2zM16 14h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2z"
@@ -205,7 +209,9 @@ impl Glyph {
             }
             Glyph::Chevron => "M6 15l6-6 6 6",
             Glyph::Expand => "M6 9l6 6 6-6",
-            Glyph::Desktop => "M3 5h18v12H3zM8 21h8M12 17v4",
+            Glyph::Desktop => {
+                "M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM8 21h8M12 17v4"
+            }
             Glyph::Charging => "M13 2L5 13h6l-1 9 9-12h-6z",
             Glyph::Add => "M12 4v16M4 12h16",
             Glyph::More => "M5 12h.01M12 12h.01M19 12h.01",
@@ -213,8 +219,12 @@ impl Glyph {
                 "M7 3.5h6l5 5v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2zM13 3.5v5h5"
             }
             Glyph::Music => {
-                "M7 3.5h10A3.5 3.5 0 0 1 20.5 7v10a3.5 3.5 0 0 1-3.5 3.5H7A3.5 3.5 0 0 1 3.5 17V7A3.5 3.5 0 0 1 7 3.5zM10 8l6 4-6 4z"
+                "M7.5 4h9A3.5 3.5 0 0 1 20 7.5v9a3.5 3.5 0 0 1-3.5 3.5h-9A3.5 3.5 0 0 1 4 16.5v-9A3.5 3.5 0 0 1 7.5 4zM10.5 9.2l4.2 2.8-4.2 2.8z"
             }
+            Glyph::Notch => {
+                "M3 4.5h18M6.5 4.5V8a5.5 5.5 0 0 0 5.5 5.5 5.5 5.5 0 0 0 5.5-5.5V4.5M10 8.2v.6M14 8.2v.6"
+            }
+            Glyph::Info => "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM12 11v5.5M12 7.8h.01",
             Glyph::Widgets => {
                 "M5.5 4h3.5a1.5 1.5 0 0 1 1.5 1.5v13a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 18.5v-13A1.5 1.5 0 0 1 5.5 4zM15 4h3.5A1.5 1.5 0 0 1 20 5.5V9a1.5 1.5 0 0 1-1.5 1.5H15A1.5 1.5 0 0 1 13.5 9V5.5A1.5 1.5 0 0 1 15 4zM15 13.5h3.5a1.5 1.5 0 0 1 1.5 1.5v3.5a1.5 1.5 0 0 1-1.5 1.5H15a1.5 1.5 0 0 1-1.5-1.5V15a1.5 1.5 0 0 1 1.5-1.5z"
             }

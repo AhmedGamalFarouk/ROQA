@@ -160,8 +160,9 @@ impl Theme {
             },
             Self::Frosted => Palette {
                 high_contrast: None,
-                body: Rgba(16, 20, 32, 0.74),
-                dock_hover: Rgba(16, 20, 32, 0.88),
+                // Graphite, not navy: the one neutral glass.
+                body: Rgba(19, 21, 25, 0.74),
+                dock_hover: Rgba(19, 21, 25, 0.88),
                 ink: (255, 255, 255),
                 accent: LAMP,
                 on_ink: (10, 14, 22),
@@ -173,8 +174,9 @@ impl Theme {
             },
             Self::Liquid => Palette {
                 high_contrast: None,
-                body: Rgba(16, 24, 42, 0.76),
-                dock_hover: Rgba(16, 24, 42, 0.88),
+                // A saturated blue, apart from Midnight's navy-black, lit by its sheen and rim.
+                body: Rgba(14, 22, 60, 0.76),
+                dock_hover: Rgba(14, 22, 60, 0.88),
                 ink: (255, 255, 255),
                 accent: LAMP,
                 on_ink: (10, 14, 22),
@@ -183,9 +185,9 @@ impl Theme {
                 shadow: 0.0,
                 rim: Some((0.95, 0.16)),
                 sheen: Some(Sheen {
-                    top: Rgba(24, 32, 56, 0.78),
-                    bottom: Rgba(14, 20, 38, 0.74),
-                    spec: 0.16,
+                    top: Rgba(18, 26, 62, 0.78),
+                    bottom: Rgba(12, 18, 44, 0.74),
+                    spec: 0.2,
                 }),
             },
         }

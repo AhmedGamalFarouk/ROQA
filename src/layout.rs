@@ -37,7 +37,7 @@ pub const MEDIA_NOTCH: NotchShape = NotchShape {
 pub const MEDIA_EXPANDED: NotchShape = NOTCH_EXPANDED;
 
 /// The one grid every tab page sits on, in DIPs from the body's left and top edges. Pages differ in content, never
-/// in padding: a 16 side margin, a header row (title left, clock right, one action just before the clock), the
+/// in padding: a 16 side margin, a header row (title left, the tune disc right, one context action just before it), the
 /// content from `BODY_Y` on, an 8 gutter between elements, 24 high chips and 14 radius tiles (the panel's 28
 /// radius less a 14 inset). The footer line and the settings button share the bottom row.
 pub const PAD: f32 = 16.0;
@@ -326,17 +326,23 @@ pub fn volume_fraction(window_width: i32, dpi: u32, progress: f32, x: i32) -> Op
     Some((offset / (bar.width - 1).max(1) as f32).clamp(0.0, 1.0))
 }
 
-/// The settings button in the expanded panel's bottom-right corner, in DIPs from the body's left and top
-/// edges (media panel, plain panel): 16 square, 16 from the right edge and 18 from the bottom, so its disc
-/// clears the glass backing's rounded corner (`BACKING_INSET`) by 6.
+/// The settings button, 16 square in DIPs from the body's left and top edges: in the plain pages' header right
+/// slot, or on the media panel 16 from the right edge and 18 from the bottom, so its disc clears the glass
+/// backing's rounded corner (`BACKING_INSET`) by 6.
 const GEAR_SIZE: f32 = 16.0;
-/// Five chips leave an eight-DIP gutter before the tune button.
+/// Five chips across the content width (the tune button lives in the header).
 pub fn prayer_chip(index: usize, dpi: u32) -> Bounds {
-    const WIDTH: f32 = (296.0 - 4.0 * 6.0) / 5.0;
+    const WIDTH: f32 = (NOTCH_EXPANDED.width - 2.0 * PAD - 4.0 * 6.0) / 5.0;
     scaled_bounds((PAD + (WIDTH + 6.0) * index as f32, 92.0, WIDTH, 26.0), dpi)
 }
 
 pub fn gear(dpi: u32, media: bool) -> Bounds {
+    if !media {
+        // Plain pages: the header's right slot, so the disc never crowds the content's corner.
+        let (x, y, w, _) = PAGE_TUNE;
+        let x = panel_width() - PAD - w + x + (w - GEAR_SIZE) / 2.0;
+        return scaled_bounds((x, y + (w - GEAR_SIZE) / 2.0, GEAR_SIZE, GEAR_SIZE), dpi);
+    }
     let shape = tall(
         if media {
             MEDIA_EXPANDED
@@ -381,7 +387,7 @@ pub fn gear_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, 
 
 /// The header row's one action (Limits' Refresh, Shelf's Add files), centred on the header's middle line and
 /// ending 8 before the clock. Ends at y 29, above the Limits column labels (y 30).
-const ACTION: (f32, f32, f32, f32) = (192.0, 9.0, 72.0, 20.0);
+const ACTION: (f32, f32, f32, f32) = (240.0, 9.0, 72.0, 20.0);
 pub fn refresh(dpi: u32) -> Bounds {
     scaled_bounds(ACTION, dpi)
 }
@@ -396,7 +402,7 @@ pub fn shelf_action(dpi: u32, undo: bool) -> Bounds {
         if undo {
             (116.0, 86.0, 48.0, 18.0)
         } else {
-            (220.0, 10.0, 40.0, 18.0)
+            (272.0, 10.0, 40.0, 18.0)
         },
         dpi,
     )
@@ -451,12 +457,18 @@ pub fn shelf_action_at(
 
 /// The page buttons (the timer's presets, the empty Weather and Prayer "Set city"): 58 x 24 capsules 66
 /// apart from x 16, y 68, in DIPs from the body's left and top edges, five across the content width.
-/// `beside`: the Timer page's controls while a countdown shows, 56 x 24 capsules 64 apart from x 152 at y 40,
-/// right of the digits.
-pub fn page_button(index: usize, beside: bool, dpi: u32) -> Bounds {
+/// `beside` (the row's control count, 0 for none): the Timer page's controls while a countdown shows, 56 x 24
+/// capsules 64 apart at y 40, right of the digits and right-aligned to the content edge.
+pub fn page_button(index: usize, beside: usize, dpi: u32) -> Bounds {
+    let right = NOTCH_EXPANDED.width - PAD;
     scaled_bounds(
-        if beside {
-            (152.0 + 64.0 * index as f32, 40.0, 56.0, CHIP_H)
+        if beside > 0 {
+            (
+                right - 56.0 - 64.0 * (beside - 1 - index.min(beside - 1)) as f32,
+                40.0,
+                56.0,
+                CHIP_H,
+            )
         } else {
             (PAD + 66.0 * index as f32, 68.0, 58.0, CHIP_H)
         },
@@ -474,7 +486,7 @@ pub fn page_button_at(
 ) -> Option<usize> {
     let vertical_padding = scaled(3.0, dpi);
     (0..count).find(|&i| {
-        let mut target = page_button(i, beside, dpi);
+        let mut target = page_button(i, if beside { count } else { 0 }, dpi);
         target.y -= vertical_padding;
         target.height += 2 * vertical_padding;
         on_slot(target, window_width, dpi, progress, media, x, y)
@@ -525,7 +537,8 @@ const TIMER_PILL: (f32, f32, f32, f32) = (108.0, 8.0, 30.0, 14.0);
 /// The title ends before the mascot's eyes (centred, 171 to 189) and the action slot starts after them.
 const PAGE_TITLE: (f32, f32, f32, f32) = (PAD, HEAD_Y, 150.0, HEAD_H);
 const PAGE_VALUE: (f32, f32, f32, f32) = (PAD, 34.0, 132.0, 36.0);
-const PAGE_CLOCK: (f32, f32, f32, f32) = (0.0, HEAD_Y, 72.0, HEAD_H);
+// The header's right slot: the tune disc, centred on the header line (the clock lives on the Media page only).
+const PAGE_TUNE: (f32, f32, f32, f32) = (0.0, HEAD_Y - 3.0, 24.0, 24.0);
 /// The mascot's resting eyes in the header, centred on the panel: their box in DIPs from the body's left edge.
 pub const HEAD_EYES: (f32, f32) = (18.0, 18.0);
 
@@ -547,15 +560,16 @@ pub fn panel_width() -> f32 {
 pub fn shelf_zone(dpi: u32) -> Bounds {
     scaled_bounds((PAD, BODY_Y, NOTCH_EXPANDED.width - 2.0 * PAD, 56.0), dpi)
 }
-/// The page clock, right-aligned 16 from the page's right edge.
-pub fn page_clock(_media: bool, dpi: u32) -> Bounds {
-    let (_, y, w, h) = PAGE_CLOCK;
+/// The tune disc's slot, right-aligned 16 from the page's right edge.
+#[cfg(test)]
+pub fn page_tune(_media: bool, dpi: u32) -> Bounds {
+    let (_, y, w, h) = PAGE_TUNE;
     scaled_bounds((panel_width() - PAD - w, y, w, h), dpi)
 }
 /// The header row's rects on a page `width` wide, in DIPs: title, eyes box, action, clock. They never overlap.
 #[cfg(test)]
 pub fn header_rects(width: f32) -> [(f32, f32, f32, f32); 4] {
-    let (_, y, w, h) = PAGE_CLOCK;
+    let (_, y, w, h) = PAGE_TUNE;
     [
         PAGE_TITLE,
         (
@@ -1405,7 +1419,7 @@ mod tests {
         let notice = power_notice(false, 96);
         assert_eq!((notice.y as f32, notice.height as f32), (y, h));
         // Pills end at 92: well above the row; 10 below it once the panel has grown.
-        let pill = page_button(0, false, 96);
+        let pill = page_button(0, 0, 96);
         assert!(notice.y - (pill.y + pill.height) >= 6);
         assert_eq!(NOTCH_EXPANDED.height + NOTICE_ROOM - (y + h), 10.0);
         // Grown, with the rail below and the open overshoot, it still fits the window.
@@ -1625,7 +1639,7 @@ mod tests {
                         && slot.y + slot.height <= body.height
                 };
                 let (title, value, clock) =
-                    (page_title(dpi), page_value(dpi), page_clock(media, dpi));
+                    (page_title(dpi), page_value(dpi), page_tune(media, dpi));
                 let notice = power_notice(media, dpi);
                 let shelf = shelf_slot(media, 0, dpi);
                 for slot in [title, value, clock, notice, shelf] {
@@ -1641,7 +1655,7 @@ mod tests {
                 // The Timer page's buttons, idle (five) or beside the digits (three), clear of the rest.
                 for (count, beside) in [(5, false), (3, true)] {
                     for index in 0..count {
-                        let button = page_button(index, beside, dpi);
+                        let button = page_button(index, if beside { count } else { 0 }, dpi);
                         assert!(fits(button), "{dpi} {media}");
                         for other in [title, clock, gear(dpi, media)] {
                             assert!(!hit(button, other), "{dpi} {media} {index}");
@@ -1789,7 +1803,7 @@ mod tests {
                 // The page's own title, clock and notice row; the Media page's elements are not drawn here.
                 let others = [
                     page_title(dpi),
-                    page_clock(media, dpi),
+                    page_tune(media, dpi),
                     power_notice(media, dpi),
                 ];
                 for slot in &slots {
@@ -2057,7 +2071,7 @@ mod tests {
                 dips(shelf_switch(dpi, 0), dpi),
                 dips(shelf_switch(dpi, 1), dpi),
                 dips(shelf_action(dpi, false), dpi),
-                dips(page_clock(false, dpi), dpi),
+                dips(page_tune(false, dpi), dpi),
                 dips(gear(dpi, false), dpi),
             ]);
             for slot in slots {
@@ -2132,7 +2146,7 @@ mod tests {
         for dpi in [96, 120, 144, 192, 240] {
             let button = dips(refresh(dpi), dpi);
             let title = dips(page_title(dpi), dpi);
-            let clock = dips(page_clock(true, dpi), dpi);
+            let clock = dips(page_tune(true, dpi), dpi);
             let first_row = LIMITS_TOP;
             // Close to exact at every scale (whole-pixel rounding).
             let near = |a: f32, b: f32| (a - b).abs() < 1.0;
