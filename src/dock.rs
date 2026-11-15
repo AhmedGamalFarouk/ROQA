@@ -218,7 +218,9 @@ pub fn items_with_pins(model: &WindowModel, pins: &Pins, desktop_only: bool) -> 
 /// picker; the minimized-apps chevron and the show-desktop strip sit at the right end.
 pub const BTN_DIPS: i32 = 44;
 pub const SEP_DIPS: i32 = 8;
-pub const STRIP_DIPS: i32 = 26;
+/// The show-desktop cell: a full button plus the end pad, so its glyph sits as far from the dock's end as Start does
+/// from the other, and the click target still runs to the screen edge.
+pub const STRIP_DIPS: i32 = BTN_DIPS + PAD_DIPS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
@@ -526,13 +528,14 @@ pub fn hit_at(buttons: Buttons, x_px: i32, width_px: i32, dpi: u32, slots: usize
 /// Window x of the hairline between the lead buttons and the slots, and between the slots and the tail,
 /// for the groups that exist.
 pub fn separators(buttons: Buttons, width_px: i32, dpi: u32) -> [Option<i32>; 2] {
-    let half = px(SEP_DIPS, dpi) / 2;
     let at = |x| if buttons.rtl { width_px - x } else { x };
+    // Each hairline sits midway between the two neighbours' visible edges: glyphs have wider margins than
+    // 40 DIP icons, so it leans toward the buttons on the lead side and falls on the cell start on the tail.
     [
-        (buttons.lead().count() > 0).then(|| at(lead_px(buttons, dpi) - half)),
+        (buttons.lead().count() > 0).then(|| at(lead_px(buttons, dpi) - px(6, dpi))),
         buttons
             .has_tail()
-            .then(|| at(width_px - tail_px(buttons, dpi) + half)),
+            .then(|| at(width_px - tail_px(buttons, dpi) + px(SEP_DIPS, dpi))),
     ]
 }
 
@@ -1475,9 +1478,9 @@ mod tests {
         let width = width_px(Buttons::default(), 2, 96);
         // Lead: pad 8 + two buttons 88 = 96, then half of the 8 separator.
         let [lead, tail] = separators(Buttons::default(), width, 96);
-        assert_eq!(lead, Some(8 + 88 + 4));
+        assert_eq!(lead, Some(8 + 88 + 2));
         // Tail: separator 8, chevron 44, the desktop control at the right edge.
-        assert_eq!(tail, Some(width - (8 + 44 + STRIP_DIPS) + 4));
+        assert_eq!(tail, Some(width - (8 + 44 + STRIP_DIPS) + 8));
         assert_eq!(separators(N, width, 96), [None, None]);
         assert_eq!(separators(only(Button::Start), width, 96)[1], None);
         assert_eq!(separators(only(Button::Desktop), width, 96)[0], None);

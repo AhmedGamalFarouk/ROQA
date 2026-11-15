@@ -2177,10 +2177,21 @@ fn paint_slots(
     let visible = dock::visible_slots(scene.layout, width, scene.dpi, scene.slots.len());
     let cell = |hit| {
         let (left, cell) = dock::span(scene.layout, width, scene.dpi, hit);
+        // The show-desktop cell runs to the dock's end; its glyph is drawn in the button part, clear of the end pad.
+        let pad = if hit == dock::Hit::Button(dock::Button::Desktop) {
+            px(dock::PAD_DIPS)
+        } else {
+            0.0
+        };
+        let (near, far) = if scene.layout.rtl {
+            (pad, 0.0)
+        } else {
+            (0.0, pad)
+        };
         D2D_RECT_F {
-            left: rect.left + left as f32,
+            left: rect.left + left as f32 + near,
             top: rect.top,
-            right: rect.left + (left + cell) as f32,
+            right: rect.left + (left + cell) as f32 - far,
             bottom: rect.bottom,
         }
     };
@@ -2238,9 +2249,6 @@ fn draw_button(
         (cell.left + cell.right) / 2.0,
         (cell.top + cell.bottom) / 2.0,
     );
-    if button == dock::Button::Desktop {
-        return glyph_desktop(context, cell, hover, px, p);
-    }
     // SAFETY: context is live between surface BeginDraw/EndDraw; the brushes are scoped to this draw.
     unsafe {
         if hover > 0.0 {
@@ -2262,31 +2270,10 @@ fn draw_button(
         dock::Button::Start => Glyph::Start,
         dock::Button::Search => Glyph::Search,
         dock::Button::TaskView => Glyph::TaskView,
-        _ => Glyph::Chevron,
+        dock::Button::Desktop => Glyph::Desktop,
+        dock::Button::Minimized => Glyph::Chevron,
     };
     glyphs::draw(context, square, shape, with_alpha(p.glyph, 1.0))
-}
-
-/// The monitor marks the show-desktop control at the dock's far end.
-fn glyph_desktop(
-    context: &ID2D1DeviceContext,
-    cell: &D2D_RECT_F,
-    hover: f32,
-    px: &dyn Fn(i32) -> f32,
-    p: &Palette,
-) -> Result<()> {
-    let side = px(20).min(cell.right - cell.left);
-    let square = pixel_square(
-        (cell.left + cell.right - side) / 2.0,
-        (cell.top + cell.bottom - side) / 2.0,
-        side,
-    );
-    glyphs::draw(
-        context,
-        square,
-        Glyph::Desktop,
-        with_alpha(p.glyph, p.ink_alpha(0.72 + 0.28 * hover)),
-    )
 }
 
 /// The notch outline turned over: rounded top corners, flat bottom flush with the surface's bottom edge.
