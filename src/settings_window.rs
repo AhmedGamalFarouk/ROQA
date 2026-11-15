@@ -592,7 +592,7 @@ struct Paint {
     title: (RECT, &'static str),
     labels: Vec<(RECT, &'static str)>,
     /// A card and the y of each divider inside it.
-    cards: Vec<(RECT, Vec<i32>)>,
+    cards: Vec<RECT>,
     /// The edits' and drop-downs' boxes, which the parent frames.
     fields: Vec<RECT>,
 }
@@ -766,7 +766,7 @@ fn paint(dc: HDC, window: HWND, p: &Paint) {
         for (rect, text) in &p.labels {
             write(dc, text, *rect, p.pal.dim, DT_LEFT | DT_NOPREFIX);
         }
-        for (rect, lines) in &p.cards {
+        for rect in &p.cards {
             // A tile of the window (radius 14); separated by fill, with an edge only where the fills are close.
             round(
                 dc,
@@ -775,15 +775,6 @@ fn paint(dc: HDC, window: HWND, p: &Paint) {
                 p.pal.card,
                 if p.pal.dark { p.pal.card } else { p.pal.line },
             );
-            for &y in lines {
-                let line = RECT {
-                    left: rect.left + px(14),
-                    top: y,
-                    right: rect.right - px(14),
-                    bottom: y + 1,
-                };
-                fill(dc, line, p.pal.line);
-            }
         }
         for field in &p.fields {
             round(dc, *field, px(14), p.pal.card, p.pal.field);
@@ -2418,16 +2409,13 @@ impl SettingsWindow {
                 card.label,
             ));
             y += px(16 + 6);
-            let (top, mut lines) = (y, Vec::new());
+            let top = y;
             let rows = self
                 .items
                 .iter()
                 .filter(|i| i.page as usize == self.page && i.card as usize == index)
                 .filter(|i| !(MONITOR..MONITOR + MAX_OFF).contains(&i.id));
-            for (n, item) in rows.enumerate() {
-                if n > 0 {
-                    lines.push(y);
-                }
+            for item in rows {
                 let (height, field) =
                     self.row(item, scale, (left + px(14), right - px(14)), y, at)?;
                 geometry.fields.extend(field);
@@ -2436,15 +2424,12 @@ impl SettingsWindow {
             if self.page == 0 && index == MAP_CARD {
                 y += self.map(scale, (left + px(14), right - px(14)), y, at.1)?;
             }
-            geometry.cards.push((
-                RECT {
-                    left,
-                    top,
-                    right,
-                    bottom: y,
-                },
-                lines,
-            ));
+            geometry.cards.push(RECT {
+                left,
+                top,
+                right,
+                bottom: y,
+            });
             y += px(14);
         }
         Ok((geometry, y + self.scroll + px(8)))
@@ -2602,7 +2587,7 @@ fn inset(h: HWND, width: i32, height: i32, top: i32, view: i32) {
     // SAFETY: our own live child; the system owns a region once it is set.
     unsafe {
         let region = if shown >= height {
-            CreateRoundRectRgn(1, 1, width, height, 8, 8)
+            CreateRoundRectRgn(1, 1, width - 1, height - 1, height, height)
         } else {
             CreateRectRgn(1, 1, width, shown.max(1))
         };
@@ -2613,7 +2598,7 @@ fn inset(h: HWND, width: i32, height: i32, top: i32, view: i32) {
 struct Geometry {
     title: (RECT, &'static str),
     labels: Vec<(RECT, &'static str)>,
-    cards: Vec<(RECT, Vec<i32>)>,
+    cards: Vec<RECT>,
     fields: Vec<RECT>,
 }
 

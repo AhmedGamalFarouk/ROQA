@@ -792,10 +792,24 @@ fn widgets_page(g: &Page, scene: &NotchScene) -> Result<()> {
                     if reading.is_some() {
                         at(76.0, 42.0, 104.0, 16.0)
                     } else {
-                        at(76.0, 28.0, 104.0, 16.0)
+                        at(76.0, 20.0, 104.0, 16.0)
                     },
                     g.ink(0.6),
                 )?;
+                if reading.is_none() {
+                    // One quiet sentence over two lines: a text box is a single line.
+                    for (n, line) in ["Pick another widget", "in Settings."]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        g.text(
+                            line,
+                            &g.font(10.0, NORMAL, LEAD),
+                            at(76.0, 38.0 + 13.0 * n as f32, 104.0, 14.0),
+                            g.ink(0.45),
+                        )?;
+                    }
+                }
             }
         }
     }

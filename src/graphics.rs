@@ -2,7 +2,7 @@ use crate::{
     audio::{BARS, Level},
     dock,
     edge::{Layout, ListRow},
-    eyes::Frame,
+    eyes::{Frame, Mood, Pose},
     icons::IconPixels,
     layout::{self, Bounds},
     media::{PLAY_PAUSE, Progress, Track},
@@ -1139,32 +1139,24 @@ fn media_page(
         },
         with_alpha(p.ink, p.ink_alpha(date)),
     )?;
-    // The mascot rests beside the clock, or a muted note when it is away; the status line sits under it.
+    // The mascot rests beside the clock, even with its shows off (then a still pair), the status line under it.
     let centre = layout::NOTCH_EXPANDED.width - 16.0 - 56.0;
-    let eyes_y = if let Some(frame) = scene.eyes {
-        tab_art::panel_eyes(
-            context,
-            body,
-            scale,
-            date,
-            frame,
-            ((centre, 56.0, 1.0), 0.0),
-            p,
-        )?;
-        72.0
-    } else {
-        glyphs::draw(
-            context,
-            pixel_square(
-                body.left + (centre - 10.0) * scale,
-                body.top + 46.0 * scale,
-                20.0 * scale,
-            ),
-            Glyph::Music,
-            with_alpha(p.ink, p.ink_alpha(0.35 * date)),
-        )?;
-        60.0
-    };
+    let frame = scene.eyes.unwrap_or(Frame {
+        mood: Mood::Idle,
+        pose: Pose::Rest,
+        alpha: 1.0,
+        look: 0.0,
+    });
+    tab_art::panel_eyes(
+        context,
+        body,
+        scale,
+        date,
+        frame,
+        ((centre, 56.0, 1.0), 0.0),
+        p,
+    )?;
+    let eyes_y = 72.0;
     match status {
         Some(line) => draw_text(
             context,

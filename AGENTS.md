@@ -25,7 +25,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 - Cargo only through `scripts\cargo.ps1 <args>`.
 - Gate: `scripts\verify.ps1` (fmt, clippy -D warnings, tests, locked release build, size gate). A change is not done until it passes.
 - Run: `scripts\run.ps1 start` (builds, then launches) and `scripts\run.ps1 quit`.
-- Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
+- Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. Do not pipe its output (the restarted ROQA holds the pipe open and the caller hangs): redirect to a file. Capture stores use fixed sample data (weather shows 3 hours, 29 degrees): that is the fixture, not a bug. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
 - Reuse a round's stills when `git rev-parse HEAD` and the exe SHA256 match its `provenance.json`.
 
 ## Reading code (token rule)
@@ -71,6 +71,6 @@ OPEN: <what is left, risks, decisions for the owner>
 The Chief reads only that final message (`t3_thread_read` limit 1), never a transcript. Anything longer goes in a file whose path is in EVIDENCE. Workers do not start sub-agents.
 
 ## Models (cost rule)
-- Capture, running tests, regression eyeballing, first critic: Gemini 3.8 Flash (provider `antigravity`, model `gemini-3.8-flash-high`).
+- Capture, running tests, regression eyeballing, first critic: Gemini 3.8 Flash (provider `antigravity`, model `gemini-3.8-flash-high`). If it stalls (it did twice on 2026-11-15), switch to Codex Luna (`codex`, `gpt-6-luna`, medium) without waiting.
 - Second critic and tie-breaker only when a score is within 0.5 of the 8.5 bar or critics differ by more than 1.0.
 - Code changes: the model the owner names. Codex workers have no ponytail skill: apply "smallest complete change" by hand.

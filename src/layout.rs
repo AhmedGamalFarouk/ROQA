@@ -65,7 +65,7 @@ pub fn set_page_height(dips: u16) {
 /// The Limits page's tool rows: the first at y 38 DIPs, `LIMITS_ROW` apart (two lines each: the used values, then
 /// the reset times and the freshness).
 pub const LIMITS_TOP: f32 = 44.0;
-pub const LIMITS_ROW: f32 = 30.0;
+pub const LIMITS_ROW: f32 = 34.0;
 /// The Limits page's panel height for `rows` tool rows: the rows and room for the gear under the last.
 pub fn limits_height(rows: usize) -> u16 {
     (LIMITS_TOP + LIMITS_ROW * rows as f32) as u16 + 22
@@ -1438,7 +1438,7 @@ mod tests {
 
     #[test]
     fn the_limits_page_grows_with_its_rows_and_still_fits_the_window_with_the_rail() {
-        assert_eq!(limits_height(3), 156);
+        assert_eq!(limits_height(3), 168);
         assert!(limits_height(2) < limits_height(3));
         // Three rows, open overshoot (progress 1.07) and the rail below stay inside the notch window.
         let shape = NOTCH_EXPANDED.height;
