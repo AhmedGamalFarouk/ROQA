@@ -1043,7 +1043,9 @@ fn limits_page(g: &Page, scene: &NotchScene) -> Result<()> {
         })
         .max();
     for (index, row) in view.rows.iter().enumerate() {
-        let y = layout::LIMITS_TOP + layout::LIMITS_ROW * index as f32;
+        // A one-line row (no reading) sits mid-band, so a two-line row above it does not crowd it.
+        let lift = if row.why.is_some() { 7.5 } else { 0.0 };
+        let y = layout::LIMITS_TOP + layout::LIMITS_ROW * index as f32 + lift;
         let dim = if row.stale { 0.5 } else { 1.0 };
         g.text(
             row.name,

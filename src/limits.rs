@@ -14,7 +14,7 @@ pub const COOLDOWN_SECS: i64 = 30;
 pub const NO_CLAUDE: &str = "Open Claude Code once to begin";
 pub const NO_CODEX: &str = "No Codex limits yet. Try Refresh.";
 pub const NO_AGY: &str = "Antigravity gave no limits";
-pub const OFF_AGY: &str = "Allow ROQA to run agy in Settings";
+pub const OFF_AGY: &str = "Allow Antigravity in Settings";
 pub const ASK_AGY: &str = "Try Refresh to read Antigravity";
 pub const WAITING: &str = "Reading...";
 

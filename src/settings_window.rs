@@ -42,7 +42,7 @@ use windows::{
             Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
             Controls::*,
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow},
-            Input::KeyboardAndMouse::SetFocus,
+            Input::KeyboardAndMouse::{EnableWindow, SetFocus},
             Shell::{DefSubclassProc, SetWindowSubclass},
             WindowsAndMessaging::*,
         },
@@ -359,7 +359,7 @@ const PAGES: &[Page] = &[
             Card {
                 label: "Pinned apps",
                 rows: &[
-                    r(PIN, Kind::Combo(200), "Pinned apps", ""),
+                    r(PIN, Kind::Combo(200), "Pin to move", ""),
                     r(EARLIER, Kind::Btn, "Move pin earlier", ""),
                     r(LATER, Kind::Btn, "Move pin later", ""),
                 ],
@@ -373,7 +373,12 @@ const PAGES: &[Page] = &[
                 label: "Location",
                 rows: &[
                     r(DETECT, C, "Detect location automatically", ""),
-                    r(CITY, Kind::Edit(200), "Weather city", "Empty is none"),
+                    r(
+                        CITY,
+                        Kind::Edit(200),
+                        "Weather city",
+                        "Leave empty for no weather",
+                    ),
                 ],
             },
             Card {
@@ -450,8 +455,8 @@ const PAGES: &[Page] = &[
             Card {
                 label: "Permissions",
                 rows: &[
-                    r(LIMCODEX, C, "Run codex on Refresh", ""),
-                    r(LIMAGY, C, "Run agy on Refresh", ""),
+                    r(LIMCODEX, C, "Run Codex on refresh", ""),
+                    r(LIMAGY, C, "Run Antigravity on refresh", ""),
                 ],
             },
             Card {
@@ -481,7 +486,7 @@ const PAGES: &[Page] = &[
                     DIAGNOSTICS,
                     Kind::Edit(220),
                     "Report file",
-                    "Empty = off",
+                    "Leave empty to turn off",
                 )],
             },
             Card {
@@ -1496,7 +1501,15 @@ impl SettingsWindow {
         for name in names {
             add_row(pins, name);
         }
+        if names.is_empty() {
+            add_row(pins, "Nothing pinned yet");
+        }
         select(pins, Some(clamp_selection(selected as isize, names.len())));
+        // Nothing to reorder until something is pinned.
+        for id in [PIN, EARLIER, LATER] {
+            // SAFETY: our own live child controls.
+            let _ = unsafe { EnableWindow(self.h(id), !names.is_empty()) };
+        }
     }
     /// The pin combo's current row (0 when none), so a refresh keeps the user's place.
     pub fn pin_selection(&self) -> usize {

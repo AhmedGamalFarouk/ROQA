@@ -8,7 +8,7 @@ Owner: Ahmed (they/them), does not read code. Report in plain language.
 One folder, one branch: work on `main` in this checkout. No branches, no worktrees.
 
 ## Priorities, in order
-1. Performance and tiny footprint: single host thread, event-driven, no idle timers or threads, one motion clock (`src/motion.rs`), frames only while animating, reduced motion respected.
+1. Performance and tiny footprint: single host (UI) thread (checked 2026-11-16: of ~23 threads at idle, ROQA starts only two parked workers, icons and window source; the rest are the GPU driver and the Windows thread pool), event-driven, no idle timers or threads, one motion clock (`src/motion.rs`), frames only while animating, reduced motion respected.
 2. Smallest complete change. Reuse what exists; no new abstraction, option or config nobody asked for.
 3. Brand consistency (below).
 
