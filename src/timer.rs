@@ -47,9 +47,10 @@ const IDLE: [Ctl; 5] = [
 pub fn controls(view: Option<&View>) -> &'static [Ctl] {
     match view.filter(|view| !view.done) {
         None => &IDLE,
-        Some(view) if view.paused => &[Ctl::Resume, Ctl::Skip, Ctl::Cancel],
+        Some(view) if view.paused && view.tagged => &[Ctl::Resume, Ctl::Skip, Ctl::Cancel],
+        Some(view) if view.paused => &[Ctl::Resume, Ctl::Cancel],
         Some(view) if view.tagged => &[Ctl::Pause, Ctl::Skip, Ctl::Cancel],
-        Some(_) => &[Ctl::Cancel],
+        Some(_) => &[Ctl::Pause, Ctl::Cancel],
     }
 }
 /// Longest countdown; also rejects a corrupt or clock-skewed stored expiry.
@@ -91,7 +92,7 @@ pub struct View {
     pub done: bool,
     /// The soonest countdown is a Pomodoro phase.
     pub tagged: bool,
-    /// A Pomodoro phase is paused (nothing runs; the host fills `panel` from its remainder).
+    /// A countdown is paused (nothing runs; the host fills `panel` from its remainder).
     pub paused: bool,
     /// The Pomodoro's phase line (the page title); empty for a plain timer.
     pub label: String,
@@ -103,19 +104,21 @@ pub struct View {
 }
 
 impl View {
-    /// The page for a paused Pomodoro phase with `left` of `total` seconds remaining.
-    pub fn paused(left: u64, total: u64, label: String, cycle: (u8, u8)) -> Self {
+    /// The page for a paused countdown with `left` of `total` seconds remaining: a Pomodoro phase when it
+    /// has a `cycle`, else a plain timer (empty label).
+    pub fn paused(left: u64, total: u64, label: String, cycle: Option<(u8, u8)>) -> Self {
+        let who = if label.is_empty() { "Timer" } else { &label };
         Self {
             pill: format!("{}m", left.div_ceil(60)),
             panel: clock(left),
-            name: format!("{label}, {} remaining", clock(left)),
+            name: format!("{who}, {} remaining", clock(left)),
             done: false,
-            tagged: true,
+            tagged: cycle.is_some(),
             paused: true,
             label,
             left,
             total,
-            cycle: Some(cycle),
+            cycle,
         }
     }
     /// The share of the countdown already gone, 0 to 1.
@@ -198,13 +201,25 @@ impl Timers {
         now: Instant,
         tag: Option<&'static str>,
     ) -> bool {
+        self.start_with(seconds, seconds, wall, now, tag)
+    }
+
+    /// `start_as`, keeping the countdown's full length `total` (a resumed one) for the progress capsule.
+    pub fn start_with(
+        &mut self,
+        seconds: u64,
+        total: u64,
+        wall: u64,
+        now: Instant,
+        tag: Option<&'static str>,
+    ) -> bool {
         if !(1..=MAX_SECONDS).contains(&seconds) || self.list.len() >= MAX {
             return false;
         }
         self.list.push(Timer {
             deadline: now + Duration::from_secs(seconds),
             expiry: wall.saturating_add(seconds),
-            total: seconds,
+            total,
             tag,
         });
         crate::sort::by(&mut self.list, |a, b| a.deadline.cmp(&b.deadline));
@@ -248,6 +263,14 @@ impl Timers {
     pub fn stop_pomo(&mut self, now: Instant) -> Option<u64> {
         let at = self.list.iter().position(|timer| timer.tag.is_some())?;
         Some(secs_left(self.list.remove(at).deadline, now).max(1))
+    }
+
+    /// Stops the soonest plain countdown and returns the seconds it had left and its full length.
+    pub fn pause_plain(&mut self, now: Instant) -> Option<(u64, u64)> {
+        let first = self.list.first().filter(|timer| timer.tag.is_none())?;
+        let (left, total) = (secs_left(first.deadline, now).max(1), first.total);
+        self.list.remove(0);
+        Some((left, total))
     }
 
     /// Cancels the soonest countdown (the one the page shows).
@@ -578,7 +601,10 @@ mod tests {
         assert_eq!(controls(None).len(), 5, "four presets and Focus");
         assert!(timers.start(60, WALL, now));
         let plain = timers.view(now);
-        assert_eq!(controls(plain.as_ref()), [Ctl::Cancel]);
+        assert_eq!(controls(plain.as_ref()), [Ctl::Pause, Ctl::Cancel]);
+        let held = View::paused(60, 60, String::new(), None);
+        assert_eq!(controls(Some(&held)), [Ctl::Resume, Ctl::Cancel]);
+        assert_eq!(held.name, "Timer, 1:00 remaining");
         timers.cancel_soonest();
         assert_eq!(timers.view(now), None);
         assert!(timers.start_as(60, WALL, now, Some("Focus")));
@@ -587,7 +613,7 @@ mod tests {
             controls(running.as_ref()),
             [Ctl::Pause, Ctl::Skip, Ctl::Cancel]
         );
-        let paused = View::paused(90, 1500, "Focus, paused".to_owned(), (0, 8));
+        let paused = View::paused(90, 1500, "Focus, paused".to_owned(), Some((0, 8)));
         assert_eq!(
             controls(Some(&paused)),
             [Ctl::Resume, Ctl::Skip, Ctl::Cancel]
@@ -611,6 +637,29 @@ mod tests {
         // A restored timer has no stored length: it starts at its time left.
         let restored = Timers::restore(&[WALL + 90], WALL, now);
         assert_eq!(restored.view(now).unwrap().elapsed(), 0.0);
-        assert_eq!(View::paused(30, 0, String::new(), (0, 8)).elapsed(), 0.0);
+        assert_eq!(
+            View::paused(30, 0, String::new(), Some((0, 8))).elapsed(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn a_plain_timer_pauses_with_its_remainder_and_resumes_with_its_length() {
+        let now = Instant::now();
+        let mut timers = Timers::default();
+        assert!(timers.start(600, WALL, now));
+        assert_eq!(timers.pause_plain(now + secs(100)), Some((500, 600)));
+        // Nothing runs while paused: no timer, no wake, nothing stored.
+        assert!(timers.view(now).is_none() && timers.next_wake(true, now).is_none());
+        assert_eq!(timers.pause_plain(now), None);
+        // Resuming keeps the full length, so the bar carries on from where it was.
+        let later = now + secs(1000);
+        assert!(timers.start_with(500, 600, WALL, later, None));
+        let view = timers.view(later + secs(50)).unwrap();
+        assert_eq!((view.left, view.total), (450, 600));
+        // A Pomodoro phase is not paused as a plain timer.
+        timers.cancel_soonest();
+        assert!(timers.start_as(60, WALL, later, Some("Focus")));
+        assert_eq!(timers.pause_plain(later), None);
     }
 }

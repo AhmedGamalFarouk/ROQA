@@ -178,6 +178,8 @@ struct Pages {
     widgets: crate::widgets::WidgetConfig,
     /// The Pomodoro's phase rules; its running phase is a tagged timer in `Desktop::timers`.
     pomo: pomo::Pomo,
+    /// A paused plain countdown: seconds left and its full length (not stored, like a paused Pomodoro).
+    held: Option<(u64, u64)>,
 }
 impl Pages {
     fn new(settings: &Settings, last: Tab) -> Self {
@@ -201,6 +203,7 @@ impl Pages {
             limits_key: None,
             widgets: settings.widgets,
             pomo: pomo::Pomo::default(),
+            held: None,
         };
         pages.set_privacy(settings.privacy, Instant::now());
         pages
@@ -216,8 +219,13 @@ impl Pages {
                 left,
                 self.pomo.total,
                 self.pomo.title(true),
-                self.pomo.cycle(),
+                Some(self.pomo.cycle()),
             ));
+        }
+        if let Some((left, total)) = self.held
+            && view.as_ref().is_none_or(|view| view.done)
+        {
+            return Some(timer::View::paused(left, total, String::new(), None));
         }
         view.map(|mut view| {
             if view.tagged {
@@ -2527,6 +2535,28 @@ impl Desktop {
         }
         self.pomo_start(now)
     }
+    /// Pause (running) or resume (held) the plain countdown the Timer page shows.
+    fn plain_act(&mut self, now: Instant) -> String {
+        let paused = self
+            .pages
+            .timer_view(&self.timers, now)
+            .is_some_and(|view| view.paused);
+        if let (true, Some((left, total))) = (paused, self.pages.held) {
+            if !self
+                .timers
+                .start_with(left, total, timer::wall_now(), now, None)
+            {
+                return format!("{} timers are already running.", timer::MAX);
+            }
+            self.pages.held = None;
+            return "Timer resumed.".to_owned();
+        }
+        if self.pages.held.is_some() {
+            return "One timer is already paused.".to_owned();
+        }
+        self.pages.held = self.timers.pause_plain(now);
+        "Timer paused.".to_owned()
+    }
     /// A Timer page button; what it did is announced as a notice (the presets just start, as before).
     fn timer_press(&mut self, control: timer::Ctl, now: Instant) {
         use timer::Ctl;
@@ -2534,6 +2564,14 @@ impl Desktop {
             Ctl::Preset(minutes) => {
                 self.clear_notice();
                 return drop(self.start_timer(minutes * 60));
+            }
+            Ctl::Pause | Ctl::Resume
+                if self
+                    .pages
+                    .timer_view(&self.timers, now)
+                    .is_some_and(|view| !view.tagged) =>
+            {
+                self.plain_act(now)
             }
             Ctl::Focus | Ctl::Pause | Ctl::Resume => self.pomo_act(false),
             Ctl::Skip => self.pomo_act(true),
@@ -2543,6 +2581,9 @@ impl Desktop {
                     self.timers.stop_pomo(now);
                     self.pages.pomo = pomo::Pomo::default();
                     "Pomodoro cancelled.".to_owned()
+                } else if view.is_some_and(|view| view.paused) {
+                    self.pages.held = None;
+                    "Timer cancelled.".to_owned()
                 } else {
                     self.timers.cancel_soonest();
                     "Timer cancelled.".to_owned()
