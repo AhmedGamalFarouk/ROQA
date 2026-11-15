@@ -2236,6 +2236,9 @@ fn paint_slots(
     Ok(())
 }
 
+/// The one box (DIPs) every dock glyph, buttons and picker alike, is stroked in: about 19 DIPs of ink beside the 40 DIP icons.
+const DOCK_GLYPH: i32 = 26;
+
 /// One taskbar button: the hover chip, then its glyph.
 fn draw_button(
     context: &ID2D1DeviceContext,
@@ -2264,7 +2267,7 @@ fn draw_button(
             context.FillRoundedRectangle(&rounded(chip, half_h), &brush);
         }
     }
-    let side = px(24);
+    let side = px(DOCK_GLYPH);
     let square = pixel_square(centre.0 - side / 2.0, centre.1 - side / 2.0, side);
     let shape = match button {
         dock::Button::Start => Glyph::Start,
@@ -2393,7 +2396,7 @@ fn draw_slot(
                 }
             }
         } else if slot.picker {
-            let side = px(26);
+            let side = px(DOCK_GLYPH);
             let glyph = D2D_RECT_F {
                 left: center_x - side / 2.0,
                 top: center_y - side / 2.0,
