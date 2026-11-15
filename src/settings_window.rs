@@ -724,6 +724,10 @@ unsafe fn fill(dc: HDC, r: RECT, colour: u32) {
 }
 
 unsafe fn write(dc: HDC, text: &str, mut r: RECT, colour: u32, flags: DRAW_TEXT_FORMAT) {
+    // An empty buffer's pointer dangles, and DrawTextW reads it under DT_END_ELLIPSIS (a crash).
+    if text.is_empty() {
+        return;
+    }
     let mut text: Vec<u16> = text.encode_utf16().collect();
     // SAFETY: draws a local buffer into the caller's live DC.
     unsafe {
@@ -2655,6 +2659,22 @@ fn footer_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_survives_empty_text() {
+        use windows::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC};
+        let r = RECT {
+            right: 10,
+            bottom: 10,
+            ..Default::default()
+        };
+        // SAFETY: a memory DC made and deleted here.
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            write(dc, "", r, 0, DT_LEFT | DT_END_ELLIPSIS);
+            let _ = DeleteDC(dc);
+        }
+    }
     use crate::{dock::Button, tabs::Tab};
 
     #[test]

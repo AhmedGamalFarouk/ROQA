@@ -18,7 +18,7 @@ Full r07/r09 detail: `cook/archive/ROUNDS-r07-r09.md`. One row per round below; 
 - Settings on/off toggles stay amber (owner decision 2026-11-16).
 
 ## Never captured so far
-Empty Media, running-app previews (privacy), second monitor, Settings pages after Notch, populated Shelf, idle CPU, FPS.
+Running-app previews (privacy), second monitor, populated Shelf, FPS. (Settings pages after Notch first captured in r13, after the crash fix.)
 
 ## Not yet confirmed on screen by the owner
 Dock folders drag-create, Shelf Copied on a real clipboard, dot-rail hover.

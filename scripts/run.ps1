@@ -8,11 +8,14 @@ if ($Action -eq 'start') {
     $logDirectory = Join-Path $projectRoot 'artifacts/runtime'
     New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
     $log = Join-Path $logDirectory ((Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.log')
-    $hostInstance = Start-Process -FilePath $executable -WindowStyle Hidden -PassThru -RedirectStandardError $log
-    try {
-        if ($hostInstance.WaitForExit(1000)) { throw "ROQA exited with $($hostInstance.ExitCode). Diagnostics: $log" }
-        Write-Host "ROQA is running (PID $($hostInstance.Id)). Quit with: ./scripts/run.ps1 quit"
-    } finally { $hostInstance.Dispose() }
+    # Launched through the shell so ROQA inherits none of the caller's pipes; a caller that
+    # captures output would otherwise wait on ROQA forever.
+    $command = '/c start "" /b "{0}" 2> "{1}"' -f ($executable -replace '/', '\'), ($log -replace '/', '\')
+    Start-Process -FilePath $env:ComSpec -ArgumentList $command -WindowStyle Hidden
+    Start-Sleep -Milliseconds 1000
+    $hostInstance = Get-Process roqa -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $hostInstance) { throw "ROQA did not stay running. Diagnostics: $log" }
+    Write-Host "ROQA is running (PID $($hostInstance.Id)). Quit with: ./scripts/run.ps1 quit"
 } else {
     if (!(Test-Path -LiteralPath $executable)) { throw 'Build/start ROQA first.' }
     $control = Start-Process -FilePath $executable -ArgumentList "--$Action" -WindowStyle Hidden -PassThru

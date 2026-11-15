@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>ROQA brand board</title>
+<style>
+:root{
+ --lamp:#FFB454; --lagoon:#3FD9C0; --coral:#FF7A7A;
+ --n0:#000;--n1:#0E0E10;--n2:#141416;--n3:#26262A;--n4:#3A3A40;--n5:#6B6B73;--n6:#9A9AA3;--n7:#DCE1E8;--n8:#ECEEF2;--n9:#fff;
+ --canvas:#1a1a1d;--panel:#222226;--line:rgba(255,255,255,.08);
+}
+*{box-sizing:border-box;margin:0}
+body{width:1920px;background:var(--canvas);font-family:"Segoe UI Variable Text","Segoe UI",sans-serif;color:var(--n8);padding:40px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);grid-auto-rows:410px;gap:24px}
+.p{background:var(--panel);border-radius:28px;position:relative;overflow:hidden;padding:28px;display:flex;flex-direction:column}
+.p.black{background:#000}.p.light{background:var(--n8);color:#14161A}
+.n{position:absolute;right:24px;bottom:18px;font-size:12px;color:var(--n6);font-variant-numeric:tabular-nums}
+.l{position:absolute;left:28px;bottom:18px;font-size:12px;color:var(--n6)}
+h2{font-family:"Segoe UI Variable Display","Segoe UI";font-weight:600;font-size:15px;color:var(--n6);margin-bottom:16px}
+.big{font-family:"Segoe UI Variable Display","Segoe UI";font-weight:600}
+.row{display:flex;gap:12px;align-items:center}
+.cap{height:30px;border-radius:15px;padding:0 14px;display:inline-flex;align-items:center;font-size:12px;background:var(--n4);color:var(--n9)}
+svg{display:block}
+.ic{stroke:var(--n7);stroke-width:1.75;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.mono{font-family:Consolas,monospace;font-size:12px;color:var(--n6)}
+table{border-collapse:collapse;font-size:12.5px;width:100%}td{padding:6px 0;border-bottom:1px solid var(--line);vertical-align:top}td:first-child{color:var(--n6);width:34%}
+</style></head><body>
+<div class="grid">
+
+<!-- 1 cover -->
+<div class="p black" style="align-items:center;justify-content:center;gap:26px">
+ <svg width="240" height="96" viewBox="0 0 240 96" id="mark"></svg>
+ <div class="big" style="font-size:64px;letter-spacing:-1px;line-height:1">roqa</div>
+ <div style="color:var(--n6);font-size:15px">A small companion for the top of your screen.</div>
+ <span class="l">ROQA brand guidelines</span><span class="n">01</span>
+</div>
+
+<!-- 2 construction -->
+<div class="p"><h2>Mark construction</h2>
+ <svg width="545" height="290" viewBox="0 0 545 290" id="constr"></svg>
+ <span class="l">Eye 1 : 1.9, gap 2.6 eye widths, pill 1 : 1.6</span><span class="n">02</span>
+</div>
+
+<!-- 3 notch application -->
+<div class="p" style="background:#5d6068;padding-top:0;align-items:center"><div id="notchApp"></div>
+ <span class="l" style="color:#fff">Notch: collapsed, then opened to the timer</span><span class="n" style="color:#fff">03</span>
+</div>
+
+<!-- 4 essence -->
+<div class="p" style="justify-content:center;gap:22px"><h2 style="position:absolute;top:28px">Brand idea</h2>
+ <div class="big" style="font-size:54px;line-height:1.05;letter-spacing:-1px">Always a glance<br>away<span style="color:var(--lamp)">.</span></div>
+ <div style="color:var(--n6);font-size:15px;max-width:420px;line-height:1.5">Calm and caring, a little poetic. Springy when it greets you, still when you are busy.</div>
+ <span class="n">04</span>
+</div>
+
+<!-- 5 color -->
+<div class="p"><h2>Accent, three options</h2>
+ <div class="row" style="gap:10px;margin-bottom:6px" id="acc"></div>
+ <div style="font-size:12.5px;color:var(--n6);margin:8px 0 18px">Recommended: Lamp. Warm like a night light, 11.9:1 on black, far from Nusa's blue and violet.</div>
+ <h2 style="margin-bottom:10px">Neutral ramp</h2><div class="row" style="gap:0;border-radius:14px;overflow:hidden" id="ramp"></div>
+ <span class="n">05</span>
+</div>
+
+<!-- 6 type -->
+<div class="p"><h2>Typography</h2>
+ <div class="big" style="font-size:78px;line-height:1;letter-spacing:-2px;font-variant-numeric:tabular-nums">25:00</div>
+ <div style="margin:14px 0 4px;font-family:'Segoe UI Variable Display';font-weight:600;font-size:22px">Segoe UI Variable Display, 600</div>
+ <div style="font-size:15px;color:var(--n7)">Segoe UI Variable Text, 400 and 500. Sentence case, tabular numbers.</div>
+ <table style="margin-top:16px"><tr><td>Time, 28 / 600</td><td>Maghrib 17:48</td></tr><tr><td>Title, 15 / 600</td><td>Focus 1 of 4</td></tr><tr><td>Body, 12 / 400</td><td>Drop a file here. It will wait.</td></tr><tr><td>Caption, 10.5 / 500</td><td>in 1 h 8 min</td></tr></table>
+ <span class="n">06</span>
+</div>
+
+<!-- 7 mascot -->
+<div class="p black" style="grid-column:span 2"><h2>Mascot states</h2><div class="row" style="gap:14px;flex-wrap:wrap" id="mascot" style="gap:12px"></div><span class="n">07</span></div>
+
+<!-- 8 shape -->
+<div class="p"><h2>Shape grammar</h2>
+ <svg width="545" height="300" viewBox="0 0 545 300" id="shape"></svg>
+ <span class="l">Capsule ends everywhere. Inner radius = outer radius - inset.</span><span class="n">08</span>
+</div>
+
+<!-- 9 motion -->
+<div class="p" style="grid-column:span 2"><h2>Motion curves</h2><div class="row" style="align-items:flex-start;gap:28px" id="curves"></div>
+ <span class="l">Reduced motion: no overshoot, 120 ms cross-fade. Frames only while a curve runs.</span><span class="n">09</span></div>
+
+<!-- 10 icons -->
+<div class="p"><h2>Icon style</h2><div class="row" style="flex-wrap:wrap;gap:22px" id="icons"></div>
+ <div style="margin-top:20px;font-size:12.5px;color:var(--n6);line-height:1.6">20 px grid, 1.75 px stroke, round caps and joins. Open ends are capsules. Active state: accent stroke, no fill.</div>
+ <span class="n">10</span></div>
+
+<!-- 11 themes -->
+<div class="p" style="grid-column:span 2"><h2>Five themes, one system</h2><div class="row" style="gap:14px;align-items:flex-start" id="themes"></div>
+ <span class="l">Only surface and ink change. Shape, motion, type and accent stay.</span><span class="n">11</span></div>
+
+<!-- 12 voice -->
+<div class="p"><h2>Voice</h2>
+ <table><tr><td>Timer done</td><td>Round done. Rest a little.</td></tr><tr><td>Empty shelf</td><td>Drop a file here. It will wait.</td></tr><tr><td>Water</td><td>Time for a glass of water.</td></tr><tr><td>Prayer</td><td>Maghrib in 12 min.</td></tr><tr><td>Error</td><td>No weather yet. Trying again soon.</td></tr><tr><td>Rule</td><td>Warm, brief, 7 words or fewer, no exclamation marks.</td></tr></table>
+ <span class="n">12</span></div>
+
+</div>
+<script>
+const LAMP='#FFB454';
+// eye: capsule w,h in dip around centre
+function eye(cx,cy,w,h,c,rot=0){return `<rect x="${cx-w/2}" y="${cy-h/2}" width="${w}" height="${h}" rx="${Math.min(w,h)/2}" fill="${c}" transform="rotate(${rot} ${cx} ${cy})"/>`}
+function eyes(o={}){const{w=9.5,h=18,dx=0,dy=0,gap=25,c=LAMP,lw=1,lh=1,rrot=0,rdy=0,rw}=o;
+ return eye(-gap/2+dx,dy,w*lw,h*lh,c)+eye(gap/2+dx,dy+rdy,(rw||w)*lw,h*lh,c,rrot)}
+// notch silhouette
+function notch(W,H,e=12,r=22,fill='#000'){return `<path d="M0 0A${e} ${e} 0 0 1 ${e} ${e}L${e} ${H-r}A${r} ${r} 0 0 0 ${e+r} ${H}L${W-e-r} ${H}A${r} ${r} 0 0 0 ${W-e} ${H-r}L${W-e} ${e}A${e} ${e} 0 0 1 ${W} 0Z" fill="${fill}"/>`}
+// 1 mark: pill + eyes
+document.getElementById('mark').innerHTML=`<rect x="0" y="0" width="240" height="96" rx="48" fill="#fff" opacity=".0"/><rect x="30" y="8" width="180" height="80" rx="40" fill="#14141a" stroke="#2c2c33"/><g transform="translate(120 48) scale(2.2)">${eyes()}</g>`;
+// 2 construction
+(()=>{let s=`<defs><pattern id="g" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M20 0H0V20" fill="none" stroke="#fff" stroke-opacity=".05"/></pattern></defs><rect width="545" height="290" fill="url(#g)"/>`;
+ s+=`<g transform="translate(272 145)"><rect x="-130" y="-58" width="260" height="116" rx="58" fill="#000" stroke="#4a4a52"/>`;
+ s+=`<g transform="scale(3.2)">${eyes()}</g>`;
+ s+=`<g stroke="#FFB454" stroke-opacity=".6" stroke-width="1" fill="none"><line x1="-160" y1="-29" x2="160" y2="-29" stroke-dasharray="3 4"/><line x1="-160" y1="29" x2="160" y2="29" stroke-dasharray="3 4"/><line x1="-40" y1="-80" x2="-40" y2="80" stroke-dasharray="3 4"/><line x1="40" y1="-80" x2="40" y2="80" stroke-dasharray="3 4"/><line x1="0" y1="-80" x2="0" y2="80" stroke-opacity=".3"/></g>`;
+ s+=`<text x="-130" y="82" fill="#9A9AA3" font-size="11">pill 260 x 116</text><text x="52" y="-34" fill="#9A9AA3" font-size="11">eye 30 x 58</text><text x="-34" y="97" fill="#9A9AA3" font-size="11" text-anchor="middle"></text></g>`;
+ document.getElementById('constr').innerHTML=s})();
+// 3 notch application
+(()=>{const clock=`<text x="150" y="25" fill="#fff" text-anchor="middle" font-family="Segoe UI Variable Display" font-weight="600" font-size="17">12:17</text>`;
+ const col=`<svg width="340" height="52" viewBox="0 0 340 52">${notch(340,44,10,20)}<text x="170" y="29" fill="#fff" text-anchor="middle" font-family="Segoe UI Variable Display" font-weight="600" font-size="16" transform="translate(0,0)">12:17</text></svg>`;
+ const idle=`<svg width="340" height="52" viewBox="0 0 340 52">${notch(340,44,10,20)}<g transform="translate(170 24) scale(.9)">${eyes()}</g></svg>`;
+ const open=`<svg width="500" height="190" viewBox="0 0 500 190">${notch(500,176,16,34)}
+ <g transform="translate(112 74) scale(.95)">${eyes({lw:.9,lh:.92,dx:-3,dy:-4})}</g>
+ <text x="64" y="127" fill="#fff" font-family="Segoe UI Variable Display" font-weight="600" font-size="34" style="font-variant-numeric:tabular-nums">25:00</text>
+ <text x="66" y="150" fill="#9A9AA3" font-size="12">Focus 1 of 4. Ready</text>
+ <rect x="296" y="46" width="112" height="36" rx="18" fill="#FFB454"/><text x="352" y="69" text-anchor="middle" fill="#14161A" font-size="14" font-weight="600">Start</text>
+ <g fill="#3A3A40"><rect x="296" y="106" width="30" height="6" rx="3"/><rect x="332" y="106" width="30" height="6" rx="3"/><rect x="368" y="106" width="30" height="6" rx="3"/><rect x="404" y="106" width="30" height="6" rx="3"/></g>
+ <g stroke="#9A9AA3" stroke-width="1.75" fill="none" stroke-linecap="round"><path d="M215 158h72"/></g>
+ <rect x="215" y="156" width="72" height="4" rx="2" fill="#3A3A40"/><rect x="215" y="156" width="14" height="4" rx="2" fill="#FFB454"/>
+ <g fill="#3A3A40"><rect x="212" y="170" width="10" height="4" rx="2" fill="#fff"/><circle cx="232" cy="172" r="2"/><circle cx="242" cy="172" r="2"/><circle cx="252" cy="172" r="2"/></g></svg>`;
+ document.getElementById('notchApp').innerHTML=`<div style="display:flex;flex-direction:column;align-items:center;gap:34px;margin-top:0"><div style="display:flex;gap:12px;flex-direction:column;align-items:center">${col}${idle}</div>${open}</div>`})();
+// 5 accents + ramp
+(()=>{const A=[['Lamp','#FFB454','warm, companion'],['Lagoon','#3FD9C0','cool, calm'],['Coral','#FF7A7A','soft, affectionate']];
+ acc.innerHTML=A.map((a,i)=>`<div style="flex:1"><div style="height:92px;border-radius:24px;background:${a[1]};${i==0?'outline:2px solid #fff;outline-offset:3px':''}"></div><div style="margin-top:8px;font-size:13px">${a[0]}${i==0?' (pick)':''}</div><div class="mono">${a[1]}</div></div>`).join('');
+ const R=['#000000','#0E0E10','#141416','#26262A','#3A3A40','#6B6B73','#9A9AA3','#DCE1E8','#ECEEF2','#FFFFFF'];
+ ramp.innerHTML=R.map((c,i)=>`<div style="flex:1;height:56px;background:${c};display:flex;align-items:flex-end;padding:4px;font-size:9px;color:${i>6?'#000':'#9A9AA3'}">${i}</div>`).join('')})();
+// 7 mascot
+(()=>{const S=[
+ ['idle',{}],['blink',{lh:.12,lw:1.1}],['squash on hover',{lw:1.28,lh:.82,dy:2}],['doze',{lh:.5,lw:1.15,dy:3}],
+ ['wave',{rrot:22,rdy:-5,lh:1.05}],['lean to timer',{dx:7,lw:.9,lh:.92,dy:-1}],['look at media',{dx:-8,dy:-1}]];
+ mascot.innerHTML=S.map(s=>`<div style="width:148px"><svg width="148" height="80" viewBox="-79 -43 158 86"><rect x="-76" y="-40" width="152" height="80" rx="40" fill="#0b0b0d" stroke="#2a2a30"/><g transform="scale(1.7)">${eyes(s[1])}</g></svg><div style="font-size:13px;margin-top:8px;color:#ECEEF2">${s[0]}</div></div>`).join('')+
+ `<div style="width:100%;font-size:13px;color:#9A9AA3;margin-top:26px">Eyes are the accent. Blur the notch and two warm capsules on black still read as ROQA.</div>`})();
+// 8 shape grammar
+(()=>{let s='';
+ s+=`<g transform="translate(20 20)"><path d="M0 0A14 14 0 0 1 14 14L14 150A40 40 0 0 0 54 190L206 190A40 40 0 0 0 246 150L246 14A14 14 0 0 1 260 0Z" fill="#000" stroke="#4a4a52"/>`;
+ s+=`<rect x="34" y="40" width="192" height="52" rx="14" fill="#26262A"/><rect x="34" y="108" width="120" height="30" rx="15" fill="#3A3A40"/><rect x="162" y="108" width="64" height="30" rx="15" fill="#FFB454"/><rect x="34" y="152" width="192" height="6" rx="3" fill="#3A3A40"/><rect x="34" y="152" width="70" height="6" rx="3" fill="#FFB454"/></g>`;
+ s+=`<g fill="#9A9AA3" font-size="12"><text x="310" y="52">Panel: bottom radius 40, top flare 14</text><text x="310" y="110">Tile: radius 14 (panel 40 - inset 26)</text><text x="310" y="150">Button, chip, tab: full capsule</text><text x="310" y="196">Progress, divider: capsule ends</text><text x="310" y="242">Never a sharp corner. Minimum radius 3.</text></g>`;
+ s+=`<g stroke="#FFB454" stroke-opacity=".5" fill="none"><path d="M292 48H280M292 106H258M292 146H236M292 192H236" stroke-dasharray="2 3"/></g>`;
+ shape.innerHTML=s})();
+// 9 curves
+(()=>{const C=[['settle','cubic-bezier(0.2, 0.9, 0.3, 1.0)',[.2,.9,.3,1],'260 ms','fades, hover out, state change'],['pop','cubic-bezier(0.34, 1.45, 0.5, 1.0)',[.34,1.45,.5,1],'360 ms','hover, squash, greet, mascot'],['slide','cubic-bezier(0.3, 0.0, 0.15, 1.0)',[.3,0,.15,1],'240 ms','tabs, pages, notices']];
+ curves.innerHTML=C.map(c=>{const [a,b,cc,d]=c[2],W=150,H=150,x=t=>10+t*W,y=t=>10+(1.0-t)*100+ 30*0;
+  const Y=v=>140-(v*100); // y range 0..1.5 maps; baseline 140, 1.0 => 40
+  const path=`M${x(0)} ${Y(0)}C${x(a)} ${Y(b)} ${x(cc)} ${Y(d)} ${x(1)} ${Y(1)}`;
+  return `<div style="width:262px"><svg width="170" height="170" viewBox="0 0 170 170"><rect x="10" y="40" width="150" height="100" fill="none" stroke="#3a3a40" stroke-dasharray="3 4"/><path d="${path}" stroke="#FFB454" stroke-width="3" fill="none" stroke-linecap="round"/></svg><div class="big" style="font-size:22px;margin-top:6px">${c[0]}</div><div class="mono" style="margin-top:4px">${c[1]}</div><div style="font-size:13px;margin-top:6px;color:#ECEEF2">${c[3]}</div><div style="font-size:12.5px;color:#9A9AA3;margin-top:2px">${c[4]}</div></div>`}).join('')})();
+// 10 icons
+(()=>{const I={timer:'<circle cx="10" cy="11" r="6.5"/><path d="M10 7.8v3.4l2 1.4M8 2.8h4"/>',water:'<path d="M10 3.5c2.6 3.2 4.5 5.4 4.5 7.8a4.5 4.5 0 0 1-9 0c0-2.4 1.9-4.6 4.5-7.8z"/>',prayer:'<path d="M3 14.5h14M5 14.5a5 5 0 0 1 10 0M10 4.5v1.5M4.3 8l1 1M15.7 8l-1 1"/>',media:'<rect x="3.5" y="3.5" width="13" height="13" rx="4"/><path d="M8.5 7.5l4 2.5-4 2.5z"/>',shelf:'<path d="M3.5 12.5h13v3a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5zM10 3.5v8M7 8.5l3 3 3-3"/>',weather:'<circle cx="8" cy="8" r="3"/><path d="M8 2.5v1M2.5 8h1M3.8 3.8l.7.7M12.2 3.8l-.7.7M7 15.5h6.5a2.7 2.7 0 0 0 0-5.4 3.7 3.7 0 0 0-6.7.6A2.5 2.5 0 0 0 7 15.5z"/>',limits:'<path d="M3.5 13a6.5 6.5 0 1 1 13 0M10 13l2.8-3.8"/>',settings:'<path d="M3.5 6h13M3.5 14h13"/><circle cx="7" cy="6" r="2" fill="#222226"/><circle cx="13" cy="14" r="2" fill="#222226"/>'};
+ icons.innerHTML=Object.entries(I).map(([n,p],i)=>`<div style="text-align:center;width:104px"><svg width="52" height="52" viewBox="0 0 20 20" class="ic" style="${i==0?'stroke:#FFB454':''}">${p}</svg><div style="font-size:12px;color:#9A9AA3;margin-top:4px">${n}</div></div>`).join('')})();
+// 11 themes
+(()=>{const T=[['Classic','#000','#fff','#FFB454','solid black, notch shadow .9'],['Midnight','#0B1020','#E8EEFF','#FFB454','solid navy-black'],['Light','#ECEEF2','#14161A','#9A5200','deepened accent for text and eyes'],['Frosted tint','rgba(16,20,32,.74)','#fff','#FFB454','translucent, 1 px rim'],['Liquid glass','linear-gradient(#18203899,#0e1426bd)','#fff','#FFB454','translucent, rim and sheen']];
+ themes.innerHTML=T.map(t=>`<div style="width:168px"><div style="height:112px;border-radius:22px;background:linear-gradient(135deg,#7a8798,#c9b79a);display:flex;align-items:center;justify-content:center"><div style="width:140px;height:70px;border-radius:35px;background:${t[1]};display:flex;align-items:center;justify-content:center;${t[0].match(/Frost|Liquid/)?'border:1px solid rgba(255,255,255,.35);':''}"><svg width="100" height="44" viewBox="-50 -22 100 44"><g transform="scale(1.35)">${eyes({c:t[3]})}</g></svg></div></div><div style="font-size:13px;margin-top:8px">${t[0]}</div><div style="font-size:11.5px;color:#9A9AA3;margin-top:2px;line-height:1.4">${t[4]}</div></div>`).join('')})();
+</script></body></html>

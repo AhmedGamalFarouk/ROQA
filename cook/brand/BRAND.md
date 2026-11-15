@@ -1,4 +1,4 @@
-# ROQA brand spec v1 (proposal, awaiting approval)
+# ROQA brand spec v1 (approved by the owner)
 
 Board: `cook/brand/board.png` (source `board.html`). Units: DIP (device-independent px). Everything below is implementable in the existing D2D code; nothing needs a new dependency, font file or timer.
 

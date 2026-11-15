@@ -25,11 +25,11 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 - Cargo only through `scripts\cargo.ps1 <args>`.
 - Gate: `scripts\verify.ps1` (fmt, clippy -D warnings, tests, locked release build, size gate). A change is not done until it passes.
 - Run: `scripts\run.ps1 start` (builds, then launches) and `scripts\run.ps1 quit`.
-- Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. Known flaws: the command does not return after it finishes (the restarted ROQA keeps its handles), so run it in the background and stop it once ROQA is back; the Settings pages after Notch still fail to capture. Capture stores use fixed sample data (weather shows 3 hours, 29 degrees): that is the fixture, not a bug. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
+- Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. A full run takes about 6 minutes and returns on its own; run it in the background. If a pass fails with "Settings not found", ROQA crashed: check `Get-WinEvent` Application id 1000 before blaming the tool. Capture stores use fixed sample data (weather shows 3 hours, 29 degrees): that is the fixture, not a bug. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
 - Reuse a round's stills when `git rev-parse HEAD` and the exe SHA256 match its `provenance.json`.
 
 ## Reading code (token rule)
-- Use the graft index first: `graft ask "<task>" --source`, `graft grep`, `graft skeleton <file>`, `graft callers <sym>`. If the `graft` command is not on PATH, read the per-file card `graft/src/<file>.md` (symbols with line numbers) and grep for the symbol.
+- The `graft` command is not installed in agent shells (checked 2026-11-16): do not try it. Read the per-file card `graft/src/<file>.md` for the symbol list, then grep the symbol for its real line. Cards are not regenerated, so their line numbers drift; trust the names, not the numbers.
 - Read a span, not a file. `host.rs` (206 KB), `graphics.rs`, `settings_window.rs`, `layout.rs`, `media.rs` are never read whole.
 - Read a full file only when it is under ~300 lines or you are rewriting most of it.
 - Docs: read the summary here; open the source doc only for the section you need.
@@ -50,6 +50,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 - Design QA ledger: `cook/ROUNDS.md` (short; old rounds in `cook/archive/`).
 - Critic rubric: `cook/RUBRIC.md`.
 - Feature ideas: `FEATURES_TO_ADD.md` (local, untracked wish list; not a plan).
+- History only, never needed for a task: `cook/archive/` (old briefs, Nusa shot notes, old fix lists). If a rule there differs from this file, this file wins.
 
 ## Handoff contract
 Brief (Chief to worker), at most 15 lines:
