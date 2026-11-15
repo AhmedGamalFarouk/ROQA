@@ -1,0 +1,76 @@
+# ROQA: project context (single source of truth)
+
+Every agent reads this file first. Briefs point here by path and never paste it. If a brief conflicts with this file, this file wins unless the brief quotes the owner.
+
+## What it is
+Native Windows 11 dock + notch in Rust: Win32, DirectComposition/Direct2D, some GDI text. One ~1.18 MB exe, no dependencies beyond Cargo.lock.
+Owner: Ahmed (they/them), does not read code. Report in plain language.
+One folder, one branch: work on `main` in this checkout. No branches, no worktrees.
+
+## Priorities, in order
+1. Performance and tiny footprint: single host thread, event-driven, no idle timers or threads, one motion clock (`src/motion.rs`), frames only while animating, reduced motion respected.
+2. Smallest complete change. Reuse what exists; no new abstraction, option or config nobody asked for.
+3. Brand consistency (below).
+
+## Hard rules (owner decisions, do not reopen)
+- Size ratchet: `scripts/size-baseline.txt` line 1 is the baseline, limit is +2%. Only the owner raises it. If a change would exceed the limit: stop, revert that change, report the byte delta.
+- No keyboard handling, hotkeys, access keys, focus rings, UIA or Narrator work. Accessibility findings are out of scope.
+- No new dependencies.
+- Never touch, delete or rebuild anything under `.tools`. Never run rustup or `scripts/bootstrap.ps1`.
+- Never push, publish or delete remote things. Only the Chief commits unless the brief says otherwise.
+- Never commit `cook/refs`, `cook/stills`, `cook/compare` (private screenshots).
+- Workers on Gemini never edit `src/`.
+
+## Commands
+- Cargo only through `scripts\cargo.ps1 <args>`.
+- Gate: `scripts\verify.ps1` (fmt, clippy -D warnings, tests, locked release build, size gate). A change is not done until it passes.
+- Run: `scripts\run.ps1 start` (builds, then launches) and `scripts\run.ps1 quit`.
+- Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
+- Reuse a round's stills when `git rev-parse HEAD` and the exe SHA256 match its `provenance.json`.
+
+## Reading code (token rule)
+- Use the graft index first: `graft ask "<task>" --source`, `graft grep`, `graft skeleton <file>`, `graft callers <sym>`. If the `graft` command is not on PATH, read the per-file card `graft/src/<file>.md` (symbols with line numbers) and grep for the symbol.
+- Read a span, not a file. `host.rs` (206 KB), `graphics.rs`, `settings_window.rs`, `layout.rs`, `media.rs` are never read whole.
+- Read a full file only when it is under ~300 lines or you are rewriting most of it.
+- Docs: read the summary here; open the source doc only for the section you need.
+
+## Brand (approved; full spec `cook/brand/BRAND.md`, board `cook/brand/board.png`)
+- Companion-like and playful: calm, caring, springy when it greets you.
+- One capsule shape grammar (radius = height/2; tiles = parent radius minus inset; never a sharp corner or hairline box).
+- One accent, Lamp `#FFB454` (Light theme `#9A5200`). Accent only on: eyes, the one primary action, progress fill, selected indicator, today marker, prayer sun.
+- One outline icon style: 20 px grid, stroke 1.75, round caps, accent only when active.
+- Three motion curves in `src/motion.rs`: settle, pop, slide. Nothing else.
+- Type: Segoe UI Variable, sentence case, tabular numerals, no uppercase labels.
+- Voice: warm, brief, 7 words or fewer, no exclamation marks, no em dashes, no emoji.
+- Never: purple gradients, glow orbs, decorative particles, shockwave rings.
+- Five themes (Classic, Light, Midnight, Frosted tint, Liquid glass) change surface and ink only.
+- Reference app: Nusa (`cook/refs/R*.png`). Take ideas, never copy.
+
+## Where state lives
+- Design QA ledger: `cook/ROUNDS.md` (short; old rounds in `cook/archive/`).
+- Critic rubric: `cook/RUBRIC.md`.
+- Feature ideas: `FEATURES_TO_ADD.md` (local, untracked wish list; not a plan).
+
+## Handoff contract
+Brief (Chief to worker), at most 15 lines:
+```
+Read AGENTS.md first. Role: implement | capture | critic | test.
+Task: <one paragraph, the outcome wanted>
+Scope: <files or surfaces; what not to touch>
+Done when: <checkable criteria>
+Report: the format in AGENTS.md.
+```
+Report (worker's final message), at most 12 lines, nothing else:
+```
+RESULT: done | partial | blocked
+CHANGED: <files, or commit sha>
+VERIFY: verify.ps1 pass|fail|not run; exe <bytes> B
+EVIDENCE: <paths to stills, logs or numbers>
+OPEN: <what is left, risks, decisions for the owner>
+```
+The Chief reads only that final message (`t3_thread_read` limit 1), never a transcript. Anything longer goes in a file whose path is in EVIDENCE. Workers do not start sub-agents.
+
+## Models (cost rule)
+- Capture, running tests, regression eyeballing, first critic: Gemini 3.8 Flash (provider `antigravity`, model `gemini-3.8-flash-high`).
+- Second critic and tie-breaker only when a score is within 0.5 of the 8.5 bar or critics differ by more than 1.0.
+- Code changes: the model the owner names. Codex workers have no ponytail skill: apply "smallest complete change" by hand.
