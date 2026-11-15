@@ -41,6 +41,7 @@ mod prayer_os;
 mod prayer_tab;
 mod preview;
 mod privacy;
+mod quick;
 mod settings;
 mod settings_window;
 mod shelf;

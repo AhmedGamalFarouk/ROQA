@@ -46,7 +46,6 @@ pub enum Glyph {
     TaskView,
     Chevron,
     Expand,
-    Desktop,
     Charging,
     Add,
     More,
@@ -62,7 +61,7 @@ pub enum Glyph {
     /// Settings' About page.
     Info,
 }
-const ALL: [Glyph; 36] = [
+const ALL: [Glyph; 35] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -89,7 +88,6 @@ const ALL: [Glyph; 36] = [
     Glyph::TaskView,
     Glyph::Chevron,
     Glyph::Expand,
-    Glyph::Desktop,
     Glyph::Charging,
     Glyph::Add,
     Glyph::More,
@@ -206,9 +204,6 @@ impl Glyph {
             }
             Glyph::Chevron => "M6 15l6-6 6 6",
             Glyph::Expand => "M6 9l6 6 6-6",
-            Glyph::Desktop => {
-                "M5 4h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM8 20h8M12 16v4"
-            }
             Glyph::Charging => "M13 2L5 13h6l-1 9 9-12h-6z",
             Glyph::Add => "M12 4v16M4 12h16",
             Glyph::More => "M5 12h.01M12 12h.01M19 12h.01",

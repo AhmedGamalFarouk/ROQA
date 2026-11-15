@@ -23,7 +23,7 @@ use crate::{
     pins::Pins,
     pomo,
     power::{self, Power},
-    prayer_os, prayer_tab, preview, privacy,
+    prayer_os, prayer_tab, preview, privacy, quick,
     settings::{self, Settings},
     settings_window::{SettingsWindow, SoundAction},
     shelf::{self, Check, Shelf},
@@ -3044,13 +3044,136 @@ impl Desktop {
     }
     /// A taskbar button: the shell shortcut it stands for (sent on this click only), or the minimized list.
     fn press_button(&mut self, hwnd: HWND, button: Button, model: &WindowModel) {
-        match button.keys() {
-            Some(keys) => {
+        match (button, button.keys()) {
+            (Button::Quick, _) => self.open_quick_menu(hwnd),
+            (_, Some(keys)) => {
                 if !dock::send_keys(keys) {
                     eprintln!("Dock button: Windows refused the key input");
                 }
             }
-            None => self.open_minimized_menu(hwnd, model),
+            (_, None) => self.open_minimized_menu(hwnd, model),
+        }
+    }
+    /// The quick settings rows right now: what Windows reports on this machine, each row's text being the
+    /// setting's state. Volume steps are 10 points; Core Audio loads on first use.
+    fn quick_rows(&mut self) -> (Vec<Item>, Vec<String>) {
+        use dock_menu::Quick;
+        self.audio.start();
+        self.audio.refresh();
+        let mut rows = Vec::new();
+        if let Some(level) = self.audio.level() {
+            rows.push((
+                Quick::Mute,
+                if level.muted {
+                    "Sound muted".to_owned()
+                } else {
+                    format!("Sound on, {}%", level.percent)
+                },
+            ));
+            rows.push((Quick::VolumeUp, "Volume up".to_owned()));
+            rows.push((Quick::VolumeDown, "Volume down".to_owned()));
+        }
+        for (row, kind, name) in [
+            (Quick::WiFi, quick::Kind::WiFi, "Wi-Fi"),
+            (Quick::Bluetooth, quick::Kind::Bluetooth, "Bluetooth"),
+        ] {
+            if let Some(on) = quick::radio_on(kind) {
+                rows.push((row, format!("{name} {}", if on { "on" } else { "off" })));
+            }
+        }
+        if let Some(mode) = quick::mode() {
+            let battery = power::Raw::read().and_then(power::Raw::summary);
+            rows.push((
+                Quick::Power,
+                battery.map_or_else(
+                    || mode.label().to_owned(),
+                    |battery| format!("{}, {}", mode.label(), battery.to_lowercase()),
+                ),
+            ));
+        }
+        rows.into_iter()
+            .map(|(row, text)| (Item::Quick(row), text))
+            .unzip()
+    }
+    /// The sliders button's popup above it. It stays open while settings change; each press updates the
+    /// row texts in place.
+    fn open_quick_menu(&mut self, hwnd: HWND) {
+        self.dismiss_preview();
+        self.close_menu();
+        let Some(dock) = self.dock_at(hwnd).filter(|dock| dock.visible) else {
+            return;
+        };
+        let (bounds, dpi, monitor, buttons) = (
+            dock.bounds,
+            dock.dpi,
+            dock.monitor.clone(),
+            dock.dock_buttons,
+        );
+        let return_to = dock::foreground_key();
+        let Some(work) = self
+            .monitors
+            .iter()
+            .find(|m| m.device == monitor)
+            .map(|m| m.work)
+        else {
+            return;
+        };
+        let (items, titles) = self.quick_rows();
+        if items.is_empty() {
+            return;
+        }
+        let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Button(Button::Quick));
+        let spec = dock_menu::Spec {
+            dock: hwnd,
+            slot: 0,
+            windows: Vec::new(),
+            identity: Identity::Unavailable(0),
+            items,
+            dock_bounds: bounds,
+            work,
+            dpi,
+            app: "Quick settings".into(),
+            titles,
+            icons: Vec::new(),
+            x: bounds.x + left + width / 2,
+            below: None,
+            return_to,
+        };
+        match dock_menu::Menu::open(&self.graphics, self.palette, spec) {
+            Ok(menu) if take_foreground(menu.hwnd()) => self.menu = Some(menu),
+            Ok(_) => eprintln!("Quick settings: Windows kept another app in front; not opened"),
+            Err(error) => eprintln!("Quick settings: {error}"),
+        }
+    }
+    /// Applies one quick setting, then shows the new state in the same popup.
+    fn run_quick(&mut self, mut menu: dock_menu::Menu, row: dock_menu::Quick) {
+        use dock_menu::Quick;
+        let step = |level: Option<audio::Level>, up: bool| {
+            level.map(|level| {
+                let percent = i32::from(level.percent) + if up { 10 } else { -10 };
+                percent.clamp(0, 100) as f32 / 100.0
+            })
+        };
+        match row {
+            Quick::Mute => self.audio.toggle_mute(),
+            Quick::VolumeUp | Quick::VolumeDown => {
+                if let Some(volume) = step(self.audio.level(), row == Quick::VolumeUp) {
+                    self.audio.set(volume);
+                }
+            }
+            Quick::WiFi => {
+                quick::toggle_radio(quick::Kind::WiFi);
+            }
+            Quick::Bluetooth => {
+                quick::toggle_radio(quick::Kind::Bluetooth);
+            }
+            Quick::Power => quick::next_mode(),
+        }
+        let (items, titles) = self.quick_rows();
+        if menu.relist(items, titles, Vec::new()).is_ok() {
+            self.menu = Some(menu);
+        } else {
+            dock::restore_foreground(menu.hwnd(), menu.return_to);
         }
     }
     /// The chevron's popup above it: the minimized windows right now (at most `MINIMIZED_MAX`), each with
@@ -3293,6 +3416,10 @@ impl Desktop {
         let Some(mut menu) = self.menu.take() else {
             return;
         };
+        if let Item::Quick(row) = item {
+            self.run_quick(menu, row);
+            return;
+        }
         if item == Item::Rename {
             let name = self
                 .pins
@@ -3462,6 +3589,7 @@ impl Desktop {
             Item::Settings
             | Item::Quit
             | Item::Restore(_)
+            | Item::Quick(_)
             | Item::RemoveShelf
             | Item::UndoShelf
             | Item::Group

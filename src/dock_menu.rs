@@ -57,6 +57,18 @@ pub enum Item {
     Quit,
     /// A minimized window in the chevron's list; its row shows the window's title (`Spec::titles`).
     Restore(WindowKey),
+    /// A row of the quick settings popup; its text is the setting's state (`Spec::titles`).
+    Quick(Quick),
+}
+/// What a quick settings row does when pressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quick {
+    Mute,
+    VolumeUp,
+    VolumeDown,
+    WiFi,
+    Bluetooth,
+    Power,
 }
 impl Item {
     pub fn label(self) -> &'static str {
@@ -80,6 +92,7 @@ impl Item {
             Item::Settings => "Settings",
             Item::Quit => "Quit ROQA",
             Item::Restore(_) => "Window",
+            Item::Quick(_) => "Setting",
         }
     }
 }

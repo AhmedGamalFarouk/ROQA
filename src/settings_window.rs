@@ -341,7 +341,8 @@ const PAGES: &[Page] = &[
                     r(DBTN + 1, C, "Search button", ""),
                     r(DBTN + 2, C, "Task View button", ""),
                     r(DBTN + 3, C, "Minimized apps list", ""),
-                    r(DBTN + 4, C, "Show desktop strip", ""),
+                    r(DBTN + 4, C, "Show desktop pill", ""),
+                    r(DBTN + 5, C, "Quick settings button", ""),
                 ],
             },
             Card {
@@ -1376,7 +1377,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         MATCH_ACCENT => &mut s.match_accent,
         DOCK_BADGES => &mut s.dock_badges,
         TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
-        DBTN..=134 => &mut s.dock_buttons.shown[id - DBTN],
+        DBTN..=135 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,
     })
 }

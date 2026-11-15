@@ -1066,19 +1066,6 @@ fn media_page(
         return media_text(context, &media_plan(scene, track, body, clock), art, p);
     }
     let open = motion::smooth(scene.progress);
-    let cue = (1.0 - motion::reveal(scene.progress)) * tab_art::clock_shown(scene);
-    if cue > 0.0 {
-        glyphs::draw(
-            context,
-            pixel_square(
-                body.right - 29.0 * scale,
-                body.top + 8.0 * scale,
-                14.0 * scale,
-            ),
-            Glyph::Expand,
-            with_alpha(p.ink, p.ink_alpha(0.68 * cue)),
-        )?;
-    }
     // The clock and date keep the left zone and the mascot sits in the right one with the status under it; the
     // pill's own clock is the same text centred, so opening only slides it left (the zone's right edge moves in).
     let zone = 130.0 * open;
@@ -2179,21 +2166,10 @@ fn paint_slots(
     let visible = dock::visible_slots(scene.layout, width, scene.dpi, scene.slots.len());
     let cell = |hit| {
         let (left, cell) = dock::span(scene.layout, width, scene.dpi, hit);
-        // The show-desktop cell runs to the dock's end; its glyph is drawn in the button part, clear of the end pad.
-        let pad = if hit == dock::Hit::Button(dock::Button::Desktop) {
-            px(dock::PAD_DIPS)
-        } else {
-            0.0
-        };
-        let (near, far) = if scene.layout.rtl {
-            (pad, 0.0)
-        } else {
-            (0.0, pad)
-        };
         D2D_RECT_F {
-            left: rect.left + left as f32 + near,
+            left: rect.left + left as f32,
             top: rect.top,
-            right: rect.left + (left + cell) as f32 - far,
+            right: rect.left + (left + cell) as f32,
             bottom: rect.bottom,
         }
     };
@@ -2213,6 +2189,7 @@ fn paint_slots(
             &cell(dock::Hit::Button(button)),
             button,
             hover,
+            scene.layout.rtl,
             px,
             p,
         )?;
@@ -2247,9 +2224,13 @@ fn draw_button(
     cell: &D2D_RECT_F,
     button: dock::Button,
     hover: f32,
+    rtl: bool,
     px: &dyn Fn(i32) -> f32,
     p: &Palette,
 ) -> Result<()> {
+    if button == dock::Button::Desktop {
+        return desktop_pill(context, cell, hover, rtl, px, p);
+    }
     let centre = (
         (cell.left + cell.right) / 2.0,
         (cell.top + cell.bottom) / 2.0,
@@ -2278,10 +2259,43 @@ fn draw_button(
         dock::Button::Start => unreachable!("drawn above"),
         dock::Button::Search => Glyph::Search,
         dock::Button::TaskView => Glyph::TaskView,
-        dock::Button::Desktop => Glyph::Desktop,
+        dock::Button::Desktop => unreachable!("drawn above"),
+        dock::Button::Quick => Glyph::Gear,
         dock::Button::Minimized => Glyph::Chevron,
     };
     glyphs::draw(context, square, shape, with_alpha(p.glyph, 1.0))
+}
+
+/// The show-desktop control: a slim vertical capsule hugging the dock's far end. It rests dim and brightens
+/// (alpha and a little width) with `hover`; the whole cell, out to the edge, is the click target.
+fn desktop_pill(
+    context: &ID2D1DeviceContext,
+    cell: &D2D_RECT_F,
+    hover: f32,
+    rtl: bool,
+    px: &dyn Fn(i32) -> f32,
+    p: &Palette,
+) -> Result<()> {
+    let half_w = px(3) + px(1) * hover;
+    let centre_x = if rtl {
+        cell.left + px(14)
+    } else {
+        cell.right - px(14)
+    };
+    let mid = (cell.top + cell.bottom) / 2.0;
+    let pill = D2D_RECT_F {
+        left: centre_x - half_w,
+        top: mid - px(14),
+        right: centre_x + half_w,
+        bottom: mid + px(14),
+    };
+    // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw.
+    unsafe {
+        let brush =
+            context.CreateSolidColorBrush(&with_alpha(p.glyph, 0.38 + 0.52 * hover), None)?;
+        context.FillRoundedRectangle(&rounded(pill, half_w), &brush);
+    }
+    Ok(())
 }
 
 /// The Windows 11 logo for the Start button: four equal squares, a gap of a ninth of the side, in Windows blue.

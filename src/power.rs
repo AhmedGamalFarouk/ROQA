@@ -44,6 +44,11 @@ impl Raw {
         })
     }
 
+    /// The battery as the power notice words it ("Charging 80%"); `None` without a battery.
+    pub fn summary(self) -> Option<String> {
+        self.state().map(|(state, percent)| text(state, percent))
+    }
+
     /// The state and charge to announce; `None` without a battery or with an unknown reading.
     // shortcut: plugged in reads "Charging" even when full or held back; refine with the charging flag
     // if a device reports it reliably at the moment of the event.

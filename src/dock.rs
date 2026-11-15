@@ -215,11 +215,11 @@ pub fn items_with_pins(model: &WindowModel, pins: &Pins, desktop_only: bool) -> 
 }
 
 /// Taskbar-style buttons beside the app slots (features D2). Start, Search and Task View sit left of the
-/// picker; the minimized-apps chevron and the show-desktop strip sit at the right end.
+/// picker; quick settings, the minimized-apps chevron and the show-desktop pill sit at the right end.
 pub const BTN_DIPS: i32 = 44;
 pub const SEP_DIPS: i32 = 8;
-/// The show-desktop cell: a full button plus the end pad, so its glyph sits as far from the dock's end as Start does
-/// from the other, and the click target still runs to the screen edge.
+/// The show-desktop cell: a full button plus the end pad. Its pill hugs the dock's end and the click target runs
+/// to the edge.
 pub const STRIP_DIPS: i32 = BTN_DIPS + PAD_DIPS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,14 +229,17 @@ pub enum Button {
     TaskView,
     Minimized,
     Desktop,
+    /// Volume, Wi-Fi, Bluetooth and power mode in ROQA's own popover.
+    Quick,
 }
 impl Button {
-    pub const ALL: [Button; 5] = [
+    pub const ALL: [Button; 6] = [
         Button::Start,
         Button::Search,
         Button::TaskView,
         Button::Minimized,
         Button::Desktop,
+        Button::Quick,
     ];
     pub fn index(self) -> usize {
         self as usize
@@ -249,21 +252,24 @@ impl Button {
             "Task View",
             "Show minimized apps",
             "Show desktop",
+            "Quick settings",
         ][self.index()]
     }
     /// Settings store key.
     pub fn key(self) -> &'static str {
-        ["dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk"][self.index()]
+        [
+            "dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk", "dbquick",
+        ][self.index()]
     }
     /// The keys a click sends: the Windows key alone opens Start; the rest are shell shortcuts. None for the
-    /// chevron, which opens ROQA's own list.
+    /// chevron and quick settings, which open ROQA's own popups.
     pub fn keys(self) -> Option<&'static [VIRTUAL_KEY]> {
         match self {
             Button::Start => Some(&[VK_LWIN]),
             Button::Search => Some(&[VK_LWIN, VK_S]),
             Button::TaskView => Some(&[VK_LWIN, VK_TAB]),
             Button::Desktop => Some(&[VK_LWIN, VK_D]),
-            Button::Minimized => None,
+            Button::Minimized | Button::Quick => None,
         }
     }
 }
@@ -271,15 +277,15 @@ impl Button {
 /// Which buttons are on, and the dock's reading direction. Default: Start, Search, the minimized list and show-desktop; Task View off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Buttons {
-    pub shown: [bool; 5],
+    pub shown: [bool; 6],
     /// Mirrored for a right-to-left UI language: the dock runs from the right edge, as the taskbar does.
     /// The host sets it from the system; it is not a stored setting.
     pub rtl: bool,
 }
 impl Buttons {
     #[cfg(test)]
-    pub const NONE: Buttons = Buttons::of([false; 5]);
-    pub const fn of(shown: [bool; 5]) -> Self {
+    pub const NONE: Buttons = Buttons::of([false; 6]);
+    pub const fn of(shown: [bool; 6]) -> Self {
         Self { shown, rtl: false }
     }
     pub fn on(self, button: Button) -> bool {
@@ -292,18 +298,18 @@ impl Buttons {
             .filter(move |b| self.on(*b))
     }
     fn has_tail(self) -> bool {
-        self.on(Button::Minimized) || self.on(Button::Desktop)
+        self.on(Button::Quick) || self.on(Button::Minimized) || self.on(Button::Desktop)
     }
-    /// The chevron, then the strip.
+    /// Quick settings, the chevron, then the pill.
     fn tail(self) -> impl Iterator<Item = Button> {
-        [Button::Minimized, Button::Desktop]
+        [Button::Quick, Button::Minimized, Button::Desktop]
             .into_iter()
             .filter(move |b| self.on(*b))
     }
 }
 impl Default for Buttons {
     fn default() -> Self {
-        Buttons::of([true, true, false, true, true])
+        Buttons::of([true, true, false, true, true, true])
     }
 }
 
@@ -421,11 +427,8 @@ fn tail_px(buttons: Buttons, dpi: u32) -> i32 {
         return px(PAD_DIPS, dpi);
     }
     px(SEP_DIPS, dpi)
-        + if buttons.on(Button::Minimized) {
-            px(BTN_DIPS, dpi)
-        } else {
-            0
-        }
+        + (i32::from(buttons.on(Button::Minimized)) + i32::from(buttons.on(Button::Quick)))
+            * px(BTN_DIPS, dpi)
         + px(
             if buttons.on(Button::Desktop) {
                 STRIP_DIPS
@@ -475,13 +478,19 @@ fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
             px(SLOT_DIPS, dpi),
         ),
         Hit::Button(Button::Desktop) => (width_px - strip, strip),
-        Hit::Button(Button::Minimized) => {
+        Hit::Button(button @ (Button::Minimized | Button::Quick)) => {
             let end = if buttons.on(Button::Desktop) {
                 STRIP_DIPS
             } else {
                 PAD_DIPS
             };
-            (width_px - px(end, dpi) - btn, btn)
+            // Quick settings sits left of the chevron when both are on.
+            let beside = if button == Button::Quick && buttons.on(Button::Minimized) {
+                btn
+            } else {
+                0
+            };
+            (width_px - px(end, dpi) - btn - beside, btn)
         }
         Hit::Button(button) => {
             let at = buttons.lead().position(|b| b == button).unwrap_or(0) as i32;
@@ -1284,11 +1293,11 @@ mod tests {
     }
 
     fn only(button: Button) -> Buttons {
-        let mut on = [false; 5];
+        let mut on = [false; 6];
         on[button.index()] = true;
         Buttons::of(on)
     }
-    const ALL: Buttons = Buttons::of([true; 5]);
+    const ALL: Buttons = Buttons::of([true; 6]);
 
     #[test]
     fn width_grows_by_each_button_and_none_keeps_the_old_dock() {
@@ -1313,15 +1322,24 @@ mod tests {
         );
         assert_eq!(
             width_px(ALL, 3, 96),
-            PAD_DIPS + 3 * BTN_DIPS + SEP_DIPS + SLOT_DIPS * 3 + SEP_DIPS + BTN_DIPS + STRIP_DIPS
+            PAD_DIPS
+                + 3 * BTN_DIPS
+                + SEP_DIPS
+                + SLOT_DIPS * 3
+                + SEP_DIPS
+                + 2 * BTN_DIPS
+                + STRIP_DIPS
         );
-        assert_eq!(Buttons::default().shown, [true, true, false, true, true]);
+        assert_eq!(
+            Buttons::default().shown,
+            [true, true, false, true, true, true]
+        );
     }
 
     #[test]
     fn cells_never_overlap_and_tile_the_dock_at_any_scale() {
         for dpi in [96, 120, 144, 192] {
-            for mask in 0..32u32 {
+            for mask in 0..64u32 {
                 let b = Buttons::of(std::array::from_fn(|i| mask >> i & 1 == 1));
                 let slots = 4;
                 let width = width_px(b, slots, dpi);
@@ -1345,7 +1363,7 @@ mod tests {
     #[test]
     fn hit_testing_maps_buttons_slots_and_gaps() {
         // 96 dpi, Start + Search + chevron + strip, 2 slots: pad 8, buttons 44, sep 8, slots 56.
-        let b = Buttons::of([true, true, false, true, true]);
+        let b = Buttons::of([true, true, false, true, true, false]);
         let width = width_px(b, 2, 96);
         let at = |x| hit_at(b, x, width, 96, 2);
         assert_eq!(at(7), None);
@@ -1385,7 +1403,7 @@ mod tests {
 
     #[test]
     fn slot_centres_and_drops_follow_the_lead_buttons() {
-        let b = Buttons::of([true, true, false, false, false]);
+        let b = Buttons::of([true, true, false, false, false, false]);
         // pad 8 + two buttons 88 + separator 8 = 104; slot 1 centre = 104 + 56 + 28.
         let width = width_px(b, 6, 96);
         assert_eq!(slot_center_x(1000, b, width, 1, 96), 1000 + 104 + 56 + 28);
@@ -1401,8 +1419,14 @@ mod tests {
         assert_eq!(Button::TaskView.keys(), Some(&[VK_LWIN, VK_TAB][..]));
         assert_eq!(Button::Desktop.keys(), Some(&[VK_LWIN, VK_D][..]));
         assert_eq!(Button::Minimized.keys(), None);
+        assert_eq!(Button::Quick.keys(), None);
         let keys: Vec<_> = Button::ALL.iter().map(|b| b.key()).collect();
-        assert_eq!(keys, ["dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk"]);
+        assert_eq!(
+            keys,
+            [
+                "dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk", "dbquick"
+            ]
+        );
     }
 
     #[test]
@@ -1436,7 +1460,7 @@ mod tests {
     #[test]
     fn a_mirrored_dock_is_the_exact_mirror_of_the_left_to_right_one() {
         for dpi in [96, 144, 192] {
-            for mask in 0..32u32 {
+            for mask in 0..64u32 {
                 let ltr = Buttons::of(std::array::from_fn(|i| mask >> i & 1 == 1));
                 let rtl = mirrored(ltr);
                 let slots = 4;
@@ -1479,8 +1503,8 @@ mod tests {
         // Lead: pad 8 + two buttons 88 = 96, then half of the 8 separator.
         let [lead, tail] = separators(Buttons::default(), width, 96);
         assert_eq!(lead, Some(8 + 88 + 2));
-        // Tail: separator 8, chevron 44, the desktop control at the right edge.
-        assert_eq!(tail, Some(width - (8 + 44 + STRIP_DIPS) + 8));
+        // Tail: separator 8, quick settings 44, chevron 44, the desktop control at the right edge.
+        assert_eq!(tail, Some(width - (8 + 44 + 44 + STRIP_DIPS) + 8));
         assert_eq!(separators(N, width, 96), [None, None]);
         assert_eq!(separators(only(Button::Start), width, 96)[1], None);
         assert_eq!(separators(only(Button::Desktop), width, 96)[0], None);
