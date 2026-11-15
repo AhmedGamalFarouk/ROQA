@@ -6,8 +6,8 @@ Full r07/r09 detail: `cook/archive/ROUNDS-r07-r09.md`. One row per round below; 
 | Round | Commit | Exe bytes | Shape | Color | Motion | Icons | Type | Coherence | Mean | Critics | Notes |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
 | r07 | 30fc488 | 1,175,552 | 8.0 | 8.0 | 7.0 | 8.0 | 7.8 | 6.8 | 7.60 | Opus, Sol, Sonnet | lenient panel |
-| r09 | f546baa | 1,183,232 | 7.4 | 7.1 | 6.8 | 6.5 | 7.2 | 6.65 | 6.94 | Opus x2 | stricter panel; not comparable to r07 |
-| r10 | 661c8eb | 1,183,232 | | | | | | | | | 13 r09 defects fixed (`cook/r09-fixes.md`, `cook/stills/r10/INDEX.md`); not scored yet |
+| r09 | a68fd90 | 1,183,232 | 7.4 | 7.1 | 6.8 | 6.5 | 7.2 | 6.65 | 6.94 | Opus x2 | stricter panel; not comparable to r07 |
+| r10 | 055df55 | 1,183,232 | | | | | | | | | 13 r09 defects fixed (`cook/r09-fixes.md`, `cook/stills/r10/INDEX.md`); not scored yet |
 
 ## Standing adjudications (do not re-raise)
 - Eyes absent from collapsed/open stills: idle-triggered by design.
