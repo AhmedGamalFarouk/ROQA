@@ -1278,9 +1278,7 @@ impl Desktop {
         let now = Instant::now();
         let devices: Vec<String> = monitors.iter().map(|m| m.device.clone()).collect();
         let settings = store.settings.clone().keep_one_monitor(&devices);
-        if let Some(failure) = settings.apply_globals() {
-            eprintln!("Settings: {failure}");
-        }
+        settings.apply_globals();
         let mut shelf = Shelf::from_store(&store);
         if shelf.set_cap(settings.shelf_cap) {
             shelf.write_to(&mut store); // the cut list leaves the file with its next write
@@ -2374,11 +2372,7 @@ impl Desktop {
             return Ok(());
         }
         let old = std::mem::replace(&mut self.settings, next);
-        if let Some(failure) = self.settings.apply_globals()
-            && let Some(window) = &self.settings_window
-        {
-            window.say(failure)?;
-        }
+        self.settings.apply_globals();
         self.water_due = None; // the schedule follows the new hours
         if old.clipboard != self.settings.clipboard {
             for notch in self
@@ -2586,26 +2580,12 @@ impl Desktop {
         self.picker = Some(Picker::create(catalog.model())?);
         Ok(())
     }
-    fn toggle_picker(&mut self, catalog: &Catalog) -> Result<()> {
-        if self.picker.take().is_some() {
-            Ok(())
-        } else {
-            self.open_picker(catalog)
-        }
-    }
     fn effective_accent(&self) -> Option<crate::theme::Rgb> {
         if self.settings.match_accent {
             crate::theme::windows_accent_color().or_else(|| Some(self.text.accent()))
         } else {
             None
         }
-    }
-}
-
-impl Drop for Desktop {
-    fn drop(&mut self) {
-        crate::hotkey::unregister_picker();
-        crate::hotkey::unregister_audio();
     }
 }
 
@@ -4678,17 +4658,6 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                     ));
                 }
                 return Ok(false);
-            }
-            if message.message == WM_HOTKEY {
-                let id = message.wParam.0 as i32;
-                if id == crate::hotkey::HOTKEY_PICKER_ID {
-                    desktop.toggle_picker(catalog)?;
-                } else if id == crate::hotkey::HOTKEY_AUDIO_CYCLE_ID
-                    && let Some(name) = desktop.audio.cycle_device()
-                {
-                    desktop.show_notice(format!("Audio: {name}"), Instant::now());
-                }
-                continue;
             }
             if catalog.message(&message)? {
                 continue;

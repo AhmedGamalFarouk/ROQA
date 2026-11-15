@@ -8,7 +8,6 @@
 use crate::{
     dock::{foreground_key, restore_foreground},
     graphics::{Glyph, draw_settings_glyph},
-    hotkey::{AudioHotkeyCombo, HotkeyCombo},
     layout::DockStyle,
     native_window,
     picker::{
@@ -115,10 +114,6 @@ const PSKIP: usize = 193;
 const LIMCOPY: usize = 194;
 const WLEFT: usize = 195;
 const WRIGHT: usize = 196;
-const HKPICKER: usize = 197;
-const HKCOMBO: usize = 198;
-const HKAUDIO: usize = 200;
-const HKAUDIOCOMBO: usize = 201;
 const MATCH_ACCENT: usize = 199;
 const DOCK_BADGES: usize = 202;
 const CLIP: usize = 203;
@@ -191,25 +186,6 @@ const PAGES: &[Page] = &[
             Card {
                 label: "Displays",
                 rows: &[],
-            },
-            Card {
-                label: "Shortcut",
-                rows: &[
-                    r(
-                        HKPICKER,
-                        C,
-                        "Global hotkey for window picker",
-                        "Open the window picker from anywhere",
-                    ),
-                    r(HKCOMBO, Kind::Combo(170), "Hotkey", ""),
-                    r(
-                        HKAUDIO,
-                        C,
-                        "Global hotkey to switch audio",
-                        "Cycle output devices from anywhere",
-                    ),
-                    r(HKAUDIOCOMBO, Kind::Combo(170), "Audio hotkey", ""),
-                ],
             },
             Card {
                 label: "Behaviour",
@@ -1408,8 +1384,6 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         RSOUNDS => &mut s.reminder_sounds,
         PPAUSE => &mut s.prayer_pause,
         WATER => &mut s.water,
-        HKPICKER => &mut s.hotkey_picker,
-        HKAUDIO => &mut s.hotkey_audio,
         MATCH_ACCENT => &mut s.match_accent,
         DOCK_BADGES => &mut s.dock_badges,
         TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
@@ -1444,12 +1418,6 @@ fn fill_combo(h: HWND, id: usize) {
         PLEAD => &LEAD_ROWS,
         LIMGROUP => &["Gemini models", "Claude and GPT models"],
         WLEFT | WRIGHT => &["Week calendar", "Battery"],
-        HKCOMBO => return HotkeyCombo::ALL.iter().for_each(|c| add_row(h, c.label())),
-        HKAUDIOCOMBO => {
-            return AudioHotkeyCombo::ALL
-                .iter()
-                .for_each(|c| add_row(h, c.label()));
-        }
         NSIZE => &["Auto", "115%", "130%", "150%"],
         NOPEN => &["Hover", "Click"],
         ANIM => &["Normal", "Fast"],
@@ -1873,10 +1841,6 @@ impl SettingsWindow {
                         LIMGROUP => usize::from(settings.limits_group),
                         WLEFT => row_of(&WidgetKind::ALL, &settings.widgets.slot_left),
                         WRIGHT => row_of(&WidgetKind::ALL, &settings.widgets.slot_right),
-                        HKCOMBO => row_of(&HotkeyCombo::ALL, &settings.hotkey_combo),
-                        HKAUDIOCOMBO => {
-                            row_of(&AudioHotkeyCombo::ALL, &settings.hotkey_audio_combo)
-                        }
                         NSIZE => row_of(&NOTCH_SIZES, &settings.notch_size),
                         NOPEN => usize::from(settings.open_click),
                         ANIM => usize::from(settings.anim_fast),
@@ -1963,10 +1927,6 @@ impl SettingsWindow {
                     match item.id {
                         WLEFT => pick(&WidgetKind::ALL, &mut next.widgets.slot_left, row),
                         WRIGHT => pick(&WidgetKind::ALL, &mut next.widgets.slot_right, row),
-                        HKCOMBO => pick(&HotkeyCombo::ALL, &mut next.hotkey_combo, row),
-                        HKAUDIOCOMBO => {
-                            pick(&AudioHotkeyCombo::ALL, &mut next.hotkey_audio_combo, row)
-                        }
                         THEME => pick(&Theme::ALL, &mut next.theme, row),
                         DOCKSTYLE => pick(&DockStyle::ALL, &mut next.dock_style, row),
                         UNITS => pick(&Units::ALL, &mut next.units, row),

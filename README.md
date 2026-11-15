@@ -11,7 +11,7 @@
 
 **ROQA** is a modern desktop enhancement shell for Windows 11 built entirely in native Rust. It delivers a fluid, interactive top dynamic notch island and bottom application dock with zero runtime bloat.
 
-- **Ultra-lightweight:** Self-contained single-binary executable (~1.08 MB) compiled with full LTO and stripped debug info.
+- **Ultra-lightweight:** Self-contained single-binary executable (~1.18 MB) compiled with full LTO and stripped debug info.
 - **Hardware-Accelerated DirectComposition:** Sub-pixel Direct2D and DirectWrite rendering with smooth 60fps springs and transitions.
 - **Pure Event-Driven Win32:** Zero polling loops or invasive system hooks; sleeps quietly when idle.
 - **Non-Invasive:** Leaves the native Windows taskbar intact, registers no background services, and makes zero unsolicited startup or registry modifications.
@@ -43,9 +43,8 @@
 - **Window Picker:** Modeless search dialog (`--show-picker`) to instantly filter and jump to any active window.
 
 ### Personalization & Settings
-- **Theme Palette:** Built-in curated themes including *Dark, Light, OLED, Sunset, Midnight, Matcha, Rose, Cyber,* and *Frosted Glass*.
+- **Theme Palette:** Five themes sharing one shape, icon and motion system: *Classic, Light, Midnight, Frosted tint* and *Liquid glass*, with a single warm accent (Lamp `#FFB454`).
 - **Windows System Accent Match:** Optional integration with Windows system accent colour (`HKCU\...\DWM\AccentColor`).
-- **Global Hotkeys:** Opt-in shortcuts (`RegisterHotKey`) for toggling the window picker and switching audio output devices.
 - **Tuning:** Adjustable notch sizing percentage, animation pace, and click-to-open behavior.
 
 ---
@@ -56,7 +55,7 @@
 |---|---|
 | **Language** | Rust 2024 edition (1.91.1+) |
 | **Graphics** | Direct2D 1.1, DirectWrite, WIC, DirectComposition via Windows SDK |
-| **Windowing & Events** | Pure Win32 (`CreateWindowExW`, `SetWinEventHook`, `RegisterHotKey`) |
+| **Windowing & Events** | Pure Win32 (`CreateWindowExW`, `SetWinEventHook`) |
 | **Media Integration** | WinRT GSMTC (`Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager`) |
 | **Audio Endpoints** | Windows Core Audio APIs (`IMMDeviceEnumerator`, `IAudioEndpointVolume`) |
 | **Weather & Networking** | Windows WinHTTP (`winhttp.dll`) with OS-managed TLS stack |
