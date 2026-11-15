@@ -7,7 +7,7 @@
 
 use crate::{
     dock::{foreground_key, restore_foreground},
-    graphics::{Glyph, draw_settings_glyph},
+    graphics::{Glyph, draw_settings_glyph, round_gdi},
     layout::DockStyle,
     native_window,
     picker::{
@@ -703,21 +703,10 @@ fn palette(settings: &Settings) -> Pal {
     }
 }
 
-/// A fill in one colour: the stock DC brush and pen carry it, so nothing is created or leaked.
-/// `HOLLOW` as the fill draws only the outline.
-const HOLLOW: u32 = u32::MAX;
+/// A capsule or card in one fill and one outline colour (the same colour means no outline).
 unsafe fn round(dc: HDC, r: RECT, radius: i32, fill: u32, line: u32) {
-    // SAFETY: stock objects on the caller's live DC.
-    unsafe {
-        SetDCBrushColor(dc, rgb(fill));
-        SetDCPenColor(dc, rgb(line));
-        SelectObject(
-            dc,
-            GetStockObject(if fill == HOLLOW { NULL_BRUSH } else { DC_BRUSH }),
-        );
-        SelectObject(dc, GetStockObject(DC_PEN));
-        let _ = RoundRect(dc, r.left, r.top, r.right, r.bottom, radius * 2, radius * 2);
-    }
+    // Anti-aliased by Direct2D on this DC (the colours are COLORREFs).
+    round_gdi(dc, r, radius, swap(fill), swap(line));
 }
 
 unsafe fn fill(dc: HDC, r: RECT, colour: u32) {

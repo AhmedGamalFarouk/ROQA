@@ -8,8 +8,10 @@ use crate::weather::Icon;
 use std::cell::RefCell;
 use windows::Win32::Graphics::Direct2D::{
     Common::{D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN},
-    D2D1_ARC_SIZE_LARGE, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_LINE_JOIN_ROUND,
-    D2D1_STROKE_STYLE_PROPERTIES, ID2D1Factory, ID2D1StrokeStyle,
+    D2D1_ARC_SIZE_LARGE, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_STROKE_STYLE_PROPERTIES, D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory,
+    ID2D1RenderTarget, ID2D1StrokeStyle,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,7 +356,8 @@ struct Kit {
     shapes: [Vec<(f32, ID2D1PathGeometry)>; ALL.len()],
 }
 thread_local! {
-    static KIT: RefCell<Option<Kit>> = const { RefCell::new(None) };
+    // Two factories live on the host thread: the dock device's and the Settings DC target's.
+    static KIT: RefCell<Vec<Kit>> = const { RefCell::new(Vec::new()) };
 }
 
 fn stroke_style(factory: &ID2D1Factory) -> Result<ID2D1StrokeStyle> {
@@ -429,7 +432,7 @@ fn build(factory: &ID2D1Factory, glyph: Glyph, side: f32) -> Result<ID2D1PathGeo
 
 /// Strokes `glyph` in `square` (physical pixels) in `color`.
 pub(super) fn draw(
-    context: &ID2D1DeviceContext,
+    context: &ID2D1RenderTarget,
     square: D2D_RECT_F,
     glyph: Glyph,
     color: D2D1_COLOR_F,
@@ -441,16 +444,20 @@ pub(super) fn draw(
         let factory = context.GetFactory()?;
         let key = windows::core::Interface::as_raw(&factory) as usize;
         let (shape, style) = KIT.with(|kit| -> Result<_> {
-            let mut kit = kit.borrow_mut();
-            if kit.as_ref().is_none_or(|held| held.factory != key) {
-                let style = stroke_style(&factory)?;
-                *kit = Some(Kit {
-                    factory: key,
-                    style,
-                    shapes: std::array::from_fn(|_| Vec::new()),
-                });
-            }
-            let kit = kit.as_mut().expect("set above");
+            let mut kits = kit.borrow_mut();
+            let at = match kits.iter().position(|held| held.factory == key) {
+                Some(at) => at,
+                None => {
+                    let style = stroke_style(&factory)?;
+                    kits.push(Kit {
+                        factory: key,
+                        style,
+                        shapes: std::array::from_fn(|_| Vec::new()),
+                    });
+                    kits.len() - 1
+                }
+            };
+            let kit = &mut kits[at];
             let slot = &mut kit.shapes[glyph as usize];
             if let Some((_, shape)) = slot.iter().find(|(size, _)| *size == side) {
                 return Ok((shape.clone(), kit.style.clone()));
@@ -479,104 +486,120 @@ pub(super) fn draw(
     Ok(())
 }
 
-/// Settings uses GDI, but shares the exact paths and rounded stroke with the D2D tabs.
+thread_local! {
+    static DC_TARGET: RefCell<Option<ID2D1DCRenderTarget>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` on an anti-aliased Direct2D target bound to `rect` of a GDI DC (Settings paints with GDI text
+/// and this for every shape); (0, 0) is the rect's top left, units are physical pixels.
+fn with_dc(
+    dc: windows::Win32::Graphics::Gdi::HDC,
+    rect: windows::Win32::Foundation::RECT,
+    f: impl FnOnce(&ID2D1RenderTarget) -> Result<()>,
+) {
+    let run = || -> Result<()> {
+        let target = DC_TARGET.with(|held| -> Result<_> {
+            let mut held = held.borrow_mut();
+            if held.is_none() {
+                // SAFETY: a single-threaded factory used only on the host thread that owns Settings.
+                let factory: ID2D1Factory =
+                    unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
+                let props = D2D1_RENDER_TARGET_PROPERTIES {
+                    pixelFormat: D2D1_PIXEL_FORMAT {
+                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    },
+                    // 96 dpi: coordinates are physical pixels, as the GDI callers already compute them.
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                    ..Default::default()
+                };
+                // SAFETY: plain value properties.
+                *held = Some(unsafe { factory.CreateDCRenderTarget(&props)? });
+            }
+            Ok(held.clone().expect("set above"))
+        })?;
+        // SAFETY: the caller's DC is live; BeginDraw/EndDraw bracket the drawing.
+        unsafe {
+            target.BindDC(dc, &rect)?;
+            target.BeginDraw();
+            let result = f(&target);
+            target.EndDraw(None, None)?;
+            result
+        }
+    };
+    let _ = run();
+}
+
+fn bgr(value: u32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: (value & 0xff) as f32 / 255.0,
+        g: (value >> 8 & 0xff) as f32 / 255.0,
+        b: (value >> 16 & 0xff) as f32 / 255.0,
+        a: 1.0,
+    }
+}
+
+/// Settings glyph on its GDI DC: the same paths and rounded stroke as the D2D tabs, anti-aliased. `ink` is a COLORREF.
 pub fn draw_gdi(
     dc: windows::Win32::Graphics::Gdi::HDC,
     rect: windows::Win32::Foundation::RECT,
     glyph: Glyph,
     ink: u32,
 ) {
-    use windows::Win32::{Foundation::COLORREF, Graphics::Gdi::*};
     let side = (rect.right - rect.left) as f32;
-    let point = |x: f32, y: f32| {
-        (
-            rect.left + snap(x, side).round() as i32,
-            rect.top + snap(y, side).round() as i32,
-        )
+    let square = D2D_RECT_F {
+        left: 0.0,
+        top: 0.0,
+        right: side,
+        bottom: side,
     };
-    // SAFETY: the owner-draw DC is live; the selected pen is restored before deletion.
-    unsafe {
-        let brush = LOGBRUSH {
-            lbStyle: BS_SOLID,
-            lbColor: COLORREF(ink),
-            lbHatch: 0,
-        };
-        let pen = ExtCreatePen(
-            PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND | PS_JOIN_ROUND,
-            stroke_pixels(side) as u32,
-            &brush,
-            None,
-        );
-        if pen.is_invalid() {
-            return;
-        }
-        let old = SelectObject(dc, pen.into());
-        let _ = BeginPath(dc);
-        let mut here = (0.0, 0.0);
-        parse(glyph.path(), |seg| match seg {
-            Seg::M(x, y) => {
-                let (px, py) = point(x, y);
-                let _ = MoveToEx(dc, px, py, None);
-                here = (x, y);
-            }
-            Seg::L(x, y) => {
-                let (px, py) = point(x, y);
-                let _ = LineTo(dc, px, py);
-                here = (x, y);
-            }
-            Seg::A(radius, large, sweep, x, y) => {
-                arc_points(here, (x, y), (radius, large, sweep), |x, y| {
-                    let (px, py) = point(x, y);
-                    let _ = LineTo(dc, px, py);
-                });
-                here = (x, y);
-            }
-            Seg::Z => {
-                let _ = CloseFigure(dc);
-            }
-        });
-        let _ = EndPath(dc);
-        let _ = StrokePath(dc);
-        SelectObject(dc, old);
-        let _ = DeleteObject(pen.into());
-    }
+    with_dc(dc, rect, |target| draw(target, square, glyph, bgr(ink)));
 }
 
-/// Flatten circular SVG arcs for the Settings DC, at sub-pixel intervals on its small icons.
-fn arc_points(
-    from: (f32, f32),
-    to: (f32, f32),
-    arc: (f32, bool, bool),
-    mut emit: impl FnMut(f32, f32),
+/// A Settings capsule or card on its GDI DC, anti-aliased: `fill` and `line` are COLORREFs, `line == fill` means no
+/// outline. Corner radius `radius` px.
+pub fn round_gdi(
+    dc: windows::Win32::Graphics::Gdi::HDC,
+    rect: windows::Win32::Foundation::RECT,
+    radius: i32,
+    fill: u32,
+    line: u32,
 ) {
-    let (radius, large, sweep) = arc;
-    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-    let chord = dx.hypot(dy);
-    if chord == 0.0 {
-        return;
-    }
-    let radius = radius.max(chord / 2.0);
-    let offset = (radius * radius - chord * chord / 4.0).max(0.0).sqrt()
-        * if large == sweep { -1.0 } else { 1.0 };
-    let centre = (
-        (from.0 + to.0) / 2.0 - dy / chord * offset,
-        (from.1 + to.1) / 2.0 + dx / chord * offset,
+    let (w, h) = (
+        (rect.right - rect.left) as f32,
+        (rect.bottom - rect.top) as f32,
     );
-    let start = (from.1 - centre.1).atan2(from.0 - centre.0);
-    let end = (to.1 - centre.1).atan2(to.0 - centre.0);
-    let turn = if sweep {
-        (end - start).rem_euclid(std::f32::consts::TAU)
-    } else {
-        -(start - end).rem_euclid(std::f32::consts::TAU)
-    };
-    let steps = (turn.abs() * radius * 2.0).ceil() as usize;
-    for step in 1..=steps {
-        let angle = start + turn * step as f32 / steps as f32;
-        emit(
-            centre.0 + radius * angle.cos(),
-            centre.1 + radius * angle.sin(),
-        );
-    }
+    with_dc(dc, rect, |target| {
+        let shape = |inset: f32| D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: inset,
+                top: inset,
+                right: w - inset,
+                bottom: h - inset,
+            },
+            radiusX: (radius as f32 - inset).min(w / 2.0).max(0.0),
+            radiusY: (radius as f32 - inset).min(h / 2.0).max(0.0),
+        };
+        // SAFETY: the target is live between BeginDraw/EndDraw; the brushes are local.
+        unsafe {
+            if fill != u32::MAX {
+                target.FillRoundedRectangle(
+                    &shape(0.0),
+                    &target.CreateSolidColorBrush(&bgr(fill), None)?,
+                );
+            }
+            if line != fill {
+                target.DrawRoundedRectangle(
+                    &shape(0.5),
+                    &target.CreateSolidColorBrush(&bgr(line), None)?,
+                    1.0,
+                    None,
+                );
+            }
+        }
+        Ok(())
+    });
 }
 
 #[cfg(test)]

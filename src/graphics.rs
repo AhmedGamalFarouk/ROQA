@@ -66,7 +66,7 @@ use windows::core::{Error, HRESULT, Interface, PCWSTR, Result, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
 mod glyphs;
-pub use glyphs::draw_gdi as draw_settings_glyph;
+pub use glyphs::{draw_gdi as draw_settings_glyph, round_gdi};
 mod tab_art;
 pub use glyphs::Glyph;
 
