@@ -37,8 +37,11 @@ if ($DryRun) {
 $existing = Get-ChildItem -LiteralPath (Join-Path $root 'cook\stills') -Directory -ErrorAction Stop | ForEach-Object {
     $file = Join-Path $_.FullName 'provenance.json'
     if (Test-Path -LiteralPath $file) {
-        try { $record = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { return }
-        if ($record.sha256 -eq $hash -and $record.gitHead -eq $head) { $_ }
+        # A record without these fields (an older format) never matches.
+        try {
+            $record = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+            if ($record.exeSha256 -eq $hash -and $record.gitHead -eq $head) { $_ }
+        } catch { return }
     }
 }
 if ($existing) {

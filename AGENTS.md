@@ -17,7 +17,8 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 - No keyboard handling, hotkeys, access keys, focus rings, UIA or Narrator work. Accessibility findings are out of scope.
 - No new dependencies.
 - Never touch, delete or rebuild anything under `.tools`. Never run rustup or `scripts/bootstrap.ps1`.
-- Never push, publish or delete remote things. Only the Chief commits unless the brief says otherwise.
+- Pushing `main` to origin needs no approval (owner decision 2026-11-16): push after a commit that passes `verify.ps1`. Never force-push, rewrite pushed history, publish releases or delete remote things. Only the Chief commits unless the brief says otherwise.
+- Several threads may share this checkout. Stage and commit only the paths you changed (`git commit -- <paths>`), never `git add -A`; if `verify.ps1` fails in files you did not touch, another thread is mid-edit: wait a few minutes and retry. Before pushing, `git pull --rebase origin main` if the push is rejected.
 - Never commit `cook/refs`, `cook/stills`, `cook/compare` (private screenshots).
 - Workers on Gemini never edit `src/`.
 

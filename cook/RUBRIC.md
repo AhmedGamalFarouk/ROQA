@@ -13,7 +13,7 @@ Score each dimension 0-10, one decimal. 8.5 = a paying user would call it finish
 Also answer: blurred to 8 px, is it still recognisably ROQA (yes/no, why).
 
 Out of scope: accessibility, keyboard, FPS, anything not visible in the images.
-By design, not defects: eyes appear only when idle; Light theme accent is the darker `#9A5200`; no glow.
+By design, not defects: eyes appear only when idle; Light theme accent is the darker `#9A5200`; no glow; Settings on/off toggles are amber (owner decision); Prayer shows two highlights (the past and the next prayer); from 23:00 to 05:00 the eyes take the sleepy half-lidded shape; the Shelf's dashed drop zone is the one outline the brand allows; weather shows 3 hours at 29 degrees (sample data).
 
 Output, at most 40 lines, written to the path the brief names:
 - a table: dimension, score, one-line reason
