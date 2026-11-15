@@ -26,6 +26,12 @@ function Raise-Backdrop {
 function Park { [Mouse07]::Move(1650, 600) }
 function Shot($name, $x=560, $y=0, $w=800, $h=300) {
     if ([Mouse07]::Backdrop() -eq [IntPtr]::Zero) { throw 'Backdrop closed before capture' }
+    # The window can exist yet be covered (r14 caught the desktop): check a pixel ROQA never draws on.
+    $probe = New-Object Drawing.Bitmap 1, 1
+    $pg = [Drawing.Graphics]::FromImage($probe)
+    $pg.CopyFromScreen(40, 540, 0, 0, $probe.Size)
+    $c = $probe.GetPixel(0, 0); $pg.Dispose(); $probe.Dispose()
+    if ($c.R -ne 105 -or $c.G -ne 105 -or $c.B -ne 105) { throw 'Backdrop not visible; refusing to capture the desktop' }
     [Cap]::Still($x, $y, $w, $h, "$out\$name.png")
 }
 function Control($action) {
