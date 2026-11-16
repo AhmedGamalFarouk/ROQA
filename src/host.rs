@@ -1,4 +1,5 @@
 use crate::{
+    agent,
     audio::{self, Audio},
     catalog_timing::milliseconds_until,
     clipboard::{self, Clips},
@@ -1363,6 +1364,8 @@ struct Desktop {
     limits_open: bool,
     /// The prayer reminders' schedule and sound (features P1).
     prayer: PrayerRun,
+    /// What coding agents reported (`roqa.exe agent`): the pill text and the eyes' mood.
+    agents: agent::Agents,
     /// When the next water reminder is due; `None` until `refresh_water` computes it.
     water_due: Option<Instant>,
 }
@@ -1500,6 +1503,7 @@ impl Desktop {
             limits_io: limits_os::Io::new(),
             limits_open: false,
             prayer: PrayerRun::default(),
+            agents: agent::Agents::default(),
             water_due: None,
         };
         if desktop.settings.notch {
@@ -2081,6 +2085,19 @@ impl Desktop {
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
     }
+    /// Reads what coding agents reported since the last time: the latest shows on the pill for the notice's
+    /// length. With the switch off they are read and dropped.
+    fn agent_reports(&mut self) {
+        let now = Instant::now();
+        for (name, state) in agent::take() {
+            if !self.settings.agent_status {
+                continue;
+            }
+            if let Some(text) = self.agents.set(&name, state, now) {
+                self.show_notice(text, now);
+            }
+        }
+    }
     /// Water reminders (F5): one deadline to the next slot, none while the switch is off. A due slot shows
     /// the progress notice (silent once the goal is met) and the next deadline is computed from the clock.
     #[inline(never)]
@@ -2144,7 +2161,9 @@ impl Desktop {
     #[inline(never)]
     fn refresh_eyes(&mut self) -> u32 {
         let now = Instant::now();
+        self.agents.prune(now);
         let facts = eyes::Facts {
+            agent: self.agents.state(now),
             playing: self
                 .pages
                 .track(&self.media)
@@ -2174,7 +2193,10 @@ impl Desktop {
         };
         eyes.set_lean(lean);
         let changed = eyes.set_mood(eyes::mood(facts), now) | eyes.tick(now);
-        let due = eyes.due();
+        let due = self
+            .agents
+            .deadline()
+            .map_or(eyes.due(), |end| end.min(eyes.due()));
         if changed {
             // A running animation paints every frame already; an open panel does not draw the eyes.
             self.request_notches(Repaint::Full, |s| !s.live && s.motion.value(now) < 0.1);
@@ -2721,6 +2743,9 @@ impl Desktop {
             (self.store.place, self.store.report) = (None, None);
         } else if old.units != self.settings.units {
             self.weather.rev = self.weather.rev.wrapping_add(1);
+        }
+        if !self.settings.agent_status {
+            self.agents.clear();
         }
         let eyes_changed = old.eyes != self.settings.eyes;
         if eyes_changed {
@@ -4355,7 +4380,7 @@ impl Desktop {
     fn command(&mut self, command: Command) -> Result<bool> {
         match command {
             Command::Quit => return Ok(false),
-            Command::ShowPicker | Command::ShowSettings => {}
+            Command::ShowPicker | Command::ShowSettings | Command::Agent => {}
             Command::ShowNotch => self.show(SurfaceKind::Notch)?,
             Command::ShowDock => self.show(SurfaceKind::Dock)?,
             Command::HideNotch => self.close(SurfaceKind::Notch),
@@ -5303,6 +5328,7 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
             match Command::ALL[index] {
                 Command::ShowPicker => desktop.open_picker(catalog)?,
                 Command::ShowSettings => desktop.open_settings()?,
+                Command::Agent => desktop.agent_reports(),
                 command => {
                     let shown = desktop.command(command);
                     if !desktop.survive(shown, true)? {

@@ -7,6 +7,8 @@ macro_rules! eprintln {
         crate::error_log::record($message);
     }};
 }
+mod agent;
+mod agent_hooks;
 mod audio;
 mod brightness;
 mod catalog_timing;
@@ -89,6 +91,19 @@ fn run() -> Result<()> {
             host::run(host::Probe::None, Some(std::path::PathBuf::from(path)))
         }
         [command] => ipc::Command::parse(command)?.signal(),
+        [command, name, state] if command == "agent" => {
+            let (Some(name), Some(state)) = (agent::clean(name), agent::State::parse(state)) else {
+                return Err(Error::new(
+                    E_INVALIDARG,
+                    "Use: agent <name> <working|needs|done>.",
+                ));
+            };
+            // A hook runs whether or not ROQA does: not running is not an error.
+            let _ = ipc::Command::Agent.signal_after(|| {
+                let _ = agent::write(name, state);
+            });
+            Ok(())
+        }
         _ => Err(Error::new(
             E_INVALIDARG,
             "Expected no argument or one control command.",

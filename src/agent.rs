@@ -1,0 +1,234 @@
+//! AI agent status: what a coding agent reported with `roqa.exe agent <name> <state>` (working, needs you, done).
+//! The client appends one line to a spool file and signals the resident process, which reads and removes it
+//! (a name cannot travel in a named event). The tracker is pure: the host asks it for the pill text, the eyes'
+//! state and the one deadline it must wake for.
+
+use std::{
+    fs,
+    io::Write,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    Working,
+    Needs,
+    Done,
+}
+impl State {
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "working" => Some(Self::Working),
+            "needs" => Some(Self::Needs),
+            "done" => Some(Self::Done),
+            _ => None,
+        }
+    }
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Needs => "needs",
+            Self::Done => "done",
+        }
+    }
+}
+
+/// How long a "needs you" or "done" shows on the eyes (the pill's notice lasts as long).
+const SHOWN: Duration = Duration::from_secs(8);
+/// A "working" report holds until the agent says otherwise; this ends one that never did (an interrupted run).
+const STALE: Duration = Duration::from_secs(10 * 60);
+/// Agents tracked at once; the least recent is dropped for a new one.
+const MAX: usize = 8;
+/// The longest agent name kept.
+const NAME: usize = 24;
+/// The spool is a few short lines; more than this is not read.
+const SPOOL_CAP: u64 = 4096;
+
+/// A name as typed: letters, digits, `-`, `_` and `.`, at most `NAME` characters.
+pub fn clean(name: &str) -> Option<&str> {
+    let ok = !name.is_empty()
+        && name.len() <= NAME
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    ok.then_some(name)
+}
+
+/// The words the pill shows: "Codex needs you", "Gemini is done".
+pub fn text(name: &str, state: State) -> String {
+    let mut chars = name.chars();
+    let shown: String = chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    match state {
+        State::Working => format!("{shown} is working"),
+        State::Needs => format!("{shown} needs you"),
+        State::Done => format!("{shown} is done"),
+    }
+}
+
+struct Entry {
+    name: String,
+    state: State,
+    until: Instant,
+}
+
+#[derive(Default)]
+pub struct Agents {
+    /// Least recent first.
+    list: Vec<Entry>,
+}
+impl Agents {
+    /// Records a report. Returns the pill text, or `None` for a repeated "working" (it only extends the hold).
+    pub fn set(&mut self, name: &str, state: State, now: Instant) -> Option<String> {
+        let quiet = self.list.iter().any(|e| {
+            e.name == name && e.state == state && state == State::Working && now < e.until
+        });
+        self.list.retain(|e| e.name != name);
+        if self.list.len() == MAX {
+            self.list.remove(0);
+        }
+        let hold = if state == State::Working {
+            STALE
+        } else {
+            SHOWN
+        };
+        self.list.push(Entry {
+            name: name.to_owned(),
+            state,
+            until: now + hold,
+        });
+        (!quiet).then(|| text(name, state))
+    }
+    pub fn clear(&mut self) {
+        self.list.clear();
+    }
+    /// Drops what ran out.
+    pub fn prune(&mut self, now: Instant) {
+        self.list.retain(|e| now < e.until);
+    }
+    /// What the eyes show: the most recent "needs you" or "done" still on show, else "working" while any agent
+    /// works.
+    pub fn state(&self, now: Instant) -> Option<State> {
+        let live = || self.list.iter().filter(|e| now < e.until);
+        live()
+            .filter(|e| e.state != State::Working)
+            .next_back()
+            .or_else(|| live().find(|e| e.state == State::Working))
+            .map(|e| e.state)
+    }
+    /// The one instant the host must wake for.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.list.iter().map(|e| e.until).min()
+    }
+}
+
+fn spool() -> Option<PathBuf> {
+    let mut path = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+    path.push("ROQA");
+    Some(path)
+}
+
+/// The client's half: appends `name state` for the resident process. Called only after its event opened.
+pub fn write(name: &str, state: State) -> std::io::Result<()> {
+    let mut path = spool().ok_or(std::io::ErrorKind::NotFound)?;
+    fs::create_dir_all(&path)?;
+    path.push("agent.txt");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    // One write, so two clients cannot interleave a line.
+    file.write_all(format!("{name} {}\n", state.word()).as_bytes())
+}
+
+/// The resident half: the reports since the last call, oldest first. Anything unreadable is dropped.
+pub fn take() -> Vec<(String, State)> {
+    let Some(path) = spool().map(|p| p.join("agent.txt")) else {
+        return Vec::new();
+    };
+    let text = fs::metadata(&path)
+        .ok()
+        .filter(|m| m.len() <= SPOOL_CAP)
+        .and_then(|_| fs::read_to_string(&path).ok());
+    // shortcut: a line appended between the read and the removal is lost; reports are seconds apart.
+    let _ = fs::remove_file(&path);
+    text.iter()
+        .flat_map(|t| t.lines())
+        .filter_map(parse)
+        .collect()
+}
+
+fn parse(line: &str) -> Option<(String, State)> {
+    let (name, state) = line.split_once(' ')?;
+    Some((clean(name)?.to_owned(), State::parse(state.trim())?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn words_use_the_agent_name() {
+        assert_eq!(text("codex", State::Needs), "Codex needs you");
+        assert_eq!(text("gemini", State::Done), "Gemini is done");
+        assert_eq!(text("aider", State::Working), "Aider is working");
+    }
+
+    #[test]
+    fn names_and_lines_are_checked() {
+        assert!(clean("claude").is_some() && clean("my-agent_2.x").is_some());
+        assert!(clean("").is_none() && clean("a b").is_none() && clean("a\"b").is_none());
+        assert!(clean(&"x".repeat(NAME + 1)).is_none());
+        assert_eq!(parse("codex done"), Some(("codex".into(), State::Done)));
+        assert_eq!(parse("codex done\r"), Some(("codex".into(), State::Done)));
+        assert!(parse("codex later").is_none() && parse("codex").is_none());
+    }
+
+    #[test]
+    fn the_most_recent_report_shows_and_working_holds_the_eyes() {
+        let t0 = Instant::now();
+        let mut agents = Agents::default();
+        assert_eq!(
+            agents.set("claude", State::Working, t0).as_deref(),
+            Some("Claude is working")
+        );
+        assert!(
+            agents.set("claude", State::Working, t0).is_none(),
+            "a repeat is quiet"
+        );
+        agents.set("codex", State::Working, t0);
+        assert_eq!(agents.state(t0), Some(State::Working));
+        let t1 = t0 + Duration::from_secs(1);
+        assert_eq!(
+            agents.set("codex", State::Done, t1).as_deref(),
+            Some("Codex is done")
+        );
+        assert_eq!(agents.state(t1), Some(State::Done));
+        // The done report runs out; Claude still works.
+        let t2 = t1 + SHOWN;
+        agents.prune(t2);
+        assert_eq!(agents.state(t2), Some(State::Working));
+        assert_eq!(agents.deadline(), Some(t0 + STALE));
+        agents.set("claude", State::Needs, t2);
+        assert_eq!(agents.state(t2), Some(State::Needs));
+        agents.set("claude", State::Done, t2);
+        agents.prune(t2 + SHOWN);
+        assert_eq!(agents.state(t2 + SHOWN), None);
+        assert_eq!(agents.deadline(), None);
+    }
+
+    #[test]
+    fn a_working_report_that_never_ends_goes_stale() {
+        let t0 = Instant::now();
+        let mut agents = Agents::default();
+        agents.set("claude", State::Working, t0);
+        assert_eq!(agents.state(t0 + STALE), None);
+        for n in 0..MAX + 3 {
+            agents.set(&format!("a{n}"), State::Working, t0);
+        }
+        assert_eq!(agents.list.len(), MAX);
+    }
+}

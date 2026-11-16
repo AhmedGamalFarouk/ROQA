@@ -35,9 +35,11 @@ pub enum Command {
     HideDock,
     ShowPicker,
     ShowSettings,
+    /// A coding agent's report: `roqa.exe agent <name> <state>` (see `agent.rs`).
+    Agent,
 }
 impl Command {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Quit,
         Self::ShowNotch,
         Self::HideNotch,
@@ -45,6 +47,7 @@ impl Command {
         Self::HideDock,
         Self::ShowPicker,
         Self::ShowSettings,
+        Self::Agent,
     ];
     fn name(self) -> &'static str {
         match self {
@@ -55,6 +58,7 @@ impl Command {
             Self::HideDock => "hide-dock",
             Self::ShowPicker => "show-picker",
             Self::ShowSettings => "show-settings",
+            Self::Agent => "agent",
         }
     }
     pub fn parse(argument: &str) -> Result<Self> {
@@ -62,6 +66,10 @@ impl Command {
             .ok_or_else(|| Error::new(E_INVALIDARG, "Unknown command. Use --quit, --show-notch, --hide-notch, --show-dock, --hide-dock, --show-picker or --show-settings."))
     }
     pub fn signal(self) -> Result<()> {
+        self.signal_after(|| {})
+    }
+    /// Signals the resident process; `before` runs only once its event opened (ROQA is running), ahead of the signal.
+    pub fn signal_after(self, before: impl FnOnce()) -> Result<()> {
         let name = object_name(self.name())?;
         // SAFETY: the name is NUL-terminated; OpenEvent requests only signaling rights.
         unsafe {
@@ -73,6 +81,7 @@ impl Command {
             if matches!(self, Self::ShowPicker | Self::ShowSettings) {
                 grant_foreground_to_resident();
             }
+            before();
             SetEvent(event.0)
         }
     }
@@ -220,6 +229,8 @@ mod tests {
             Command::parse("--show-settings").unwrap(),
             Command::ShowSettings
         );
+
+        assert_eq!(Command::parse("--agent").unwrap(), Command::Agent);
 
         assert!(Command::parse("quit").is_err());
         assert!(Command::parse("--unknown").is_err());

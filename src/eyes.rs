@@ -4,6 +4,7 @@
 //! once. Between shows nothing runs, so the only wait is the next show's deadline and a paint happens only
 //! for the steps of a show.
 
+use crate::agent;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +20,8 @@ pub enum Mood {
     Adhan,
     /// The Weather page is open and it rains or storms: droopy.
     Rain,
+    /// A coding agent is working: narrowed and steady.
+    Busy,
 }
 
 /// Squash and stretch: the shape the eye holds for one step of a show.
@@ -45,6 +48,8 @@ pub struct Facts {
     pub idle: bool,
     /// A prayer reminder is active.
     pub adhan: bool,
+    /// What the coding agents last reported (`agent::Agents::state`).
+    pub agent: Option<agent::State>,
     /// The Weather page shows a rain or storm condition.
     pub rain: bool,
     /// Local hour, 0 to 23.
@@ -61,6 +66,12 @@ pub fn late(hour: u8) -> bool {
 pub fn mood(facts: Facts) -> Mood {
     if facts.adhan {
         Mood::Adhan
+    } else if let Some(state) = facts.agent {
+        match state {
+            agent::State::Working => Mood::Busy,
+            agent::State::Needs => Mood::Surprised,
+            agent::State::Done => Mood::Happy,
+        }
     } else if facts.alert {
         Mood::Surprised
     } else if facts.rain {
@@ -100,6 +111,7 @@ pub fn eye(mood: Mood, pose: Pose) -> Eye {
         Mood::Surprised => (0.85, 1.3, -1.0, 0.0, 0.0),
         Mood::Adhan => (1.2, 0.9, 0.0, 0.25, 0.25),
         Mood::Rain => (0.9, 1.0, 2.0, 0.4, 0.0),
+        Mood::Busy => (1.15, 0.7, 0.0, 0.3, 0.0),
     };
     // Pose factors: width, height, extra dy and extra top lid.
     let (px, py, pdy, ptop) = match pose {
@@ -348,7 +360,7 @@ impl Eyes {
             next: now + Duration::from_millis(steps[0].4),
         });
     }
-    /// A new happy, surprised, adhan or rain mood shows the eyes once; any other change is silent. Returns whether a show
+    /// A new happy, surprised, busy, adhan or rain mood shows the eyes once; any other change is silent. Returns whether a show
     /// started (a repaint is needed).
     pub fn set_mood(&mut self, mood: Mood, now: Instant) -> bool {
         if mood == self.mood {
@@ -359,7 +371,7 @@ impl Eyes {
             return self.wake(now);
         }
         let show: &'static [Step] = match mood {
-            Mood::Happy | Mood::Surprised => &EVENT,
+            Mood::Happy | Mood::Surprised | Mood::Busy => &EVENT,
             Mood::Adhan => &ADHAN,
             Mood::Rain => &RAIN,
             _ => return false,
@@ -448,6 +460,28 @@ mod tests {
             hour,
             ..Facts::default()
         }
+    }
+
+    #[test]
+    fn an_agent_report_outranks_alerts_but_not_the_adhan() {
+        let base = facts(true, true, true, 3);
+        let with = |agent| Facts {
+            agent: Some(agent),
+            ..base
+        };
+        assert_eq!(mood(with(agent::State::Working)), Mood::Busy);
+        assert_eq!(mood(with(agent::State::Needs)), Mood::Surprised);
+        assert_eq!(mood(with(agent::State::Done)), Mood::Happy);
+        let adhan = Facts {
+            adhan: true,
+            ..with(agent::State::Done)
+        };
+        assert_eq!(mood(adhan), Mood::Adhan);
+        let mut eyes = Eyes::new(Instant::now(), 7);
+        assert!(
+            eyes.set_mood(Mood::Busy, Instant::now()),
+            "a busy mood shows once"
+        );
     }
 
     #[test]

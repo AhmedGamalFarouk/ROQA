@@ -6,6 +6,7 @@
 //! request likewise (`take_start`).
 
 use crate::{
+    agent_hooks,
     dock::{foreground_key, restore_foreground},
     graphics::{Glyph, draw_settings_glyph, round_gdi},
     layout::DockStyle,
@@ -129,6 +130,9 @@ const DISKD: usize = 210;
 const LOWAT: usize = 211;
 const WEEK1: usize = 212;
 const PILLLOW: usize = 213;
+/// The agent-status switch, then one button per `agent_hooks::AGENTS` entry.
+const AGENT_ON: usize = 214;
+const AGENT_BTN: usize = 215;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -513,6 +517,24 @@ const PAGES: &[Page] = &[
                         "Optional: copy into settings.json",
                     ),
                     r(LIMCOPY, Kind::Btn, "Copy", "Copy the whole command"),
+                ],
+            },
+            Card {
+                label: "Agent status",
+                rows: &[
+                    r(
+                        AGENT_ON,
+                        C,
+                        "Show agent status",
+                        "The eyes and pill show a coding agent working",
+                    ),
+                    r(AGENT_BTN, Kind::Btn, "Add hook", "Claude Code"),
+                    r(AGENT_BTN + 1, Kind::Btn, "Add hook", "Codex"),
+                    r(AGENT_BTN + 2, Kind::Btn, "Add hook", "Gemini CLI"),
+                    r(AGENT_BTN + 3, Kind::Btn, "Add hook", "Antigravity"),
+                    r(AGENT_BTN + 4, Kind::Btn, "Add hook", "Cursor"),
+                    r(AGENT_BTN + 5, Kind::Btn, "Add hook", "Copilot CLI"),
+                    r(AGENT_BTN + 6, Kind::Btn, "Add hook", "opencode"),
                 ],
             },
         ],
@@ -1419,6 +1441,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         NOTCH_HIDE => &mut s.notch_hide,
         DOCK_LEFT => &mut s.dock_left,
         PILLLOW => &mut s.widgets.pill_low,
+        AGENT_ON => &mut s.agent_status,
         TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
         DBTN..=137 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,
@@ -1578,6 +1601,104 @@ impl SettingsWindow {
             .iter()
             .find(|i| i.id == id)
             .map_or(HWND::default(), |i| i.h)
+    }
+
+    /// Each agent's row: whether it is installed and whether ROQA's hook is in its file.
+    fn refresh_agents(&self) {
+        let home = agent_hooks::home().unwrap_or_default();
+        for (i, spec) in agent_hooks::AGENTS.iter().enumerate() {
+            let Some(item) = self.items.iter().find(|item| item.id == AGENT_BTN + i) else {
+                continue;
+            };
+            let status = agent_hooks::status(spec, &home);
+            let (words, button) = match status {
+                agent_hooks::Status::NotInstalled => ("not installed", "Add hook"),
+                agent_hooks::Status::Ready => ("detected", "Add hook"),
+                agent_hooks::Status::Added => ("hook added", "Undo"),
+            };
+            let _ = set_text(item.label, &format!("{}: {words}", spec.label));
+            let _ = set_text(item.h, button);
+            // SAFETY: our own live child control.
+            let _ = unsafe { EnableWindow(item.h, status != agent_hooks::Status::NotInstalled) };
+        }
+    }
+
+    /// "Add hook" or "Undo" for agent `i`: shows exactly what will change, and writes only on OK.
+    fn agent_click(&self, i: usize) {
+        let spec = &agent_hooks::AGENTS[i];
+        let Some(home) = agent_hooks::home() else {
+            return;
+        };
+        let add = agent_hooks::status(spec, &home) != agent_hooks::Status::Added;
+        let plan = std::env::current_exe()
+            .map_err(|e| e.to_string())
+            .and_then(|exe| agent_hooks::plan(spec, &home, &exe, add));
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(message) => return self.notify(&message, MB_ICONINFORMATION),
+        };
+        let body = if add {
+            format!(
+                "ROQA adds this to {}:
+
+{}
+
+A copy of the file is kept next to it.",
+                plan.path.display(),
+                plan.shown
+            )
+        } else {
+            format!(
+                "{}
+
+Other hooks stay. A copy of the file is kept.",
+                plan.shown
+            )
+        };
+        if self.ask(spec.label, &body) {
+            let now = prayer_os::local_now();
+            let (y, m, d) = now.ymd;
+            let stamp = format!(
+                "{y:04}{m:02}{d:02}-{:02}{:02}{:02}",
+                now.secs / 3600,
+                now.secs / 60 % 60,
+                now.secs % 60
+            );
+            match agent_hooks::apply(&plan, &stamp) {
+                Ok(()) if spec.id == "codex" && add => self.notify(
+                    "Added. Trust it once in Codex with /hooks.",
+                    MB_ICONINFORMATION,
+                ),
+                Ok(()) => {}
+                Err(message) => self.notify(&message, MB_ICONWARNING),
+            }
+        }
+        self.refresh_agents();
+    }
+    fn ask(&self, title: &str, body: &str) -> bool {
+        let (body, title) = (wide(body), wide(title));
+        // SAFETY: the live settings dialog owns this confirmation; both strings are terminated.
+        let answer = unsafe {
+            MessageBoxW(
+                Some(self.window),
+                PCWSTR(body.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OKCANCEL | MB_DEFBUTTON2 | MB_ICONQUESTION,
+            )
+        };
+        answer == IDOK
+    }
+    fn notify(&self, body: &str, icon: MESSAGEBOX_STYLE) {
+        let body = wide(body);
+        // SAFETY: the live settings dialog owns this notice; the string is terminated.
+        unsafe {
+            MessageBoxW(
+                Some(self.window),
+                PCWSTR(body.as_ptr()),
+                w!("ROQA"),
+                MB_OK | icon,
+            );
+        }
     }
 
     pub fn set_pins(&self, names: &[String], selected: usize) {
@@ -1867,6 +1988,7 @@ impl SettingsWindow {
                 }
             }
         }
+        self.refresh_agents();
         Ok(())
     }
 
@@ -2168,6 +2290,9 @@ impl SettingsWindow {
                         }
                     }
                     (WDRANK, _) if notification == BN_CLICKED => self.drank = true,
+                    (AGENT_BTN..=221, _) if notification == BN_CLICKED => {
+                        self.agent_click(id - AGENT_BTN)
+                    }
                     (LIMCOPY, _) if notification == BN_CLICKED => {
                         // SAFETY: select-all then copy on our own read-only edit.
                         unsafe {

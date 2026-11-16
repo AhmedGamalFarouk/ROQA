@@ -55,6 +55,8 @@ pub struct Settings {
     pub widgets: WidgetConfig,
     /// The mascot eyes in the pill; off removes their state, deadlines and drawing.
     pub eyes: bool,
+    /// A coding agent's reports (`roqa.exe agent`) show on the eyes and the pill; off ignores them.
+    pub agent_status: bool,
     /// The mic and camera dots (features B5); off closes the registry watch.
     pub privacy: bool,
     /// Remember text copied to the Windows clipboard on the Shelf's Copied list; off removes the listener.
@@ -124,6 +126,7 @@ impl Default for Settings {
             tabs: Tab::DEFAULT,
             widgets: WidgetConfig::default(),
             eyes: true,
+            agent_status: false,
             privacy: true,
             clipboard: true,
             city: String::new(),
@@ -264,6 +267,7 @@ impl Settings {
             "edgevol" => flag(value).map(|v| self.edge_volume = v).is_some(),
             "edgebri" => flag(value).map(|v| self.edge_brightness = v).is_some(),
             "eyes" => flag(value).map(|v| self.eyes = v).is_some(),
+            "agents" => flag(value).map(|v| self.agent_status = v).is_some(),
             "privacy" => flag(value).map(|v| self.privacy = v).is_some(),
             "clipcopy" => flag(value).map(|v| self.clipboard = v).is_some(),
             "detect" => flag(value).map(|v| self.detect = v).is_some(),
@@ -424,8 +428,9 @@ impl Settings {
             u8::from(self.edge_brightness)
         ));
         out.push_str(&format!(
-            "eyes={}\nprivacy={}\ndetect={}\nunits={}\ndockstyle={}\n",
+            "eyes={}\nagents={}\nprivacy={}\ndetect={}\nunits={}\ndockstyle={}\n",
             u8::from(self.eyes),
+            u8::from(self.agent_status),
             u8::from(self.privacy),
             u8::from(self.detect),
             self.units.key(),
@@ -955,6 +960,7 @@ mod tests {
             limits_agy: true,
             limits_group: 1,
             eyes: false,
+            agent_status: true,
             city: "Washington, D.C.".into(),
             detect: true,
             units: Units::Celsius,
@@ -1041,6 +1047,7 @@ mod tests {
             "tabshelf=1",
             "tablimits=0",
             "eyes=1",
+            "agents=0",
             "privacy=1",
         ] {
             assert!(text.lines().any(|l| l == line), "{line}");
