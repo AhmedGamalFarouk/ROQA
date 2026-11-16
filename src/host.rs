@@ -177,6 +177,8 @@ struct Pages {
     limits: limits::View,
     limits_key: Option<(u32, bool, String)>,
     widgets: crate::widgets::WidgetConfig,
+    /// The system tiles' last readings; sampled only while an open notch shows them (`refresh_stats`).
+    stats: crate::widgets::Stats,
     /// The Pomodoro's phase rules; its running phase is a tagged timer in `Desktop::timers`.
     pomo: pomo::Pomo,
     /// A paused plain countdown: seconds left and its full length (not stored, like a paused Pomodoro).
@@ -203,6 +205,7 @@ impl Pages {
             limits: limits::View::default(),
             limits_key: None,
             widgets: settings.widgets,
+            stats: crate::widgets::Stats::default(),
             pomo: pomo::Pomo::default(),
             held: None,
         };
@@ -379,6 +382,8 @@ enum Role {
         shadow: NotchShadow,
         engaged: bool,
         intent: Option<Instant>,
+        /// When an open notch the pointer left closes (`LINGER_TIME`); re-entry cancels it.
+        linger: Option<Instant>,
         area: Vec<Bounds>,
     },
     /// Hovered cell, per-cell hover progress and the tooltips of its buttons (none if the control could not
@@ -424,6 +429,7 @@ impl Surface {
                 shadow,
                 engaged: false,
                 intent: None,
+                linger: None,
                 area: Vec::new(),
             },
         };
@@ -529,8 +535,11 @@ impl Surface {
             self.rail_fx.press = Tween::rest(0.0);
             match &mut self.role {
                 Role::Notch {
-                    engaged, intent, ..
-                } => (*engaged, *intent) = (false, None),
+                    engaged,
+                    intent,
+                    linger,
+                    ..
+                } => (*engaged, *intent, *linger) = (false, None, None),
                 Role::Dock { hover, slots, .. } => {
                     *hover = None;
                     slots.fill(Tween::rest(0.0));
@@ -792,6 +801,7 @@ impl Surface {
             clips: copied,
             tab: page,
             widgets: pages.widgets,
+            stats: (pages.stats.cpu, pages.stats.net),
             rail: rail.map(|layout| RailScene {
                 layout,
                 tabs: visible.as_slice(),
@@ -834,7 +844,10 @@ impl Surface {
     /// closes from wherever the motion is. The HWND itself never moves.
     fn set_notch_hover(&mut self, over: bool) {
         let Role::Notch {
-            engaged, intent, ..
+            engaged,
+            intent,
+            linger,
+            ..
         } = &mut self.role
         else {
             return;
@@ -843,8 +856,13 @@ impl Surface {
             return;
         }
         *engaged = over;
+        *linger = None;
         if !over {
-            *intent = None;
+            if intent.take().is_none() && self.motion.target() >= 1.0 {
+                // Open: a slip past the edge gets a short grace (`Desktop::refresh_close`), no frames meanwhile.
+                *linger = Some(Instant::now() + motion::time(motion::LINGER_TIME));
+                return;
+            }
             self.motion.retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
         } else if motion::click_to_open() {
             // Click mode: the pill only swells (and never shrinks an open panel); a click opens it.
@@ -1168,6 +1186,9 @@ struct Desktop {
     /// Dock auto-hide (`dock_tuck`), and the catalog generation it last read.
     tuck: dock_tuck::Tuck,
     tuck_generation: Option<u64>,
+    /// A new song opened the notch on its own: when it closes again, and the song it showed.
+    peek: Option<Instant>,
+    peek_title: Option<String>,
     /// The Places popup's rows while it is open.
     places: Vec<crate::places::Place>,
     graphics: Graphics,
@@ -1278,6 +1299,8 @@ struct PrayerRun {
 }
 /// How long a prayer reminder holds the notch open.
 const PRAYER_NOTICE: Duration = Duration::from_secs(8);
+/// How long a device alert holds the notch open.
+const DEVICE_NOTICE: Duration = Duration::from_secs(4);
 /// The system sound for a finished timer or a due reminder (callers check the sound settings).
 fn chime() {
     // SAFETY: plays the user's own default sound asynchronously; no pointers.
@@ -1328,6 +1351,8 @@ impl Desktop {
             fullscreen_due: None,
             tuck: dock_tuck::Tuck::default(),
             tuck_generation: None,
+            peek: None,
+            peek_title: None,
             places: Vec::new(),
             graphics: Graphics::create()?,
             rebuild: Rebuild::new(Instant::now()),
@@ -2060,11 +2085,87 @@ impl Desktop {
         }
     }
     /// Opens every visible notch; a notch hidden by a full-screen app stays hidden.
+    /// Closes the notches whose leave grace ran out and, when a peek ends, the ones nobody points at;
+    /// returns the wait until the next of those (`INFINITE` with none, the common case).
+    #[inline(never)]
+    fn refresh_close(&mut self) -> u32 {
+        let now = Instant::now();
+        if self.peek.is_some_and(|due| now >= due) {
+            self.peek = None;
+            self.surfaces.iter_mut().for_each(Surface::close_alert);
+        }
+        let mut next = self.peek;
+        for surface in &mut self.surfaces {
+            let Role::Notch { linger, .. } = &mut surface.role else {
+                continue;
+            };
+            match *linger {
+                Some(due) if now >= due => {
+                    *linger = None;
+                    surface
+                        .motion
+                        .retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
+                    surface.live = true;
+                }
+                Some(due) => next = Some(next.map_or(due, |soonest: Instant| soonest.min(due))),
+                None => {}
+            }
+        }
+        next.map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+    /// The memory, disk, processor and network tiles: while an open notch shows the Widgets page with one of
+    /// them, read and repainted every `STATS_STEP`; otherwise no wait, and the readings are dropped.
+    #[inline(never)]
+    fn refresh_stats(&mut self) -> u32 {
+        let now = Instant::now();
+        let shown = self.pages.widgets.live()
+            && self.page() == Tab::Widgets
+            && self.surfaces.iter().any(Surface::expanded);
+        if !shown {
+            self.pages.stats = crate::widgets::Stats::default();
+            return INFINITE;
+        }
+        if self.pages.stats.sample(now) {
+            self.request_notches(Repaint::Full, Surface::expanded);
+        }
+        self.pages
+            .stats
+            .deadline()
+            .map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+    /// A new song while every notch is closed opens them for `PEEK_TIME`; the first song after start does not.
+    fn peek_song(&mut self) {
+        let Some(title) = self
+            .pages
+            .track(&self.media)
+            .filter(|track| track.playing)
+            .map(|track| track.title.clone())
+        else {
+            return;
+        };
+        if self.peek_title.as_ref() == Some(&title) {
+            return;
+        }
+        let first = self.peek_title.replace(title).is_none();
+        let now = Instant::now();
+        if first
+            || !self
+                .surfaces
+                .iter()
+                .filter(|s| s.kind() == SurfaceKind::Notch)
+                .all(|s| s.collapsed(now))
+        {
+            return;
+        }
+        self.open_notches();
+        self.peek = Some(now + motion::PEEK_TIME);
+    }
     fn open_notches(&mut self) {
         for surface in &mut self.surfaces {
             if surface.visible
-                && let Role::Notch { intent, .. } = &mut surface.role
+                && let Role::Notch { intent, linger, .. } = &mut surface.role
             {
+                *linger = None;
                 open_notch(intent, &mut surface.motion);
                 surface.live = true;
             }
@@ -4253,13 +4354,17 @@ impl Desktop {
         if message.message == native_window::DEVICE {
             let bits = native_window::device_read();
             let text = if bits & native_window::DRIVE_BIT != 0 {
-                "Drive connected."
+                "Drive connected"
             } else if bits & native_window::CAMERA_BIT != 0 {
-                "Camera connected."
+                "Camera connected"
             } else {
-                "Speaker connected."
+                "Speaker connected"
             };
-            self.show_notice(text.into(), Instant::now());
+            // A short peek, unlike a prayer alert: it does not show over a full-screen app.
+            self.power
+                .announce(text.into(), Instant::now(), DEVICE_NOTICE);
+            self.open_notches();
+            self.request_notches(Repaint::Full, |_| true);
             return Ok(());
         }
         if message.message == native_window::WAKE {
@@ -4453,6 +4558,9 @@ impl Desktop {
                 }
             }
             WM_MOUSELEAVE => {
+                if surface.kind() == SurfaceKind::Dock {
+                    self.tuck.release(&surface.monitor, Instant::now());
+                }
                 surface.leave();
                 if !surface.grip.drag && surface.grip.hover {
                     surface.grip.hover = false;
@@ -4692,6 +4800,9 @@ impl Desktop {
         let changed =
             self.media.refresh(self.cover_pixels()) || status != self.media.view().status();
         let redraw = changed && media_on;
+        if changed {
+            self.peek_song();
+        }
         let shown = self.pages.track(&self.media).is_some();
         if shown || self.edges.wants_audio() {
             // Core Audio loads only once a media panel or the volume slider can show the level.
@@ -4724,7 +4835,9 @@ impl Desktop {
             .min(self.refresh_ring())
             .min(self.refresh_privacy())
             .min(self.refresh_prayer())
-            .min(self.refresh_water());
+            .min(self.refresh_water())
+            .min(self.refresh_close())
+            .min(self.refresh_stats());
         self.refresh_menu();
         self.paint_requested()?;
         if let Some(picker) = &mut self.picker {

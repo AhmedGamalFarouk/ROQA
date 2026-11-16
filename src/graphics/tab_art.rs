@@ -721,27 +721,50 @@ fn widgets_page(g: &Page, scene: &NotchScene) -> Result<()> {
                     g.text(&day.to_string(), &g.font(10.0, SEMI, MIDDLE), cell, colour)?;
                 }
             }
-            WidgetKind::Memory | WidgetKind::Disk => {
-                let (title, reading) = if kind == WidgetKind::Memory {
-                    ("Memory in use", crate::widgets::memory())
-                } else {
-                    ("Disk in use", crate::widgets::disk())
+            WidgetKind::Memory | WidgetKind::Disk | WidgetKind::Cpu | WidgetKind::Network => {
+                use crate::widgets::speed;
+                let percent_text = |p: Option<u32>| p.map_or("--".into(), |p| format!("{p}%"));
+                // The big reading, its line, and the bar's percent (none for a speed).
+                let (big, line, bar): (String, String, Option<u32>) = match kind {
+                    WidgetKind::Network => match scene.stats.1 {
+                        Some((down, up)) => (speed(down), format!("Down, {} up", speed(up)), None),
+                        None => ("--".into(), "Network speed".into(), None),
+                    },
+                    WidgetKind::Cpu => (
+                        percent_text(scene.stats.0),
+                        "Processor in use".into(),
+                        Some(scene.stats.0.unwrap_or(0)),
+                    ),
+                    _ => {
+                        let (title, reading) = if kind == WidgetKind::Memory {
+                            ("Memory in use", crate::widgets::memory())
+                        } else {
+                            ("Disk in use", crate::widgets::disk())
+                        };
+                        (
+                            percent_text(reading.as_ref().map(|r| r.percent)),
+                            reading
+                                .as_ref()
+                                .map_or_else(|| title.into(), |r| format!("{title}, {}", r.detail)),
+                            Some(reading.map_or(0, |r| r.percent)),
+                        )
+                    }
                 };
-                let percent = reading.as_ref().map_or(0, |r| r.percent);
                 g.text(
-                    &reading
-                        .as_ref()
-                        .map_or("--".into(), |r| format!("{}%", r.percent)),
+                    &big,
                     &g.display(24.0, BOLD, LEAD),
                     at(14.0, 6.0, 162.0, 28.0),
                     g.ink(1.0),
                 )?;
                 g.text(
-                    &reading.map_or_else(|| title.into(), |r| format!("{title}, {}", r.detail)),
+                    &line,
                     &g.font(11.0, NORMAL, LEAD),
                     at(14.0, 35.0, 162.0, 16.0),
                     g.ink(0.6),
                 )?;
+                let Some(percent) = bar else {
+                    continue;
+                };
                 // The track and the fill are both capsules; the fill is the one accent here.
                 g.fill(at(14.0, 56.0, 162.0, 6.0), None, g.ink(0.18))?;
                 if percent > 0 {

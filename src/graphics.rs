@@ -210,6 +210,8 @@ pub struct NotchScene<'a> {
     /// The page the open panel shows. Media is the media and clock panel; the others draw their own content.
     pub tab: Tab,
     pub widgets: crate::widgets::WidgetConfig,
+    /// The Processor tile's percent and the Network tile's bytes per second down and up (`widgets::Stats`).
+    pub stats: (Option<u32>, Option<(u64, u64)>),
     /// The hanging tab handle; `None` draws none (fewer than two tabs).
     pub rail: Option<RailScene<'a>>,
     /// The mascot's frame (`None` with the setting off); alpha 0 at rest, when the pill shows only the time.
@@ -2910,6 +2912,7 @@ mod media_tests {
             shelf_hover: false,
             clips: false,
             widgets: crate::widgets::WidgetConfig::default(),
+            stats: (None, None),
             tab: Tab::Media,
             rail: None,
             eyes: None,
@@ -2952,6 +2955,7 @@ mod media_tests {
                 shelf_hover: false,
                 clips: false,
                 widgets: crate::widgets::WidgetConfig::default(),
+                stats: (None, None),
                 tab: Tab::Media,
                 rail: None,
                 eyes: None,
@@ -3203,6 +3207,7 @@ mod media_tests {
                 shelf_hover: false,
                 clips: false,
                 widgets: crate::widgets::WidgetConfig::default(),
+                stats: (None, None),
                 tab: Tab::Media,
                 rail: None,
                 eyes: None,
@@ -3267,6 +3272,7 @@ mod media_tests {
                     shelf_hover: false,
                     clips: false,
                     widgets: crate::widgets::WidgetConfig::default(),
+                    stats: (None, None),
                     tab: Tab::Media,
                     rail: None,
                     eyes: None,
@@ -3319,6 +3325,7 @@ mod media_tests {
             shelf_hover: false,
             clips: false,
             widgets: crate::widgets::WidgetConfig::default(),
+            stats: (None, None),
             tab: Tab::Media,
             rail: None,
             eyes: None,

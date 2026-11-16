@@ -273,8 +273,18 @@ pub struct Hover {
 }
 impl Hover {
     pub fn enter(&mut self, now: Instant) {
+        self.enter_after(now, SHOW_DELAY);
+    }
+    /// `enter` with its own reveal delay (the dock's edge strip is quicker than the sliders').
+    pub fn enter_after(&mut self, now: Instant, delay: Duration) {
         if !std::mem::replace(&mut self.over, true) {
-            self.due = (!self.shown).then_some(now + SHOW_DELAY);
+            self.due = (!self.shown).then_some(now + delay);
+        }
+    }
+    /// The pointer left what the pill revealed: a shown pill hides `delay` from now, not at the slower poll.
+    pub fn release(&mut self, now: Instant, delay: Duration) {
+        if self.shown && !self.over {
+            self.due = Some(now + delay);
         }
     }
     pub fn leave(&mut self, now: Instant) {

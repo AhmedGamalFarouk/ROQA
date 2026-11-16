@@ -63,6 +63,9 @@ windows = { version = "=0.62.2", features = [
     "Win32_Devices_Display",
     # WinHTTP: the Open-Meteo requests, through the OS TLS stack (features W1).
     "Win32_Networking_WinHttp",
+    # GetIfTable2: the Network widget's speed, read only while its tile shows.
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
     # Job object and PeekNamedPipe: the opt-in `agy` and `codex app-server` runs of the Limits tab (features U1).
     "Win32_System_JobObjects",
     "Win32_System_Pipes",

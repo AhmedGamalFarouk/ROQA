@@ -91,6 +91,10 @@ pub const CLOSE_TIME: Duration = Duration::from_millis(560);
 pub const INTENT_TIME: Duration = Duration::from_millis(320);
 pub const HOVER_IN_TIME: Duration = Duration::from_millis(260);
 pub const HOVER_OUT_TIME: Duration = Duration::from_millis(220);
+/// Leave grace: an open notch waits this long after the pointer slips out before it closes.
+pub const LINGER_TIME: Duration = Duration::from_millis(240);
+/// A peek (a new song): the notch opens on its own and closes after this unless the pointer holds it.
+pub const PEEK_TIME: Duration = Duration::from_millis(2800);
 
 /// The slide direction (+1 towards a later tab, -1 an earlier one) of a switch to `page` from `last` while
 /// the panel is `open`; none when the page is unchanged or the panel is not open, so an idle notch starts no

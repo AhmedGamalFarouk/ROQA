@@ -1,4 +1,5 @@
-//! Configuration for the two expanded-notch widget slots.
+//! Configuration for the two expanded-notch widget slots, and the readings of the system tiles.
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WidgetKind {
@@ -8,16 +9,29 @@ pub enum WidgetKind {
     Memory,
     /// The system drive's space in use.
     Disk,
+    /// Processor in use.
+    Cpu,
+    /// Download and upload speed.
+    Network,
 }
 
 impl WidgetKind {
-    pub const ALL: [Self; 4] = [Self::WeekCalendar, Self::Battery, Self::Memory, Self::Disk];
+    pub const ALL: [Self; 6] = [
+        Self::WeekCalendar,
+        Self::Battery,
+        Self::Memory,
+        Self::Disk,
+        Self::Cpu,
+        Self::Network,
+    ];
     pub fn key(self) -> &'static str {
         match self {
             Self::WeekCalendar => "week",
             Self::Battery => "battery",
             Self::Memory => "memory",
             Self::Disk => "disk",
+            Self::Cpu => "cpu",
+            Self::Network => "network",
         }
     }
 
@@ -27,6 +41,8 @@ impl WidgetKind {
             "battery" => Some(Self::Battery),
             "memory" => Some(Self::Memory),
             "disk" => Some(Self::Disk),
+            "cpu" => Some(Self::Cpu),
+            "network" => Some(Self::Network),
             _ => None,
         }
     }
@@ -44,6 +60,122 @@ impl Default for WidgetConfig {
             slot_left: WidgetKind::WeekCalendar,
             slot_right: WidgetKind::Battery,
         }
+    }
+}
+
+impl WidgetConfig {
+    /// True when a tile shows a reading that changes by itself (memory, disk, CPU, network).
+    pub fn live(self) -> bool {
+        [self.slot_left, self.slot_right]
+            .iter()
+            .any(|kind| !matches!(kind, WidgetKind::WeekCalendar | WidgetKind::Battery))
+    }
+}
+
+/// How often the system tiles are read while they show.
+pub const STATS_STEP: Duration = Duration::from_secs(1);
+
+/// CPU in use and network speed: differences between two samples `STATS_STEP` apart, taken only while an
+/// open notch shows the tiles (`Desktop::refresh_stats`); dropped when it closes.
+#[derive(Default)]
+pub struct Stats {
+    last: Option<Sample>,
+    pub cpu: Option<u32>,
+    /// Bytes per second down and up.
+    pub net: Option<(u64, u64)>,
+}
+
+#[derive(Clone, Copy)]
+struct Sample {
+    at: Instant,
+    /// Idle and total processor time (100 ns units).
+    cpu: Option<(u64, u64)>,
+    /// Bytes received and sent by the physical adapters.
+    net: Option<(u64, u64)>,
+}
+
+impl Stats {
+    /// Reads once the step is due; true when it did (the tiles repaint).
+    pub fn sample(&mut self, now: Instant) -> bool {
+        if self.deadline().is_some_and(|due| now < due) {
+            return false;
+        }
+        let next = Sample {
+            at: now,
+            cpu: cpu_times(),
+            net: net_bytes(),
+        };
+        if let Some(last) = self.last {
+            (self.cpu, self.net) = rates(last, next);
+        }
+        self.last = Some(next);
+        true
+    }
+    pub fn deadline(&self) -> Option<Instant> {
+        self.last.map(|sample| sample.at + STATS_STEP)
+    }
+}
+
+fn rates(a: Sample, b: Sample) -> (Option<u32>, Option<(u64, u64)>) {
+    let cpu = a
+        .cpu
+        .zip(b.cpu)
+        .and_then(|((idle0, total0), (idle1, total1))| {
+            let total = total1.saturating_sub(total0);
+            let busy = total.saturating_sub(idle1.saturating_sub(idle0));
+            (total > 0).then(|| (busy * 100 / total).min(100) as u32)
+        });
+    let seconds = b.at.saturating_duration_since(a.at).as_secs_f64();
+    let net = a
+        .net
+        .zip(b.net)
+        .filter(|_| seconds > 0.0)
+        .map(|((down0, up0), (down1, up1))| {
+            let per_second = |from: u64, to: u64| (to.saturating_sub(from) as f64 / seconds) as u64;
+            (per_second(down0, down1), per_second(up0, up1))
+        });
+    (cpu, net)
+}
+
+fn cpu_times() -> Option<(u64, u64)> {
+    use windows::Win32::{Foundation::FILETIME, System::Threading::GetSystemTimes};
+    let (mut idle, mut kernel, mut user) = Default::default();
+    // SAFETY: three live out values.
+    unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) }.ok()?;
+    let ticks = |t: FILETIME| u64::from(t.dwHighDateTime) << 32 | u64::from(t.dwLowDateTime);
+    // Kernel time includes the idle time.
+    Some((ticks(idle), ticks(kernel) + ticks(user)))
+}
+
+fn net_bytes() -> Option<(u64, u64)> {
+    use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+    // SAFETY: the API allocates the table; it is read only while alive and freed once below.
+    unsafe {
+        GetIfTable2(&mut table).ok().ok()?;
+        let rows =
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        // Physical adapters only (hardware, not a filter layer), so one transfer is counted once.
+        let total = rows
+            .iter()
+            .filter(|row| row.InterfaceAndOperStatusFlags._bitfield & 0b11 == 0b01)
+            .fold((0u64, 0u64), |(down, up), row| {
+                (down + row.InOctets, up + row.OutOctets)
+            });
+        FreeMibTable(table.cast());
+        Some(total)
+    }
+}
+
+/// "2.4 MB/s": a speed in the units the tile shows.
+pub fn speed(bytes_per_second: u64) -> String {
+    let kilo = bytes_per_second as f64 / 1024.0;
+    if kilo < 1000.0 {
+        format!("{kilo:.0} KB/s")
+    } else if kilo < 1000.0 * 1024.0 {
+        format!("{:.1} MB/s", kilo / 1024.0)
+    } else {
+        format!("{:.1} GB/s", kilo / 1024.0 / 1024.0)
     }
 }
 
@@ -168,5 +300,47 @@ mod tests {
             assert_eq!(WidgetKind::from_key(kind.key()), Some(kind));
         }
         assert_eq!(WidgetKind::from_key("unknown"), None);
+        assert!(!config.live());
+        let stats = WidgetConfig {
+            slot_left: WidgetKind::WeekCalendar,
+            slot_right: WidgetKind::Network,
+        };
+        assert!(stats.live());
+    }
+
+    #[test]
+    fn stats_read_rates_between_two_samples() {
+        let at = Instant::now();
+        let a = Sample {
+            at,
+            cpu: Some((100, 1000)),
+            net: Some((0, 0)),
+        };
+        let b = Sample {
+            at: at + Duration::from_secs(2),
+            cpu: Some((175, 1100)),
+            net: Some((4096, 2048)),
+        };
+        assert_eq!(rates(a, b), (Some(25), Some((2048, 1024))));
+        // A missing or reset counter reads nothing rather than a wild number.
+        assert_eq!(
+            rates(
+                a,
+                Sample {
+                    cpu: None,
+                    net: None,
+                    ..b
+                }
+            ),
+            (None, None)
+        );
+        assert_eq!(rates(b, a).0, None);
+        assert_eq!(speed(512 * 1024), "512 KB/s");
+        assert_eq!(speed(2 * 1024 * 1024 + 400 * 1024), "2.4 MB/s");
+        // Due once a step has passed; the first sample has no rates yet.
+        let mut stats = Stats::default();
+        assert!(stats.sample(at) && stats.cpu.is_none());
+        assert!(!stats.sample(at + Duration::from_millis(500)));
+        assert_eq!(stats.deadline(), Some(at + STATS_STEP));
     }
 }

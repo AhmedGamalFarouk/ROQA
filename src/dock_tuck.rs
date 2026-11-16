@@ -1,7 +1,8 @@
 //! Dock auto-hide: the dock slides away while the foreground window covers it, and comes back while the
 //! pointer rests on a thin strip along the monitor's bottom edge (or stays on the dock). Event-driven: the
 //! catalog's generation feeds `sync`; the only waits are the strip's hover deadline and, while a window
-//! covers the dock, one slow re-check (a window dragged onto or off the dock raises no event).
+//! covers the dock, one slow re-check (a maximize or a resize raises no event the catalog hears; a drag's end
+//! does).
 use crate::{
     dock::px, edge::Hover, layout::Bounds, native_window::NativeWindow, topology::Monitor,
 };
@@ -22,6 +23,11 @@ use windows::{
 const POLL: Duration = Duration::from_secs(2);
 /// The strip's thickness in DIPs.
 const STRIP: i32 = 2;
+/// The pointer resting on the strip reveals the dock after this (short: it should feel instant, yet a pointer
+/// sweeping along the edge does not flash it).
+const REVEAL: Duration = Duration::from_millis(90);
+/// After the pointer leaves a revealed dock it slides away this much later.
+const LEAVE: Duration = Duration::from_millis(400);
 
 pub fn overlaps(a: Bounds, b: Bounds) -> bool {
     a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
@@ -124,7 +130,7 @@ impl Tuck {
         match message.message {
             WM_MOUSEMOVE => {
                 strip.track();
-                strip.hover.enter(now);
+                strip.hover.enter_after(now, REVEAL);
             }
             WM_MOUSELEAVE => {
                 strip.tracking = false;
@@ -133,6 +139,14 @@ impl Tuck {
             _ => {}
         }
         true
+    }
+    /// The pointer left the dock on `device`: a revealed dock leaves after `LEAVE`.
+    pub fn release(&mut self, device: &str, now: Instant) {
+        if self.peek.as_deref() == Some(device)
+            && let Some(strip) = self.strips.iter_mut().find(|s| s.monitor == device)
+        {
+            strip.hover.release(now, LEAVE);
+        }
     }
     /// The soonest deadline, if any.
     pub fn deadline(&self) -> Option<Instant> {
@@ -146,9 +160,11 @@ impl Tuck {
 impl Strip {
     fn create(monitor: &Monitor, dock: Bounds) -> Option<Self> {
         let height = px(STRIP, monitor.dpi).max(2);
+        // Along the work area's bottom: on the screen edge when the taskbar hides, above it when it shows, so
+        // the strip never takes the taskbar's edge clicks (Start, icons).
         let at = Bounds {
             x: dock.x,
-            y: monitor.rect.y + monitor.rect.height - height,
+            y: monitor.work.y + monitor.work.height - height,
             width: dock.width,
             height,
         };

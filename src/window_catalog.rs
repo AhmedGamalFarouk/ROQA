@@ -186,6 +186,8 @@ impl Catalog {
         catalog.results = Some(result_rx);
         for (first, last) in [
             (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
+            // A window dropped onto or off the dock: auto-hide re-reads at once (`dock_tuck`).
+            (EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZEEND),
             (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
             (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE),
             (EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE),
