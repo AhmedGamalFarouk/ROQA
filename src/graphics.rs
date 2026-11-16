@@ -1445,6 +1445,7 @@ struct MediaPlan<'a> {
     /// The progress bar's track and filled part, and their opacity.
     bar: Option<([D2D1_ROUNDED_RECT; 2], f32)>,
     chips: Vec<Chip>,
+    players: Vec<PlayerChip<'a>>,
     volume: Option<VolumeBar>,
     /// The visualizer's bars and their opacity.
     meter: Option<([D2D1_ROUNDED_RECT; BARS], f32)>,
@@ -1500,6 +1501,53 @@ struct Chip {
 }
 /// Opacity of a control the player does not accept now.
 const DISABLED: f32 = 0.30;
+
+/// A player chip under the cover when two or more players are open: the shown one wears the accent.
+struct PlayerChip<'a> {
+    rect: D2D_RECT_F,
+    name: &'a str,
+    chosen: bool,
+    alpha: f32,
+    font: Font,
+}
+/// The chips for `track`'s players, placed like the controls and faded in with them.
+fn player_chips<'a>(
+    scene: &NotchScene,
+    track: &'a Track,
+    body: &D2D_RECT_F,
+) -> Vec<PlayerChip<'a>> {
+    let reveal = motion::reveal(scene.progress);
+    if reveal <= 0.0 {
+        return Vec::new();
+    }
+    let scale = scene.dpi as f32 / 96.0;
+    track
+        .players
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let cell = layout::player_chip(scene.dpi, track.players.len(), index);
+            PlayerChip {
+                rect: D2D_RECT_F {
+                    left: body.left + cell.x as f32,
+                    top: body.top + cell.y as f32,
+                    right: body.left + (cell.x + cell.width) as f32,
+                    bottom: body.top + (cell.y + cell.height) as f32,
+                },
+                name,
+                chosen: index == track.chosen,
+                alpha: reveal,
+                font: Font {
+                    family: TEXT_FONT,
+                    size: 11.0 * scale,
+                    weight: DWRITE_FONT_WEIGHT_NORMAL,
+                    designator: 1.0,
+                    align: DWRITE_TEXT_ALIGNMENT_CENTER,
+                },
+            }
+        })
+        .collect()
+}
 
 /// What the pointer is doing on the volume bar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1652,6 +1700,7 @@ fn media_plan<'a>(
     ];
     let bar = progress_row(&mut lines, scene, body);
     let chips = media_chips(scene, track, body);
+    let players = player_chips(scene, track, body);
     MediaPlan {
         cover: rounded(cover, at(5.0, layout::TILE_RADIUS) * scale),
         art: scene.art.map(|(_, pixels)| pixels),
@@ -1665,6 +1714,7 @@ fn media_plan<'a>(
             .collect(),
         bar,
         chips,
+        players,
         volume: volume_bar(scene, body),
         meter: meter_bars(scene, body),
         pill_meter,
@@ -1967,6 +2017,32 @@ fn media_text(
         } else {
             glyphs::draw(context, chip.glyph, chip.shape, color)?;
         }
+    }
+    for chip in &plan.players {
+        let fill = if chip.chosen {
+            tint(p.accent_dim(false, 0.35 * chip.alpha))
+        } else {
+            with_alpha(p.ink, p.ink_alpha(0.12 * chip.alpha))
+        };
+        // SAFETY: as above.
+        unsafe {
+            let brush = context.CreateSolidColorBrush(&fill, None)?;
+            let radius = (chip.rect.bottom - chip.rect.top) / 2.0;
+            context.FillRoundedRectangle(&rounded(chip.rect, radius), &brush);
+        }
+        let text = D2D_RECT_F {
+            left: chip.rect.left + 6.0,
+            right: (chip.rect.right - 6.0).max(chip.rect.left + 6.0),
+            ..chip.rect
+        };
+        let strength = if chip.chosen { 0.95 } else { 0.65 };
+        draw_text(
+            context,
+            chip.name,
+            &chip.font,
+            text,
+            with_alpha(p.ink, p.ink_alpha(strength * chip.alpha)),
+        )?;
     }
     if let Some(bar) = &plan.volume {
         // SAFETY: as above.

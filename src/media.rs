@@ -76,7 +76,15 @@ pub struct Track {
     pub seekable: bool,
     pub rate: f64,
     pub timeline: Timeline,
+    /// Short names of the players, oldest first, when two or more are open (at most `MAX_PLAYERS`,
+    /// the newest); empty with one, which keeps the panel as it always was.
+    pub players: Vec<String>,
+    /// The index in `players` of the player this track and the controls belong to.
+    pub chosen: usize,
 }
+
+/// The most player chips the panel shows.
+pub const MAX_PLAYERS: usize = 3;
 
 /// What the panel's progress row draws: whole seconds elapsed and in total, and the bar's filled
 /// pixels.
@@ -212,9 +220,18 @@ impl View {
 /// enabled controls changed. Timeline and rate updates, and changes among the no-media views, draw
 /// nothing new. Every track field the notch draws must be compared here.
 pub fn redraw(before: &View, after: &View) -> bool {
-    fn drawn(view: &View) -> Option<(&str, &str, bool, [bool; 3])> {
-        view.shown()
-            .map(|t| (t.title.as_str(), t.artist.as_str(), t.playing, t.controls))
+    type Drawn<'a> = (&'a str, &'a str, bool, [bool; 3], &'a [String], usize);
+    fn drawn(view: &View) -> Option<Drawn<'_>> {
+        view.shown().map(|t| {
+            (
+                t.title.as_str(),
+                t.artist.as_str(),
+                t.playing,
+                t.controls,
+                t.players.as_slice(),
+                t.chosen,
+            )
+        })
     }
     drawn(before) != drawn(after)
 }
@@ -233,6 +250,8 @@ pub enum Change {
         rate: f64,
         timeline: Timeline,
     },
+    /// The players now open and which one is shown (`Track::players`, `Track::chosen`).
+    Players { names: Vec<String>, chosen: usize },
     /// Title and artist read for session `generation`.
     Properties {
         generation: u64,
@@ -288,6 +307,11 @@ impl State {
                     (track.rate, track.timeline) = (rate, timeline);
                 }
             }
+            Change::Players { names, chosen } => {
+                if let View::Track(track) = &mut self.view {
+                    (track.players, track.chosen) = (names, chosen);
+                }
+            }
             Change::Properties {
                 generation,
                 title,
@@ -311,6 +335,59 @@ impl State {
         }
         false
     }
+}
+
+/// Brings `order` (player ids, oldest first) up to date with the `present` ones and returns the id to
+/// show: a newly opened player (the one Windows calls current goes last among several at once, so it
+/// wins at start-up) replaces any pick; else the pick, while it is open; else the newest.
+fn order_players(
+    order: &mut Vec<String>,
+    picked: &mut Option<String>,
+    present: &[&str],
+    current: Option<&str>,
+) -> Option<String> {
+    order.retain(|id| present.contains(&id.as_str()));
+    let mut fresh: Vec<&str> = present
+        .iter()
+        .copied()
+        .filter(|id| !order.iter().any(|known| known == id))
+        .collect();
+    fresh.sort_by_key(|id| Some(*id) == current);
+    if !fresh.is_empty() {
+        *picked = None;
+    }
+    order.extend(fresh.into_iter().map(str::to_owned));
+    if picked.as_ref().is_some_and(|id| !order.contains(id)) {
+        *picked = None;
+    }
+    picked.clone().or_else(|| order.last().cloned())
+}
+
+/// The chips for `order`: the newest `MAX_PLAYERS` short names and the shown one's index among them;
+/// none with a single player.
+fn chips(order: &[String], chosen: Option<&str>) -> (Vec<String>, usize) {
+    if order.len() < 2 {
+        return (Vec::new(), 0);
+    }
+    let shown = &order[order.len().saturating_sub(MAX_PLAYERS)..];
+    let at = shown.iter().position(|id| Some(id.as_str()) == chosen);
+    (
+        shown.iter().map(|id| short_name(id)).collect(),
+        at.unwrap_or(0),
+    )
+}
+
+/// A player's chip text from its app id: `Spotify.exe` and `SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify`
+/// both read "Spotify".
+fn short_name(id: &str) -> String {
+    let id = id.rsplit('!').next().unwrap_or(id);
+    let id = id.strip_suffix(".exe").unwrap_or(id);
+    let name = id.rsplit('.').next().unwrap_or(id);
+    let mut letters = name.chars();
+    letters
+        .next()
+        .map(|first| first.to_uppercase().chain(letters).collect())
+        .unwrap_or_default()
 }
 
 /// Whether two views differ in more than the timeline, which players may update every second.
@@ -581,6 +658,10 @@ pub struct Media {
     // Teardown is field order after `drop` cancels pending reads: the session's tokens are removed
     // and it is released before the manager's.
     session: Option<Subscribed<Session>>,
+    /// The ids of the open players, in the order they appeared; the newest is shown unless one was picked.
+    players: Vec<String>,
+    /// The player the user chose with a chip, until a newer one appears or it closes.
+    picked: Option<String>,
     manager: Option<Subscribed<Manager>>,
     request: Option<Request<Manager>>,
     fetch: Option<Request<Properties>>,
@@ -614,6 +695,8 @@ impl Media {
     pub fn create() -> Self {
         Self {
             session: None,
+            players: Vec::new(),
+            picked: None,
             manager: None,
             request: None,
             fetch: None,
@@ -938,21 +1021,59 @@ impl Media {
             Err(error) => eprintln!("Media: no album art: {error}"),
         }
     }
-    /// Re-reads the current session; on a change, ends the old one, starts a new generation and
-    /// returns the reads the new session needs.
+    /// Shows the player behind chip `index` (an index into `Track::players`) from now on.
+    pub fn choose(&mut self, index: usize) {
+        let from = self.players.len().saturating_sub(MAX_PLAYERS);
+        if let Some(id) = self.players.get(from + index) {
+            self.picked = Some(id.clone());
+            self.wake.raise(SESSION);
+        }
+    }
+    /// Re-reads the open players and shows the chosen one (the newest unless picked); on a change,
+    /// ends the old session, starts a new generation and returns the reads the new session needs.
     fn replace_session(&mut self) -> u32 {
         let Some(manager) = &self.manager else {
             return 0;
         };
-        let current = match manager.source.GetCurrentSession() {
-            Ok(session) => Some(session),
+        let (current, sessions) = match (
+            manager.source.GetCurrentSession(),
+            manager.source.GetSessions(),
+        ) {
+            (Ok(session), Ok(sessions)) => (Some(session), sessions),
             // A null session (no player) arrives as an empty error.
-            Err(error) if error.code().is_ok() => None,
-            Err(error) => {
+            (Err(error), Ok(sessions)) if error.code().is_ok() => (None, sessions),
+            (Err(error), _) | (_, Err(error)) => {
                 eprintln!("Media: current session: {error}");
                 return 0;
             }
         };
+        let id = |session: &Session| {
+            session
+                .SourceAppUserModelId()
+                .map(|id| id.to_string_lossy())
+                .unwrap_or_default()
+        };
+        // One entry per app: an app's second session is the same player.
+        let mut open: Vec<(String, Session)> = Vec::new();
+        for session in sessions {
+            let id = id(&session);
+            if !open.iter().any(|(known, _)| *known == id) {
+                open.push((id, session));
+            }
+        }
+        let present: Vec<&str> = open.iter().map(|(id, _)| id.as_str()).collect();
+        let current_id = current.as_ref().map(id);
+        let chosen = order_players(
+            &mut self.players,
+            &mut self.picked,
+            &present,
+            current_id.as_deref(),
+        );
+        let (names, shown) = chips(&self.players, chosen.as_deref());
+        let current = chosen.and_then(|chosen| {
+            open.into_iter()
+                .find_map(|(id, session)| (id == chosen).then_some(session))
+        });
         // COM identity: the same session may come back through another interface pointer.
         let identity = |session: &Session| {
             session
@@ -960,6 +1081,10 @@ impl Media {
                 .map_or(session.as_raw(), |unknown| unknown.as_raw())
         };
         if current.as_ref().map(identity) == self.session.as_ref().map(|s| identity(&s.source)) {
+            self.state.apply(Change::Players {
+                names,
+                chosen: shown,
+            });
             return 0;
         }
         self.end_session();
@@ -969,6 +1094,10 @@ impl Media {
                 .ok()
         });
         self.state.apply(Change::Session(next.is_some()));
+        self.state.apply(Change::Players {
+            names,
+            chosen: shown,
+        });
         self.session = next;
         PROPERTIES | PLAYBACK
     }
@@ -1461,6 +1590,73 @@ mod tests {
     }
 
     #[test]
+    fn the_newest_player_is_shown_a_pick_holds_and_a_gone_one_falls_back() {
+        let (mut order, mut picked) = (Vec::new(), None);
+        let mut show = |present: &[&str], current: Option<&str>, order: &mut Vec<String>| {
+            order_players(order, &mut picked, present, current)
+        };
+        // Nothing open, then one: it is shown, with no chips.
+        assert_eq!(show(&[], None, &mut order), None);
+        assert_eq!(show(&["a"], Some("a"), &mut order).as_deref(), Some("a"));
+        assert_eq!(chips(&order, Some("a")), (Vec::new(), 0));
+        // Two at once: the one Windows calls current wins; a later one wins over it.
+        let mut start = Vec::new();
+        assert_eq!(
+            show(&["a", "b"], Some("a"), &mut start).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            show(&["a", "b", "c"], Some("a"), &mut start).as_deref(),
+            Some("c")
+        );
+        // A pick holds across passes until a newer player opens or it closes.
+        picked = Some("a".into());
+        let mut show = |present: &[&str], order: &mut Vec<String>| {
+            order_players(order, &mut picked, present, None)
+        };
+        assert_eq!(show(&["a", "b", "c"], &mut start).as_deref(), Some("a"));
+        assert_eq!(show(&["b", "c"], &mut start).as_deref(), Some("c"));
+        assert_eq!(show(&["b", "c", "d"], &mut start).as_deref(), Some("d"));
+        // The chips are the newest three, with the shown one marked.
+        let long: Vec<String> = ["a.exe", "b.exe", "c.exe", "d.exe"]
+            .map(String::from)
+            .into();
+        assert_eq!(
+            chips(&long, Some("c.exe")),
+            (vec!["B".into(), "C".into(), "D".into()], 1)
+        );
+    }
+
+    #[test]
+    fn a_chip_reads_the_app_name_from_its_id() {
+        assert_eq!(short_name("Spotify.exe"), "Spotify");
+        assert_eq!(
+            short_name("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"),
+            "Spotify"
+        );
+        assert_eq!(short_name("chrome.exe"), "Chrome");
+        assert_eq!(short_name(""), "");
+    }
+
+    #[test]
+    fn players_arrive_after_a_session_and_clear_with_it() {
+        let mut state = State::default();
+        state.apply(Change::Session(true));
+        let players = || Change::Players {
+            names: vec!["Spotify".into(), "Chrome".into()],
+            chosen: 1,
+        };
+        state.apply(players());
+        assert!(matches!(&state.view, View::Track(t) if t.players.len() == 2 && t.chosen == 1));
+        state.apply(Change::Session(true));
+        assert!(matches!(&state.view, View::Track(t) if t.players.is_empty() && t.chosen == 0));
+        // Without a track nothing is stored.
+        state.apply(Change::Session(false));
+        state.apply(players());
+        assert_eq!(state.view, View::NoPlayer);
+    }
+
+    #[test]
     fn the_notch_repaints_only_when_the_drawn_view_changes() {
         let playing = View::Track(Track {
             title: "Song".into(),
@@ -1492,6 +1688,17 @@ mod tests {
             }
             assert!(redraw(&enabled, &disabled));
         }
+        // The player chips and the chosen one are drawn too.
+        let two = with(|t| t.players = vec!["Spotify".into(), "Chrome".into()]);
+        assert!(redraw(&playing, &two));
+        assert!(redraw(
+            &two,
+            &with(|t| {
+                t.players = vec!["Spotify".into(), "Chrome".into()];
+                t.chosen = 1;
+            })
+        ));
+        assert!(!redraw(&two, &two.clone()));
         assert!(!redraw(&View::NoPlayer, &View::Track(Track::default())));
         assert!(redraw(&playing, &View::NoPlayer));
         // The no-media views all draw the plain clock notch.

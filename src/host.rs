@@ -4665,7 +4665,10 @@ impl Desktop {
         if page != Tab::Media || !live {
             return false;
         }
-        if let Some(control) = layout::media_control_at(width, dpi, progress, x, y) {
+        let players = self.pages.track(&self.media).map_or(0, |t| t.players.len());
+        if let Some(player) = layout::player_at(width, dpi, progress, players, x, y) {
+            self.media.choose(player);
+        } else if let Some(control) = layout::media_control_at(width, dpi, progress, x, y) {
             self.press(control);
         } else if let Some(fraction) = layout::media_seek_at(width, dpi, progress, x, y) {
             self.media.seek(fraction);

@@ -312,6 +312,42 @@ pub fn volume_bar(dpi: u32) -> Bounds {
     scaled_bounds(VOLUME_BAR, dpi)
 }
 
+/// Where the player chips sit when two or more players are open: a row under the cover (80 square at 16, 24), as
+/// wide as the cover column, in DIPs from the body's left and top edges: x, y, width, height.
+const PLAYER_CHIPS: (f32, f32, f32, f32) = (16.0, 108.0, 84.0, 16.0);
+const PLAYER_GAP: f32 = 4.0;
+
+/// Chip `index` of `count` in pixels from the body's left and top edges: the row's width shared equally.
+pub fn player_chip(dpi: u32, count: usize, index: usize) -> Bounds {
+    let (x, y, width, height) = PLAYER_CHIPS;
+    let each = (width - PLAYER_GAP * (count.max(1) - 1) as f32) / count.max(1) as f32;
+    scaled_bounds(
+        (x + index as f32 * (each + PLAYER_GAP), y, each, height),
+        dpi,
+    )
+}
+
+/// The player chip under a window point, of `count`; none while the panel rows are not drawn.
+pub fn player_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    count: usize,
+    x: i32,
+    y: i32,
+) -> Option<usize> {
+    (0..count).find(|&index| {
+        panel_offset(
+            window_width,
+            dpi,
+            progress,
+            player_chip(dpi, count, index),
+            (x, y),
+        )
+        .is_some()
+    })
+}
+
 /// The volume a click at a window point sets: 0 at the bar's first pixel to 1 at its last; none
 /// outside the bar or while the row is not drawn.
 pub fn volume_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32) -> Option<f32> {
