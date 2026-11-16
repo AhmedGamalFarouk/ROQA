@@ -2,7 +2,7 @@ use crate::pins::{self, Pins};
 use crate::sort;
 use crate::window_model::{Identity, WindowKey, WindowModel, WindowRecord};
 use windows::Win32::{
-    Foundation::{HWND, LPARAM, WPARAM},
+    Foundation::{HWND, LPARAM, RECT, WPARAM},
     Globalization::{
         GetLocaleInfoW, GetUserDefaultUILanguage, LOCALE_IREADINGLAYOUT, LOCALE_RETURN_NUMBER,
     },
@@ -10,12 +10,13 @@ use windows::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
-            VK_D, VK_LWIN, VK_S, VK_TAB,
+            VK_B, VK_D, VK_LWIN, VK_RETURN, VK_S, VK_TAB,
         },
         Shell::{SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, ShellExecuteExW},
         WindowsAndMessaging::{
-            GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-            PostMessageW, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow,
+            GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+            IsWindow, IsWindowVisible, PostMessageW, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL,
+            SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
             ShowWindowAsync, WM_CLOSE,
         },
     },
@@ -233,9 +234,11 @@ pub enum Button {
     Quick,
     /// The Recycle Bin and the drives, in ROQA's own popup.
     Places,
+    /// Windows' own hidden-icons flyout, opened with Win+B and Enter and set beside the button.
+    Tray,
 }
 impl Button {
-    pub const ALL: [Button; 7] = [
+    pub const ALL: [Button; 8] = [
         Button::Start,
         Button::Search,
         Button::TaskView,
@@ -243,6 +246,7 @@ impl Button {
         Button::Desktop,
         Button::Quick,
         Button::Places,
+        Button::Tray,
     ];
     pub fn index(self) -> usize {
         self as usize
@@ -257,12 +261,13 @@ impl Button {
             "Show desktop",
             "Quick settings",
             "Drives and Recycle Bin",
+            "Show hidden icons",
         ][self.index()]
     }
     /// Settings store key.
     pub fn key(self) -> &'static str {
         [
-            "dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk", "dbquick", "dbplaces",
+            "dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk", "dbquick", "dbplaces", "dbtray",
         ][self.index()]
     }
     /// The keys a click sends: the Windows key alone opens Start; the rest are shell shortcuts. None for the
@@ -273,7 +278,7 @@ impl Button {
             Button::Search => Some(&[VK_LWIN, VK_S]),
             Button::TaskView => Some(&[VK_LWIN, VK_TAB]),
             Button::Desktop => Some(&[VK_LWIN, VK_D]),
-            Button::Minimized | Button::Quick | Button::Places => None,
+            Button::Minimized | Button::Quick | Button::Places | Button::Tray => None,
         }
     }
 }
@@ -281,7 +286,7 @@ impl Button {
 /// Which buttons are on, and the dock's reading direction. Default: Start, Search, the minimized list and show-desktop; Task View off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Buttons {
-    pub shown: [bool; 7],
+    pub shown: [bool; 8],
     /// Mirrored for a right-to-left UI language: the dock runs from the right edge, as the taskbar does.
     /// The host sets it from the system; it is not a stored setting.
     pub rtl: bool,
@@ -291,8 +296,8 @@ pub struct Buttons {
 }
 impl Buttons {
     #[cfg(test)]
-    pub const NONE: Buttons = Buttons::of([false; 7]);
-    pub const fn of(shown: [bool; 7]) -> Self {
+    pub const NONE: Buttons = Buttons::of([false; 8]);
+    pub const fn of(shown: [bool; 8]) -> Self {
         Self {
             shown,
             rtl: false,
@@ -314,18 +319,23 @@ impl Buttons {
         .filter(move |b| self.on(*b))
     }
     fn has_tail(self) -> bool {
-        self.on(Button::Quick) || self.on(Button::Minimized) || self.on(Button::Desktop)
+        self.tail().next().is_some()
     }
-    /// Quick settings, the chevron, then the pill.
+    /// The hidden-icons chevron, quick settings, the minimized chevron, then the pill.
     fn tail(self) -> impl Iterator<Item = Button> {
-        [Button::Quick, Button::Minimized, Button::Desktop]
-            .into_iter()
-            .filter(move |b| self.on(*b))
+        [
+            Button::Tray,
+            Button::Quick,
+            Button::Minimized,
+            Button::Desktop,
+        ]
+        .into_iter()
+        .filter(move |b| self.on(*b))
     }
 }
 impl Default for Buttons {
     fn default() -> Self {
-        Buttons::of([true, true, false, true, true, true, false])
+        Buttons::of([true, true, false, true, true, true, false, true])
     }
 }
 
@@ -443,7 +453,7 @@ fn tail_px(buttons: Buttons, dpi: u32) -> i32 {
         return px(PAD_DIPS, dpi);
     }
     px(SEP_DIPS, dpi)
-        + (i32::from(buttons.on(Button::Minimized)) + i32::from(buttons.on(Button::Quick)))
+        + (buttons.tail().count() as i32 - i32::from(buttons.on(Button::Desktop)))
             * px(BTN_DIPS, dpi)
         + px(
             if buttons.on(Button::Desktop) {
@@ -507,19 +517,20 @@ fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
             px(SLOT_DIPS, dpi),
         ),
         Hit::Button(Button::Desktop) => (width_px - strip, strip),
-        Hit::Button(button @ (Button::Minimized | Button::Quick)) => {
+        Hit::Button(button @ (Button::Minimized | Button::Quick | Button::Tray)) => {
             let end = if buttons.on(Button::Desktop) {
                 STRIP_DIPS
             } else {
                 PAD_DIPS
             };
-            // Quick settings sits left of the chevron when both are on.
-            let beside = if button == Button::Quick && buttons.on(Button::Minimized) {
-                btn
-            } else {
-                0
-            };
-            (width_px - px(end, dpi) - btn - beside, btn)
+            // Each button sits left of the tail buttons after it (all but the pill).
+            let beside = buttons
+                .tail()
+                .skip_while(|b| *b != button)
+                .skip(1)
+                .filter(|b| *b != Button::Desktop)
+                .count() as i32;
+            (width_px - px(end, dpi) - btn - beside * btn, btn)
         }
         Hit::Button(button) => {
             let at = buttons.lead().position(|b| b == button).unwrap_or(0) as i32;
@@ -616,6 +627,18 @@ pub fn drop_index(
     let x_px = ltr_x(buttons, x_px, width_px);
     let slot = (x_px - lead_px(buttons, dpi)).div_euclid(px(SLOT_DIPS, dpi).max(1));
     Some((slot - 1).clamp(0, last as i32) as usize)
+}
+
+/// How far item `index` sits from its place, in slots (+1 toward the end), while item `from` is held and the gap
+/// is at `gap` (a slot position that eases between slots): items between the held one and the gap close up
+/// around it and the gap opens at its end.
+pub fn drag_shift(from: usize, gap: f32, index: usize) -> f32 {
+    let at = index as f32;
+    match index.cmp(&from) {
+        std::cmp::Ordering::Greater => -(gap - at + 1.0).clamp(0.0, 1.0),
+        std::cmp::Ordering::Less => (at - gap + 1.0).clamp(0.0, 1.0),
+        std::cmp::Ordering::Equal => 0.0,
+    }
 }
 
 /// The pin that represents `item`, if any: its identity, or the executable pin that claimed it.
@@ -750,6 +773,46 @@ pub fn send_keys(keys: &[VIRTUAL_KEY]) -> bool {
         .collect();
     // SAFETY: `events` is a live slice of fully initialized INPUT structs and the size is theirs.
     unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) as usize == events.len() }
+}
+
+/// How long the shell is given to move focus to the tray (after Win+B) and to draw the flyout (after Enter).
+const TRAY_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Opens Windows' own hidden-icons flyout on the user's click (Win+B, then Enter; Windows draws it and handles
+/// every click in it) and sets it centred above `anchor` (the button's screen x, the dock's top y), inside `work`.
+/// A thread that lives about half a second waits out the shell's focus moves; nothing runs between clicks.
+/// The flyout is only moved when the foreground window is the flyout itself.
+pub fn open_tray_flyout(anchor: (i32, i32), work: crate::layout::Bounds) {
+    let _ = std::thread::Builder::new().spawn(move || {
+        let sent = |keys| send_keys(keys).then(|| std::thread::sleep(TRAY_WAIT));
+        if sent(&[VK_LWIN, VK_B]).is_none() || sent(&[VK_RETURN]).is_none() {
+            return;
+        }
+        // SAFETY: scalar window queries and one move of a foreign window revalidated by its class name.
+        unsafe {
+            let flyout = GetForegroundWindow();
+            let mut class = [0u16; 64];
+            let len = GetClassNameW(flyout, &mut class).max(0) as usize;
+            let mut rect = RECT::default();
+            if String::from_utf16_lossy(&class[..len]) != "TopLevelWindowForOverflowXamlIsland"
+                || GetWindowRect(flyout, &mut rect).is_err()
+            {
+                return;
+            }
+            let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+            let x = (anchor.0 - width / 2).clamp(work.x, (work.x + work.width - width).max(work.x));
+            let y = (anchor.1 - height).max(work.y);
+            let _ = SetWindowPos(
+                flyout,
+                None,
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    });
 }
 
 /// Asks each window to close (`WM_CLOSE`, posted: an app may refuse or prompt, and ROQA never waits).
@@ -1285,6 +1348,22 @@ mod tests {
     }
 
     #[test]
+    fn drag_shift_opens_the_gap_at_either_end_and_in_a_one_icon_dock() {
+        // Holding item 1 of 4, gap at rest on 1: nothing moves.
+        assert!((0..4).all(|i| drag_shift(1, 1.0, i) == 0.0));
+        // Gap dragged right to 3: items 2 and 3 close left, item 0 stays.
+        let to = |gap| [0, 2, 3].map(|i| drag_shift(1, gap, i));
+        assert_eq!(to(3.0), [0.0, -1.0, -1.0]);
+        // Gap dragged left to 0: item 0 steps right, the later items stay.
+        assert_eq!(drag_shift(1, 0.0, 0), 1.0);
+        assert_eq!(drag_shift(1, 0.0, 2), 0.0);
+        // Halfway between slots is halfway shifted.
+        assert_eq!(drag_shift(1, 1.5, 2), -0.5);
+        // A one-icon dock has nothing to shift.
+        assert_eq!(drag_shift(0, 0.0, 0), 0.0);
+    }
+
+    #[test]
     fn pin_toggle_target_follows_the_claiming_pin() {
         let running = |identity, exe: &str| DockItem {
             members: Vec::new(),
@@ -1322,11 +1401,11 @@ mod tests {
     }
 
     fn only(button: Button) -> Buttons {
-        let mut on = [false; 7];
+        let mut on = [false; 8];
         on[button.index()] = true;
         Buttons::of(on)
     }
-    const ALL: Buttons = Buttons::of([true; 7]);
+    const ALL: Buttons = Buttons::of([true; 8]);
 
     #[test]
     fn width_grows_by_each_button_and_none_keeps_the_old_dock() {
@@ -1356,12 +1435,12 @@ mod tests {
                 + SEP_DIPS
                 + SLOT_DIPS * 3
                 + SEP_DIPS
-                + 2 * BTN_DIPS
+                + 3 * BTN_DIPS
                 + STRIP_DIPS
         );
         assert_eq!(
             Buttons::default().shown,
-            [true, true, false, true, true, true, false]
+            [true, true, false, true, true, true, false, true]
         );
     }
 
@@ -1392,7 +1471,7 @@ mod tests {
     #[test]
     fn hit_testing_maps_buttons_slots_and_gaps() {
         // 96 dpi, Start + Search + chevron + strip, 2 slots: pad 8, buttons 44, sep 8, slots 56.
-        let b = Buttons::of([true, true, false, true, true, false, false]);
+        let b = Buttons::of([true, true, false, true, true, false, false, false]);
         let width = width_px(b, 2, 96);
         let at = |x| hit_at(b, x, width, 96, 2);
         assert_eq!(at(7), None);
@@ -1432,7 +1511,7 @@ mod tests {
 
     #[test]
     fn slot_centres_and_drops_follow_the_lead_buttons() {
-        let b = Buttons::of([true, true, false, false, false, false, false]);
+        let b = Buttons::of([true, true, false, false, false, false, false, false]);
         // pad 8 + two buttons 88 + separator 8 = 104; slot 1 centre = 104 + 56 + 28.
         let width = width_px(b, 6, 96);
         assert_eq!(slot_center_x(1000, b, width, 1, 96), 1000 + 104 + 56 + 28);
@@ -1449,11 +1528,12 @@ mod tests {
         assert_eq!(Button::Desktop.keys(), Some(&[VK_LWIN, VK_D][..]));
         assert_eq!(Button::Minimized.keys(), None);
         assert_eq!(Button::Quick.keys(), None);
+        assert_eq!(Button::Tray.keys(), None);
         let keys: Vec<_> = Button::ALL.iter().map(|b| b.key()).collect();
         assert_eq!(
             keys,
             [
-                "dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk", "dbquick", "dbplaces"
+                "dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk", "dbquick", "dbplaces", "dbtray"
             ]
         );
     }
@@ -1532,8 +1612,8 @@ mod tests {
         // Lead: pad 8 + two buttons 88 = 96, then half of the 8 separator.
         let [lead, tail] = separators(Buttons::default(), width, 96);
         assert_eq!(lead, Some(8 + 88 + 2));
-        // Tail: separator 8, quick settings 44, chevron 44, the desktop control at the right edge.
-        assert_eq!(tail, Some(width - (8 + 44 + 44 + STRIP_DIPS) + 8));
+        // Tail: separator 8, hidden icons 44, quick settings 44, chevron 44, the desktop control at the right edge.
+        assert_eq!(tail, Some(width - (8 + 44 + 44 + 44 + STRIP_DIPS) + 8));
         assert_eq!(separators(N, width, 96), [None, None]);
         assert_eq!(separators(only(Button::Start), width, 96)[1], None);
         assert_eq!(separators(only(Button::Desktop), width, 96)[0], None);

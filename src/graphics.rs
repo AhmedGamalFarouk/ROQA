@@ -148,9 +148,15 @@ pub struct DockSlot<'a> {
     pub badge: dock::Badge,
     /// Hover animation progress, 0 (rest) to 1 (hovered).
     pub hover: f32,
+    /// Pixels the slot sits from its cell while a drag opens a gap, or follows the pointer when it is the held one.
+    pub dx: f32,
+    /// The icon being dragged: drawn last, over the others.
+    pub held: bool,
 }
 
 pub struct DockScene<'a> {
+    /// Window x of the drop marker (reduced motion draws a Lamp capsule there instead of sliding the icons).
+    pub marker: Option<f32>,
     pub slots: Vec<DockSlot<'a>>,
     /// Which taskbar buttons are on, and each enabled one's hover progress.
     pub layout: dock::Buttons,
@@ -2210,15 +2216,15 @@ fn paint_slots(
             bottom: rect.bottom,
         }
     };
-    for (index, slot) in scene.slots.iter().take(visible).enumerate() {
-        draw_slot(
-            context,
-            &cell(dock::Hit::Slot(index)),
-            slot,
-            scene.dpi,
-            px,
-            p,
-        )?;
+    // The held icon last, so it rides over its neighbours.
+    for held in [false, true] {
+        for (index, slot) in scene.slots.iter().take(visible).enumerate() {
+            if slot.held == held {
+                let mut at = cell(dock::Hit::Slot(index));
+                (at.left, at.right) = (at.left + slot.dx, at.right + slot.dx);
+                draw_slot(context, &at, slot, scene.dpi, px, p)?;
+            }
+        }
     }
     for &(button, hover) in &scene.buttons {
         draw_button(
@@ -2247,6 +2253,16 @@ fn paint_slots(
                 bottom: rect.bottom - px(20),
             };
             context.FillRoundedRectangle(&rounded(hairline, px(3) / 2.0), &line);
+        }
+        if let Some(x) = scene.marker {
+            let mark = D2D_RECT_F {
+                left: rect.left + x - px(3) / 2.0,
+                top: (rect.top + rect.bottom) / 2.0 - px(18),
+                right: rect.left + x + px(3) / 2.0,
+                bottom: (rect.top + rect.bottom) / 2.0 + px(18),
+            };
+            let lamp = context.CreateSolidColorBrush(&tint(p.accent_dim(false, 1.0)), None)?;
+            context.FillRoundedRectangle(&rounded(mark, px(3) / 2.0), &lamp);
         }
     }
     Ok(())
@@ -2300,6 +2316,7 @@ fn draw_button(
         dock::Button::Quick => Glyph::Gear,
         dock::Button::Minimized => Glyph::Chevron,
         dock::Button::Places => Glyph::Drive,
+        dock::Button::Tray => Glyph::Tray,
     };
     glyphs::draw(context, square, shape, with_alpha(p.glyph, 1.0))
 }

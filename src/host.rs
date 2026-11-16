@@ -939,8 +939,12 @@ impl Surface {
         &mut self,
         items: &[DockItem],
         icons: &[Vec<Option<Arc<IconPixels>>>],
+        drag: Option<&Drag>,
     ) -> Result<()> {
         let now = Instant::now();
+        let drag = drag.filter(|drag| drag.active);
+        let (calm, rtl) = (motion::calm(), self.dock_buttons.rtl);
+        let step = dock::px(dock::SLOT_DIPS, self.dpi) as f32 * if rtl { -1.0 } else { 1.0 };
         // A hover began at a mouse message; its first frame comes later. Start the clocks here so that frame
         // shows the rest value and the motion keeps its whole duration.
         if self.hover_unpainted {
@@ -968,27 +972,71 @@ impl Surface {
             picker: true,
             badge: dock::Badge::None,
             hover: hover(Hit::Slot(0)),
+            dx: 0.0,
+            held: false,
         }];
         slots.extend(
             items
                 .iter()
                 .zip(icons)
                 .enumerate()
-                .map(|(index, (item, icon))| DockSlot {
-                    icon: icon.first().and_then(Option::as_deref),
-                    mini: if item.members.is_empty() {
-                        Vec::new()
-                    } else {
-                        icon.iter().map(Option::as_deref).collect()
-                    },
-                    running: !item.windows.is_empty(),
-                    windows: item.windows.len(),
-                    active: item.active,
-                    picker: false,
-                    badge: item.badge,
-                    hover: hover(Hit::Slot(index + 1)),
+                .map(|(index, (item, icon))| {
+                    // The held icon follows the pointer, lifted; the others slide to open the gap.
+                    let held = drag.is_some_and(|drag| drag.from == index);
+                    let dx = match drag {
+                        Some(drag) if held => {
+                            let (left, cell) = dock::span(
+                                self.dock_buttons,
+                                self.bounds.width,
+                                self.dpi,
+                                Hit::Slot(index + 1),
+                            );
+                            (drag.at - left - cell / 2) as f32
+                        }
+                        Some(drag) if !calm => {
+                            dock::drag_shift(drag.from, drag.gap.value(now), index) * step
+                        }
+                        _ => 0.0,
+                    };
+                    DockSlot {
+                        icon: icon.first().and_then(Option::as_deref),
+                        mini: if item.members.is_empty() {
+                            Vec::new()
+                        } else {
+                            icon.iter().map(Option::as_deref).collect()
+                        },
+                        running: !item.windows.is_empty(),
+                        windows: item.windows.len(),
+                        active: item.active,
+                        picker: false,
+                        badge: item.badge,
+                        hover: if held {
+                            1.0
+                        } else {
+                            hover(Hit::Slot(index + 1))
+                        },
+                        dx,
+                        held,
+                    }
                 }),
         );
+        // Reduced motion: no sliding, a Lamp capsule on the edge where the icon would land.
+        let marker = drag
+            .filter(|drag| calm && drag.group.is_none() && drag.gap.target() != drag.from as f32)
+            .map(|drag| {
+                let slot = drag.gap.target() as usize;
+                let (left, cell) = dock::span(
+                    self.dock_buttons,
+                    self.bounds.width,
+                    self.dpi,
+                    Hit::Slot(slot + 1),
+                );
+                (if (slot > drag.from) != rtl {
+                    left + cell
+                } else {
+                    left
+                }) as f32
+            });
         // Only the window rows from the content's top down are visible and take input: a region clips
         // the rest.
         let slide = dock::slide_offset(self.slide.value(now), self.bounds.height);
@@ -1000,6 +1048,7 @@ impl Surface {
             height: self.bounds.height - top,
         }])?;
         self.canvas.paint_dock(&DockScene {
+            marker,
             slots,
             layout: self.dock_buttons,
             buttons: Button::ALL
@@ -1017,6 +1066,13 @@ impl Surface {
     fn dock_hit(&self, lparam: LPARAM, slots: usize) -> Option<Hit> {
         let x = i32::from((lparam.0 & 0xffff) as u16 as i16);
         dock::hit_at(self.dock_buttons, x, self.bounds.width, self.dpi, slots)
+    }
+    /// The item a drag at window x lands on, and whether x is on that slot's middle (a folder drop).
+    fn drop_at(&self, x: i32, items: usize, slots: usize) -> Option<(usize, bool)> {
+        let (buttons, width, dpi) = (self.dock_buttons, self.bounds.width, self.dpi);
+        let slot = dock::drop_index(buttons, x, width, dpi, slots, items)?;
+        let (left, cell) = dock::span(buttons, width, dpi, Hit::Slot(slot + 1));
+        Some((slot, dock::folder_drop(x - left, cell, dpi)))
     }
     /// The pointer's cell index (the hover tween and UIA child), if over a slot or button.
     fn dock_cell(&self, lparam: LPARAM, slots: usize) -> Option<usize> {
@@ -1146,6 +1202,10 @@ struct Drag {
     from: usize,
     x: i32,
     active: bool,
+    /// Pointer x now, the slot the gap eases to (held on a slot's middle, a folder drop), and that middle slot.
+    at: i32,
+    gap: Tween,
+    group: Option<usize>,
 }
 
 /// Applies one pin edit: only a real change (`edit` returns true) rewrites the store's pin section and marks
@@ -1533,7 +1593,7 @@ impl Desktop {
             // Sized after the push: icons are extracted once, for the densest dock.
             let icons = self.dock_icons();
             let last = self.surfaces.len() - 1;
-            self.surfaces[last].paint_dock(&self.dock_items, &icons)?;
+            self.surfaces[last].paint_dock(&self.dock_items, &icons, self.drag.as_ref())?;
         }
         // Shown after its first paint, and never on the monitor a full-screen app covers.
         let visible = !self
@@ -2438,7 +2498,9 @@ impl Desktop {
                         &self.shelf,
                         &self.pages,
                     )?,
-                    SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
+                    SurfaceKind::Dock => {
+                        surface.paint_dock(&self.dock_items, &icons, self.drag.as_ref())?
+                    }
                 }
                 surface.live = surface.motion.running(now)
                     || surface.volume_fill.running(now)
@@ -2448,7 +2510,10 @@ impl Desktop {
                     || surface.slide.running(now)
                     || match &surface.role {
                         Role::Notch { intent, .. } => intent.is_some(),
-                        Role::Dock { slots, .. } => slots.iter().any(|tween| tween.running(now)),
+                        Role::Dock { slots, .. } => {
+                            slots.iter().any(|tween| tween.running(now))
+                                || self.drag.as_ref().is_some_and(|drag| drag.gap.running(now))
+                        }
                     };
                 // A notch opened before a window covered it was held up; closed, it goes now.
                 settled |= !surface.live
@@ -2905,7 +2970,7 @@ impl Desktop {
             );
             dock.window.resize(dock.bounds)?;
             dock.canvas.resize(dock.bounds)?;
-            dock.paint_dock(&self.dock_items, &icons)?;
+            dock.paint_dock(&self.dock_items, &icons, self.drag.as_ref())?;
         }
         Ok(())
     }
@@ -2973,7 +3038,7 @@ impl Desktop {
             .iter_mut()
             .filter(|s| s.kind() == SurfaceKind::Dock && s.visible)
         {
-            dock.paint_dock(&self.dock_items, &icons)?;
+            dock.paint_dock(&self.dock_items, &icons, self.drag.as_ref())?;
         }
         Ok(())
     }
@@ -3274,12 +3339,34 @@ impl Desktop {
         match (button, button.keys()) {
             (Button::Quick, _) => self.open_quick_menu(hwnd),
             (Button::Places, _) => self.open_places_menu(hwnd),
+            (Button::Tray, _) => self.open_tray(hwnd),
             (_, Some(keys)) => {
                 if !dock::send_keys(keys) {
                     eprintln!("Dock button: Windows refused the key input");
                 }
             }
             (_, None) => self.open_minimized_menu(hwnd, model),
+        }
+    }
+    /// The hidden-icons button: Windows' own flyout, set above the button.
+    fn open_tray(&mut self, hwnd: HWND) {
+        let Some(dock) = self.dock_at(hwnd) else {
+            return;
+        };
+        let (left, width) = dock::span(
+            dock.dock_buttons,
+            dock.bounds.width,
+            dock.dpi,
+            Hit::Button(Button::Tray),
+        );
+        if let Some(work) = self
+            .monitors
+            .iter()
+            .find(|m| m.device == dock.monitor)
+            .map(|m| m.work)
+        {
+            let top = dock.bounds.y - dock::px(8, dock.dpi);
+            dock::open_tray_flyout((dock.bounds.x + left + width / 2, top), work);
         }
     }
     /// The quick settings rows right now: what Windows reports on this machine, each row's text being the
@@ -3942,39 +4029,38 @@ impl Desktop {
             return false;
         }
         let slots = self.dock_slots();
-        let target = self.dock_at(hwnd).and_then(|dock| {
-            let (x, _) = point(lparam);
-            let slot = dock::drop_index(
-                dock.dock_buttons,
-                x,
-                dock.bounds.width,
-                dock.dpi,
-                slots,
-                self.dock_items.len(),
-            )?;
-            let hit = Hit::Slot(slot + 1);
-            let item = self.dock_items.get(slot)?;
-            let pin = dock::pinned_as(item, &self.pins).unwrap_or_else(|| item.identity.clone());
-            let (left, width) = dock::span(dock.dock_buttons, dock.bounds.width, dock.dpi, hit);
-            Some((pin, dock::folder_drop(x - left, width, dock.dpi)))
-        });
-        if let Some((target, group)) = target
-            && let Some(source) = self.dock_items.get(drag.from)
+        // The lifted icon and the gap go (a drop that changes nothing still needs this repaint).
+        if let Some(dock) = self.surfaces.iter_mut().find(|s| s.window.0 == hwnd) {
+            dock.live = true;
+        }
+        let drop = self
+            .dock_at(hwnd)
+            .and_then(|dock| dock.drop_at(point(lparam).0, self.dock_items.len(), slots));
+        if let Some((slot, group)) = drop
+            && let (Some(item), Some(source)) =
+                (self.dock_items.get(slot), self.dock_items.get(drag.from))
         {
+            let target = dock::pinned_as(item, &self.pins).unwrap_or_else(|| item.identity.clone());
             let group = group && source.members.is_empty();
             let source =
                 dock::pinned_as(source, &self.pins).unwrap_or_else(|| source.identity.clone());
             self.change_pins(|pins| {
                 if group {
-                    pins.group(&source, &target)
-                } else {
-                    pins.position(&source)
-                        .zip(
-                            pins.position(&target)
-                                .or_else(|| pins.items().len().checked_sub(1)),
-                        )
-                        .is_some_and(|(from, to)| pins.move_to(from, to))
+                    return pins.group(&source, &target);
                 }
+                // A running app that is not pinned pins where it is dropped (never on its own slot).
+                let added = pins.position(&source).is_none();
+                if added && (slot == drag.from || pins.add(source.clone()).is_err()) {
+                    return false;
+                }
+                let moved = pins
+                    .position(&source)
+                    .zip(
+                        pins.position(&target)
+                            .or_else(|| pins.items().len().checked_sub(1)),
+                    )
+                    .is_some_and(|(from, to)| pins.move_to(from, to));
+                added || moved
             });
         }
         true
@@ -4552,6 +4638,9 @@ impl Desktop {
                     from,
                     x: point(message.lParam).0,
                     active: false,
+                    at: 0,
+                    gap: Tween::rest(from as f32),
+                    group: None,
                 });
                 if self.drag.is_some() {
                     // SAFETY: captures the pointer for this thread's own live dock window.
@@ -4566,13 +4655,32 @@ impl Desktop {
                     if message.wParam.0 & MK_LBUTTON == 0 {
                         // The release was lost (capture stolen): no drag, no click.
                         self.drag = None;
-                    } else if !drag.active {
-                        drag.active =
-                            dock::drag_started(drag.x, point(message.lParam).0, surface.dpi);
+                        surface.live = true;
+                    } else {
+                        let x = point(message.lParam).0;
+                        drag.active |= dock::drag_started(drag.x, x, surface.dpi);
+                        if drag.active {
+                            drag.at = x;
+                            let drop = surface.drop_at(x, self.dock_items.len(), slots);
+                            drag.group = drop
+                                .filter(|&(slot, middle)| middle && slot != drag.from)
+                                .map(|(slot, _)| slot);
+                            if let (None, Some((slot, _))) = (drag.group, drop) {
+                                drag.gap
+                                    .retarget(slot as f32, motion::POP_TIME, motion::POP);
+                            }
+                            surface.live = true;
+                        }
                     }
                 }
                 if let Role::Dock { hover, .. } = surface.role {
-                    let cell = surface.dock_cell(message.lParam, slots);
+                    // While dragging, only the folder target lights up.
+                    let cell = match &self.drag {
+                        Some(drag) if drag.active => drag.group.and_then(|slot| {
+                            dock::cell_index(surface.dock_buttons, slots, Hit::Slot(slot + 1))
+                        }),
+                        _ => surface.dock_cell(message.lParam, slots),
+                    };
                     if entered || cell != hover {
                         surface.hover_dock(cell, true);
                     }
@@ -4754,7 +4862,9 @@ impl Desktop {
                         &self.shelf,
                         &self.pages,
                     )?,
-                    SurfaceKind::Dock => surface.paint_dock(&self.dock_items, &icons)?,
+                    SurfaceKind::Dock => {
+                        surface.paint_dock(&self.dock_items, &icons, self.drag.as_ref())?
+                    }
                 }
             }
             surface.overlay = false;

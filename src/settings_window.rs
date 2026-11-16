@@ -381,6 +381,7 @@ const PAGES: &[Page] = &[
                     r(DBTN + 4, C, "Show desktop pill", ""),
                     r(DBTN + 5, C, "Quick settings button", ""),
                     r(DBTN + 6, C, "Drives and Recycle Bin button", ""),
+                    r(DBTN + 7, C, "Hidden icons button", ""),
                 ],
             },
             Card {
@@ -1419,7 +1420,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         DOCK_LEFT => &mut s.dock_left,
         PILLLOW => &mut s.widgets.pill_low,
         TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
-        DBTN..=136 => &mut s.dock_buttons.shown[id - DBTN],
+        DBTN..=137 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,
     })
 }

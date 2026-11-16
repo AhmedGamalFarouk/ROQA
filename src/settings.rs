@@ -653,7 +653,7 @@ mod tests {
             diagnostics: Some("  \"C:\\logs\\roqa.json\"  ".into()),
             theme: Theme::Frosted,
             dock_style: DockStyle::Attached,
-            dock_buttons: Buttons::of([false, true, true, false, true, true, false]),
+            dock_buttons: Buttons::of([false, true, true, false, true, true, false, true]),
             desktop_only: true,
             edge_volume: false,
             edge_brightness: false,
@@ -947,7 +947,7 @@ mod tests {
             diagnostics: Some("C:\\a=b\\r.json".into()),
             theme: Theme::Midnight,
             dock_style: DockStyle::Attached,
-            dock_buttons: Buttons::of([false, true, true, false, true, true, false]),
+            dock_buttons: Buttons::of([false, true, true, false, true, true, false, true]),
             desktop_only: true,
             edge_volume: true,
             tabs: [false, true, false, true, false, true, true],
@@ -1062,13 +1062,13 @@ mod tests {
         let defaults = Settings::default();
         assert_eq!(
             defaults.dock_buttons.shown,
-            [true, true, false, true, true, true, false]
+            [true, true, false, true, true, true, false, true]
         );
         let mut off = Settings::default();
         assert!(off.set("dbstart", "0") && off.set("dbtask", "1"));
         assert_eq!(
             off.dock_buttons.shown,
-            [false, true, true, true, true, true, false]
+            [false, true, true, true, true, true, false, true]
         );
         let mut text = String::new();
         off.write_lines(&mut text);
