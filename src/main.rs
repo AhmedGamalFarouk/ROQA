@@ -25,6 +25,7 @@ mod error_log;
 mod eyes;
 mod graphics;
 mod host;
+mod hotkeys;
 mod icons;
 mod ipc;
 mod layout;

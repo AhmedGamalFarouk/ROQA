@@ -13,6 +13,7 @@ use crate::{
         COVER_DIPS, Canvas, DockScene, DockSlot, Fx, Graphics, Grip, NotchScene, RailScene,
         ShelfSlot,
     },
+    hotkeys,
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
     layout::{self, Bounds, DockStyle, SurfaceKind, placement_styled},
@@ -59,7 +60,7 @@ use windows::Win32::{
         Controls::WM_MOUSELEAVE,
         Input::KeyboardAndMouse::{
             GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-            VK_CONTROL,
+            VK_CONTROL, VK_MENU,
         },
         WindowsAndMessaging::*,
     },
@@ -1366,6 +1367,9 @@ struct Desktop {
     prayer: PrayerRun,
     /// What coding agents reported (`roqa.exe agent`): the pill text and the eyes' mood.
     agents: agent::Agents,
+    /// The registered global shortcuts and the dock's hidden-by-shortcut state (this run only).
+    hotkeys: hotkeys::Hotkeys,
+    dock_away: bool,
     /// When the next water reminder is due; `None` until `refresh_water` computes it.
     water_due: Option<Instant>,
 }
@@ -1504,8 +1508,11 @@ impl Desktop {
             limits_open: false,
             prayer: PrayerRun::default(),
             agents: agent::Agents::default(),
+            hotkeys: hotkeys::Hotkeys::default(),
+            dock_away: false,
             water_due: None,
         };
+        desktop.hotkeys.sync(desktop.settings.hotkeys);
         if desktop.settings.notch {
             desktop.show(SurfaceKind::Notch)?;
         }
@@ -2580,7 +2587,13 @@ impl Desktop {
         )?);
         self.sync_settings_pins(0);
         self.sync_water();
+        self.sync_settings_hotkeys();
         Ok(())
+    }
+    fn sync_settings_hotkeys(&mut self) {
+        if let Some(window) = &mut self.settings_window {
+            window.set_hotkeys(&self.hotkeys.notes());
+        }
     }
     fn sync_settings_pins(&self, selected: usize) {
         if let Some(window) = &self.settings_window {
@@ -2727,6 +2740,10 @@ impl Desktop {
             self.tuck_generation = None;
         }
         self.edges_dirty = true;
+        if old.hotkeys != self.settings.hotkeys {
+            self.hotkeys.sync(self.settings.hotkeys);
+            self.sync_settings_hotkeys();
+        }
         let widgets_changed = old.widgets != self.settings.widgets;
         self.pages.widgets = self.settings.widgets;
         self.pages.water.1 = self.settings.water_cfg[0] as u8;
@@ -3392,6 +3409,56 @@ impl Desktop {
         {
             let top = dock.bounds.y - dock::px(8, dock.dpi);
             dock::open_tray_flyout((dock.bounds.x + left + width / 2, top), work);
+        }
+    }
+    /// A global shortcut (`hotkeys.rs`) fired; a message queued just before its switch went off is ignored.
+    fn hotkey(&mut self, id: usize, catalog: &Catalog) -> Result<()> {
+        let Some((group, index)) =
+            hotkeys::action(id).filter(|&(group, _)| self.settings.hotkeys[group])
+        else {
+            return Ok(());
+        };
+        match group {
+            0 => self.toggle_notch(),
+            1 => self.activate(HWND::default(), Some(Hit::Slot(index + 1)), catalog)?,
+            2 => {
+                self.dock_away = !self.dock_away;
+                self.apply_visibility()?;
+            }
+            _ => {
+                let dock = self
+                    .surfaces
+                    .iter()
+                    .find(|s| s.kind() == SurfaceKind::Dock && s.dock_buttons.on(Button::Tray))
+                    .map(|s| s.window.0);
+                if let Some(hwnd) = dock {
+                    // The keys are still down: lift Ctrl and Alt so the flyout's Win+B is not Ctrl+Alt+Win+B.
+                    dock::release_keys(&[VK_CONTROL, VK_MENU]);
+                    self.open_tray(hwnd);
+                } else {
+                    self.show_notice("Turn on the hidden icons button.".into(), Instant::now());
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Opens every closed notch, or closes the open ones.
+    fn toggle_notch(&mut self) {
+        let open = self
+            .surfaces
+            .iter()
+            .any(|s| s.kind() == SurfaceKind::Notch && s.motion.target() >= 1.0);
+        if !open {
+            return self.open_notches();
+        }
+        for surface in &mut self.surfaces {
+            if let Role::Notch { intent, linger, .. } = &mut surface.role {
+                (*intent, *linger) = (None, None);
+                surface
+                    .motion
+                    .retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
+                surface.live = true;
+            }
         }
     }
     /// The quick settings rows right now: what Windows reports on this machine, each row's text being the
@@ -4870,7 +4937,7 @@ impl Desktop {
                 .iter()
                 .any(|(_, device)| device == &surface.monitor)
                 && match surface.kind() {
-                    SurfaceKind::Dock => self.tuck.shown(&surface.monitor),
+                    SurfaceKind::Dock => self.tuck.shown(&surface.monitor) && !self.dock_away,
                     // An open notch stays up while a window slides under it.
                     SurfaceKind::Notch => {
                         self.tuck_notch.shown(&surface.monitor) || surface.motion.target() > 0.0
@@ -5438,6 +5505,10 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                     ));
                 }
                 return Ok(false);
+            }
+            if message.message == WM_HOTKEY {
+                desktop.hotkey(message.wParam.0, catalog)?;
+                continue;
             }
             if desktop.shell_hook != 0 && message.message == desktop.shell_hook {
                 desktop.note_shell_event(message.wParam.0, message.lParam.0 as usize);

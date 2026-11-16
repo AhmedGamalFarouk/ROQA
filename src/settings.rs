@@ -3,6 +3,7 @@
 
 use crate::{
     dock::{Button, Buttons},
+    hotkeys,
     layout::{DockStyle, SurfaceKind},
     pomo,
     prayer::Method,
@@ -104,6 +105,8 @@ pub struct Settings {
     pub pomo_cfg: pomo::Config,
     /// Tint progress bars and highlights with Windows accent colour; false (off) by default.
     pub match_accent: bool,
+    /// Global shortcuts (`hotkeys.rs`), one switch per group; all off until asked for.
+    pub hotkeys: [bool; hotkeys::COUNT],
 }
 
 impl Default for Settings {
@@ -153,6 +156,7 @@ impl Default for Settings {
             water_cfg: water::DEFAULT,
             pomo_cfg: pomo::DEFAULT,
             match_accent: false,
+            hotkeys: [false; hotkeys::COUNT],
         }
     }
 }
@@ -368,6 +372,12 @@ impl Settings {
                 .zip(flag(value))
                 .map(|(tab, on)| self.tabs[tab.index()] = on)
                 .is_some(),
+            _ if key.starts_with("hk") => hotkeys::KEYS
+                .iter()
+                .position(|name| key.strip_prefix("hk") == Some(name))
+                .zip(flag(value))
+                .map(|(group, on)| self.hotkeys[group] = on)
+                .is_some(),
             "shelfcap" => value.parse().map(|v| self.shelf_cap = v).is_ok(),
             "theme" => Theme::from_key(value).map(|v| self.theme = v).is_some(),
             _ if Button::ALL.iter().any(|b| b.key() == key) => Button::ALL
@@ -517,6 +527,9 @@ pcfg={},{},{},{}
                 u8::from(self.tabs[tab.index()])
             ));
         }
+        for (name, on) in hotkeys::KEYS.iter().zip(self.hotkeys) {
+            out.push_str(&format!("hk{name}={}\n", u8::from(on)));
+        }
         for device in self.off_monitors.iter().filter(one_line) {
             out.push_str(&format!("off={device}\n"));
         }
@@ -590,6 +603,24 @@ mod tests {
             }
         }
         assert_eq!(restored.widgets, settings.widgets);
+    }
+
+    #[test]
+    fn hotkeys_default_off_round_trip_and_ignore_unknown_groups() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.hotkeys, [false; hotkeys::COUNT]);
+        assert!(settings.set("hkapps", "1") && settings.set("hktray", "1"));
+        assert!(!settings.set("hkfuture", "1") && !settings.set("hknotch", "2"));
+        assert_eq!(settings.hotkeys, [false, true, false, true]);
+        let mut text = String::new();
+        settings.write_lines(&mut text);
+        assert!(text.lines().any(|l| l == "hkapps=1") && text.lines().any(|l| l == "hknotch=0"));
+        let mut back = Settings::default();
+        for line in text.lines() {
+            let (key, value) = line.split_once('=').unwrap();
+            back.set(key, value);
+        }
+        assert_eq!(back.hotkeys, settings.hotkeys);
     }
 
     #[test]

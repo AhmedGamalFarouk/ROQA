@@ -752,7 +752,22 @@ pub fn launch_with(target: &str, parameters: Option<&str>) -> bool {
 /// Taps `keys` together (down in order, up in reverse) with one `SendInput`, on the user's click only. No
 /// hook and nothing stays pressed. False when Windows injected fewer events than asked.
 pub fn send_keys(keys: &[VIRTUAL_KEY]) -> bool {
-    let key = |vk: VIRTUAL_KEY, up: bool| INPUT {
+    let events: Vec<INPUT> = keys
+        .iter()
+        .map(|&vk| key_event(vk, false))
+        .chain(keys.iter().rev().map(|&vk| key_event(vk, true)))
+        .collect();
+    send_events(&events)
+}
+
+/// Lifts `keys` (key-up only) while the user still holds them, so the keys sent next are not combined with them.
+pub fn release_keys(keys: &[VIRTUAL_KEY]) -> bool {
+    let events: Vec<INPUT> = keys.iter().map(|&vk| key_event(vk, true)).collect();
+    send_events(&events)
+}
+
+fn key_event(vk: VIRTUAL_KEY, up: bool) -> INPUT {
+    INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
@@ -765,14 +780,12 @@ pub fn send_keys(keys: &[VIRTUAL_KEY]) -> bool {
                 ..Default::default()
             },
         },
-    };
-    let events: Vec<INPUT> = keys
-        .iter()
-        .map(|&vk| key(vk, false))
-        .chain(keys.iter().rev().map(|&vk| key(vk, true)))
-        .collect();
+    }
+}
+
+fn send_events(events: &[INPUT]) -> bool {
     // SAFETY: `events` is a live slice of fully initialized INPUT structs and the size is theirs.
-    unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) as usize == events.len() }
+    unsafe { SendInput(events, std::mem::size_of::<INPUT>() as i32) as usize == events.len() }
 }
 
 /// How long the shell is given to move focus to the tray (after Win+B) and to draw the flyout (after Enter).

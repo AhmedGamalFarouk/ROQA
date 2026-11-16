@@ -9,6 +9,7 @@ use crate::{
     agent_hooks,
     dock::{foreground_key, restore_foreground},
     graphics::{Glyph, draw_settings_glyph, round_gdi},
+    hotkeys,
     layout::DockStyle,
     native_window,
     picker::{
@@ -133,6 +134,8 @@ const PILLLOW: usize = 213;
 /// The agent-status switch, then one button per `agent_hooks::AGENTS` entry.
 const AGENT_ON: usize = 214;
 const AGENT_BTN: usize = 215;
+/// The four shortcut switches (`hotkeys::KEYS` order).
+const HOTKEY: usize = 222;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -540,6 +543,29 @@ const PAGES: &[Page] = &[
         ],
     },
     Page {
+        name: "Hotkeys",
+        cards: &[
+            Card {
+                label: "Shortcuts",
+                rows: &[
+                    r(HOTKEY, C, "Open or close the notch", "Ctrl+Alt+N"),
+                    r(HOTKEY + 1, C, "Open dock apps by number", "Ctrl+Alt+1 to 9"),
+                    r(HOTKEY + 2, C, "Hide or show the dock", "Ctrl+Alt+D"),
+                    r(HOTKEY + 3, C, "Open hidden icons", "Ctrl+Alt+B"),
+                ],
+            },
+            Card {
+                label: "Why Ctrl and Alt",
+                rows: &[r(
+                    LABEL,
+                    Kind::Note,
+                    "Windows keeps Win+number, so these use Ctrl+Alt.",
+                    "",
+                )],
+            },
+        ],
+    },
+    Page {
         name: "About",
         cards: &[
             Card {
@@ -573,7 +599,7 @@ const PAGES: &[Page] = &[
     },
 ];
 /// The sidebar uses the same outline family as the notch, with accent only on selection.
-const TILES: [Glyph; 8] = [
+const TILES: [Glyph; 9] = [
     Glyph::Gear,
     Glyph::Sun,
     Glyph::Notch,
@@ -581,6 +607,7 @@ const TILES: [Glyph; 8] = [
     Glyph::PartlyCloudy,
     Glyph::Prayer,
     Glyph::Limits,
+    Glyph::Keys,
     Glyph::Info,
 ];
 
@@ -882,7 +909,7 @@ fn draw_side(item: &DRAWITEMSTRUCT, p: &Paint) {
         if item.itemState.0 & ODS_SELECTED.0 != 0 {
             round(dc, cell, (cell.bottom - cell.top) / 2, p.pal.sel, p.pal.sel);
         }
-        let glyph = TILES[item.itemID as usize % 8];
+        let glyph = TILES[item.itemID as usize % TILES.len()];
         let ink = if item.itemState.0 & ODS_SELECTED.0 != 0 {
             p.pal.accent
         } else {
@@ -1442,6 +1469,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         DOCK_LEFT => &mut s.dock_left,
         PILLLOW => &mut s.widgets.pill_low,
         AGENT_ON => &mut s.agent_status,
+        HOTKEY..=225 => &mut s.hotkeys[id - HOTKEY],
         TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
         DBTN..=137 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,
@@ -1601,6 +1629,16 @@ impl SettingsWindow {
             .iter()
             .find(|i| i.id == id)
             .map_or(HWND::default(), |i| i.h)
+    }
+
+    /// Each shortcut row's caption: its keys, or which of them another app already holds.
+    pub fn set_hotkeys(&mut self, notes: &[String; hotkeys::COUNT]) {
+        for (i, note) in notes.iter().enumerate() {
+            if let Some(item) = self.items.iter().find(|item| item.id == HOTKEY + i) {
+                let _ = set_text(item.cap, note);
+            }
+        }
+        let _ = self.layout();
     }
 
     /// Each agent's row: whether it is installed and whether ROQA's hook is in its file.
@@ -2770,6 +2808,21 @@ Other hooks stay. A copy of the file is kept.",
                 };
                 put(item.h, a, y + top, b - a, height - top)?;
                 put(item.cap, a + px(22), y + px(30), w, cap)?;
+                if !item.cap.0.is_null() {
+                    // The switch spans the caption's line; above it the caption shows (it was hidden under it).
+                    // SAFETY: our own live child; only its place in the stacking order changes.
+                    let _ = unsafe {
+                        SetWindowPos(
+                            item.cap,
+                            Some(HWND_TOP),
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                        )
+                    };
+                }
                 Ok((height, None))
             }
             Kind::Combo(w) | Kind::Edit(w) => {

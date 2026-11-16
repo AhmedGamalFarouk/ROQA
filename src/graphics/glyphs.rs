@@ -64,8 +64,10 @@ pub enum Glyph {
     Drive,
     /// The dock's hidden-icons button: a chevron over three dots.
     Tray,
+    /// Settings' Hotkeys page: a keyboard.
+    Keys,
 }
-const ALL: [Glyph; 37] = [
+const ALL: [Glyph; 38] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -103,6 +105,7 @@ const ALL: [Glyph; 37] = [
     Glyph::Info,
     Glyph::Drive,
     Glyph::Tray,
+    Glyph::Keys,
 ];
 /// Grid size and stroke, in grid units.
 const GRID: f32 = 24.0;
@@ -227,6 +230,9 @@ impl Glyph {
                 "M4 14.5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM4 14.5l2.3-7.6A2 2 0 0 1 8.2 5.5h7.6a2 2 0 0 1 1.9 1.4l2.3 7.6M16.5 16h.01"
             }
             Glyph::Tray => "M8 11l4-4 4 4M7 17h.01M12 17h.01M17 17h.01",
+            Glyph::Keys => {
+                "M6 6.5h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2zM8 10.2h.01M12 10.2h.01M16 10.2h.01M8.5 14h7"
+            }
             Glyph::Widgets => {
                 "M5.5 4h3.5a1.5 1.5 0 0 1 1.5 1.5v13a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 18.5v-13A1.5 1.5 0 0 1 5.5 4zM15 4h3.5A1.5 1.5 0 0 1 20 5.5V9a1.5 1.5 0 0 1-1.5 1.5H15A1.5 1.5 0 0 1 13.5 9V5.5A1.5 1.5 0 0 1 15 4zM15 13.5h3.5a1.5 1.5 0 0 1 1.5 1.5v3.5a1.5 1.5 0 0 1-1.5 1.5H15a1.5 1.5 0 0 1-1.5-1.5V15a1.5 1.5 0 0 1 1.5-1.5z"
             }
