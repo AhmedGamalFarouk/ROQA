@@ -441,14 +441,14 @@ fn timer_page(g: &Page, scene: &NotchScene) -> Result<()> {
         g.text(
             line,
             &g.display(15.0, SEMI, LEAD),
-            g.at(layout::PAD, layout::BODY_Y, 328.0, 22.0),
+            g.at(layout::PAD, layout::BODY_Y, 228.0, 22.0),
             g.ink(1.0),
         )?;
         for (index, control) in crate::timer::controls(scene.timer).iter().enumerate() {
             let slot = layout::page_button(index, 0, scene.dpi);
             g.chip(g.slot(slot), &control.label())?;
         }
-        return Ok(());
+        return g.chip(g.slot(layout::watch_button(scene.dpi)), "Stopwatch");
     };
     g.text(
         &view.panel,
@@ -460,6 +460,14 @@ fn timer_page(g: &Page, scene: &NotchScene) -> Result<()> {
     for (index, control) in controls.iter().enumerate() {
         let slot = layout::page_button(index, controls.len(), scene.dpi);
         g.chip(g.slot(slot), &control.label())?;
+    }
+    if view.watch {
+        return g.text(
+            &view.laps,
+            &g.font(11.0, NORMAL, LEAD),
+            g.at(layout::PAD, 92.0, 328.0, 14.0),
+            g.ink(0.6),
+        );
     }
     timer_bar(g, view)?;
     g.text(

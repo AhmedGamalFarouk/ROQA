@@ -498,6 +498,23 @@ pub fn page_button_at(
         on_slot(target, window_width, dpi, progress, media, x, y)
     })
 }
+/// The idle Timer page's "Stopwatch" chip: 72 x 24, right-aligned on the "Pick a time" row (y 40).
+pub fn watch_button(dpi: u32) -> Bounds {
+    scaled_bounds((NOTCH_EXPANDED.width - PAD - 72.0, 40.0, 72.0, CHIP_H), dpi)
+}
+pub fn watch_button_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    (x, y): (i32, i32),
+) -> bool {
+    let vertical_padding = scaled(3.0, dpi);
+    let mut target = watch_button(dpi);
+    target.y -= vertical_padding;
+    target.height += 2 * vertical_padding;
+    on_slot(target, window_width, dpi, progress, media, x, y)
+}
 fn on_slot(
     button: Bounds,
     window_width: i32,
@@ -1668,6 +1685,12 @@ mod tests {
                         }
                         assert!(!beside || !hit(button, value), "{dpi} {media}");
                     }
+                }
+                // The idle Timer page's Stopwatch chip clears the title, the clock and the gear.
+                let watch = watch_button(dpi);
+                assert!(fits(watch), "{dpi} {media}");
+                for other in [title, clock, gear(dpi, media)] {
+                    assert!(!hit(watch, other), "{dpi} {media}");
                 }
                 // Shelf page: the first file capsule, the title and the clock.
                 let shelf_page = [title, clock, shelf];

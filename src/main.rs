@@ -52,6 +52,7 @@ mod settings_window;
 mod shelf;
 mod shelf_os;
 mod sort;
+mod stopwatch;
 mod store;
 mod tabs;
 mod text_settings;

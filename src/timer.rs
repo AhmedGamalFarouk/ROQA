@@ -21,6 +21,10 @@ pub enum Ctl {
     Resume,
     Skip,
     Cancel,
+    /// The stopwatch (`stopwatch.rs`): start it, close a lap, clear it.
+    Watch,
+    Lap,
+    Reset,
 }
 impl Ctl {
     pub fn label(self) -> String {
@@ -31,6 +35,9 @@ impl Ctl {
             Ctl::Resume => "Resume".to_owned(),
             Ctl::Skip => "Skip".to_owned(),
             Ctl::Cancel => "Cancel".to_owned(),
+            Ctl::Watch => "Stopwatch".to_owned(),
+            Ctl::Lap => "Lap".to_owned(),
+            Ctl::Reset => "Reset".to_owned(),
         }
     }
 }
@@ -47,6 +54,8 @@ const IDLE: [Ctl; 5] = [
 pub fn controls(view: Option<&View>) -> &'static [Ctl] {
     match view.filter(|view| !view.done) {
         None => &IDLE,
+        Some(view) if view.watch && view.paused => &[Ctl::Resume, Ctl::Reset],
+        Some(view) if view.watch => &[Ctl::Lap, Ctl::Pause, Ctl::Reset],
         Some(view) if view.paused && view.tagged => &[Ctl::Resume, Ctl::Skip, Ctl::Cancel],
         Some(view) if view.paused => &[Ctl::Resume, Ctl::Cancel],
         Some(view) if view.tagged => &[Ctl::Pause, Ctl::Skip, Ctl::Cancel],
@@ -101,6 +110,9 @@ pub struct View {
     pub total: u64,
     /// A Pomodoro's current segment and segment count (`pomo::Pomo::cycle`); the host fills it for tagged phases.
     pub cycle: Option<(u8, u8)>,
+    /// The page shows the stopwatch: `panel` counts up, `laps` is its last laps (empty for a timer).
+    pub watch: bool,
+    pub laps: String,
 }
 
 impl View {
@@ -119,6 +131,8 @@ impl View {
             left,
             total,
             cycle,
+            watch: false,
+            laps: String::new(),
         }
     }
     /// The share of the countdown already gone, 0 to 1.
@@ -151,7 +165,7 @@ fn tick_in(left: Duration) -> Duration {
     })
 }
 
-fn clock(secs: u64) -> String {
+pub fn clock(secs: u64) -> String {
     let (hours, minutes, seconds) = (secs / 3600, secs % 3600 / 60, secs % 60);
     if hours > 0 {
         format!("{hours}:{minutes:02}:{seconds:02}")
@@ -360,6 +374,8 @@ impl Timers {
             left: soonest,
             total: self.list.first().map_or(0, |timer| timer.total),
             cycle: None,
+            watch: false,
+            laps: String::new(),
         })
     }
 }

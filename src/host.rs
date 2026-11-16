@@ -32,6 +32,7 @@ use crate::{
     shelf::{self, Check, Shelf},
     shelf_os::{self, DropEvent, Drops},
     sort,
+    stopwatch::Stopwatch,
     store::{self, Flush, Pending, Store},
     tabs::{Tab, Tabs},
     text_settings::TextSettings,
@@ -187,6 +188,8 @@ struct Pages {
     pomo: pomo::Pomo,
     /// A paused plain countdown: seconds left and its full length (not stored, like a paused Pomodoro).
     held: Option<(u64, u64)>,
+    /// The Timer page's stopwatch: shown when no countdown is.
+    stopwatch: Stopwatch,
 }
 impl Pages {
     fn new(settings: &Settings, last: Tab) -> Self {
@@ -213,6 +216,7 @@ impl Pages {
             stats: crate::widgets::Stats::default(),
             pomo: pomo::Pomo::default(),
             held: None,
+            stopwatch: Stopwatch::default(),
         };
         pages.set_privacy(settings.privacy, Instant::now());
         pages
@@ -244,6 +248,7 @@ impl Pages {
             }
             view
         })
+        .or_else(|| self.stopwatch.view(now))
     }
     /// Starts or stops the registry watch with the setting and reads the devices once; true when the dots changed.
     fn set_privacy(&mut self, on: bool, now: Instant) -> bool {
@@ -1792,7 +1797,10 @@ impl Desktop {
         }
         let expanded = self.page() == Tab::Timer && self.surfaces.iter().any(Surface::expanded);
         if expanded {
-            let panel = self.timers.view(now).map(|view| view.panel);
+            let panel = self
+                .pages
+                .timer_view(&self.timers, now)
+                .map(|view| view.panel);
             if panel.as_deref().unwrap_or("") != self.timer_shown {
                 self.timer_shown = panel.unwrap_or_default();
                 // A running animation paints every frame already.
@@ -1801,6 +1809,9 @@ impl Desktop {
         }
         self.timers
             .next_wake(expanded, now)
+            .into_iter()
+            .chain(self.pages.stopwatch.next_tick(now).filter(|_| expanded))
+            .min()
             .map_or(INFINITE, |due| milliseconds_until(due, now))
     }
     /// The page the open panel shows now.
@@ -2216,7 +2227,7 @@ impl Desktop {
     fn refresh_ring(&mut self) -> u32 {
         if motion::calm()
             || !self.pages.tabs.on(Tab::Timer)
-            || !self.timers.running()
+            || !(self.timers.running() || self.pages.stopwatch.running())
             || self.pages.track(&self.media).is_some()
         {
             return INFINITE;
@@ -2924,6 +2935,20 @@ impl Desktop {
     /// A Timer page button; what it did is announced as a notice (the presets just start, as before).
     fn timer_press(&mut self, control: timer::Ctl, now: Instant) {
         use timer::Ctl;
+        let watching = self
+            .pages
+            .timer_view(&self.timers, now)
+            .is_some_and(|view| view.watch);
+        if watching || control == Ctl::Watch {
+            match control {
+                Ctl::Watch | Ctl::Resume => self.pages.stopwatch.start(now),
+                Ctl::Pause => self.pages.stopwatch.pause(now),
+                Ctl::Lap => self.pages.stopwatch.lap(now),
+                Ctl::Reset => self.pages.stopwatch.reset(),
+                _ => {}
+            }
+            return self.request_notches(Repaint::Full, |_| true);
+        }
         let status = match control {
             Ctl::Preset(minutes) => {
                 self.clear_notice();
@@ -2937,6 +2962,7 @@ impl Desktop {
             {
                 self.plain_act(now)
             }
+            Ctl::Watch | Ctl::Lap | Ctl::Reset => return, // handled above
             Ctl::Focus | Ctl::Pause | Ctl::Resume => self.pomo_act(false),
             Ctl::Skip => self.pomo_act(true),
             Ctl::Cancel => {
@@ -4560,6 +4586,12 @@ impl Desktop {
             Tab::Prayer if self.pages.prayer.set_city => (1, false),
             _ => (0, false),
         };
+        let idle = view.as_ref().is_none_or(|view| view.done);
+        if page == Tab::Timer && idle && layout::watch_button_at(width, dpi, progress, live, (x, y))
+        {
+            self.timer_press(timer::Ctl::Watch, now);
+            return true;
+        }
         if let Some(button) = layout::page_button_at(width, dpi, progress, live, buttons, (x, y)) {
             if page != Tab::Timer {
                 let opened = self.open_settings().and_then(|()| {
