@@ -21,6 +21,8 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 - Several threads may share this checkout. Stage and commit only the paths you changed (`git commit -- <paths>`), never `git add -A`; if `verify.ps1` fails in files you did not touch, another thread is mid-edit: wait a few minutes and retry. Before pushing, `git pull --rebase origin main` if the push is rejected.
 - Never commit `cook/refs`, `cook/stills`, `cook/compare` (private screenshots).
 - Workers on Gemini never edit `src/`.
+- Threads: when a thread's work is done and its report is read, the Chief settles it in T3 Code (t3_thread_organize); workers never leave a finished thread unsettled.
+- Docs: a report, research or scratch .md file that is no longer needed is deleted once its findings are acted on or copied into AGENTS.md, cook/ROUNDS.md or FEATURES_TO_ADD.md; the owner's own notes and AGENTS.md, cook/BRAND/RUBRIC docs are never deleted. Check git status first: delete untracked ones with plain rm, tracked ones with git rm in the same commit.
 
 ## Commands
 - Cargo only through `scripts\cargo.ps1 <args>`.
@@ -69,6 +71,7 @@ CHANGED: <files, or commit sha>
 VERIFY: verify.ps1 pass|fail|not run; exe <bytes> B
 EVIDENCE: <paths to stills, logs or numbers>
 OPEN: <what is left, risks, decisions for the owner>
+settle: done|n/a
 ```
 The Chief reads only that final message (`t3_thread_read` limit 1), never a transcript. Anything longer goes in a file whose path is in EVIDENCE. Workers do not start sub-agents.
 
