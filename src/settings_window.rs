@@ -2168,8 +2168,17 @@ impl SettingsWindow {
             self.scroll = next;
             self.layout()?;
             // The title, cards and dividers are painted by the parent, not moved with the children.
+            // The children are invalidated too: with WS_CLIPCHILDREN the parent's own repaint skips them, and
+            // moved controls would keep stale pixels.
             // SAFETY: our own live window.
-            let _ = unsafe { InvalidateRect(Some(self.window), None, true) };
+            let _ = unsafe {
+                RedrawWindow(
+                    Some(self.window),
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+                )
+            };
         }
         Ok(())
     }
@@ -2490,7 +2499,7 @@ impl SettingsWindow {
                     top,
                     tile.width,
                     tile.height,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
                 )?;
                 clip(h, top, tile.height, tile.width, view);
             }
@@ -2528,7 +2537,16 @@ impl SettingsWindow {
             }
             // SAFETY: our own live child.
             unsafe {
-                SetWindowPos(h, None, x, y, w.max(1), ht, SWP_NOZORDER | SWP_NOACTIVATE)?;
+                // NOCOPYBITS: a scrolled control repaints itself instead of dragging its old pixels along.
+                SetWindowPos(
+                    h,
+                    None,
+                    x,
+                    y,
+                    w.max(1),
+                    ht,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
+                )?;
                 clip(h, y, ht, w.max(1), view);
             }
             Ok(())
