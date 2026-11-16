@@ -4,14 +4,20 @@
 pub enum WidgetKind {
     WeekCalendar,
     Battery,
+    /// Memory in use.
+    Memory,
+    /// The system drive's space in use.
+    Disk,
 }
 
 impl WidgetKind {
-    pub const ALL: [Self; 2] = [Self::WeekCalendar, Self::Battery];
+    pub const ALL: [Self; 4] = [Self::WeekCalendar, Self::Battery, Self::Memory, Self::Disk];
     pub fn key(self) -> &'static str {
         match self {
             Self::WeekCalendar => "week",
             Self::Battery => "battery",
+            Self::Memory => "memory",
+            Self::Disk => "disk",
         }
     }
 
@@ -19,6 +25,8 @@ impl WidgetKind {
         match key {
             "week" => Some(Self::WeekCalendar),
             "battery" => Some(Self::Battery),
+            "memory" => Some(Self::Memory),
+            "disk" => Some(Self::Disk),
             _ => None,
         }
     }
@@ -37,6 +45,50 @@ impl Default for WidgetConfig {
             slot_right: WidgetKind::Battery,
         }
     }
+}
+
+/// A usage tile's reading: percent in use and one line of detail.
+pub struct Usage {
+    pub percent: u32,
+    pub detail: String,
+}
+
+fn gigabytes(bytes: u64) -> f64 {
+    bytes as f64 / f64::from(1u32 << 30)
+}
+
+/// "6.2 of 16 GB" and the percent it is, or `None` for an empty total.
+fn usage(used: u64, total: u64) -> Option<Usage> {
+    (total > 0).then(|| Usage {
+        percent: (used * 100 / total).min(100) as u32,
+        detail: format!("{:.1} of {:.0} GB", gigabytes(used), gigabytes(total)),
+    })
+}
+
+/// Physical memory in use, read when the tile is drawn (no timer).
+pub fn memory() -> Option<Usage> {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX {
+        dwLength: size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `status` is a live, sized out value.
+    unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
+    usage(
+        status.ullTotalPhys - status.ullAvailPhys,
+        status.ullTotalPhys,
+    )
+}
+
+/// The system drive's space in use, read when the tile is drawn.
+pub fn disk() -> Option<Usage> {
+    use windows::{Win32::Storage::FileSystem::GetDiskFreeSpaceExW, core::HSTRING};
+    let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+    let root = HSTRING::from(format!("{drive}\\"));
+    let (mut free, mut total) = (0u64, 0u64);
+    // SAFETY: `root` and both out values outlive the call.
+    unsafe { GetDiskFreeSpaceExW(&root, Some(&mut free), Some(&mut total), None) }.ok()?;
+    usage(total.saturating_sub(free), total)
 }
 
 /// Monday-first day numbers for the week containing a valid local date.
@@ -72,6 +124,24 @@ fn month_days(year: u16, month: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_reads_percent_and_gigabytes() {
+        let gb = 1u64 << 30;
+        let reading = usage(4 * gb, 16 * gb).unwrap();
+        assert_eq!(
+            (reading.percent, reading.detail.as_str()),
+            (25, "4.0 of 16 GB")
+        );
+        assert!(usage(0, 0).is_none());
+        assert_eq!(usage(20, 10).unwrap().percent, 100);
+        assert_eq!(WidgetKind::from_key("memory"), Some(WidgetKind::Memory));
+        assert!(
+            WidgetKind::ALL
+                .iter()
+                .all(|k| WidgetKind::from_key(k.key()) == Some(*k))
+        );
+    }
 
     #[test]
     fn week_crosses_month_year_and_leap_boundaries() {

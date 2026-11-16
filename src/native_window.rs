@@ -35,7 +35,7 @@ use windows::Win32::{
         WindowsAndMessaging::*,
     },
 };
-use windows::core::{BOOL, Error, HSTRING, Result, w};
+use windows::core::{BOOL, Error, GUID, HSTRING, Result, w};
 
 pub const REPOSITION: u32 = WM_APP + 1;
 pub const CLOSE_SURFACE: u32 = WM_APP + 2;
@@ -56,6 +56,27 @@ fn claim(flag: &AtomicBool) -> bool {
 /// The host is about to read the power status: the next broadcast posts again.
 pub fn power_read() {
     POWER_PENDING.store(false, Ordering::Release);
+}
+/// Posted (once until read) when a drive, camera or audio output arrives; `device_read` says which.
+pub const DEVICE: u32 = WM_APP + 10;
+pub const DRIVE_BIT: u32 = 1;
+pub const CAMERA_BIT: u32 = 2;
+pub const SPEAKER_BIT: u32 = 4;
+static DEVICE_BITS: AtomicU32 = AtomicU32::new(0);
+const CAMERA: GUID = GUID::from_u128(0xe5323777_f976_4f5b_9b55_b94699c46e44);
+const SPEAKER: GUID = GUID::from_u128(0x65e8773e_8f56_11d0_a3b9_00a0c9223196);
+/// The arrivals since the last read; the next arrival posts again.
+pub fn device_read() -> u32 {
+    DEVICE_BITS.swap(0, Ordering::AcqRel)
+}
+/// Which of the three alerts a device broadcast is, or 0: a drive (not a disc going in), a camera, a speaker.
+fn device_bit(kind: u32, interface: GUID, disc: bool) -> u32 {
+    match kind {
+        k if k == DBT_DEVTYP_VOLUME.0 && !disc => DRIVE_BIT,
+        k if k == DBT_DEVTYP_DEVICEINTERFACE.0 && interface == CAMERA => CAMERA_BIT,
+        k if k == DBT_DEVTYP_DEVICEINTERFACE.0 && interface == SPEAKER => SPEAKER_BIT,
+        _ => 0,
+    }
 }
 /// Posted (once until read) when the session unlocks or the display turns on: the mascot wakes.
 pub const WAKE: u32 = WM_APP + 8;
@@ -123,7 +144,7 @@ impl Drop for WindowClass {
 }
 
 /// The window and, for a notch, its display-state notification (unlock is a session notification, released by Drop).
-pub struct NativeWindow(pub HWND, Option<HPOWERNOTIFY>);
+pub struct NativeWindow(pub HWND, Option<HPOWERNOTIFY>, Vec<HDEVNOTIFY>);
 impl NativeWindow {
     pub fn create(bounds: Bounds, kind: SurfaceKind) -> Result<Self> {
         let title = match kind {
@@ -148,6 +169,22 @@ impl NativeWindow {
                 DEVICE_NOTIFY_WINDOW_HANDLE,
             )
             .ok();
+            // Camera and speaker interfaces arrive here; a drive letter arrives as a plain broadcast.
+            for class in [CAMERA, SPEAKER] {
+                let filter = DEV_BROADCAST_DEVICEINTERFACE_W {
+                    dbcc_size: size_of::<DEV_BROADCAST_DEVICEINTERFACE_W>() as u32,
+                    dbcc_devicetype: DBT_DEVTYP_DEVICEINTERFACE.0,
+                    dbcc_classguid: class,
+                    ..Default::default()
+                };
+                if let Ok(handle) = RegisterDeviceNotificationW(
+                    HANDLE(self.0.0),
+                    (&raw const filter).cast(),
+                    DEVICE_NOTIFY_WINDOW_HANDLE,
+                ) {
+                    self.2.push(handle);
+                }
+            }
         }
     }
     pub fn create_hidden(bounds: Bounds, title: windows::core::PCWSTR) -> Result<Self> {
@@ -187,7 +224,7 @@ impl NativeWindow {
                 Some(HINSTANCE(GetModuleHandleW(None)?.0)),
                 None,
             )?;
-            Ok(Self(hwnd, None))
+            Ok(Self(hwnd, None, Vec::new()))
         }
     }
     /// A hidden topmost popup that never takes focus, for a DWM thumbnail.
@@ -209,7 +246,7 @@ impl NativeWindow {
                 Some(HINSTANCE(GetModuleHandleW(None)?.0)),
                 None,
             )?;
-            Ok(Self(hwnd, None))
+            Ok(Self(hwnd, None, Vec::new()))
         }
     }
     /// A layered transparent HWND lets input reach windows in other processes, unlike HTTRANSPARENT.
@@ -308,6 +345,9 @@ impl Drop for NativeWindow {
                 let _ = UnregisterPowerSettingNotification(handle);
                 let _ = WTSUnRegisterSessionNotification(self.0);
             }
+            for handle in self.2.drain(..) {
+                let _ = UnregisterDeviceNotification(handle);
+            }
             if let Err(error) = DestroyWindow(self.0) {
                 eprintln!("Window cleanup: {error}");
             }
@@ -404,6 +444,32 @@ pub fn foreground_monitor(key: WindowKey) -> Option<String> {
     // SAFETY: scalar query on a revalidated transient foreign HWND.
     let monitor = unsafe { MonitorFromWindow(HWND(key.handle as *mut _), MONITOR_DEFAULTTONULL) };
     monitor_info(monitor).ok().map(|info| device_name(&info))
+}
+
+/// The monitor and frame of a visible, un-minimized, non-desktop foreign window; `None` otherwise.
+pub fn window_frame(key: WindowKey) -> Option<(String, Bounds)> {
+    if !dock::valid_target(key) {
+        return None;
+    }
+    let window = HWND(key.handle as *mut _);
+    let mut class = [0u16; 16];
+    // SAFETY: bounded writable buffer; a stale HWND yields 0 characters.
+    let length = usize::try_from(unsafe { GetClassNameW(window, &mut class) }).ok()?;
+    let named = |name: &str| name.encode_utf16().eq(class[..length].iter().copied());
+    let mut rect = RECT::default();
+    // SAFETY: scalar geometry queries on a transient foreign HWND; a stale one fails cleanly.
+    let (iconic, monitor) = unsafe {
+        GetWindowRect(window, &mut rect).ok()?;
+        (
+            IsIconic(window).as_bool(),
+            MonitorFromWindow(window, MONITOR_DEFAULTTONULL),
+        )
+    };
+    if iconic || length == 0 || named("Progman") || named("WorkerW") {
+        return None;
+    }
+    let info = monitor_info(monitor).ok()?;
+    Some((device_name(&info), bounds(rect)))
 }
 
 /// A stale, hidden, cloaked or minimized window cannot keep a monitor suppressed. Revalidate its PID too,
@@ -516,6 +582,25 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
             }
             return LRESULT(1); // TRUE grants the broadcast
         }
+        if message == WM_DEVICECHANGE && wparam.0 == DBT_DEVICEARRIVAL as usize && lparam.0 != 0 {
+            let header = &*(lparam.0 as *const DEV_BROADCAST_HDR);
+            let kind = header.dbch_devicetype.0;
+            let interface = if kind == DBT_DEVTYP_DEVICEINTERFACE.0 {
+                (*(lparam.0 as *const DEV_BROADCAST_DEVICEINTERFACE_W)).dbcc_classguid
+            } else {
+                GUID::zeroed()
+            };
+            let disc = kind == DBT_DEVTYP_VOLUME.0
+                && (*(lparam.0 as *const DEV_BROADCAST_VOLUME)).dbcv_flags.0 & DBTF_MEDIA.0 != 0;
+            let bit = device_bit(kind, interface, disc);
+            if bit != 0
+                && DEVICE_BITS.fetch_or(bit, Ordering::AcqRel) == 0
+                && PostMessageW(None, DEVICE, WPARAM(0), LPARAM(0)).is_err()
+            {
+                DEVICE_BITS.store(0, Ordering::Release);
+            }
+            return LRESULT(1);
+        }
         if message == WM_CLIPBOARDUPDATE {
             if claim(&CLIP_PENDING) && PostMessageW(None, CLIPBOARD, WPARAM(0), LPARAM(0)).is_err()
             {
@@ -608,6 +693,22 @@ fn repositions(message: u32, wparam: WPARAM, taskbar_created: u32) -> Option<boo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn device_arrivals_map_to_one_alert_each() {
+        use super::*;
+        let none = GUID::zeroed();
+        assert_eq!(device_bit(DBT_DEVTYP_VOLUME.0, none, false), DRIVE_BIT);
+        assert_eq!(device_bit(DBT_DEVTYP_VOLUME.0, none, true), 0); // a disc going in
+        assert_eq!(
+            device_bit(DBT_DEVTYP_DEVICEINTERFACE.0, CAMERA, false),
+            CAMERA_BIT
+        );
+        assert_eq!(
+            device_bit(DBT_DEVTYP_DEVICEINTERFACE.0, SPEAKER, false),
+            SPEAKER_BIT
+        );
+        assert_eq!(device_bit(DBT_DEVTYP_DEVICEINTERFACE.0, none, false), 0);
+    }
     use super::*;
     #[test]
     fn one_power_post_serves_every_window_until_the_host_reads() {

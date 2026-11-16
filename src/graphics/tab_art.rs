@@ -721,6 +721,37 @@ fn widgets_page(g: &Page, scene: &NotchScene) -> Result<()> {
                     g.text(&day.to_string(), &g.font(10.0, SEMI, MIDDLE), cell, colour)?;
                 }
             }
+            WidgetKind::Memory | WidgetKind::Disk => {
+                let (title, reading) = if kind == WidgetKind::Memory {
+                    ("Memory in use", crate::widgets::memory())
+                } else {
+                    ("Disk in use", crate::widgets::disk())
+                };
+                let percent = reading.as_ref().map_or(0, |r| r.percent);
+                g.text(
+                    &reading
+                        .as_ref()
+                        .map_or("--".into(), |r| format!("{}%", r.percent)),
+                    &g.display(24.0, BOLD, LEAD),
+                    at(14.0, 6.0, 162.0, 28.0),
+                    g.ink(1.0),
+                )?;
+                g.text(
+                    &reading.map_or_else(|| title.into(), |r| format!("{title}, {}", r.detail)),
+                    &g.font(11.0, NORMAL, LEAD),
+                    at(14.0, 35.0, 162.0, 16.0),
+                    g.ink(0.6),
+                )?;
+                // The track and the fill are both capsules; the fill is the one accent here.
+                g.fill(at(14.0, 56.0, 162.0, 6.0), None, g.ink(0.18))?;
+                if percent > 0 {
+                    g.fill(
+                        at(14.0, 56.0, (162.0 * percent as f32 / 100.0).max(6.0), 6.0),
+                        None,
+                        g.accent(1.0),
+                    )?;
+                }
+            }
             WidgetKind::Battery => {
                 let raw = crate::power::Raw::read();
                 let reading = raw.filter(|r| r.flag & 128 == 0 && r.percent <= 100);

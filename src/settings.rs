@@ -77,6 +77,8 @@ pub struct Settings {
     pub limits_group: u8,
     /// Hide the dock and notch over a full-screen app (the F3 prayer alert still shows).
     pub hide_fullscreen: bool,
+    /// The dock slides away while a window covers it and returns when the pointer rests at the screen edge.
+    pub dock_hide: bool,
     /// Open the notch on a click instead of hovering over it.
     pub open_click: bool,
     /// Closed pill size, one of `NOTCH_SIZES` percent.
@@ -131,6 +133,7 @@ impl Default for Settings {
             limits_agy: false,
             limits_group: 0,
             hide_fullscreen: true,
+            dock_hide: false,
             open_click: false,
             notch_size: 0,
             anim_fast: false,
@@ -263,6 +266,7 @@ impl Settings {
                 .is_some(),
             "limcodex" => flag(value).map(|v| self.limits_codex = v).is_some(),
             "limagy" => flag(value).map(|v| self.limits_agy = v).is_some(),
+            "dockhide" => flag(value).map(|v| self.dock_hide = v).is_some(),
             "fshide" => flag(value).map(|v| self.hide_fullscreen = v).is_some(),
             "rsounds" => flag(value).map(|v| self.reminder_sounds = v).is_some(),
             "ppause" => flag(value).map(|v| self.prayer_pause = v).is_some(),
@@ -395,6 +399,7 @@ limgroup={}
             self.limits_group
         ));
         let [a, b, c, d, e] = self.prayer_shift;
+        out.push_str(&format!("dockhide={}\n", u8::from(self.dock_hide)));
         out.push_str(&format!(
             "fshide={}
 rsounds={}
@@ -586,7 +591,7 @@ mod tests {
             diagnostics: Some("  \"C:\\logs\\roqa.json\"  ".into()),
             theme: Theme::Frosted,
             dock_style: DockStyle::Attached,
-            dock_buttons: Buttons::of([false, true, true, false, true, true]),
+            dock_buttons: Buttons::of([false, true, true, false, true, true, false]),
             desktop_only: true,
             edge_volume: false,
             edge_brightness: false,
@@ -880,7 +885,7 @@ mod tests {
             diagnostics: Some("C:\\a=b\\r.json".into()),
             theme: Theme::Midnight,
             dock_style: DockStyle::Attached,
-            dock_buttons: Buttons::of([false, true, true, false, true, true]),
+            dock_buttons: Buttons::of([false, true, true, false, true, true, false]),
             desktop_only: true,
             edge_volume: true,
             tabs: [false, true, false, true, false, true, true],
@@ -995,13 +1000,13 @@ mod tests {
         let defaults = Settings::default();
         assert_eq!(
             defaults.dock_buttons.shown,
-            [true, true, false, true, true, true]
+            [true, true, false, true, true, true, false]
         );
         let mut off = Settings::default();
         assert!(off.set("dbstart", "0") && off.set("dbtask", "1"));
         assert_eq!(
             off.dock_buttons.shown,
-            [false, true, true, true, true, true]
+            [false, true, true, true, true, true, false]
         );
         let mut text = String::new();
         off.write_lines(&mut text);

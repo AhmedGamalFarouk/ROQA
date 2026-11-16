@@ -117,6 +117,7 @@ const WRIGHT: usize = 196;
 const MATCH_ACCENT: usize = 199;
 const DOCK_BADGES: usize = 202;
 const CLIP: usize = 203;
+const DOCK_HIDE: usize = 204;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -250,6 +251,12 @@ const PAGES: &[Page] = &[
                         "Show estimated notification badges",
                         "Counts are inferred from window titles",
                     ),
+                    r(
+                        DOCK_HIDE,
+                        C,
+                        "Hide behind windows",
+                        "Rest the pointer at the bottom edge to bring it back",
+                    ),
                 ],
             },
         ],
@@ -343,6 +350,7 @@ const PAGES: &[Page] = &[
                     r(DBTN + 3, C, "Minimized apps list", ""),
                     r(DBTN + 4, C, "Show desktop pill", ""),
                     r(DBTN + 5, C, "Quick settings button", ""),
+                    r(DBTN + 6, C, "Drives and Recycle Bin button", ""),
                 ],
             },
             Card {
@@ -1376,8 +1384,9 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         WATER => &mut s.water,
         MATCH_ACCENT => &mut s.match_accent,
         DOCK_BADGES => &mut s.dock_badges,
+        DOCK_HIDE => &mut s.dock_hide,
         TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
-        DBTN..=135 => &mut s.dock_buttons.shown[id - DBTN],
+        DBTN..=136 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,
     })
 }
@@ -1407,7 +1416,7 @@ fn fill_combo(h: HWND, id: usize) {
         PMETHOD => return Method::ALL.iter().for_each(|m| add_row(h, m.label())),
         PLEAD => &LEAD_ROWS,
         LIMGROUP => &["Gemini models", "Claude and GPT models"],
-        WLEFT | WRIGHT => &["Week calendar", "Battery"],
+        WLEFT | WRIGHT => &["Week calendar", "Battery", "Memory", "Disk"],
         NSIZE => &["Auto", "115%", "130%", "150%"],
         NOPEN => &["Hover", "Click"],
         ANIM => &["Normal", "Fast"],

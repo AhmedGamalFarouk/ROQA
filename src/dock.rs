@@ -231,15 +231,18 @@ pub enum Button {
     Desktop,
     /// Volume, Wi-Fi, Bluetooth and power mode in ROQA's own popover.
     Quick,
+    /// The Recycle Bin and the drives, in ROQA's own popup.
+    Places,
 }
 impl Button {
-    pub const ALL: [Button; 6] = [
+    pub const ALL: [Button; 7] = [
         Button::Start,
         Button::Search,
         Button::TaskView,
         Button::Minimized,
         Button::Desktop,
         Button::Quick,
+        Button::Places,
     ];
     pub fn index(self) -> usize {
         self as usize
@@ -253,12 +256,13 @@ impl Button {
             "Show minimized apps",
             "Show desktop",
             "Quick settings",
+            "Drives and Recycle Bin",
         ][self.index()]
     }
     /// Settings store key.
     pub fn key(self) -> &'static str {
         [
-            "dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk", "dbquick",
+            "dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk", "dbquick", "dbplaces",
         ][self.index()]
     }
     /// The keys a click sends: the Windows key alone opens Start; the rest are shell shortcuts. None for the
@@ -269,7 +273,7 @@ impl Button {
             Button::Search => Some(&[VK_LWIN, VK_S]),
             Button::TaskView => Some(&[VK_LWIN, VK_TAB]),
             Button::Desktop => Some(&[VK_LWIN, VK_D]),
-            Button::Minimized | Button::Quick => None,
+            Button::Minimized | Button::Quick | Button::Places => None,
         }
     }
 }
@@ -277,25 +281,30 @@ impl Button {
 /// Which buttons are on, and the dock's reading direction. Default: Start, Search, the minimized list and show-desktop; Task View off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Buttons {
-    pub shown: [bool; 6],
+    pub shown: [bool; 7],
     /// Mirrored for a right-to-left UI language: the dock runs from the right edge, as the taskbar does.
     /// The host sets it from the system; it is not a stored setting.
     pub rtl: bool,
 }
 impl Buttons {
     #[cfg(test)]
-    pub const NONE: Buttons = Buttons::of([false; 6]);
-    pub const fn of(shown: [bool; 6]) -> Self {
+    pub const NONE: Buttons = Buttons::of([false; 7]);
+    pub const fn of(shown: [bool; 7]) -> Self {
         Self { shown, rtl: false }
     }
     pub fn on(self, button: Button) -> bool {
         self.shown[button.index()]
     }
-    /// Start, Search and Task View, in that order.
+    /// Start, Search, Task View and Places, in that order.
     fn lead(self) -> impl Iterator<Item = Button> {
-        [Button::Start, Button::Search, Button::TaskView]
-            .into_iter()
-            .filter(move |b| self.on(*b))
+        [
+            Button::Start,
+            Button::Search,
+            Button::TaskView,
+            Button::Places,
+        ]
+        .into_iter()
+        .filter(move |b| self.on(*b))
     }
     fn has_tail(self) -> bool {
         self.on(Button::Quick) || self.on(Button::Minimized) || self.on(Button::Desktop)
@@ -309,7 +318,7 @@ impl Buttons {
 }
 impl Default for Buttons {
     fn default() -> Self {
-        Buttons::of([true, true, false, true, true, true])
+        Buttons::of([true, true, false, true, true, true, false])
     }
 }
 
@@ -1293,11 +1302,11 @@ mod tests {
     }
 
     fn only(button: Button) -> Buttons {
-        let mut on = [false; 6];
+        let mut on = [false; 7];
         on[button.index()] = true;
         Buttons::of(on)
     }
-    const ALL: Buttons = Buttons::of([true; 6]);
+    const ALL: Buttons = Buttons::of([true; 7]);
 
     #[test]
     fn width_grows_by_each_button_and_none_keeps_the_old_dock() {
@@ -1323,7 +1332,7 @@ mod tests {
         assert_eq!(
             width_px(ALL, 3, 96),
             PAD_DIPS
-                + 3 * BTN_DIPS
+                + 4 * BTN_DIPS
                 + SEP_DIPS
                 + SLOT_DIPS * 3
                 + SEP_DIPS
@@ -1332,7 +1341,7 @@ mod tests {
         );
         assert_eq!(
             Buttons::default().shown,
-            [true, true, false, true, true, true]
+            [true, true, false, true, true, true, false]
         );
     }
 
@@ -1363,7 +1372,7 @@ mod tests {
     #[test]
     fn hit_testing_maps_buttons_slots_and_gaps() {
         // 96 dpi, Start + Search + chevron + strip, 2 slots: pad 8, buttons 44, sep 8, slots 56.
-        let b = Buttons::of([true, true, false, true, true, false]);
+        let b = Buttons::of([true, true, false, true, true, false, false]);
         let width = width_px(b, 2, 96);
         let at = |x| hit_at(b, x, width, 96, 2);
         assert_eq!(at(7), None);
@@ -1403,7 +1412,7 @@ mod tests {
 
     #[test]
     fn slot_centres_and_drops_follow_the_lead_buttons() {
-        let b = Buttons::of([true, true, false, false, false, false]);
+        let b = Buttons::of([true, true, false, false, false, false, false]);
         // pad 8 + two buttons 88 + separator 8 = 104; slot 1 centre = 104 + 56 + 28.
         let width = width_px(b, 6, 96);
         assert_eq!(slot_center_x(1000, b, width, 1, 96), 1000 + 104 + 56 + 28);
@@ -1424,7 +1433,7 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk", "dbquick"
+                "dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk", "dbquick", "dbplaces"
             ]
         );
     }

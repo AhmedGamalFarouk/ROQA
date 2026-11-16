@@ -2262,6 +2262,7 @@ fn draw_button(
         dock::Button::Desktop => unreachable!("drawn above"),
         dock::Button::Quick => Glyph::Gear,
         dock::Button::Minimized => Glyph::Chevron,
+        dock::Button::Places => Glyph::Drive,
     };
     glyphs::draw(context, square, shape, with_alpha(p.glyph, 1.0))
 }

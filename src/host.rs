@@ -5,6 +5,7 @@ use crate::{
     clipboard_os, clock,
     dock::{self, Button, Buttons, DockItem, Hit},
     dock_menu::{self, Event, Item},
+    dock_tuck,
     edge::{self, Edges},
     eyes::{self, Eyes},
     graphics::{
@@ -1164,6 +1165,11 @@ struct Desktop {
     /// while a current or retained window covers its monitor.
     fullscreen_generation: Option<u64>,
     fullscreen_due: Option<Instant>,
+    /// Dock auto-hide (`dock_tuck`), and the catalog generation it last read.
+    tuck: dock_tuck::Tuck,
+    tuck_generation: Option<u64>,
+    /// The Places popup's rows while it is open.
+    places: Vec<crate::places::Place>,
     graphics: Graphics,
     rebuild: Rebuild,
     picker: Option<Picker>,
@@ -1320,6 +1326,9 @@ impl Desktop {
                 .collect(),
             fullscreen_generation: None,
             fullscreen_due: None,
+            tuck: dock_tuck::Tuck::default(),
+            tuck_generation: None,
+            places: Vec::new(),
             graphics: Graphics::create()?,
             rebuild: Rebuild::new(Instant::now()),
             picker: None,
@@ -1470,7 +1479,8 @@ impl Desktop {
         let visible = !self
             .fullscreen
             .iter()
-            .any(|(_, device)| device == &monitor.device);
+            .any(|(_, device)| device == &monitor.device)
+            && (kind != SurfaceKind::Dock || self.tuck.shown(&monitor.device));
         let last = self.surfaces.len() - 1;
         self.surfaces[last].set_visible(visible);
         Ok(())
@@ -2414,6 +2424,9 @@ impl Desktop {
         if old.hide_fullscreen != self.settings.hide_fullscreen {
             self.fullscreen_generation = None; // the next pass hides or shows again
         }
+        if old.dock_hide != self.settings.dock_hide {
+            self.tuck_generation = None;
+        }
         self.edges_dirty = true;
         let widgets_changed = old.widgets != self.settings.widgets;
         self.pages.widgets = self.settings.widgets;
@@ -3046,6 +3059,7 @@ impl Desktop {
     fn press_button(&mut self, hwnd: HWND, button: Button, model: &WindowModel) {
         match (button, button.keys()) {
             (Button::Quick, _) => self.open_quick_menu(hwnd),
+            (Button::Places, _) => self.open_places_menu(hwnd),
             (_, Some(keys)) => {
                 if !dock::send_keys(keys) {
                     eprintln!("Dock button: Windows refused the key input");
@@ -3143,6 +3157,54 @@ impl Desktop {
             Ok(menu) if take_foreground(menu.hwnd()) => self.menu = Some(menu),
             Ok(_) => eprintln!("Quick settings: Windows kept another app in front; not opened"),
             Err(error) => eprintln!("Quick settings: {error}"),
+        }
+    }
+    /// The Places button's popup above it: the Recycle Bin and each drive as the shell reports them now;
+    /// a click opens that place in Explorer.
+    fn open_places_menu(&mut self, hwnd: HWND) {
+        self.dismiss_preview();
+        self.close_menu();
+        let Some(dock) = self.dock_at(hwnd).filter(|dock| dock.visible) else {
+            return;
+        };
+        let (bounds, dpi, monitor, buttons) = (
+            dock.bounds,
+            dock.dpi,
+            dock.monitor.clone(),
+            dock.dock_buttons,
+        );
+        let return_to = dock::foreground_key();
+        let Some(work) = self
+            .monitors
+            .iter()
+            .find(|m| m.device == monitor)
+            .map(|m| m.work)
+        else {
+            return;
+        };
+        let places = crate::places::list();
+        let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Button(Button::Places));
+        let spec = dock_menu::Spec {
+            dock: hwnd,
+            slot: 0,
+            windows: Vec::new(),
+            identity: Identity::Unavailable(0),
+            items: (0..places.len()).map(Item::Place).collect(),
+            dock_bounds: bounds,
+            work,
+            dpi,
+            app: "Places".into(),
+            titles: places.iter().map(|place| place.text.clone()).collect(),
+            icons: Vec::new(),
+            x: bounds.x + left + width / 2,
+            below: None,
+            return_to,
+        };
+        self.places = places;
+        match dock_menu::Menu::open(&self.graphics, self.palette, spec) {
+            Ok(menu) if take_foreground(menu.hwnd()) => self.menu = Some(menu),
+            Ok(_) => eprintln!("Places: Windows kept another app in front; not opened"),
+            Err(error) => eprintln!("Places: {error}"),
         }
     }
     /// Applies one quick setting, then shows the new state in the same popup.
@@ -3512,6 +3574,13 @@ impl Desktop {
                 Item::Restore(key) => {
                     self.run_dock_action(dock::Action::Activate(key));
                 }
+                Item::Place(index) => {
+                    if let Some(place) = self.places.get(index)
+                        && !dock::launch(&place.target)
+                    {
+                        eprintln!("Places: the shell did not open {}", place.target);
+                    }
+                }
                 Item::RemoveShelf => {
                     if let Identity::Executable(path) = &menu.identity {
                         self.remove_shelf_entry(path);
@@ -3590,6 +3659,7 @@ impl Desktop {
             | Item::Quit
             | Item::Restore(_)
             | Item::Quick(_)
+            | Item::Place(_)
             | Item::RemoveShelf
             | Item::UndoShelf
             | Item::Group
@@ -4180,6 +4250,18 @@ impl Desktop {
             }
             return Ok(());
         }
+        if message.message == native_window::DEVICE {
+            let bits = native_window::device_read();
+            let text = if bits & native_window::DRIVE_BIT != 0 {
+                "Drive connected."
+            } else if bits & native_window::CAMERA_BIT != 0 {
+                "Camera connected."
+            } else {
+                "Speaker connected."
+            };
+            self.show_notice(text.into(), Instant::now());
+            return Ok(());
+        }
         if message.message == native_window::WAKE {
             native_window::wake_read();
             let now = Instant::now();
@@ -4418,12 +4500,18 @@ impl Desktop {
         if before == self.fullscreen {
             return Ok(());
         }
+        self.apply_visibility()
+    }
+    /// Hides or shows each surface for the full-screen and dock auto-hide state, painted current before
+    /// it appears.
+    fn apply_visibility(&mut self) -> Result<()> {
         let icons = self.dock_icons();
         for surface in &mut self.surfaces {
             let visible = !self
                 .fullscreen
                 .iter()
-                .any(|(_, device)| device == &surface.monitor);
+                .any(|(_, device)| device == &surface.monitor)
+                && (surface.kind() != SurfaceKind::Dock || self.tuck.shown(&surface.monitor));
             if visible && !surface.visible {
                 match surface.kind() {
                     SurfaceKind::Notch => surface.paint_notch(
@@ -4442,6 +4530,44 @@ impl Desktop {
             surface.set_visible(visible);
         }
         Ok(())
+    }
+    /// Dock auto-hide: re-reads which window covers a dock when the catalog changed or the re-check is due,
+    /// and applies the strips' hover deadlines.
+    fn refresh_tuck(&mut self, generation: u64) -> Result<()> {
+        let now = Instant::now();
+        let mut changed = false;
+        if self.tuck_generation != Some(generation) || self.tuck.polled(now) {
+            self.tuck_generation = Some(generation);
+            let frame = match dock::foreground_key() {
+                None => Some(None),
+                Some(key) if dock::valid_target(key) => Some(native_window::window_frame(key)),
+                Some(_) => None,
+            };
+            let docks: Vec<_> = self
+                .surfaces
+                .iter()
+                .filter(|s| s.kind() == SurfaceKind::Dock)
+                .map(|s| (s.monitor.clone(), s.bounds))
+                .collect();
+            changed |= self
+                .tuck
+                .sync(self.settings.dock_hide, frame, &docks, &self.monitors, now);
+        }
+        let surfaces = &self.surfaces;
+        changed |= self.tuck.tick(now, |device| {
+            surfaces
+                .iter()
+                .any(|s| s.kind() == SurfaceKind::Dock && s.monitor == device && s.hovered)
+        });
+        if changed {
+            self.apply_visibility()?;
+        }
+        Ok(())
+    }
+    fn tuck_wait(&self) -> u32 {
+        self.tuck
+            .deadline()
+            .map_or(INFINITE, |due| milliseconds_until(due, Instant::now()))
     }
     fn fullscreen_wait(&self) -> u32 {
         self.fullscreen_due
@@ -4584,6 +4710,7 @@ impl Desktop {
         self.refresh_weather();
         self.refresh_limits();
         self.refresh_fullscreen(model.generation)?;
+        self.refresh_tuck(model.generation)?;
         let wait = self
             .refresh_clock()?
             .min(self.refresh_progress()?)
@@ -4746,6 +4873,7 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
             .min(clock_wait)
             .min(desktop.topology_wait())
             .min(desktop.fullscreen_wait())
+            .min(desktop.tuck_wait())
             .min(desktop.store_wait())
             .min(desktop.media_wait())
             .min(desktop.rebuild.wait(Instant::now()));
@@ -4944,7 +5072,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 desktop.open_app_menu(message.hwnd, message.lParam);
                 continue;
             }
-            if desktop.edge_message(&message) {
+            if desktop.edge_message(&message) || desktop.tuck.message(&message, Instant::now()) {
                 continue;
             }
             if desktop.notch_input(&message) {

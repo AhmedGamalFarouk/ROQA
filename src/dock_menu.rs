@@ -59,6 +59,8 @@ pub enum Item {
     Restore(WindowKey),
     /// A row of the quick settings popup; its text is the setting's state (`Spec::titles`).
     Quick(Quick),
+    /// A row of the Places popup (an index into the host's list); its text is in `Spec::titles`.
+    Place(usize),
 }
 /// What a quick settings row does when pressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +95,7 @@ impl Item {
             Item::Quit => "Quit ROQA",
             Item::Restore(_) => "Window",
             Item::Quick(_) => "Setting",
+            Item::Place(_) => "Place",
         }
     }
 }
