@@ -43,6 +43,8 @@ const WAKE: u32 = WM_APP + 51;
 const REBIND: u32 = 1;
 /// The bound endpoint's level or mute changed: read it again.
 const VOLUME: u32 = 2;
+/// With `VOLUME`: the change was made by something other than ROQA (a volume key, another app).
+const EXTERNAL: u32 = 4;
 /// Event context of ROQA's own changes. Their notifications wake nothing: the setter already
 /// queued its own re-read.
 const ECHO: GUID = GUID::from_u128(0x9d8f3897_b1df_4a66_add8_1c91eefc0f51);
@@ -180,7 +182,7 @@ impl IAudioEndpointVolumeCallback_Impl for VolumeEvents_Impl {
         // SAFETY: Core Audio's notification data is valid for this call; a null one still wakes.
         let echo = unsafe { data.as_ref() }.is_some_and(|data| data.guidEventContext == ECHO);
         if !echo {
-            self.0.raise(VOLUME);
+            self.0.raise(VOLUME | EXTERNAL);
         }
         Ok(())
     }
@@ -294,6 +296,8 @@ pub struct Audio {
     started: bool,
     /// `None` without a default render endpoint, or before the first bind.
     level: Option<Level>,
+    /// The last `refresh` changed the level because of something other than ROQA.
+    elsewhere: bool,
     /// The last `BARS` peak samples, oldest first; zero while the visualizer is stopped.
     peaks: [f32; BARS],
     wake: Arc<Wake>,
@@ -306,6 +310,7 @@ impl Audio {
             devices: None,
             started: false,
             level: None,
+            elsewhere: false,
             peaks: [0.0; BARS],
             wake: Arc::new(Wake {
                 dirty: AtomicU32::new(0),
@@ -392,6 +397,7 @@ impl Audio {
     /// Applies pending notifications; returns whether the shown level changed. Without any it
     /// costs one atomic swap.
     pub fn refresh(&mut self) -> bool {
+        self.elsewhere = false;
         let dirty = self.wake.dirty.swap(0, Ordering::Relaxed);
         if dirty == 0 {
             return false;
@@ -414,7 +420,13 @@ impl Audio {
                 .inspect_err(|error| eprintln!("Audio: level: {error}"))
                 .ok()
         });
-        before != self.level
+        let changed = before != self.level;
+        self.elsewhere = changed && dirty & EXTERNAL != 0 && dirty & REBIND == 0;
+        changed
+    }
+    /// The last `refresh` saw the volume or mute change from outside ROQA (not a device switch).
+    pub fn elsewhere(&self) -> bool {
+        self.elsewhere
     }
     /// Sets the master volume, 0 to 1, as ROQA's own change, unmuting a muted endpoint; the next
     /// `refresh` reads the result. Like `toggle_mute`, it acts only while the row shows a level,
@@ -592,9 +604,9 @@ mod tests {
             assert_eq!(take(&wake), 0);
             data.guidEventContext = GUID::zeroed();
             callback.OnNotify(&mut data).unwrap();
-            assert_eq!(take(&wake), VOLUME);
+            assert_eq!(take(&wake), VOLUME | EXTERNAL);
             callback.OnNotify(std::ptr::null_mut()).unwrap();
-            assert_eq!(take(&wake), VOLUME);
+            assert_eq!(take(&wake), VOLUME | EXTERNAL);
         }
     }
 

@@ -1401,6 +1401,8 @@ struct PrayerRun {
 const PRAYER_NOTICE: Duration = Duration::from_secs(8);
 /// How long a device alert holds the notch open.
 const DEVICE_NOTICE: Duration = Duration::from_secs(4);
+/// How long a volume change from outside ROQA holds the notch open.
+const VOLUME_NOTICE: Duration = Duration::from_millis(1500);
 /// The system sound for a finished timer or a due reminder (callers check the sound settings).
 fn chime() {
     // SAFETY: plays the user's own default sound asynchronously; no pointers.
@@ -5237,12 +5239,23 @@ impl Desktop {
             self.peek_song();
         }
         let shown = self.pages.track(&self.media).is_some();
-        if shown || self.edges.wants_audio() {
-            // Core Audio loads only once a media panel or the volume slider can show the level.
+        if shown || self.edges.wants_audio() || self.settings.notch {
+            // Core Audio loads once a notch can show the level: in a media panel, on the slider, or as a pill.
             self.audio.start();
         }
         let volume = self.audio.refresh();
-        if redraw {
+        if self.audio.elsewhere()
+            && let Some(level) = self.audio.level()
+        {
+            let text = if level.muted {
+                "Muted".to_owned()
+            } else {
+                format!("Volume {}%", level.percent)
+            };
+            self.power.announce(text, Instant::now(), VOLUME_NOTICE);
+            self.open_notches();
+            self.request_notches(Repaint::Full, |_| true);
+        } else if redraw {
             self.request_notches(Repaint::Full, |_| true);
         } else if volume && shown {
             // Only an open or opening panel draws the volume row; a collapsed pill has nothing new.
