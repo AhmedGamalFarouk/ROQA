@@ -285,12 +285,19 @@ pub struct Buttons {
     /// Mirrored for a right-to-left UI language: the dock runs from the right edge, as the taskbar does.
     /// The host sets it from the system; it is not a stored setting.
     pub rtl: bool,
+    /// App slots (picker included) to centre in a bar wider than they are; 0 leaves them at the start.
+    /// The host sets it from the "Icons at the start" setting and the dock's slot count; it is not stored.
+    pub centre: usize,
 }
 impl Buttons {
     #[cfg(test)]
     pub const NONE: Buttons = Buttons::of([false; 7]);
     pub const fn of(shown: [bool; 7]) -> Self {
-        Self { shown, rtl: false }
+        Self {
+            shown,
+            rtl: false,
+            centre: 0,
+        }
     }
     pub fn on(self, button: Button) -> bool {
         self.shown[button.index()]
@@ -448,6 +455,17 @@ fn tail_px(buttons: Buttons, dpi: u32) -> i32 {
         )
 }
 
+/// How far a wide bar pushes the slots right so they sit in the middle of the room between the buttons.
+fn centre_px(buttons: Buttons, width_px: i32, dpi: u32) -> i32 {
+    let room = width_px - lead_px(buttons, dpi) - tail_px(buttons, dpi);
+    let used = px(SLOT_DIPS, dpi) * buttons.centre as i32;
+    if buttons.centre == 0 {
+        0
+    } else {
+        ((room - used) / 2).max(0)
+    }
+}
+
 /// Total width in pixels, the sum of the scaled parts so no cell is clipped by rounding. With no buttons:
 /// the pad, the slots and the pad.
 #[inline(never)]
@@ -483,7 +501,9 @@ fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
     let (btn, strip) = (px(BTN_DIPS, dpi), px(STRIP_DIPS, dpi));
     match hit {
         Hit::Slot(slot) => (
-            lead_px(buttons, dpi) + px(SLOT_DIPS, dpi) * slot as i32,
+            lead_px(buttons, dpi)
+                + centre_px(buttons, width_px, dpi)
+                + px(SLOT_DIPS, dpi) * slot as i32,
             px(SLOT_DIPS, dpi),
         ),
         Hit::Button(Button::Desktop) => (width_px - strip, strip),
@@ -535,7 +555,7 @@ pub fn hit_at(buttons: Buttons, x_px: i32, width_px: i32, dpi: u32, slots: usize
     if let Some(button) = on_button {
         return Some(Hit::Button(button));
     }
-    let offset = x_px - lead_px(buttons, dpi);
+    let offset = x_px - lead_px(buttons, dpi) - centre_px(buttons, width_px, dpi);
     if offset < 0 {
         return None;
     }
@@ -1535,6 +1555,24 @@ mod tests {
                 .iter()
                 .enumerate()
                 .all(|(at, label)| !labels[..at].contains(label))
+        );
+    }
+
+    #[test]
+    fn a_wide_bar_centres_its_slots_only_when_asked() {
+        let b = Buttons::default();
+        let wide = width_px(b, 3, 96) + 400;
+        let left = span(b, wide, 96, Hit::Slot(0)).0;
+        let centred = Buttons { centre: 3, ..b };
+        let mid = span(centred, wide, 96, Hit::Slot(0)).0;
+        assert_eq!(mid - left, 200);
+        let (at, w) = span(centred, wide, 96, Hit::Slot(1));
+        assert_eq!(hit_at(centred, at + w / 2, wide, 96, 3), Some(Hit::Slot(1)));
+        // A dock exactly as wide as its slots does not move.
+        let snug = width_px(b, 3, 96);
+        assert_eq!(
+            span(centred, snug, 96, Hit::Slot(0)).0,
+            span(b, snug, 96, Hit::Slot(0)).0
         );
     }
 }

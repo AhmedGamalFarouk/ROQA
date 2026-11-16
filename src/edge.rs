@@ -311,6 +311,10 @@ impl Hover {
     pub fn deadline(&self) -> Option<Instant> {
         self.due
     }
+    /// Shown by something other than the pointer (an alert): it hides `delay` from now unless held.
+    pub fn show_until(&mut self, now: Instant, delay: Duration) {
+        (self.over, self.shown, self.due) = (false, true, Some(now + delay));
+    }
     pub fn reset(&mut self) {
         *self = Self::default();
     }

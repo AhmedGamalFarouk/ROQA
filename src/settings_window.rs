@@ -118,6 +118,8 @@ const MATCH_ACCENT: usize = 199;
 const DOCK_BADGES: usize = 202;
 const CLIP: usize = 203;
 const DOCK_HIDE: usize = 204;
+const NOTCH_HIDE: usize = 205;
+const DOCK_LEFT: usize = 206;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -238,6 +240,12 @@ const PAGES: &[Page] = &[
                         "Open the notch",
                         "By hovering or by a click",
                     ),
+                    r(
+                        NOTCH_HIDE,
+                        C,
+                        "Hide behind windows",
+                        "Rest the pointer at the top edge to bring it back",
+                    ),
                     r(ANIM, Kind::Combo(120), "Animation speed", ""),
                 ],
             },
@@ -256,6 +264,12 @@ const PAGES: &[Page] = &[
                         C,
                         "Hide behind windows",
                         "Rest the pointer at the bottom edge to bring it back",
+                    ),
+                    r(
+                        DOCK_LEFT,
+                        C,
+                        "Icons at the start",
+                        "Instead of the middle of a full-width dock",
                     ),
                 ],
             },
@@ -1385,6 +1399,8 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         MATCH_ACCENT => &mut s.match_accent,
         DOCK_BADGES => &mut s.dock_badges,
         DOCK_HIDE => &mut s.dock_hide,
+        NOTCH_HIDE => &mut s.notch_hide,
+        DOCK_LEFT => &mut s.dock_left,
         TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
         DBTN..=136 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,

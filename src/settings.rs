@@ -79,6 +79,10 @@ pub struct Settings {
     pub hide_fullscreen: bool,
     /// The dock slides away while a window covers it and returns when the pointer rests at the screen edge.
     pub dock_hide: bool,
+    /// The notch slides away while a window covers it and returns when the pointer rests at the top edge.
+    pub notch_hide: bool,
+    /// Keep the dock's icons at the start of a full-width bar instead of the middle.
+    pub dock_left: bool,
     /// Open the notch on a click instead of hovering over it.
     pub open_click: bool,
     /// Closed pill size, one of `NOTCH_SIZES` percent.
@@ -133,7 +137,9 @@ impl Default for Settings {
             limits_agy: false,
             limits_group: 0,
             hide_fullscreen: true,
-            dock_hide: false,
+            dock_hide: true,
+            notch_hide: true,
+            dock_left: false,
             open_click: false,
             notch_size: 0,
             anim_fast: false,
@@ -266,7 +272,10 @@ impl Settings {
                 .is_some(),
             "limcodex" => flag(value).map(|v| self.limits_codex = v).is_some(),
             "limagy" => flag(value).map(|v| self.limits_agy = v).is_some(),
-            "dockhide" => flag(value).map(|v| self.dock_hide = v).is_some(),
+            // New keys: the old "dockhide" (off by default then) is ignored so everyone starts on.
+            "dockauto" => flag(value).map(|v| self.dock_hide = v).is_some(),
+            "notchauto" => flag(value).map(|v| self.notch_hide = v).is_some(),
+            "dockleft" => flag(value).map(|v| self.dock_left = v).is_some(),
             "fshide" => flag(value).map(|v| self.hide_fullscreen = v).is_some(),
             "rsounds" => flag(value).map(|v| self.reminder_sounds = v).is_some(),
             "ppause" => flag(value).map(|v| self.prayer_pause = v).is_some(),
@@ -399,7 +408,15 @@ limgroup={}
             self.limits_group
         ));
         let [a, b, c, d, e] = self.prayer_shift;
-        out.push_str(&format!("dockhide={}\n", u8::from(self.dock_hide)));
+        out.push_str(&format!(
+            "dockauto={}
+notchauto={}
+dockleft={}
+",
+            u8::from(self.dock_hide),
+            u8::from(self.notch_hide),
+            u8::from(self.dock_left)
+        ));
         out.push_str(&format!(
             "fshide={}
 rsounds={}

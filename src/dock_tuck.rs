@@ -1,4 +1,4 @@
-//! Dock auto-hide: the dock slides away while the foreground window covers it, and comes back while the
+//! Dock and notch auto-hide: the surface slides away while the foreground window covers it, and comes back while the
 //! pointer rests on a thin strip along the monitor's bottom edge (or stays on the dock). Event-driven: the
 //! catalog's generation feeds `sync`; the only waits are the strip's hover deadline and, while a window
 //! covers the dock, one slow re-check (a maximize or a resize raises no event the catalog hears; a drag's end
@@ -46,6 +46,8 @@ pub type Frame = Option<Option<(String, Bounds)>>;
 
 #[derive(Default)]
 pub struct Tuck {
+    /// The notch's: its strip runs along the top edge instead of the bottom.
+    top: bool,
     /// Monitors whose dock a window covers.
     tucked: Vec<String>,
     /// The monitor whose covered dock is shown again.
@@ -54,6 +56,13 @@ pub struct Tuck {
     poll: Option<Instant>,
 }
 impl Tuck {
+    /// The notch's: its strip runs along the top edge.
+    pub fn top() -> Self {
+        Self {
+            top: true,
+            ..Self::default()
+        }
+    }
     /// False while a covered dock is hidden on `device`.
     pub fn shown(&self, device: &str) -> bool {
         !self.tucked.iter().any(|m| m == device) || self.peek.as_deref() == Some(device)
@@ -73,7 +82,10 @@ impl Tuck {
     ) -> bool {
         let before = (self.tucked.clone(), self.peek.clone());
         if !on {
-            *self = Self::default();
+            *self = Self {
+                top: self.top,
+                ..Self::default()
+            };
         } else {
             if let Some(frame) = frame {
                 self.tucked = docks
@@ -96,7 +108,7 @@ impl Tuck {
                 if self.tucked.contains(device)
                     && !self.strips.iter().any(|s| &s.monitor == device)
                     && let Some(monitor) = monitors.iter().find(|m| &m.device == device)
-                    && let Some(strip) = Strip::create(monitor, *bounds)
+                    && let Some(strip) = Strip::create(monitor, *bounds, self.top)
                 {
                     self.strips.push(strip);
                 }
@@ -140,6 +152,15 @@ impl Tuck {
         }
         true
     }
+    /// Shows a tucked surface on `device` for `delay` (a notch alert); true when it was tucked.
+    pub fn alert(&mut self, device: &str, now: Instant, delay: Duration) -> bool {
+        let Some(strip) = self.strips.iter_mut().find(|s| s.monitor == device) else {
+            return false;
+        };
+        strip.hover.show_until(now, delay);
+        self.peek = Some(device.to_owned());
+        true
+    }
     /// The pointer left the dock on `device`: a revealed dock leaves after `LEAVE`.
     pub fn release(&mut self, device: &str, now: Instant) {
         if self.peek.as_deref() == Some(device)
@@ -158,13 +179,17 @@ impl Tuck {
     }
 }
 impl Strip {
-    fn create(monitor: &Monitor, dock: Bounds) -> Option<Self> {
+    fn create(monitor: &Monitor, dock: Bounds, top: bool) -> Option<Self> {
         let height = px(STRIP, monitor.dpi).max(2);
         // Along the work area's bottom: on the screen edge when the taskbar hides, above it when it shows, so
         // the strip never takes the taskbar's edge clicks (Start, icons).
         let at = Bounds {
             x: dock.x,
-            y: monitor.work.y + monitor.work.height - height,
+            y: if top {
+                monitor.work.y
+            } else {
+                monitor.work.y + monitor.work.height - height
+            },
             width: dock.width,
             height,
         };

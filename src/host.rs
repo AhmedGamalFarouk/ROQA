@@ -1185,6 +1185,7 @@ struct Desktop {
     fullscreen_due: Option<Instant>,
     /// Dock auto-hide (`dock_tuck`), and the catalog generation it last read.
     tuck: dock_tuck::Tuck,
+    tuck_notch: dock_tuck::Tuck,
     tuck_generation: Option<u64>,
     /// A new song opened the notch on its own: when it closes again, and the song it showed.
     peek: Option<Instant>,
@@ -1350,6 +1351,7 @@ impl Desktop {
             fullscreen_generation: None,
             fullscreen_due: None,
             tuck: dock_tuck::Tuck::default(),
+            tuck_notch: dock_tuck::Tuck::top(),
             tuck_generation: None,
             peek: None,
             peek_title: None,
@@ -1437,6 +1439,11 @@ impl Desktop {
     fn dock_buttons(&self) -> Buttons {
         Buttons {
             rtl: self.rtl,
+            centre: if self.settings.dock_left {
+                0
+            } else {
+                self.dock_slots()
+            },
             ..self.settings.dock_buttons
         }
     }
@@ -1505,7 +1512,10 @@ impl Desktop {
             .fullscreen
             .iter()
             .any(|(_, device)| device == &monitor.device)
-            && (kind != SurfaceKind::Dock || self.tuck.shown(&monitor.device));
+            && match kind {
+                SurfaceKind::Dock => self.tuck.shown(&monitor.device),
+                SurfaceKind::Notch => self.tuck_notch.shown(&monitor.device),
+            };
         let last = self.surfaces.len() - 1;
         self.surfaces[last].set_visible(visible);
         Ok(())
@@ -2161,6 +2171,23 @@ impl Desktop {
         self.peek = Some(now + motion::PEEK_TIME);
     }
     fn open_notches(&mut self) {
+        // An alert or a new song shows a tucked notch for a while, like Bloom's peek.
+        let now = Instant::now();
+        let hidden: Vec<_> = self
+            .surfaces
+            .iter()
+            .filter(|s| s.kind() == SurfaceKind::Notch && !s.visible)
+            .map(|s| s.monitor.clone())
+            .collect();
+        let peeked = hidden.iter().fold(false, |any, device| {
+            self.tuck_notch
+                .alert(device, now, motion::time(motion::PEEK_TIME))
+                || any
+        });
+        if peeked {
+            // A paint failure leaves the notch hidden; the next pass retries.
+            let _ = self.apply_visibility();
+        }
         for surface in &mut self.surfaces {
             if surface.visible
                 && let Role::Notch { intent, linger, .. } = &mut surface.role
@@ -2525,7 +2552,7 @@ impl Desktop {
         if old.hide_fullscreen != self.settings.hide_fullscreen {
             self.fullscreen_generation = None; // the next pass hides or shows again
         }
-        if old.dock_hide != self.settings.dock_hide {
+        if old.dock_hide != self.settings.dock_hide || old.notch_hide != self.settings.notch_hide {
             self.tuck_generation = None;
         }
         self.edges_dirty = true;
@@ -2558,6 +2585,7 @@ impl Desktop {
         }
         if old.dock_style != self.settings.dock_style
             || old.dock_buttons != self.settings.dock_buttons
+            || old.dock_left != self.settings.dock_left
         {
             self.relayout_docks()?;
         }
@@ -4558,9 +4586,11 @@ impl Desktop {
                 }
             }
             WM_MOUSELEAVE => {
-                if surface.kind() == SurfaceKind::Dock {
-                    self.tuck.release(&surface.monitor, Instant::now());
-                }
+                let tuck = match surface.kind() {
+                    SurfaceKind::Dock => &mut self.tuck,
+                    SurfaceKind::Notch => &mut self.tuck_notch,
+                };
+                tuck.release(&surface.monitor, Instant::now());
                 surface.leave();
                 if !surface.grip.drag && surface.grip.hover {
                     surface.grip.hover = false;
@@ -4619,7 +4649,13 @@ impl Desktop {
                 .fullscreen
                 .iter()
                 .any(|(_, device)| device == &surface.monitor)
-                && (surface.kind() != SurfaceKind::Dock || self.tuck.shown(&surface.monitor));
+                && match surface.kind() {
+                    SurfaceKind::Dock => self.tuck.shown(&surface.monitor),
+                    // An open notch stays up while a window slides under it.
+                    SurfaceKind::Notch => {
+                        self.tuck_notch.shown(&surface.monitor) || surface.motion.target() > 0.0
+                    }
+                };
             if visible && !surface.visible {
                 match surface.kind() {
                     SurfaceKind::Notch => surface.paint_notch(
@@ -4644,7 +4680,10 @@ impl Desktop {
     fn refresh_tuck(&mut self, generation: u64) -> Result<()> {
         let now = Instant::now();
         let mut changed = false;
-        if self.tuck_generation != Some(generation) || self.tuck.polled(now) {
+        if self.tuck_generation != Some(generation)
+            || self.tuck.polled(now)
+            || self.tuck_notch.polled(now)
+        {
             self.tuck_generation = Some(generation);
             let frame = match dock::foreground_key() {
                 None => Some(None),
@@ -4657,11 +4696,45 @@ impl Desktop {
                 .filter(|s| s.kind() == SurfaceKind::Dock)
                 .map(|s| (s.monitor.clone(), s.bounds))
                 .collect();
-            changed |= self
-                .tuck
-                .sync(self.settings.dock_hide, frame, &docks, &self.monitors, now);
+            changed |= self.tuck.sync(
+                self.settings.dock_hide,
+                frame.clone(),
+                &docks,
+                &self.monitors,
+                now,
+            );
+            // The notch's footprint is its closed pill at the top centre, not the whole transparent window.
+            let notches: Vec<_> = self
+                .surfaces
+                .iter()
+                .filter(|s| s.kind() == SurfaceKind::Notch)
+                .map(|s| {
+                    let width = dock::px(layout::NOTCH.width as i32, s.dpi).min(s.bounds.width);
+                    let pill = Bounds {
+                        x: s.bounds.x + (s.bounds.width - width) / 2,
+                        width,
+                        height: dock::px(layout::NOTCH.height as i32, s.dpi),
+                        ..s.bounds
+                    };
+                    (s.monitor.clone(), pill)
+                })
+                .collect();
+            changed |= self.tuck_notch.sync(
+                self.settings.notch_hide,
+                frame,
+                &notches,
+                &self.monitors,
+                now,
+            );
         }
         let surfaces = &self.surfaces;
+        changed |= self.tuck_notch.tick(now, |device| {
+            surfaces.iter().any(|s| {
+                s.kind() == SurfaceKind::Notch
+                    && s.monitor == device
+                    && (s.hovered || s.motion.target() > 0.0)
+            })
+        });
         changed |= self.tuck.tick(now, |device| {
             surfaces
                 .iter()
@@ -4675,6 +4748,9 @@ impl Desktop {
     fn tuck_wait(&self) -> u32 {
         self.tuck
             .deadline()
+            .into_iter()
+            .chain(self.tuck_notch.deadline())
+            .min()
             .map_or(INFINITE, |due| milliseconds_until(due, Instant::now()))
     }
     fn fullscreen_wait(&self) -> u32 {
@@ -5185,7 +5261,10 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 desktop.open_app_menu(message.hwnd, message.lParam);
                 continue;
             }
-            if desktop.edge_message(&message) || desktop.tuck.message(&message, Instant::now()) {
+            if desktop.edge_message(&message)
+                || desktop.tuck.message(&message, Instant::now())
+                || desktop.tuck_notch.message(&message, Instant::now())
+            {
                 continue;
             }
             if desktop.notch_input(&message) {
