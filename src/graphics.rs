@@ -1391,6 +1391,8 @@ struct MediaPlan<'a> {
     volume: Option<VolumeBar>,
     /// The visualizer's bars and their opacity.
     meter: Option<([D2D1_ROUNDED_RECT; BARS], f32)>,
+    /// The collapsed pill's level bars and their opacity.
+    pill_meter: Option<([D2D1_ROUNDED_RECT; BARS], f32)>,
 }
 
 /// A black circle carrying the play-state glyph at the art's bottom-right corner, faded by `alpha`.
@@ -1529,6 +1531,26 @@ fn media_plan<'a>(
     let artist = motion::reveal(scene.progress);
     // The title makes way while the mascot's eyes are in its lane.
     let title_fade = tab_art::clock_shown(scene);
+    // The pill's lane: five level bars, then the elapsed time. They fade with the title's lane.
+    let pill_text = leading + 24.0 * scale;
+    let fade = title_fade * (1.0 - open);
+    let pill_meter = (fade > 0.0).then(|| {
+        let full = layout::meter(scene.dpi).0.height.max(1) as f32;
+        let bars = std::array::from_fn(|index| {
+            let level = (scene.bars[index] as f32 / full).min(1.0);
+            let height = ((3.0 + 9.0 * level) * scale).round();
+            let left = (leading + index as f32 * 4.0 * scale).round();
+            let top = body.top + middle * scale - height / 2.0;
+            let rect = D2D_RECT_F {
+                left,
+                top,
+                right: left + 2.0 * scale,
+                bottom: top + height,
+            };
+            rounded(rect, scale)
+        });
+        (bars, METER_FILL * fade * dim)
+    });
     let mut lines = vec![
         Line {
             text: scene.time.into(),
@@ -1547,7 +1569,17 @@ fn media_plan<'a>(
                 },
             ),
             rect: row(title, at(middle, 30.0), 12.0),
-            alpha: at(0.85, 1.0) * dim * title_fade,
+            // The pill shows the elapsed time and level bars instead; the title arrives with the panel.
+            alpha: at(0.85, 1.0) * dim * title_fade * open,
+        },
+        Line {
+            text: scene
+                .played
+                .map_or_else(String::new, |p| p.times()[0].clone())
+                .into(),
+            font: font(12.0, DWRITE_FONT_WEIGHT_NORMAL),
+            rect: row((pill_text, title.1.max(pill_text)), middle, 12.0),
+            alpha: dim * title_fade * (1.0 - open),
         },
         Line {
             text: track.artist.as_str().into(),
@@ -1578,6 +1610,7 @@ fn media_plan<'a>(
         chips,
         volume: volume_bar(scene, body),
         meter: meter_bars(scene, body),
+        pill_meter,
     }
 }
 
@@ -1913,7 +1946,7 @@ fn media_text(
             )?;
         }
     }
-    if let Some((bars, alpha)) = &plan.meter {
+    for (bars, alpha) in plan.meter.iter().chain(&plan.pill_meter) {
         // SAFETY: as above.
         unsafe {
             let brush =
@@ -3015,15 +3048,12 @@ mod media_tests {
         assert_eq!(plan.glyph, rect(104.0, 10.0, 114.0, 20.0));
         assert!(plan.playing);
         assert_eq!(plan.dim, 1.0);
-        // The title ends 8 before the clock's measured width; the artist is not laid out.
-        let title_end = 337.0 - clock_width("9:50 pm", 0.0, 96) - 8.0;
+        // No title in the pill (and no elapsed time without a duration): the clock and the level bars.
         assert_eq!(
             lines(&plan),
-            [
-                ("9:50 pm", rect(119.0, 3.0, 337.0, 27.0), 15.0, 1.0),
-                ("Song", rect(127.0, 3.0, title_end, 27.0), 12.0, 0.85),
-            ]
+            [("9:50 pm", rect(119.0, 3.0, 337.0, 27.0), 15.0, 1.0)]
         );
+        assert!(plan.pill_meter.is_some());
         let clock = &plan.lines[0].font;
         assert_eq!(
             (clock.weight, clock.designator, clock.align),
@@ -3032,11 +3062,6 @@ mod media_tests {
                 TIME_DESIGNATOR,
                 DWRITE_TEXT_ALIGNMENT_TRAILING
             )
-        );
-        let title = &plan.lines[1].font;
-        assert_eq!(
-            (title.weight, title.align),
-            (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING)
         );
         // The pill draws no controls.
         assert!(plan.chips.is_empty());
@@ -3406,7 +3431,7 @@ mod media_tests {
         let song = track("Song", "Artist", true);
         for dpi in [96, 144, 192] {
             let scale = dpi as f32 / 96.0;
-            for progress in [0.0, 0.5, 1.0] {
+            for progress in [0.5, 1.0] {
                 let body = body(dpi, progress);
                 let open = motion::smooth(progress);
                 let plan = plan(&song, "9:50 pm", progress, dpi);
@@ -3439,7 +3464,7 @@ mod media_tests {
         ] {
             for dpi in [96, 144, 192] {
                 let scale = dpi as f32 / 96.0;
-                for progress in [0.0, 0.5, 1.0] {
+                for progress in [0.1, 0.5, 1.0] {
                     let clock = clock_width(time, progress, dpi);
                     let plan = plan(&song, time, progress, dpi);
                     let title = plan.lines[1].rect;
@@ -3455,7 +3480,7 @@ mod media_tests {
             }
         }
         // A clock wider than the row leaves an empty, not inverted, title column.
-        let plan = plan(&song, long, 0.0, 96);
+        let plan = plan(&song, long, 0.1, 96);
         assert_eq!(plan.lines[1].rect.right, plan.lines[1].rect.left);
     }
 

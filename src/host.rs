@@ -697,12 +697,14 @@ impl Surface {
                 .retarget(level, VOLUME_EASE, motion::SETTLE);
         }
         let volume_fill = self.volume_fill.value(now);
-        // Only a revealed panel row reads the time; a collapsed notch draws no progress.
-        self.played = track
-            .filter(|_| motion::reveal(progress) > 0.0)
-            .and_then(|track| {
-                track.progress(media::now_ticks(), layout::media_progress(self.dpi).width)
-            });
+        // The panel's row needs the bar's width; the collapsed pill shows only the elapsed time, so a
+        // 1 px bar keeps its repaints to whole seconds.
+        let width = if motion::reveal(progress) > 0.0 {
+            layout::media_progress(self.dpi).width
+        } else {
+            1
+        };
+        self.played = track.and_then(|track| track.progress(media::now_ticks(), width));
         // Paused bars lie flat at once; the meter stops on the next pass.
         let peaks = match track {
             Some(track) if track.playing => audio.peaks(),
@@ -1574,15 +1576,29 @@ impl Desktop {
     fn refresh_progress(&mut self) -> Result<u32> {
         let mut next_due = None::<Instant>;
         let media_page = self.page() == Tab::Media;
-        for notch in self.surfaces.iter_mut().filter(|s| s.expanded()) {
-            let Some(track) = self.pages.track(&self.media).filter(|_| media_page) else {
-                break;
+        // A visible collapsed notch ticks too: its pill shows the elapsed time while a track plays.
+        for notch in self
+            .surfaces
+            .iter_mut()
+            .filter(|s| s.visible && s.kind() == SurfaceKind::Notch)
+        {
+            let open = notch.expanded();
+            let Some(track) = self
+                .pages
+                .track(&self.media)
+                .filter(|track| (media_page || !open) && (open || track.playing))
+            else {
+                continue;
             };
             let (now, ticks) = (Instant::now(), media::now_ticks());
             if let Some(due) = self.progress_due.filter(|&due| due <= now) {
                 self.progress_tick = due;
             }
-            let width = layout::media_progress(notch.dpi).width;
+            let width = if open {
+                layout::media_progress(notch.dpi).width
+            } else {
+                1
+            };
             // A running animation paints every frame already.
             if !notch.live && notch.played != track.progress(ticks, width) {
                 notch.request(Repaint::Full);
@@ -1606,8 +1622,19 @@ impl Desktop {
         let track = self.pages.track(&self.media);
         let (shown, playing) = (track.is_some(), track.is_some_and(|track| track.playing));
         // Only the Media page draws the visualizer; any other page, or no Media tab, makes no meter call.
+        // A visible collapsed notch shows the meter in its pill while a track plays.
         let open = self.page() == Tab::Media && self.surfaces.iter().any(Surface::expanded);
-        let due = meter_due(open, playing, self.audio.metered(), self.sampled, now);
+        let pill = self
+            .surfaces
+            .iter()
+            .any(|s| s.visible && s.kind() == SurfaceKind::Notch && !s.expanded());
+        let due = meter_due(
+            open || pill,
+            playing,
+            self.audio.metered(),
+            self.sampled,
+            now,
+        );
         match due {
             None => self.audio.stop(),
             Some(due) if due > now => return Ok(milliseconds_until(due, now)),
@@ -1617,10 +1644,18 @@ impl Desktop {
             }
         }
         let peaks = self.audio.peaks();
-        for notch in self.surfaces.iter_mut().filter(|s| s.expanded()) {
-            // A running animation paints every frame already.
+        for notch in self
+            .surfaces
+            .iter_mut()
+            .filter(|s| s.visible && s.kind() == SurfaceKind::Notch)
+        {
+            // A running animation paints every frame already; the pill has no meter slot to patch.
             if shown && !notch.live && notch.bars != layout::meter_heights(peaks, notch.dpi) {
-                notch.request(Repaint::Meter);
+                notch.request(if notch.expanded() {
+                    Repaint::Meter
+                } else {
+                    Repaint::Full
+                });
             }
         }
         Ok(due.map_or(INFINITE, |_| milliseconds_until(now + METER_PERIOD, now)))
