@@ -50,6 +50,8 @@ pub enum Item {
     CloseAll,
     Pin,
     Unpin,
+    /// Hide a running, unpinned app from the dock (Settings lists it to bring back).
+    Hide,
     RemoveShelf,
     UndoShelf,
     /// The app menu (right-click on the notch or the dock outside an app slot).
@@ -89,6 +91,7 @@ impl Item {
             Item::CloseAll => "Close all windows",
             Item::Pin => "Pin to dock",
             Item::Unpin => "Unpin from dock",
+            Item::Hide => "Hide from dock",
             Item::RemoveShelf => "Remove from Shelf",
             Item::UndoShelf => "Undo removal",
             Item::Settings => "Settings",
@@ -123,6 +126,7 @@ pub fn items(item: &DockItem, pins: &Pins) -> Vec<Item> {
         }
     } else if launchable {
         list.push(Item::Pin);
+        list.push(Item::Hide);
     }
     if launchable {
         list.push(Item::Group);
@@ -636,7 +640,13 @@ mod tests {
         let running2 = dock_item(app.clone(), &[1, 2]);
         assert_eq!(
             items(&running2, &none),
-            [Item::NewInstance, Item::CloseAll, Item::Pin, Item::Group]
+            [
+                Item::NewInstance,
+                Item::CloseAll,
+                Item::Pin,
+                Item::Hide,
+                Item::Group
+            ]
         );
         // Running (1 window), unpinned: Close is offered.
         let running1 = dock_item(app.clone(), &[1]);
@@ -646,6 +656,7 @@ mod tests {
                 Item::NewInstance,
                 Item::Close(key_of(1)),
                 Item::Pin,
+                Item::Hide,
                 Item::Group
             ]
         );
@@ -668,6 +679,7 @@ mod tests {
                 Item::NewInstance,
                 Item::Close(key_of(3)),
                 Item::Pin,
+                Item::Hide,
                 Item::Group
             ]
         );

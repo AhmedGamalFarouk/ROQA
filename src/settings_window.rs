@@ -136,6 +136,9 @@ const AGENT_ON: usize = 214;
 const AGENT_BTN: usize = 215;
 /// The four shortcut switches (`hotkeys::KEYS` order).
 const HOTKEY: usize = 222;
+/// The hidden-apps list and its "Show in dock" button.
+const HIDDEN: usize = 230;
+const SHOW: usize = 231;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -411,6 +414,13 @@ const PAGES: &[Page] = &[
                     r(LATER, Kind::Btn, "Move pin later", ""),
                 ],
             },
+            Card {
+                label: "Hidden apps",
+                rows: &[
+                    r(HIDDEN, Kind::Combo(200), "Hidden app", ""),
+                    r(SHOW, Kind::Btn, "Show in dock", ""),
+                ],
+            },
         ],
     },
     Page {
@@ -630,6 +640,7 @@ pub struct SettingsWindow {
     items: Vec<Item>,
     page: usize,
     move_pin: Option<(usize, bool)>,
+    show_hidden: Option<usize>,
     /// The connected monitors' GDI devices (at most `MAX_OFF`); monitor `n` is the checkbox `MONITOR + n`.
     devices: Vec<String>,
     /// The same monitors with their size and place, for the map.
@@ -1584,6 +1595,7 @@ impl SettingsWindow {
             items: Vec::new(),
             page: 0,
             move_pin: None,
+            show_hidden: None,
             devices: Vec::new(),
             monitors: Vec::new(),
             sounds: prayer_os::discover(),
@@ -1777,6 +1789,28 @@ Other hooks stay. A copy of the file is kept.",
     }
     pub fn take_move(&mut self) -> Option<(usize, bool)> {
         self.move_pin.take()
+    }
+    /// Fills the hidden-apps list; nothing to show until an app is hidden.
+    pub fn set_hidden(&self, names: &[String]) {
+        let list = self.h(HIDDEN);
+        // SAFETY: synchronous string copies to our own native combo box.
+        unsafe {
+            SendMessageW(list, CB_RESETCONTENT, None, None);
+        }
+        for name in names {
+            add_row(list, name);
+        }
+        if names.is_empty() {
+            add_row(list, "Nothing hidden");
+        }
+        select(list, Some(0));
+        for id in [HIDDEN, SHOW] {
+            // SAFETY: our own live child controls.
+            let _ = unsafe { EnableWindow(self.h(id), !names.is_empty()) };
+        }
+    }
+    pub fn take_show(&mut self) -> Option<usize> {
+        self.show_hidden.take()
     }
 
     /// One control row: the label before its control and the caption after it.
@@ -2326,6 +2360,9 @@ Other hooks stay. A copy of the file is kept.",
                         if let Some(index) = chosen_row(self.h(PIN)) {
                             self.move_pin = Some((index, id == LATER));
                         }
+                    }
+                    (SHOW, _) if notification == BN_CLICKED => {
+                        self.show_hidden = chosen_row(self.h(HIDDEN));
                     }
                     (WDRANK, _) if notification == BN_CLICKED => self.drank = true,
                     (AGENT_BTN..=221, _) if notification == BN_CLICKED => {

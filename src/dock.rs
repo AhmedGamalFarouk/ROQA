@@ -122,8 +122,11 @@ pub fn items(model: &WindowModel, desktop_only: bool) -> Vec<DockItem> {
 /// An `Executable` pin also claims a group whose AUMID identity has the same exe, so a pin survives that upgrade.
 /// With no pins this equals `items(model, desktop_only)`. A pin with no window left on this desktop stays, as a launcher.
 pub fn items_with_pins(model: &WindowModel, pins: &Pins, desktop_only: bool) -> Vec<DockItem> {
-    let mut running: Vec<Option<DockItem>> =
-        items(model, desktop_only).into_iter().map(Some).collect();
+    let mut running: Vec<Option<DockItem>> = items(model, desktop_only)
+        .into_iter()
+        .filter(|item| !pins.hides(&item.identity, item.executable.as_deref()))
+        .map(Some)
+        .collect();
     let find = |running: &[Option<DockItem>], matches: &dyn Fn(&DockItem) -> bool| {
         running
             .iter()
@@ -1101,6 +1104,22 @@ mod tests {
             items(&model, false)
         );
         assert!(items_with_pins(&WindowModel::default(), &Pins::default(), false).is_empty());
+    }
+
+    #[test]
+    fn a_hidden_app_leaves_the_dock_and_comes_back() {
+        let model = sample_model();
+        let mut pins = Pins::default();
+        assert!(pins.hide(Identity::Executable("c:\\9.exe".into())));
+        let shown = items_with_pins(&model, &pins, false);
+        assert_eq!(shown.len(), items(&model, false).len() - 1);
+        assert!(
+            shown
+                .iter()
+                .all(|item| item.executable.as_deref() != Some("c:\\9.exe"))
+        );
+        assert!(pins.unhide(0));
+        assert_eq!(items_with_pins(&model, &pins, false), items(&model, false));
     }
 
     #[test]

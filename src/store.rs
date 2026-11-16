@@ -27,6 +27,8 @@ pub struct Store {
     /// Pinned apps (AUMID or executable path), in display order.
     pub pins: Vec<String>,
     pub folders: Vec<String>,
+    /// Apps hidden from the dock (same keys as pins).
+    pub hidden: Vec<String>,
     /// File-shelf references, in display order.
     pub shelf: Vec<String>,
     /// Copied text for the Shelf's Copied list, newest first (`clipboard.rs`).
@@ -165,6 +167,7 @@ fn parse(text: &str) -> Option<Store> {
         match line.split_once('=') {
             Some(("pin", value)) if !value.is_empty() => store.pins.push(value.into()),
             Some(("folder", value)) if !value.is_empty() => store.folders.push(value.into()),
+            Some(("hide", value)) if !value.is_empty() => store.hidden.push(value.into()),
             Some(("shelf", value)) if !value.is_empty() => store.shelf.push(value.into()),
             Some(("clip", value)) if !value.is_empty() => {
                 store.clips.push(crate::clipboard::decode(value))
@@ -210,6 +213,7 @@ impl Store {
         for (key, list) in [
             ("pin", &self.pins),
             ("folder", &self.folders),
+            ("hide", &self.hidden),
             ("shelf", &self.shelf),
         ] {
             // Newlines cannot be represented in this line format (and cannot occur in Windows paths or AUMIDs).
@@ -307,6 +311,7 @@ mod tests {
                 "Microsoft.Edge_8wekyb3d8bbwe!App".into(),
                 r"C:\Apps\a=b.exe".into(),
             ],
+            hidden: vec!["app:Hidden.One".into(), r"exe:c:\apps\h.exe".into()],
             shelf: vec![r"C:\Users\me\doc.txt".into()],
             clips: vec!["two\nlines \\ and = sign".into()],
             timers: vec![1_800_000_000, 1_800_000_060],
@@ -389,6 +394,7 @@ mod tests {
             parse(text),
             Some(Store {
                 folders: Vec::new(),
+                hidden: Vec::new(),
                 pins: vec!["a".into()],
                 shelf: vec!["b".into()],
                 clips: Vec::new(),

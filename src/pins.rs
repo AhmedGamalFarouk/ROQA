@@ -18,7 +18,8 @@ pub enum PinError {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Pins(Vec<Identity>, Vec<Folder>);
+/// Pins, folders, and the apps hidden from the dock.
+pub struct Pins(Vec<Identity>, Vec<Folder>, Vec<Identity>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Folder {
@@ -81,6 +82,9 @@ impl Pins {
                 });
             }
         }
+        for identity in store.hidden.iter().filter_map(|text| decode(text)) {
+            pins.hide(identity);
+        }
         pins
     }
 
@@ -101,6 +105,7 @@ impl Pins {
                 line
             })
             .collect();
+        store.hidden = self.2.iter().filter_map(encode).collect();
     }
 
     pub fn items(&self) -> &[Identity] {
@@ -123,6 +128,36 @@ impl Pins {
         }
         self.0.push(key);
         Ok(self.0.len() - 1)
+    }
+
+    pub fn hidden(&self) -> &[Identity] {
+        &self.2
+    }
+
+    /// Hides an app from the dock; false when it cannot be (no usable key, already hidden, list full).
+    pub fn hide(&mut self, identity: Identity) -> bool {
+        match normalize(&identity) {
+            Some(key) if !self.2.contains(&key) && self.2.len() < MAX_PINS => {
+                self.2.push(key);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn unhide(&mut self, index: usize) -> bool {
+        index < self.2.len() && {
+            self.2.remove(index);
+            true
+        }
+    }
+
+    /// Whether a running group is hidden: by its identity, or by its exe when an exe was hidden.
+    pub fn hides(&self, identity: &Identity, executable: Option<&str>) -> bool {
+        self.2.iter().any(|hidden| {
+            hidden == identity
+                || matches!(hidden, Identity::Executable(path) if executable == Some(path))
+        })
     }
 
     pub fn remove(&mut self, identity: &Identity) -> bool {
@@ -455,6 +490,21 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(state, crate::store::Load::Loaded);
         assert_eq!(Pins::from_store(&loaded), pins);
+    }
+
+    #[test]
+    fn hidden_apps_match_by_identity_or_exe_and_survive_the_store() {
+        let mut pins = Pins::default();
+        assert!(pins.hide(app("A!App")) && pins.hide(exe(r"C:\X.exe")));
+        assert!(!pins.hide(app("A!App")) && !pins.hide(Identity::Unavailable(1)));
+        assert!(pins.hides(&app("A!App"), None));
+        assert!(pins.hides(&app("B!App"), Some(r"c:\x.exe")));
+        assert!(!pins.hides(&app("B!App"), None));
+        let mut store = Store::default();
+        pins.write_to(&mut store);
+        assert_eq!(Pins::from_store(&store), pins);
+        assert!(pins.unhide(0) && !pins.unhide(5));
+        assert_eq!(pins.hidden(), [exe(r"c:\x.exe")]);
     }
 
     #[test]

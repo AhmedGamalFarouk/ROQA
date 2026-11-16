@@ -2606,6 +2606,14 @@ impl Desktop {
                     .collect::<Vec<_>>(),
                 selected,
             );
+            window.set_hidden(
+                &self
+                    .pins
+                    .hidden()
+                    .iter()
+                    .map(crate::pins::display_name)
+                    .collect::<Vec<_>>(),
+            );
         }
     }
     /// Takes what the settings window produced in its last message: a change to apply live and a timer to
@@ -2614,10 +2622,11 @@ impl Desktop {
         let Some(window) = &mut self.settings_window else {
             return Ok(());
         };
-        let (change, start, movement, sound, drank, pomo) = (
+        let (change, start, movement, show, sound, drank, pomo) = (
             window.take_change(),
             window.take_start(),
             window.take_move(),
+            window.take_show(),
             window.take_sound_action(),
             window.take_drank(),
             window.take_pomo(),
@@ -2651,6 +2660,9 @@ impl Desktop {
                 window.select_pin(to);
             }
             self.change_pins(|pins| pins.move_to(from, to));
+        }
+        if let Some(index) = show {
+            self.change_pins(|pins| pins.unhide(index));
         }
         if let Some(next) = change {
             self.apply_settings(next, catalog)?;
@@ -4048,6 +4060,7 @@ impl Desktop {
                     }
                 });
             }
+            Item::Hide => self.change_pins(|pins| pins.hide(target.identity)),
             Item::Settings
             | Item::Quit
             | Item::Restore(_)
