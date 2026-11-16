@@ -2748,7 +2748,17 @@ impl Desktop {
         if old.hide_fullscreen != self.settings.hide_fullscreen {
             self.fullscreen_generation = None; // the next pass hides or shows again
         }
-        if old.dock_hide != self.settings.dock_hide || old.notch_hide != self.settings.notch_hide {
+        if (
+            old.dock_hide,
+            old.notch_hide,
+            old.reveal_delay,
+            old.hide_delay,
+        ) != (
+            self.settings.dock_hide,
+            self.settings.notch_hide,
+            self.settings.reveal_delay,
+            self.settings.hide_delay,
+        ) {
             self.tuck_generation = None;
         }
         self.edges_dirty = true;
@@ -5007,6 +5017,10 @@ impl Desktop {
                 .filter(|s| s.kind() == SurfaceKind::Dock)
                 .map(|s| (s.monitor.clone(), s.bounds))
                 .collect();
+            self.tuck
+                .set_delays(self.settings.reveal_delay, self.settings.hide_delay);
+            self.tuck_notch
+                .set_delays(self.settings.reveal_delay, self.settings.hide_delay);
             changed |= self.tuck.sync(
                 self.settings.dock_hide,
                 frame.clone(),

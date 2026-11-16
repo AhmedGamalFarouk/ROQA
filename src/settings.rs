@@ -84,6 +84,10 @@ pub struct Settings {
     pub dock_hide: bool,
     /// The notch slides away while a window covers it and returns when the pointer rests at the top edge.
     pub notch_hide: bool,
+    /// How long the pointer rests at the edge before a hidden dock or notch comes back, and how long after it
+    /// leaves before it hides again: a row of `dock_tuck::REVEAL` and `dock_tuck::LEAVE` (0 is today's).
+    pub reveal_delay: u8,
+    pub hide_delay: u8,
     /// Keep the dock's icons at the start of a full-width bar instead of the middle.
     pub dock_left: bool,
     /// Open the notch on a click instead of hovering over it.
@@ -145,6 +149,8 @@ impl Default for Settings {
             hide_fullscreen: true,
             dock_hide: true,
             notch_hide: true,
+            reveal_delay: 0,
+            hide_delay: 0,
             dock_left: false,
             open_click: false,
             notch_size: 0,
@@ -195,6 +201,8 @@ impl Settings {
             self.prayer_lead = 0;
         }
         self.limits_group = self.limits_group.min(1);
+        self.reveal_delay = self.reveal_delay.min(crate::dock_tuck::DELAYS as u8 - 1);
+        self.hide_delay = self.hide_delay.min(crate::dock_tuck::DELAYS as u8 - 1);
         if !NOTCH_SIZES.contains(&self.notch_size) {
             self.notch_size = 0;
         }
@@ -284,6 +292,8 @@ impl Settings {
             // New keys: the old "dockhide" (off by default then) is ignored so everyone starts on.
             "dockauto" => flag(value).map(|v| self.dock_hide = v).is_some(),
             "notchauto" => flag(value).map(|v| self.notch_hide = v).is_some(),
+            "revealdelay" => value.parse().map(|v| self.reveal_delay = v).is_ok(),
+            "hidedelay" => value.parse().map(|v| self.hide_delay = v).is_ok(),
             "dockleft" => flag(value).map(|v| self.dock_left = v).is_some(),
             "fshide" => flag(value).map(|v| self.hide_fullscreen = v).is_some(),
             "rsounds" => flag(value).map(|v| self.reminder_sounds = v).is_some(),
@@ -473,6 +483,12 @@ dockleft={}
             u8::from(self.dock_hide),
             u8::from(self.notch_hide),
             u8::from(self.dock_left)
+        ));
+        out.push_str(&format!(
+            "revealdelay={}
+hidedelay={}
+",
+            self.reveal_delay, self.hide_delay
         ));
         out.push_str(&format!(
             "fshide={}
@@ -769,6 +785,11 @@ mod tests {
     fn the_new_settings_default_to_todays_behaviour_and_round_trip() {
         let d = Settings::default();
         assert!(d.hide_fullscreen && d.reminder_sounds && !d.open_click && !d.anim_fast);
+        assert_eq!((d.reveal_delay, d.hide_delay), (0, 0));
+        let mut delays = Settings::default();
+        assert!(delays.set("revealdelay", "2") && delays.set("hidedelay", "9"));
+        let delays = delays.clamped();
+        assert_eq!((delays.reveal_delay, delays.hide_delay), (2, 2));
         assert!(!d.prayer_pause && d.notch_size == 0 && d.prayer_shift == [0; 5]);
         assert!(
             !d.water && d.water_cfg == water::DEFAULT,

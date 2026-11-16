@@ -29,11 +29,21 @@ use windows::{
 
 /// The strip's thickness in DIPs.
 const STRIP: i32 = 2;
+/// How many choices each delay has (Settings: short, medium, long); the first is today's.
+pub const DELAYS: usize = 3;
 /// The pointer resting on the strip reveals the dock after this (short: it should feel instant, yet a pointer
 /// sweeping along the edge does not flash it).
-const REVEAL: Duration = Duration::from_millis(90);
+const REVEAL: [Duration; DELAYS] = [
+    Duration::from_millis(90),
+    Duration::from_millis(300),
+    Duration::from_millis(600),
+];
 /// After the pointer leaves a revealed dock it slides away this much later.
-const LEAVE: Duration = Duration::from_millis(400);
+const LEAVE: [Duration; DELAYS] = [
+    Duration::from_millis(400),
+    Duration::from_millis(1000),
+    Duration::from_millis(2500),
+];
 /// A strip that handed a click on stays out of the way this long.
 const REST: Duration = Duration::from_millis(800);
 
@@ -63,8 +73,16 @@ pub struct Tuck {
     /// The monitor whose covered dock is shown again.
     peek: Option<String>,
     strips: Vec<Strip>,
+    /// The chosen rows of `REVEAL` and `LEAVE`.
+    reveal: usize,
+    leave: usize,
 }
 impl Tuck {
+    /// Picks the reveal and hide delays (settings rows; out of range means the longest).
+    pub fn set_delays(&mut self, reveal: u8, leave: u8) {
+        self.reveal = usize::from(reveal).min(DELAYS - 1);
+        self.leave = usize::from(leave).min(DELAYS - 1);
+    }
     /// The notch's: its strip runs along the top edge.
     pub fn top() -> Self {
         Self {
@@ -171,7 +189,7 @@ impl Tuck {
         match message.message {
             WM_MOUSEMOVE => {
                 strip.track();
-                strip.hover.enter_after(now, REVEAL);
+                strip.hover.enter_after(now, REVEAL[self.reveal]);
             }
             WM_MOUSELEAVE => {
                 strip.tracking = false;
@@ -197,7 +215,7 @@ impl Tuck {
         if self.peek.as_deref() == Some(device)
             && let Some(strip) = self.strips.iter_mut().find(|s| s.monitor == device)
         {
-            strip.hover.release(now, LEAVE);
+            strip.hover.release(now, LEAVE[self.leave]);
         }
     }
     /// The soonest deadline, if any.
@@ -297,6 +315,16 @@ mod tests {
     }
     fn frame(handle: usize, device: &str, at: Bounds) -> Frame {
         Some((k(handle), device.to_owned(), at))
+    }
+    #[test]
+    fn delays_start_at_todays_and_stay_in_range() {
+        let mut tuck = Tuck::default();
+        assert_eq!(
+            (REVEAL[tuck.reveal], LEAVE[tuck.leave]),
+            (Duration::from_millis(90), Duration::from_millis(400))
+        );
+        tuck.set_delays(9, 1);
+        assert_eq!((tuck.reveal, tuck.leave), (DELAYS - 1, 1));
     }
     #[test]
     fn a_window_over_the_dock_tucks_it_and_leaving_shows_it() {

@@ -122,6 +122,9 @@ const CLIP: usize = 203;
 const DOCK_HIDE: usize = 204;
 const NOTCH_HIDE: usize = 205;
 const DOCK_LEFT: usize = 206;
+/// The reveal and hide delay lists.
+const REVEAL: usize = 232;
+const HIDE: usize = 233;
 /// The Widgets card's extra rows: the two lower slots, network units, the disk, the low-battery level, the
 /// week's first day and the closed pill's low-battery bolt.
 const WLEFT2: usize = 207;
@@ -289,6 +292,23 @@ const PAGES: &[Page] = &[
                         C,
                         "Icons at the start",
                         "Instead of the middle of a full-width dock",
+                    ),
+                ],
+            },
+            Card {
+                label: "Hiding",
+                rows: &[
+                    r(
+                        REVEAL,
+                        Kind::Combo(120),
+                        "Reveal delay",
+                        "How long to rest at the edge",
+                    ),
+                    r(
+                        HIDE,
+                        Kind::Combo(120),
+                        "Hide delay",
+                        "How long before it slides away",
                     ),
                 ],
             },
@@ -1571,6 +1591,7 @@ fn fill_combo(h: HWND, id: usize) {
         NSIZE => &["Auto", "115%", "130%", "150%"],
         NOPEN => &["Hover", "Click"],
         ANIM => &["Normal", "Fast"],
+        REVEAL | HIDE => &["Short", "Medium", "Long"],
         _ => &[],
     };
     rows.iter().for_each(|row| add_row(h, row));
@@ -2140,6 +2161,8 @@ Other hooks stay. A copy of the file is kept.",
                         NSIZE => row_of(&NOTCH_SIZES, &settings.notch_size),
                         NOPEN => usize::from(settings.open_click),
                         ANIM => usize::from(settings.anim_fast),
+                        REVEAL => usize::from(settings.reveal_delay),
+                        HIDE => usize::from(settings.hide_delay),
                         PSOUND => self.sound_row(&settings.prayer_sound),
                         _ => continue,
                     };
@@ -2242,6 +2265,8 @@ Other hooks stay. A copy of the file is kept.",
                         NSIZE => pick(&NOTCH_SIZES, &mut next.notch_size, row),
                         NOPEN => next.open_click = row.map_or(next.open_click, |r| r == 1),
                         ANIM => next.anim_fast = row.map_or(next.anim_fast, |r| r == 1),
+                        REVEAL => next.reveal_delay = row.map_or(next.reveal_delay, |r| r as u8),
+                        HIDE => next.hide_delay = row.map_or(next.hide_delay, |r| r as u8),
                         LIMGROUP => {
                             next.limits_group = row.map_or(next.limits_group, |r| r.min(1) as u8)
                         }
