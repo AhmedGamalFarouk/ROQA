@@ -14,7 +14,6 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 
 ## Hard rules (owner decisions, do not reopen)
 - No size limit (owner decision 2026-11-16): `verify.ps1` reports the exe size; put the byte delta in every report. Performance rules above still hold.
-- No keyboard handling, hotkeys, access keys, focus rings, UIA or Narrator work. Accessibility findings are out of scope.
 - No new dependencies.
 - Never touch, delete or rebuild anything under `.tools`. Never run rustup or `scripts/bootstrap.ps1`.
 - Pushing `main` to origin needs no approval (owner decision 2026-11-16): push after a commit that passes `verify.ps1`. Never force-push, rewrite pushed history, publish releases or delete remote things. Only the Chief commits unless the brief says otherwise.
