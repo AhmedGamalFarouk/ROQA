@@ -5,6 +5,7 @@
 //! callbacks may run on any Core Audio thread: they only set a dirty bit and post one scalar wake,
 //! so they never block, panic, register or unregister. Every bind, read and write happens on the
 //! host (STA) thread.
+use crate::{icons::IconPixels, window_source::process_executable};
 use std::sync::{
     Arc,
     atomic::{AtomicU32, AtomicU64, Ordering},
@@ -13,13 +14,15 @@ use windows::{
     Win32::{
         Foundation::{LPARAM, PROPERTYKEY, WPARAM},
         Media::Audio::{
-            AUDIO_VOLUME_NOTIFICATION_DATA, DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole,
+            AUDIO_VOLUME_NOTIFICATION_DATA, AudioSessionStateActive, DEVICE_STATE,
+            DEVICE_STATE_ACTIVE, EDataFlow, ERole,
             Endpoints::{
                 IAudioEndpointVolume, IAudioEndpointVolumeCallback,
                 IAudioEndpointVolumeCallback_Impl, IAudioMeterInformation,
             },
-            IMMDevice, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
-            MMDeviceEnumerator, eConsole, eRender,
+            IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice,
+            IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
+            ISimpleAudioVolume, MMDeviceEnumerator, eConsole, eRender,
         },
         System::{
             Com::{
@@ -30,7 +33,7 @@ use windows::{
         },
         UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP},
     },
-    core::{GUID, PCWSTR, Result, implement},
+    core::{GUID, Interface, PCWSTR, Result, implement},
 };
 
 /// The visualizer's bar count: one per meter sample, oldest first.
@@ -71,6 +74,110 @@ pub struct Device {
     pub id: String,
     pub name: String,
     pub current: bool,
+}
+
+/// The most apps the mixer lists.
+pub const MAX_APPS: usize = 6;
+
+/// An app with sound playing on the default output. Its session interfaces are held only while the
+/// volume list shows them; nothing is watched, so the level is as of the moment the list opened.
+pub struct App {
+    pub name: String,
+    /// The lowercase executable path, which is also the icon's identity.
+    pub path: String,
+    /// Filled in by the host's icon service once the icon arrives.
+    pub icon: Option<std::sync::Arc<IconPixels>>,
+    pub percent: u8,
+    pub muted: bool,
+    /// One app can own several sessions (a browser's tabs); they move together.
+    volumes: Vec<ISimpleAudioVolume>,
+}
+impl App {
+    /// Sets every session's level and unmutes, as the master slider does.
+    pub fn set(&mut self, percent: u8) {
+        self.percent = percent.min(100);
+        // SAFETY: host-thread calls on live session interfaces.
+        let set = self.volumes.iter().try_for_each(|volume| unsafe {
+            volume.SetMasterVolume(f32::from(self.percent) / 100.0, &ECHO)?;
+            volume.SetMute(false, &ECHO)
+        });
+        match set {
+            Ok(()) => self.muted = false,
+            Err(error) => eprintln!("Audio: app level: {error}"),
+        }
+    }
+    pub fn toggle_mute(&mut self) {
+        // SAFETY: as in `set`.
+        let set = self
+            .volumes
+            .iter()
+            .try_for_each(|volume| unsafe { volume.SetMute(!self.muted, &ECHO) });
+        match set {
+            Ok(()) => self.muted = !self.muted,
+            Err(error) => eprintln!("Audio: app mute: {error}"),
+        }
+    }
+}
+
+/// An app's name from its executable path: the file name without `.exe`, first letter raised.
+// shortcut: the file name, not the product name ("Msedge"); read the version resource if that looks wrong.
+fn app_name(path: &str) -> String {
+    let file = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    let stem = file.strip_suffix(".exe").unwrap_or(file);
+    let mut letters = stem.chars();
+    letters
+        .next()
+        .map(|first| first.to_uppercase().chain(letters).collect())
+        .unwrap_or_default()
+}
+
+/// The sessions currently making sound on `device`, one entry per app, by name, bounded.
+///
+/// # Safety
+/// Host thread, on a live device.
+unsafe fn playing_apps(device: &IMMDevice) -> Result<Vec<App>> {
+    let mut apps: Vec<App> = Vec::new();
+    // SAFETY: per the contract; every interface is released when it drops.
+    unsafe {
+        let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None)?;
+        let sessions: IAudioSessionEnumerator = manager.GetSessionEnumerator()?;
+        for index in 0..sessions.GetCount()? {
+            let Ok(control) = sessions.GetSession(index) else {
+                continue;
+            };
+            if control.GetState() != Ok(AudioSessionStateActive) {
+                continue;
+            }
+            let (Ok(detail), Ok(volume)) = (
+                control.cast::<IAudioSessionControl2>(),
+                control.cast::<ISimpleAudioVolume>(),
+            ) else {
+                continue;
+            };
+            // S_OK means this is the system sounds session.
+            if detail.IsSystemSoundsSession().0 == 0 {
+                continue;
+            }
+            let Some(path) = detail.GetProcessId().ok().and_then(process_executable) else {
+                continue;
+            };
+            if let Some(app) = apps.iter_mut().find(|app| app.path == path) {
+                app.volumes.push(volume);
+            } else if let (Ok(level), Ok(muted)) = (volume.GetMasterVolume(), volume.GetMute()) {
+                apps.push(App {
+                    name: app_name(&path),
+                    path,
+                    icon: None,
+                    percent: percent(level),
+                    muted: muted.as_bool(),
+                    volumes: vec![volume],
+                });
+            }
+        }
+    }
+    apps.sort_by(|a, b| a.name.cmp(&b.name));
+    apps.truncate(MAX_APPS);
+    Ok(apps)
 }
 
 /// `(id, name)` pairs as enumerated, bounded, with the one equal to `default` marked current.
@@ -481,6 +588,22 @@ impl Audio {
                 .unwrap_or_default()
         }
     }
+    /// The apps playing sound on the default output now, asked once (host thread). Empty before
+    /// `start` or when Windows will not say, which the list shows as nothing playing.
+    pub fn apps(&self) -> Vec<App> {
+        let Some(devices) = &self.devices else {
+            return Vec::new();
+        };
+        // SAFETY: host-thread calls on the live enumerator and the device it returns.
+        unsafe {
+            devices
+                .enumerator
+                .GetDefaultAudioEndpoint(eRender, eConsole)
+                .and_then(|device| playing_apps(&device))
+                .inspect_err(|error| eprintln!("Audio: app list: {error}"))
+                .unwrap_or_default()
+        }
+    }
     pub fn toggle_mute(&self) {
         if let (Some(endpoint), Some(level)) = (&self.endpoint, self.level) {
             // SAFETY: as in `set`.
@@ -635,6 +758,13 @@ mod tests {
         audio.wake.raise(REBIND);
         assert!(audio.refresh()); // A lost endpoint hides the level.
         assert_eq!(audio.level(), None);
+    }
+
+    #[test]
+    fn an_app_is_named_by_its_file_without_exe_and_capitalised() {
+        assert_eq!(app_name(r"c:\program files\spotify\spotify.exe"), "Spotify");
+        assert_eq!(app_name("vlc"), "Vlc");
+        assert_eq!(app_name(""), "");
     }
 
     #[test]

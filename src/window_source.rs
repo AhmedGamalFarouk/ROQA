@@ -225,7 +225,7 @@ fn application_id(hwnd: HWND) -> Option<String> {
     }
 }
 
-fn process_executable(process: u32) -> Option<String> {
+pub fn process_executable(process: u32) -> Option<String> {
     // SAFETY: requests only limited query rights; owned handle closes on every return path.
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process).ok()?;

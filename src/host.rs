@@ -2470,17 +2470,31 @@ impl Desktop {
         }
         let fullscreen = &self.fullscreen;
         let covered = |device: &str| fullscreen.iter().any(|(_, covered)| covered == device);
-        let mut due = self
-            .edges
-            .refresh(now, &self.audio, &self.graphics, self.palette, covered);
+        // The mixer's app icons come from the dock's icon cache, at the dock's size.
+        let size = self.icon_size();
+        let icons = &mut self.icons;
+        let mut icon = |identity: &_, sources| size.and_then(|s| icons.icon(identity, sources, s));
+        let mut due = self.edges.refresh(
+            now,
+            &self.audio,
+            &self.graphics,
+            self.palette,
+            covered,
+            &mut icon,
+        );
         if !self.audio.active() && self.edges.wants_audio() {
             // A volume pill just opened: load Core Audio now (nothing else wakes the next pass) and draw
             // the pill again with the level.
             self.audio.start();
             self.audio.refresh();
-            due = self
-                .edges
-                .refresh(now, &self.audio, &self.graphics, self.palette, covered);
+            due = self.edges.refresh(
+                now,
+                &self.audio,
+                &self.graphics,
+                self.palette,
+                covered,
+                &mut icon,
+            );
         }
         due.map_or(INFINITE, |due| milliseconds_until(due, now))
     }

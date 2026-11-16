@@ -1,7 +1,7 @@
 use crate::{
     audio::{BARS, Level},
     dock,
-    edge::{Layout, ListRow},
+    edge::{Layout, ListRow, MIX_PERCENT},
     eyes::{Frame, Mood, Pose},
     icons::IconPixels,
     layout::{self, Bounds},
@@ -616,6 +616,27 @@ impl Canvas {
             for (index, row) in scene.rows.iter().enumerate() {
                 let cell = surface_rect(rect, row.rect);
                 let (left, middle) = (cell.left + 12.0 * scale, (cell.top + cell.bottom) / 2.0);
+                // A mixer row is a capsule slider: the track, and the level filled in the accent.
+                if let Some((percent, muted)) = row.level {
+                    let shape = rounded(cell, (cell.bottom - cell.top) / 2.0);
+                    draw_track(context, &p, &shape, 0.30)?;
+                    let width = (cell.right - cell.left) * f32::from(percent.min(100)) / 100.0;
+                    if width >= 1.0 {
+                        let fill = D2D_RECT_F {
+                            right: cell.left + width,
+                            ..cell
+                        };
+                        // SAFETY: live draw context between BeginDraw/EndDraw; the brush is scoped to this draw.
+                        unsafe {
+                            let brush = context
+                                .CreateSolidColorBrush(&tint(p.accent_dim(muted, 0.40)), None)?;
+                            context.FillRoundedRectangle(
+                                &rounded(fill, ((cell.bottom - cell.top) / 2.0).min(width / 2.0)),
+                                &brush,
+                            );
+                        }
+                    }
+                }
                 // SAFETY: live draw context between BeginDraw/EndDraw; brushes are scoped to this draw.
                 unsafe {
                     if scene.hover == Some(index) {
@@ -648,26 +669,54 @@ impl Canvas {
                     right: cell.right - 8.0 * scale,
                     ..cell
                 };
-                if let Some(pixels) = row.icon {
+                // A mixer row keeps room for its icon while the icon is still on its way.
+                if row.icon.is_some() || row.level.is_some() {
                     let side = 20.0 * scale;
-                    let frame = D2D_RECT_F {
-                        left,
-                        top: middle - side / 2.0,
-                        right: left + side,
-                        bottom: middle + side / 2.0,
-                    };
-                    // SAFETY: live draw context between BeginDraw/EndDraw; the bitmap is scoped to this draw.
-                    unsafe {
-                        context.DrawBitmap(
-                            &upload(context, pixels)?,
-                            Some(&frame),
-                            1.0,
-                            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-                            None,
-                            None,
-                        );
+                    if let Some(pixels) = row.icon {
+                        let frame = D2D_RECT_F {
+                            left,
+                            top: middle - side / 2.0,
+                            right: left + side,
+                            bottom: middle + side / 2.0,
+                        };
+                        let muted = row.level.is_some_and(|(_, muted)| muted);
+                        // SAFETY: live draw context between BeginDraw/EndDraw; the bitmap is scoped to this draw.
+                        unsafe {
+                            context.DrawBitmap(
+                                &upload(context, pixels)?,
+                                Some(&frame),
+                                if muted { 0.40 } else { 1.0 },
+                                D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                                None,
+                                None,
+                            );
+                        }
                     }
                     text.left = left + side + 8.0 * scale;
+                }
+                if let Some((percent, muted)) = row.level {
+                    text.right = cell.right - MIX_PERCENT as f32 * scale;
+                    let label = if muted {
+                        "Muted".to_owned()
+                    } else {
+                        format!("{percent}%")
+                    };
+                    let digits = D2D_RECT_F {
+                        left: text.right,
+                        right: cell.right - 14.0 * scale,
+                        ..cell
+                    };
+                    let trailing = Font {
+                        align: DWRITE_TEXT_ALIGNMENT_TRAILING,
+                        ..font
+                    };
+                    draw_text(
+                        context,
+                        &label,
+                        &trailing,
+                        digits,
+                        tint(p.ink_dim(false, 0.90)),
+                    )?;
                 }
                 draw_text(context, row.name, &font, text, tint(p.ink_dim(false, 0.90)))?;
             }

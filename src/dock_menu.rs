@@ -502,6 +502,7 @@ impl Menu {
                 name: row_label(&self.items, &self.titles, index),
                 current: false,
                 icon: self.icons.get(index).and_then(|icon| icon.as_deref()),
+                level: None,
                 rect: row_rect(self.dpi, panel, index - self.offset),
             })
             .collect();
