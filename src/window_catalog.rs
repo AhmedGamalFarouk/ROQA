@@ -10,7 +10,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
     time::Instant,
@@ -20,7 +20,7 @@ use windows::{
         Foundation::{E_FAIL, HWND, LPARAM, WPARAM},
         System::{
             Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
-            Threading::GetCurrentThreadId,
+            Threading::{GetCurrentProcessId, GetCurrentThreadId},
         },
         UI::{
             Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
@@ -32,6 +32,11 @@ use windows::{
 
 const DIRTY: u32 = WM_APP + 10;
 const COMPLETE: u32 = WM_APP + 11;
+const FRAME: u32 = WM_APP + 12;
+/// The foreground window whose own move or resize is heard, and how many were (see `moved`).
+static WATCHED: AtomicUsize = AtomicUsize::new(0);
+static FRAMES: AtomicU64 = AtomicU64::new(0);
+static FRAME_POSTED: AtomicBool = AtomicBool::new(false);
 static TARGET: AtomicU32 = AtomicU32::new(0);
 static NOTIFIED: AtomicBool = AtomicBool::new(false);
 const RING_CAPACITY: usize = 256;
@@ -74,6 +79,34 @@ unsafe extern "system" fn changed(
     }
 }
 
+/// A window moved, resized, maximized or restored: counted, and one wake posted until it is read.
+unsafe extern "system" fn moved(
+    _: HWINEVENTHOOK,
+    _: u32,
+    hwnd: HWND,
+    object: i32,
+    child: i32,
+    _: u32,
+    _: u32,
+) {
+    if object != 0 || child != 0 || hwnd.0 as usize != WATCHED.load(Ordering::Relaxed) {
+        return;
+    }
+    FRAMES.fetch_add(1, Ordering::Relaxed);
+    let target = TARGET.load(Ordering::Relaxed);
+    if target != 0 && !FRAME_POSTED.swap(true, Ordering::Relaxed) {
+        // SAFETY: scalar-only notification; no window memory or retained callback data. No panicking operations.
+        if unsafe { PostThreadMessageW(target, FRAME, WPARAM(0), LPARAM(0)) }.is_err() {
+            FRAME_POSTED.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Bumps whenever the foreground window's own frame changed; the host adds it to the catalog generation.
+pub fn frames() -> u64 {
+    FRAMES.load(Ordering::Relaxed)
+}
+
 struct Hook(HWINEVENTHOOK);
 impl Hook {
     fn release(&mut self) -> Result<()> {
@@ -97,6 +130,9 @@ impl Drop for Hook {
 
 pub struct Catalog {
     hooks: Vec<Hook>,
+    /// Location events of the foreground window's thread only: a global location hook would hear every caret
+    /// and cursor of every window.
+    place: Hook,
     requests: Option<Sender<Request>>,
     results: Option<Receiver<Snapshot>>,
     worker: Option<JoinHandle<()>>,
@@ -126,8 +162,11 @@ impl Catalog {
         NOTIFIED.store(false, Ordering::Relaxed);
         HANDLE_COUNT.store(0, Ordering::Relaxed);
         OVERFLOW.store(false, Ordering::Relaxed);
+        WATCHED.store(0, Ordering::Relaxed);
+        FRAME_POSTED.store(false, Ordering::Relaxed);
         let mut catalog = Self {
             hooks: Vec::new(),
+            place: Hook(HWINEVENTHOOK::default()),
             requests: None,
             results: None,
             worker: None,
@@ -211,9 +250,45 @@ impl Catalog {
             }
             catalog.hooks.push(Hook(hook));
         }
+        catalog.follow()?;
         catalog.schedule.invalidate();
         catalog.request()?;
         Ok(catalog)
+    }
+    /// Hears the foreground window's own frame changes: moves the location hook to its thread when the
+    /// foreground changed. ROQA's own windows keep the last one.
+    fn follow(&mut self) -> Result<()> {
+        // SAFETY: scalar foreground and thread queries.
+        let (window, process, thread) = unsafe {
+            let window = GetForegroundWindow();
+            let mut process = 0;
+            let thread = GetWindowThreadProcessId(window, Some(&mut process));
+            (window, process, thread)
+        };
+        let watched = window.0 as usize;
+        // SAFETY: scalar process id query.
+        let own = unsafe { GetCurrentProcessId() };
+        if watched == WATCHED.load(Ordering::Relaxed) || (watched != 0 && process == own) {
+            return Ok(());
+        }
+        self.place.release()?;
+        WATCHED.store(watched, Ordering::Relaxed);
+        if watched != 0 {
+            // SAFETY: out-of-context notification for one thread, no DLL injection; delivered on this UI thread.
+            let hook = unsafe {
+                SetWinEventHook(
+                    EVENT_OBJECT_LOCATIONCHANGE,
+                    EVENT_OBJECT_LOCATIONCHANGE,
+                    None,
+                    Some(moved),
+                    process,
+                    thread,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                )
+            };
+            self.place = Hook(hook); // a refused hook only loses the in-place resize; the catalog events remain
+        }
+        Ok(())
     }
     pub fn model(&self) -> &WindowModel {
         &self.model
@@ -225,6 +300,7 @@ impl Catalog {
         let now = Instant::now();
         match message.message {
             DIRTY => self.drain_ingress(now),
+            FRAME => FRAME_POSTED.store(false, Ordering::Relaxed),
             COMPLETE => self.collect(now)?,
             _ => return Ok(false),
         }
@@ -253,6 +329,7 @@ impl Catalog {
     fn service_at(&mut self, now: Instant) -> Result<()> {
         // WinEvent callbacks and this drain run on the same thread, including recovery after a lost wake.
         self.drain_ingress(now);
+        self.follow()?;
         self.collect(now)?;
         if self.timing.repair_due(now) {
             self.reconciliations += 1;
@@ -334,6 +411,8 @@ impl Catalog {
             }
         }
         self.hooks.clear();
+        failure = self.place.release().err().or(failure);
+        WATCHED.store(0, Ordering::Relaxed);
         self.cancel.store(true, Ordering::Relaxed);
         self.requests.take();
         self.results.take(); // Release a worker blocked sending its single bounded result before joining.
@@ -399,6 +478,7 @@ mod tests {
         let (result_tx, result_rx) = channel(1);
         let mut catalog = Catalog {
             hooks: Vec::new(),
+            place: Hook(HWINEVENTHOOK::default()),
             requests: Some(request_tx),
             results: Some(result_rx),
             worker: None,

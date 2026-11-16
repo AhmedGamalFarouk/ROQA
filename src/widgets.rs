@@ -161,15 +161,15 @@ struct Sample {
 }
 
 impl Stats {
-    /// Reads once the step is due; true when it did (the tiles repaint).
-    pub fn sample(&mut self, now: Instant) -> bool {
+    /// Reads once the step is due; true when it did (the tiles repaint). Only the counters a shown tile uses.
+    pub fn sample(&mut self, now: Instant, shown: WidgetConfig) -> bool {
         if self.deadline().is_some_and(|due| now < due) {
             return false;
         }
         let next = Sample {
             at: now,
-            cpu: cpu_times(),
-            net: net_bytes(),
+            cpu: shown.uses(WidgetKind::Cpu).then(cpu_times).flatten(),
+            net: shown.uses(WidgetKind::Network).then(net_bytes).flatten(),
         };
         if let Some(last) = self.last {
             (self.cpu, self.net) = rates(last, next);
@@ -434,8 +434,8 @@ mod tests {
         assert_eq!(speed(125_000, true), "1.0 Mb/s");
         // Due once a step has passed; the first sample has no rates yet.
         let mut stats = Stats::default();
-        assert!(stats.sample(at) && stats.cpu.is_none());
-        assert!(!stats.sample(at + Duration::from_millis(500)));
+        assert!(stats.sample(at, WidgetConfig::default()) && stats.cpu.is_none());
+        assert!(!stats.sample(at + Duration::from_millis(500), WidgetConfig::default()));
         assert_eq!(stats.deadline(), Some(at + STATS_STEP));
     }
 }

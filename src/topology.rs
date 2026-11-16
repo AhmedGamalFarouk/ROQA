@@ -1,4 +1,7 @@
-use crate::{layout::Bounds, sort};
+use crate::{
+    layout::{Bounds, DockStyle},
+    sort,
+};
 
 /// One display monitor as observed in a single enumeration pass.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -10,6 +13,22 @@ pub struct Monitor {
     /// The whole monitor, taskbar included: its size and place in the desktop, for the Settings map.
     pub rect: Bounds,
     pub dpi: u32,
+    /// Pixels a taskbar that hides at the bottom covers when it slides in; 0 when it shows or sits elsewhere.
+    pub taskbar: i32,
+}
+impl Monitor {
+    /// Where a dock of `style` sits: a floating one stays above the taskbar that slides in over the bottom edge.
+    pub fn dock_room(&self, style: DockStyle) -> Bounds {
+        let lift = if style == DockStyle::Floating {
+            self.taskbar
+        } else {
+            0
+        };
+        Bounds {
+            height: (self.work.height - lift).max(1),
+            ..self.work
+        }
+    }
 }
 
 /// A usable snapshot is non-empty, has positive work areas and DPI and unique identities. It is
@@ -107,6 +126,7 @@ mod tests {
                 height: 1080,
             },
             dpi,
+            taskbar: 0,
         }
     }
 

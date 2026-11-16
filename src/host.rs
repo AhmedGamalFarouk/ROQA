@@ -39,7 +39,7 @@ use crate::{
     water,
     weather::{self, Feed},
     weather_os,
-    window_catalog::Catalog,
+    window_catalog::{self, Catalog},
     window_model::{Identity, WindowKey, WindowModel},
 };
 use std::{
@@ -409,7 +409,14 @@ impl Surface {
         dock_style: DockStyle,
         dock_buttons: Buttons,
     ) -> Result<Self> {
-        let bounds = placement_styled(monitor.work, dpi, kind, slots, dock_style, dock_buttons);
+        let bounds = placement_styled(
+            monitor.dock_room(dock_style),
+            dpi,
+            kind,
+            slots,
+            dock_style,
+            dock_buttons,
+        );
         let shadow = if kind == SurfaceKind::Notch {
             Some(NotchShadow::create(graphics, bounds, palette)?)
         } else {
@@ -1048,10 +1055,10 @@ const VOLUME_EASE: Duration = Duration::from_millis(120);
 const TOPOLOGY_RETRY: Duration = Duration::from_millis(250);
 const TOPOLOGY_RETRIES: u32 = 8;
 /// Windows sends no notification when a full-screen app starts or stops. The foreground geometry is
-/// re-read on every catalog generation (foreground, show/hide, title, and the 30 s repair scan) and
-/// topology change; the shell state is polled at this interval only while the foreground window
-/// covers its whole monitor, so an ordinary desktop adds no wakes.
-// shortcut: an in-place resize to full screen with no other window event is seen at the next catalog generation (30 s worst case); a foreground-scoped location hook was rejected for its caret/cursor event volume.
+/// re-read on every catalog generation (foreground, show/hide, title, the foreground window's own resize,
+/// and the 30 s repair scan) and topology change. The shell learns of a new full-screen window a moment
+/// after it covers the monitor, so one more look is taken this long after a covering window was not
+/// admitted; there is no timer otherwise.
 const FULLSCREEN_POLL: Duration = Duration::from_secs(2);
 /// A lost graphics device is rebuilt after a doubling delay (250 ms up to 8 s), since a driver reset
 /// or update takes a moment. Any rebuild failure retries, as one during a reset need not read as a
@@ -1643,10 +1650,17 @@ impl Desktop {
         // Only the Media page draws the visualizer; any other page, or no Media tab, makes no meter call.
         // A visible collapsed notch shows the meter in its pill while a track plays.
         let open = self.page() == Tab::Media && self.surfaces.iter().any(Surface::expanded);
-        let pill = self
-            .surfaces
-            .iter()
-            .any(|s| s.visible && s.kind() == SurfaceKind::Notch && !s.expanded());
+        // The pill draws bars only while the mascot's eyes are not in their lane.
+        let eyes_away = self
+            .pages
+            .eyes
+            .as_ref()
+            .is_none_or(|eyes| eyes.frame().is_none());
+        let pill = eyes_away
+            && self
+                .surfaces
+                .iter()
+                .any(|s| s.visible && s.kind() == SurfaceKind::Notch && !s.expanded());
         let due = meter_due(
             open || pill,
             playing,
@@ -2156,7 +2170,6 @@ impl Desktop {
             self.request_notches(Repaint::Full, |_| true);
         }
     }
-    /// Opens every visible notch; a notch hidden by a full-screen app stays hidden.
     /// Closes the notches whose leave grace ran out and, when a peek ends, the ones nobody points at;
     /// returns the wait until the next of those (`INFINITE` with none, the common case).
     #[inline(never)]
@@ -2197,7 +2210,7 @@ impl Desktop {
             self.pages.stats = crate::widgets::Stats::default();
             return INFINITE;
         }
-        if self.pages.stats.sample(now) {
+        if self.pages.stats.sample(now, self.pages.widgets) {
             self.request_notches(Repaint::Full, Surface::expanded);
         }
         self.pages
@@ -2232,6 +2245,7 @@ impl Desktop {
         self.open_notches();
         self.peek = Some(now + motion::PEEK_TIME);
     }
+    /// Opens every visible notch; a notch hidden by a full-screen app stays hidden.
     fn open_notches(&mut self) {
         // An alert or a new song shows a tucked notch for a while, like Bloom's peek.
         let now = Instant::now();
@@ -2406,6 +2420,7 @@ impl Desktop {
             .hover_popup
             .as_ref()
             .is_some_and(|popup| popup.running(now));
+        let mut settled = false;
         for surface in &mut self.surfaces {
             if let Role::Notch { intent, .. } = &mut surface.role
                 && intent.is_some_and(|at| now >= at)
@@ -2435,6 +2450,10 @@ impl Desktop {
                         Role::Notch { intent, .. } => intent.is_some(),
                         Role::Dock { slots, .. } => slots.iter().any(|tween| tween.running(now)),
                     };
+                // A notch opened before a window covered it was held up; closed, it goes now.
+                settled |= !surface.live
+                    && surface.kind() == SurfaceKind::Notch
+                    && !self.tuck_notch.shown(&surface.monitor);
             }
             if surface.leaving && !surface.slide.running(now) {
                 surface.apply_visible(false);
@@ -2444,6 +2463,9 @@ impl Desktop {
                 surface.set_visible(false);
             }
             running |= surface.live;
+        }
+        if settled {
+            self.apply_visibility()?;
         }
         Ok(running)
     }
@@ -2874,7 +2896,7 @@ impl Desktop {
             );
             (dock.dock_style, dock.dock_buttons) = (style, buttons);
             dock.bounds = placement_styled(
-                monitor.work,
+                monitor.dock_room(style),
                 dock.dpi,
                 SurfaceKind::Dock,
                 slots,
@@ -4686,6 +4708,7 @@ impl Desktop {
         let admitted = candidate
             .clone()
             .filter(|_| native_window::shell_fullscreen());
+        let waiting = candidate.is_some() && admitted.is_none();
         let normal_monitor = admitted
             .is_none()
             .then(|| foreground.and_then(native_window::foreground_monitor))
@@ -4696,11 +4719,12 @@ impl Desktop {
             normal_monitor.as_deref(),
             &self.monitors,
         );
-        self.fullscreen_due =
-            (candidate.is_some() || !self.fullscreen.is_empty()).then_some(now + FULLSCREEN_POLL);
+        self.fullscreen_due = (waiting && !polled).then_some(now + FULLSCREEN_POLL);
         if before == self.fullscreen {
             return Ok(());
         }
+        // A strip never shows over a full-screen app: the tuck pass drops it.
+        self.tuck_generation = None;
         self.apply_visibility()
     }
     /// Hides or shows each surface for the full-screen and dock auto-hide state, painted current before
@@ -4738,21 +4762,30 @@ impl Desktop {
         }
         Ok(())
     }
-    /// Dock auto-hide: re-reads which window covers a dock when the catalog changed or the re-check is due,
-    /// and applies the strips' hover deadlines.
+    /// Dock auto-hide: re-reads which window covers a dock when the catalog or the foreground window's frame
+    /// changed, and applies the strips' hover deadlines.
     fn refresh_tuck(&mut self, generation: u64) -> Result<()> {
         let now = Instant::now();
         let mut changed = false;
-        if self.tuck_generation != Some(generation)
-            || self.tuck.polled(now)
-            || self.tuck_notch.polled(now)
-        {
+        if self.tuck_generation != Some(generation) {
             self.tuck_generation = Some(generation);
-            let frame = match dock::foreground_key() {
-                None => Some(None),
-                Some(key) if dock::valid_target(key) => Some(native_window::window_frame(key)),
-                Some(_) => None,
-            };
+            let frame = dock::foreground_key()
+                .filter(|key| dock::valid_target(*key))
+                .and_then(|key| {
+                    native_window::window_frame(key).map(|(device, frame)| (key, device, frame))
+                });
+            // No strip on a monitor a full-screen app owns: it would sit over the player's controls.
+            let monitors: Vec<_> = self
+                .monitors
+                .iter()
+                .filter(|m| {
+                    !self
+                        .fullscreen
+                        .iter()
+                        .any(|(_, device)| device == &m.device)
+                })
+                .cloned()
+                .collect();
             let docks: Vec<_> = self
                 .surfaces
                 .iter()
@@ -4763,8 +4796,8 @@ impl Desktop {
                 self.settings.dock_hide,
                 frame.clone(),
                 &docks,
-                &self.monitors,
-                now,
+                &monitors,
+                native_window::window_frame,
             );
             // The notch's footprint is its closed pill at the top centre, not the whole transparent window.
             let notches: Vec<_> = self
@@ -4786,8 +4819,8 @@ impl Desktop {
                 self.settings.notch_hide,
                 frame,
                 &notches,
-                &self.monitors,
-                now,
+                &monitors,
+                native_window::window_frame,
             );
         }
         let surfaces = &self.surfaces;
@@ -4959,8 +4992,10 @@ impl Desktop {
         self.refresh_shelf();
         self.refresh_weather();
         self.refresh_limits();
-        self.refresh_fullscreen(model.generation)?;
-        self.refresh_tuck(model.generation)?;
+        // The foreground window's own move or resize counts as a change too.
+        let stamp = model.generation.wrapping_add(window_catalog::frames());
+        self.refresh_fullscreen(stamp)?;
+        self.refresh_tuck(stamp)?;
         let wait = self
             .refresh_clock()?
             .min(self.refresh_progress()?)
@@ -5532,6 +5567,7 @@ mod clock_wait_tests {
                     height: 1080,
                 },
                 dpi: 96,
+                taskbar: 0,
             })
             .collect();
         let candidate = |handle, device: &str| {

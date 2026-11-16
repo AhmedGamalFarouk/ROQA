@@ -1,10 +1,10 @@
 //! Dock and notch auto-hide: the surface slides away while the foreground window covers it, and comes back while the
 //! pointer rests on a thin strip along the monitor's bottom edge (or stays on the dock). Event-driven: the
-//! catalog's generation feeds `sync`; the only waits are the strip's hover deadline and, while a window
-//! covers the dock, one slow re-check (a maximize or a resize raises no event the catalog hears; a drag's end
-//! does).
+//! catalog's generation feeds `sync` (it hears the foreground window's own move and resize too); the only
+//! waits are the strips' hover deadlines. A strip never keeps a click: it hides and hands the click on.
 use crate::{
     dock::px, edge::Hover, layout::Bounds, native_window::NativeWindow, topology::Monitor,
+    window_model::WindowKey,
 };
 use std::{
     mem::size_of,
@@ -13,14 +13,20 @@ use std::{
 use windows::{
     Win32::UI::{
         Controls::WM_MOUSELEAVE,
-        Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent},
-        WindowsAndMessaging::{MSG, WM_MOUSEMOVE},
+        Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_MOUSE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_LEFTDOWN,
+            MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+            MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, SendInput, TME_LEAVE,
+            TRACKMOUSEEVENT, TrackMouseEvent,
+        },
+        WindowsAndMessaging::{
+            MSG, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
+            WM_RBUTTONDOWN, WM_RBUTTONUP,
+        },
     },
     core::w,
 };
 
-/// Re-check of the foreground window's place while it covers the dock.
-const POLL: Duration = Duration::from_secs(2);
 /// The strip's thickness in DIPs.
 const STRIP: i32 = 2;
 /// The pointer resting on the strip reveals the dock after this (short: it should feel instant, yet a pointer
@@ -28,6 +34,8 @@ const STRIP: i32 = 2;
 const REVEAL: Duration = Duration::from_millis(90);
 /// After the pointer leaves a revealed dock it slides away this much later.
 const LEAVE: Duration = Duration::from_millis(400);
+/// A strip that handed a click on stays out of the way this long.
+const REST: Duration = Duration::from_millis(800);
 
 pub fn overlaps(a: Bounds, b: Bounds) -> bool {
     a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
@@ -36,24 +44,25 @@ pub fn overlaps(a: Bounds, b: Bounds) -> bool {
 struct Strip {
     window: NativeWindow,
     monitor: String,
+    at: Bounds,
     hover: Hover,
     tracking: bool,
+    /// Hidden after a click until this time.
+    rest: Option<Instant>,
 }
 
-/// What the foreground window says about the docks: `Some(Some(..))` a window's monitor and frame,
-/// `Some(None)` none that counts, `None` leave the last answer (ROQA itself has the foreground).
-pub type Frame = Option<Option<(String, Bounds)>>;
+/// The foreground window, its monitor and its frame; `None` when none counts (ROQA itself, the desktop).
+pub type Frame = Option<(WindowKey, String, Bounds)>;
 
 #[derive(Default)]
 pub struct Tuck {
     /// The notch's: its strip runs along the top edge instead of the bottom.
     top: bool,
-    /// Monitors whose dock a window covers.
-    tucked: Vec<String>,
+    /// Per monitor, the window that covers its dock.
+    covers: Vec<(String, WindowKey)>,
     /// The monitor whose covered dock is shown again.
     peek: Option<String>,
     strips: Vec<Strip>,
-    poll: Option<Instant>,
 }
 impl Tuck {
     /// The notch's: its strip runs along the top edge.
@@ -65,61 +74,81 @@ impl Tuck {
     }
     /// False while a covered dock is hidden on `device`.
     pub fn shown(&self, device: &str) -> bool {
-        !self.tucked.iter().any(|m| m == device) || self.peek.as_deref() == Some(device)
+        !self.tucked(device) || self.peek.as_deref() == Some(device)
     }
-    /// True when the re-check is due.
-    pub fn polled(&self, now: Instant) -> bool {
-        self.poll.is_some_and(|due| now >= due)
+    fn tucked(&self, device: &str) -> bool {
+        self.covers.iter().any(|(m, _)| m == device)
     }
-    /// Returns true when a dock must show or hide.
+    /// Returns true when a dock must show or hide. `look` reads a window's monitor and frame now (`None` once
+    /// it is minimized, closed or hidden); `monitors` are the ones that may carry a strip.
     pub fn sync(
         &mut self,
         on: bool,
         frame: Frame,
         docks: &[(String, Bounds)],
         monitors: &[Monitor],
-        now: Instant,
+        look: impl Fn(WindowKey) -> Option<(String, Bounds)>,
     ) -> bool {
-        let before = (self.tucked.clone(), self.peek.clone());
+        let before = (self.covers.clone(), self.peek.clone());
         if !on {
             *self = Self {
                 top: self.top,
                 ..Self::default()
             };
         } else {
-            if let Some(frame) = frame {
-                self.tucked = docks
+            let over = |device: &str, frame: Bounds| {
+                docks
                     .iter()
-                    .filter(|(device, bounds)| {
-                        frame
-                            .as_ref()
-                            .is_some_and(|(at, frame)| at == device && overlaps(*frame, *bounds))
-                    })
-                    .map(|(device, _)| device.clone())
-                    .collect();
+                    .any(|(d, bounds)| d == device && overlaps(frame, *bounds))
+            };
+            // A window that moved away, closed or minimized no longer covers its dock.
+            self.covers.retain(|(device, key)| {
+                look(*key).is_some_and(|(at, frame)| &at == device && over(device, frame))
+            });
+            // The foreground window alone decides its own monitor; the others keep their covers.
+            if let Some((key, at, frame)) = frame {
+                self.covers.retain(|(device, k)| *k != key && *device != at);
+                if over(&at, frame) {
+                    self.covers.push((at, key));
+                }
             }
-            self.poll = (!self.tucked.is_empty()).then_some(now + POLL);
-            if self.peek.as_ref().is_some_and(|m| !self.tucked.contains(m)) {
+            if self.peek.as_deref().is_some_and(|m| !self.tucked(m)) {
                 self.peek = None;
             }
-            self.strips
-                .retain(|strip| self.tucked.contains(&strip.monitor));
+            self.strips.retain(|strip| {
+                self.covers.iter().any(|(m, _)| *m == strip.monitor)
+                    && monitors.iter().any(|m| m.device == strip.monitor)
+            });
             for (device, bounds) in docks {
-                if self.tucked.contains(device)
-                    && !self.strips.iter().any(|s| &s.monitor == device)
-                    && let Some(monitor) = monitors.iter().find(|m| &m.device == device)
-                    && let Some(strip) = Strip::create(monitor, *bounds, self.top)
-                {
-                    self.strips.push(strip);
+                let Some(monitor) = monitors.iter().find(|m| &m.device == device) else {
+                    continue;
+                };
+                if !self.tucked(device) {
+                    continue;
+                }
+                let at = Strip::place(monitor, *bounds, self.top);
+                match self.strips.iter_mut().find(|s| &s.monitor == device) {
+                    // A dock, DPI or taskbar change moved the edge: follow it.
+                    Some(strip) if strip.at != at => {
+                        if strip.window.resize(at).is_ok() {
+                            strip.at = at;
+                        }
+                    }
+                    Some(_) => {}
+                    None => self.strips.extend(Strip::create(monitor, at)),
                 }
             }
         }
-        before != (self.tucked.clone(), self.peek.clone())
+        before != (self.covers.clone(), self.peek.clone())
     }
     /// Applies the strips' hover deadlines; `held` says the pointer is on that monitor's dock.
     pub fn tick(&mut self, now: Instant, held: impl Fn(&str) -> bool) -> bool {
         let mut changed = false;
         for strip in &mut self.strips {
+            if strip.rest.is_some_and(|due| now >= due) {
+                strip.rest = None;
+                strip.window.show();
+            }
             match strip.hover.tick(now, held(&strip.monitor)) {
                 Some(true) => {
                     self.peek = Some(strip.monitor.clone());
@@ -148,6 +177,8 @@ impl Tuck {
                 strip.tracking = false;
                 strip.hover.leave(now);
             }
+            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
+            | WM_MBUTTONUP => strip.pass(message.message, now),
             _ => {}
         }
         true
@@ -173,34 +204,67 @@ impl Tuck {
     pub fn deadline(&self) -> Option<Instant> {
         self.strips
             .iter()
-            .filter_map(|strip| strip.hover.deadline())
-            .chain(self.poll)
+            .flat_map(|strip| [strip.hover.deadline(), strip.rest])
+            .flatten()
             .min()
     }
 }
 impl Strip {
-    fn create(monitor: &Monitor, dock: Bounds, top: bool) -> Option<Self> {
+    /// Along the work area's bottom: on the screen edge when the taskbar shows (the work area ends above it, so the
+    /// strip never takes the taskbar's clicks), one strip higher when the taskbar hides (the work area is the whole
+    /// screen, and the screen's last row must stay free to bring the taskbar back).
+    fn place(monitor: &Monitor, dock: Bounds, top: bool) -> Bounds {
         let height = px(STRIP, monitor.dpi).max(2);
-        // Along the work area's bottom: on the screen edge when the taskbar hides, above it when it shows, so
-        // the strip never takes the taskbar's edge clicks (Start, icons).
-        let at = Bounds {
+        let hidden_taskbar =
+            monitor.work.y + monitor.work.height >= monitor.rect.y + monitor.rect.height;
+        Bounds {
             x: dock.x,
             y: if top {
                 monitor.work.y
             } else {
-                monitor.work.y + monitor.work.height - height
+                monitor.work.y + monitor.work.height - height * (1 + i32::from(hidden_taskbar))
             },
             width: dock.width,
             height,
-        };
+        }
+    }
+    fn create(monitor: &Monitor, at: Bounds) -> Option<Self> {
         let window = NativeWindow::create_hidden(at, w!("ROQA Dock Edge")).ok()?;
         window.show();
         Some(Self {
             window,
             monitor: monitor.device.clone(),
+            at,
             hover: Hover::default(),
             tracking: false,
+            rest: None,
         })
+    }
+    /// A click landed on the strip, which must not keep it (browser tabs, window edges): hide, then send the
+    /// same button event to whatever is underneath. The strip comes back after `REST`.
+    fn pass(&mut self, message: u32, now: Instant) {
+        let flag: MOUSE_EVENT_FLAGS = match message {
+            WM_LBUTTONDOWN => MOUSEEVENTF_LEFTDOWN,
+            WM_LBUTTONUP => MOUSEEVENTF_LEFTUP,
+            WM_RBUTTONDOWN => MOUSEEVENTF_RIGHTDOWN,
+            WM_RBUTTONUP => MOUSEEVENTF_RIGHTUP,
+            WM_MBUTTONDOWN => MOUSEEVENTF_MIDDLEDOWN,
+            _ => MOUSEEVENTF_MIDDLEUP,
+        };
+        self.window.hide();
+        self.rest = Some(now + REST);
+        self.hover.leave(now);
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dwFlags: flag,
+                    ..Default::default()
+                },
+            },
+        };
+        // SAFETY: one well-formed mouse event at the pointer's current place, sent with the real struct size.
+        unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
     }
     fn track(&mut self) {
         if self.tracking {
@@ -228,28 +292,65 @@ mod tests {
             height,
         }
     }
+    fn k(handle: usize) -> WindowKey {
+        WindowKey { handle, process: 1 }
+    }
+    fn frame(handle: usize, device: &str, at: Bounds) -> Frame {
+        Some((k(handle), device.to_owned(), at))
+    }
     #[test]
     fn a_window_over_the_dock_tucks_it_and_leaving_shows_it() {
         let docks = [("A".to_owned(), b(400, 1000, 500, 60))];
-        let now = Instant::now();
         let mut tuck = Tuck::default();
+        let gone = |_| None;
         // Not covering: nothing changes.
-        let far = Some(Some(("A".to_owned(), b(0, 0, 1920, 900))));
-        assert!(!tuck.sync(true, far, &docks, &[], now) && tuck.shown("A"));
-        let over = Some(Some(("A".to_owned(), b(0, 0, 1920, 1080))));
-        assert!(tuck.sync(true, over, &docks, &[], now) && !tuck.shown("A"));
+        let far = frame(1, "A", b(0, 0, 1920, 900));
+        assert!(!tuck.sync(true, far, &docks, &[], gone) && tuck.shown("A"));
+        let over = frame(1, "A", b(0, 0, 1920, 1080));
+        assert!(tuck.sync(true, over, &docks, &[], gone) && !tuck.shown("A"));
         assert!(tuck.shown("B"));
-        // ROQA holding the foreground keeps the answer.
-        assert!(!tuck.sync(true, None, &docks, &[], now) && !tuck.shown("A"));
-        assert!(tuck.sync(true, Some(None), &docks, &[], now) && tuck.shown("A"));
+        // ROQA holding the foreground: the window still covers it.
+        let still = |_| Some(("A".to_owned(), b(0, 0, 1920, 1080)));
+        assert!(!tuck.sync(true, None, &docks, &[], still) && !tuck.shown("A"));
+        // The window closes or minimizes.
+        assert!(tuck.sync(true, None, &docks, &[], gone) && tuck.shown("A"));
         assert!(tuck.deadline().is_none());
+    }
+    #[test]
+    fn a_cover_on_another_monitor_survives_a_focus_change() {
+        let docks = [
+            ("A".to_owned(), b(0, 1000, 500, 60)),
+            ("B".to_owned(), b(2000, 1000, 500, 60)),
+        ];
+        let mut tuck = Tuck::default();
+        let screens = |key: WindowKey| {
+            Some(if key == k(2) {
+                ("B".to_owned(), b(1920, 0, 1920, 1080))
+            } else {
+                ("A".to_owned(), b(0, 0, 800, 600))
+            })
+        };
+        tuck.sync(
+            true,
+            frame(2, "B", b(1920, 0, 1920, 1080)),
+            &docks,
+            &[],
+            screens,
+        );
+        // Focus moves to a small window on A: B's dock stays hidden under its maximized window.
+        tuck.sync(true, frame(1, "A", b(0, 0, 800, 600)), &docks, &[], screens);
+        assert!(tuck.shown("A") && !tuck.shown("B"));
+        // B's window is restored away from its dock while another window holds the focus.
+        let moved = |_| Some(("B".to_owned(), b(1920, 0, 800, 600)));
+        tuck.sync(true, frame(1, "A", b(0, 0, 800, 600)), &docks, &[], moved);
+        assert!(tuck.shown("B"));
     }
     #[test]
     fn off_forgets_everything() {
         let docks = [("A".to_owned(), b(0, 0, 10, 10))];
         let mut tuck = Tuck::default();
-        let over = Some(Some(("A".to_owned(), b(0, 0, 20, 20))));
-        tuck.sync(true, over, &docks, &[], Instant::now());
-        assert!(tuck.sync(false, None, &docks, &[], Instant::now()) && tuck.shown("A"));
+        let over = frame(1, "A", b(0, 0, 20, 20));
+        tuck.sync(true, over, &docks, &[], |_| None);
+        assert!(tuck.sync(false, None, &docks, &[], |_| None) && tuck.shown("A"));
     }
 }

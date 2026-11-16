@@ -31,7 +31,10 @@ use windows::Win32::{
     },
     UI::{
         HiDpi::GetDpiForWindow,
-        Shell::{QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState},
+        Shell::{
+            ABE_BOTTOM, ABM_GETSTATE, ABM_GETTASKBARPOS, ABS_AUTOHIDE, APPBARDATA, QUNS_BUSY,
+            QUNS_RUNNING_D3D_FULL_SCREEN, SHAppBarMessage, SHQueryUserNotificationState,
+        },
         WindowsAndMessaging::*,
     },
 };
@@ -69,10 +72,11 @@ const SPEAKER: GUID = GUID::from_u128(0x65e8773e_8f56_11d0_a3b9_00a0c9223196);
 pub fn device_read() -> u32 {
     DEVICE_BITS.swap(0, Ordering::AcqRel)
 }
-/// Which of the three alerts a device broadcast is, or 0: a drive (not a disc going in), a camera, a speaker.
-fn device_bit(kind: u32, interface: GUID, disc: bool) -> u32 {
+/// Which of the three alerts a device broadcast is, or 0: a drive (not a disc going in, not a network share
+/// mapped at logon: `not_a_drive`), a camera, a speaker.
+fn device_bit(kind: u32, interface: GUID, not_a_drive: bool) -> u32 {
     match kind {
-        k if k == DBT_DEVTYP_VOLUME.0 && !disc => DRIVE_BIT,
+        k if k == DBT_DEVTYP_VOLUME.0 && !not_a_drive => DRIVE_BIT,
         k if k == DBT_DEVTYP_DEVICEINTERFACE.0 && interface == CAMERA => CAMERA_BIT,
         k if k == DBT_DEVTYP_DEVICEINTERFACE.0 && interface == SPEAKER => SPEAKER_BIT,
         _ => 0,
@@ -397,19 +401,44 @@ pub fn monitors() -> Result<Vec<Monitor>> {
         )
         .ok()?;
     }
+    let hides = taskbar_hides_at_bottom();
     handles
         .into_iter()
         .map(|handle| {
             let info = monitor_info(handle)?;
             let work = bounds(info.monitorInfo.rcWork);
+            let rect = bounds(info.monitorInfo.rcMonitor);
+            let dpi = dpi_at(work)?;
             Ok(Monitor {
                 device: device_name(&info),
                 work,
-                rect: bounds(info.monitorInfo.rcMonitor),
-                dpi: dpi_at(work)?,
+                rect,
+                dpi,
+                // The work area then reaches the screen's last row, and the taskbar (48 DIPs) slides over it.
+                taskbar: if hides && work.y + work.height == rect.y + rect.height {
+                    dock::px(48, dpi)
+                } else {
+                    0
+                },
             })
         })
         .collect()
+}
+
+/// True when the taskbar is set to hide and sits at the bottom edge.
+fn taskbar_hides_at_bottom() -> bool {
+    let mut data = APPBARDATA {
+        cbSize: size_of::<APPBARDATA>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `data` is a live, sized APPBARDATA for both queries; the shell fills it in place.
+    unsafe {
+        if SHAppBarMessage(ABM_GETSTATE, &mut data) as u32 & ABS_AUTOHIDE == 0 {
+            return false;
+        }
+        SHAppBarMessage(ABM_GETTASKBARPOS, &mut data);
+    }
+    data.uEdge == ABE_BOTTOM
 }
 
 /// Geometry and device name of one monitor; fails once its HMONITOR no longer exists.
@@ -465,7 +494,18 @@ pub fn window_frame(key: WindowKey) -> Option<(String, Bounds)> {
             MonitorFromWindow(window, MONITOR_DEFAULTTONULL),
         )
     };
-    if iconic || length == 0 || named("Progman") || named("WorkerW") {
+    // A window on another virtual desktop is cloaked: it covers nothing here.
+    let mut cloaked = 0u32;
+    // SAFETY: DWM writes one DWORD to this owned buffer; a failed read counts as not cloaked.
+    let _ = unsafe {
+        DwmGetWindowAttribute(
+            window,
+            DWMWA_CLOAKED,
+            &raw mut cloaked as *mut _,
+            size_of::<u32>() as u32,
+        )
+    };
+    if iconic || cloaked != 0 || length == 0 || named("Progman") || named("WorkerW") {
         return None;
     }
     let info = monitor_info(monitor).ok()?;
@@ -590,9 +630,11 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
             } else {
                 GUID::zeroed()
             };
-            let disc = kind == DBT_DEVTYP_VOLUME.0
-                && (*(lparam.0 as *const DEV_BROADCAST_VOLUME)).dbcv_flags.0 & DBTF_MEDIA.0 != 0;
-            let bit = device_bit(kind, interface, disc);
+            let not_a_drive = kind == DBT_DEVTYP_VOLUME.0
+                && (*(lparam.0 as *const DEV_BROADCAST_VOLUME)).dbcv_flags.0
+                    & (DBTF_MEDIA.0 | DBTF_NET.0)
+                    != 0;
+            let bit = device_bit(kind, interface, not_a_drive);
             if bit != 0
                 && DEVICE_BITS.fetch_or(bit, Ordering::AcqRel) == 0
                 && PostMessageW(None, DEVICE, WPARAM(0), LPARAM(0)).is_err()
