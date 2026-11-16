@@ -120,6 +120,15 @@ const CLIP: usize = 203;
 const DOCK_HIDE: usize = 204;
 const NOTCH_HIDE: usize = 205;
 const DOCK_LEFT: usize = 206;
+/// The Widgets card's extra rows: the two lower slots, network units, the disk, the low-battery level, the
+/// week's first day and the closed pill's low-battery bolt.
+const WLEFT2: usize = 207;
+const WRIGHT2: usize = 208;
+const NETU: usize = 209;
+const DISKD: usize = 210;
+const LOWAT: usize = 211;
+const WEEK1: usize = 212;
+const PILLLOW: usize = 213;
 const SIDE: usize = 98;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
@@ -295,6 +304,13 @@ const PAGES: &[Page] = &[
                 rows: &[
                     r(WLEFT, Kind::Combo(160), "Left slot", ""),
                     r(WRIGHT, Kind::Combo(160), "Right slot", ""),
+                    r(WLEFT2, Kind::Combo(160), "Lower left slot", ""),
+                    r(WRIGHT2, Kind::Combo(160), "Lower right slot", ""),
+                    r(NETU, Kind::Combo(160), "Network speed", ""),
+                    r(DISKD, Kind::Combo(160), "Disk tile", ""),
+                    r(WEEK1, Kind::Combo(160), "Week starts on", ""),
+                    r(LOWAT, Kind::Combo(160), "Low battery at", ""),
+                    r(PILLLOW, C, "Low battery bolt in the pill", ""),
                 ],
             },
             Card {
@@ -1401,6 +1417,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         DOCK_HIDE => &mut s.dock_hide,
         NOTCH_HIDE => &mut s.notch_hide,
         DOCK_LEFT => &mut s.dock_left,
+        PILLLOW => &mut s.widgets.pill_low,
         TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
         DBTN..=136 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,
@@ -1423,6 +1440,51 @@ const LEAD_ROWS: [&str; 4] = [
     "10 minutes before",
     "15 minutes before",
 ];
+/// The widget kinds' names, in `WidgetKind::ALL` order.
+const SLOT_NAMES: [&str; 9] = [
+    "Week calendar",
+    "Battery",
+    "Memory",
+    "Disk",
+    "Processor",
+    "Network",
+    "Next prayer",
+    "Water",
+    "Weather",
+];
+/// The slot lists: every kind, with "Empty" first for a lower slot.
+fn fill_slots(h: HWND, lower: bool) {
+    if lower {
+        add_row(h, "Empty");
+    }
+    SLOT_NAMES.iter().for_each(|name| add_row(h, name));
+}
+/// A lower slot's row: 0 is empty, then the kinds in order.
+fn lower_row(slot: Option<WidgetKind>) -> usize {
+    slot.map_or(0, |kind| 1 + row_of(&WidgetKind::ALL, &kind))
+}
+fn lower_pick(slot: &mut Option<WidgetKind>, row: Option<usize>) {
+    if let Some(row) = row {
+        *slot = row
+            .checked_sub(1)
+            .and_then(|i| WidgetKind::ALL.get(i).copied());
+    }
+}
+/// The disk rows: "System drive", then each fixed drive's letter.
+fn disk_row(drive: Option<u8>) -> usize {
+    drive
+        .and_then(|d| crate::widgets::fixed_drives().iter().position(|x| *x == d))
+        .map_or(0, |i| i + 1)
+}
+fn disk_pick(slot: &mut Option<u8>, row: Option<usize>) {
+    if let Some(row) = row {
+        *slot = row
+            .checked_sub(1)
+            .and_then(|i| crate::widgets::fixed_drives().get(i).copied());
+    }
+}
+/// The "Low battery at" percents; 0 leaves it to Windows.
+const LOW_ROWS: [u8; 4] = [0, 10, 20, 30];
 /// Adds the rows of the drop-down list that table row `id` names (the pin and sound lists are filled elsewhere).
 fn fill_combo(h: HWND, id: usize) {
     let rows: &[&str] = match id {
@@ -1432,14 +1494,17 @@ fn fill_combo(h: HWND, id: usize) {
         PMETHOD => return Method::ALL.iter().for_each(|m| add_row(h, m.label())),
         PLEAD => &LEAD_ROWS,
         LIMGROUP => &["Gemini models", "Claude and GPT models"],
-        WLEFT | WRIGHT => &[
-            "Week calendar",
-            "Battery",
-            "Memory",
-            "Disk",
-            "Processor",
-            "Network",
-        ],
+        WLEFT | WRIGHT => return fill_slots(h, false),
+        WLEFT2 | WRIGHT2 => return fill_slots(h, true),
+        NETU => &["Bytes per second", "Bits per second"],
+        WEEK1 => &["Monday", "Sunday"],
+        LOWAT => &["Windows decides", "10%", "20%", "30%"],
+        DISKD => {
+            add_row(h, "System drive");
+            return crate::widgets::fixed_drives()
+                .iter()
+                .for_each(|d| add_row(h, &format!("Drive {}", *d as char)));
+        }
         NSIZE => &["Auto", "115%", "130%", "150%"],
         NOPEN => &["Hover", "Click"],
         ANIM => &["Normal", "Fast"],
@@ -1871,6 +1936,12 @@ impl SettingsWindow {
                         LIMGROUP => usize::from(settings.limits_group),
                         WLEFT => row_of(&WidgetKind::ALL, &settings.widgets.slot_left),
                         WRIGHT => row_of(&WidgetKind::ALL, &settings.widgets.slot_right),
+                        WLEFT2 => lower_row(settings.widgets.slot_left2),
+                        WRIGHT2 => lower_row(settings.widgets.slot_right2),
+                        NETU => usize::from(settings.widgets.net_bits),
+                        WEEK1 => usize::from(settings.widgets.week_sunday),
+                        LOWAT => row_of(&LOW_ROWS, &settings.widgets.low_at),
+                        DISKD => disk_row(settings.widgets.disk_drive),
                         NSIZE => row_of(&NOTCH_SIZES, &settings.notch_size),
                         NOPEN => usize::from(settings.open_click),
                         ANIM => usize::from(settings.anim_fast),
@@ -1957,6 +2028,17 @@ impl SettingsWindow {
                     match item.id {
                         WLEFT => pick(&WidgetKind::ALL, &mut next.widgets.slot_left, row),
                         WRIGHT => pick(&WidgetKind::ALL, &mut next.widgets.slot_right, row),
+                        WLEFT2 => lower_pick(&mut next.widgets.slot_left2, row),
+                        WRIGHT2 => lower_pick(&mut next.widgets.slot_right2, row),
+                        NETU => {
+                            next.widgets.net_bits = row.map_or(next.widgets.net_bits, |r| r == 1)
+                        }
+                        WEEK1 => {
+                            next.widgets.week_sunday =
+                                row.map_or(next.widgets.week_sunday, |r| r == 1)
+                        }
+                        LOWAT => pick(&LOW_ROWS, &mut next.widgets.low_at, row),
+                        DISKD => disk_pick(&mut next.widgets.disk_drive, row),
                         THEME => pick(&Theme::ALL, &mut next.theme, row),
                         DOCKSTYLE => pick(&DockStyle::ALL, &mut next.dock_style, row),
                         UNITS => pick(&Units::ALL, &mut next.units, row),

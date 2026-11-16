@@ -25,6 +25,14 @@ pub struct Raw {
     pub ac: u8,
     pub flag: u8,
     pub percent: u8,
+    /// Seconds of charge left on battery, when Windows knows.
+    pub left: Option<u32>,
+}
+
+/// The Settings "Low battery at" percent; 0 leaves it to Windows' own low flag.
+static LOW_AT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub fn set_low_at(percent: u8) {
+    LOW_AT.store(percent, std::sync::atomic::Ordering::Relaxed);
 }
 
 const FLAG_LOW: u8 = 2;
@@ -41,7 +49,18 @@ impl Raw {
             ac: status.ACLineStatus,
             flag: status.BatteryFlag,
             percent: status.BatteryLifePercent,
+            left: Some(status.BatteryLifeTime).filter(|secs| *secs != u32::MAX),
         })
+    }
+
+    fn under_threshold(self) -> bool {
+        let at = LOW_AT.load(std::sync::atomic::Ordering::Relaxed);
+        at > 0 && self.percent <= at
+    }
+
+    /// On battery and low: Windows' flag or the chosen percent. False without a battery.
+    pub fn low(self) -> bool {
+        matches!(self.state(), Some((State::Low | State::Critical, _)))
     }
 
     /// The battery as the power notice words it ("Charging 80%"); `None` without a battery.
@@ -59,7 +78,7 @@ impl Raw {
         let state = match (self.ac, self.flag) {
             (1, _) => State::Charging,
             (0, flag) if flag & FLAG_CRITICAL != 0 => State::Critical,
-            (0, flag) if flag & FLAG_LOW != 0 => State::Low,
+            (0, flag) if flag & FLAG_LOW != 0 || self.under_threshold() => State::Low,
             (0, _) => State::OnBattery,
             _ => return None,
         };
@@ -137,7 +156,12 @@ mod tests {
     use super::*;
 
     const fn raw(ac: u8, flag: u8, percent: u8) -> Option<Raw> {
-        Some(Raw { ac, flag, percent })
+        Some(Raw {
+            ac,
+            flag,
+            percent,
+            left: None,
+        })
     }
 
     #[test]

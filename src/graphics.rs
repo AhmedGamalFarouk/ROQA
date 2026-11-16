@@ -210,6 +210,7 @@ pub struct NotchScene<'a> {
     /// The page the open panel shows. Media is the media and clock panel; the others draw their own content.
     pub tab: Tab,
     pub widgets: crate::widgets::WidgetConfig,
+    pub glance: crate::widgets::Glance,
     /// The Processor tile's percent and the Network tile's bytes per second down and up (`widgets::Stats`).
     pub stats: (Option<u32>, Option<(u64, u64)>),
     /// The hanging tab handle; `None` draws none (fewer than two tabs).
@@ -985,6 +986,7 @@ fn notch_text(
         tab_art::draw_eyes(context, scene, frame, body, scale, p)?;
     }
     tab_art::draw_privacy(context, scene, body, scale)?;
+    tab_art::draw_low(context, scene, body, scale, p)?;
     if scene.tab == Tab::Media {
         media_page(context, scene, body, scale, art, status, p)?;
     } else {
@@ -2945,6 +2947,7 @@ mod media_tests {
             shelf_hover: false,
             clips: false,
             widgets: crate::widgets::WidgetConfig::default(),
+            glance: Default::default(),
             stats: (None, None),
             tab: Tab::Media,
             rail: None,
@@ -2988,6 +2991,7 @@ mod media_tests {
                 shelf_hover: false,
                 clips: false,
                 widgets: crate::widgets::WidgetConfig::default(),
+                glance: Default::default(),
                 stats: (None, None),
                 tab: Tab::Media,
                 rail: None,
@@ -3232,6 +3236,7 @@ mod media_tests {
                 shelf_hover: false,
                 clips: false,
                 widgets: crate::widgets::WidgetConfig::default(),
+                glance: Default::default(),
                 stats: (None, None),
                 tab: Tab::Media,
                 rail: None,
@@ -3297,6 +3302,7 @@ mod media_tests {
                     shelf_hover: false,
                     clips: false,
                     widgets: crate::widgets::WidgetConfig::default(),
+                    glance: Default::default(),
                     stats: (None, None),
                     tab: Tab::Media,
                     rail: None,
@@ -3350,6 +3356,7 @@ mod media_tests {
             shelf_hover: false,
             clips: false,
             widgets: crate::widgets::WidgetConfig::default(),
+            glance: Default::default(),
             stats: (None, None),
             tab: Tab::Media,
             rail: None,

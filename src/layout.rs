@@ -59,6 +59,12 @@ const NOTCH_HOVER_SLOP: f32 = 4.0;
 /// A page that needs a taller panel than the plain 80 DIP (Limits): its height in DIPs, 0 for none. Set by
 /// the host before each paint, like the pill size, so drawing and hit tests agree.
 static PAGE_HEIGHT: AtomicU16 = AtomicU16::new(0);
+/// The Widgets page's heights: one row of tiles, or two rows of compact ones. Both are 420 wide.
+pub const WIDGETS_PAGE: u16 = 140;
+pub const WIDGETS_TALL: u16 = 164;
+fn wide_page() -> bool {
+    matches!(PAGE_HEIGHT.load(Relaxed), WIDGETS_PAGE | WIDGETS_TALL)
+}
 pub fn set_page_height(dips: u16) {
     PAGE_HEIGHT.store(dips, Relaxed);
 }
@@ -93,14 +99,14 @@ fn tall(shape: NotchShape, notice_row: bool) -> NotchShape {
         } else {
             shape.height + MEDIA_NOTICE_ROOM * shown
         },
-        width: if page == 140.0 {
+        width: if wide_page() {
             WIDE_W
         } else if page > 0.0 {
             MEDIA_EXPANDED.width
         } else {
             shape.width
         },
-        ears: if page == 140.0 { 10.0 } else { shape.ears },
+        ears: if wide_page() { 10.0 } else { shape.ears },
         radius: shape.radius,
     }
 }
@@ -133,7 +139,7 @@ pub fn notch_shape(progress: f32, media: bool) -> NotchShape {
     };
     let from = pill(from, to, PILL_PERCENT.load(Relaxed));
     NotchShape {
-        width: lerp(from.width, to.width, progress).min(if PAGE_HEIGHT.load(Relaxed) == 140 {
+        width: lerp(from.width, to.width, progress).min(if wide_page() {
             WIDE_W
         } else {
             f32::MAX
@@ -550,7 +556,7 @@ pub fn page_value(dpi: u32) -> Bounds {
 }
 /// The panel's width on the current page (the 420 wide Widgets page, else the plain 360).
 pub fn panel_width() -> f32 {
-    if PAGE_HEIGHT.load(Relaxed) == 140 {
+    if wide_page() {
         WIDE_W
     } else {
         NOTCH_EXPANDED.width

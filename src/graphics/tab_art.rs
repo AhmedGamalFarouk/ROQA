@@ -667,49 +667,102 @@ fn drop_zone(
     Ok(())
 }
 
-/// The Widgets page: two tiles of one size on the grid (190 x 72, the 14 radius, an 8 gutter), each with one
-/// accent: today in the week, the battery ring.
+/// The Widgets page: tiles of one size on the grid (190 x 72, the 14 radius, an 8 gutter), two across; a filled
+/// lower slot makes two rows of compact 190 x 52 tiles. Each tile has at most one accent: today in the week, the
+/// battery ring, a usage bar's fill, the water bar.
 fn widgets_page(g: &Page, scene: &NotchScene) -> Result<()> {
-    use crate::widgets::WidgetKind;
-    let kinds = [scene.widgets.slot_left, scene.widgets.slot_right];
-    for (index, kind) in kinds.into_iter().enumerate() {
+    use crate::widgets::{WidgetKind, speed};
+    let tall = scene.widgets.tall();
+    let tile = if tall { WIDGET_COMPACT } else { WIDGET_TILE };
+    // A standard value, or its compact twin.
+    let pick = |standard: f32, compact: f32| if tall { compact } else { standard };
+    for (index, kind) in scene.widgets.cells().into_iter().enumerate() {
+        let Some(kind) = kind else {
+            continue;
+        };
         let (x, y) = (
-            layout::PAD + (WIDGET_TILE.0 + layout::GUTTER) * index as f32,
-            layout::BODY_Y,
+            layout::PAD + (tile.0 + layout::GUTTER) * (index % 2) as f32,
+            layout::BODY_Y + (tile.1 + layout::GUTTER) * (index / 2) as f32,
         );
         let at = |dx: f32, dy: f32, w: f32, h: f32| g.at(x + dx, y + dy, w, h);
-        g.tile(at(0.0, 0.0, WIDGET_TILE.0, WIDGET_TILE.1))?;
+        g.tile(at(0.0, 0.0, tile.0, tile.1))?;
+        // The big reading, its line and an optional bar's percent: the usage tiles' common face.
+        let reading = |big: &str, line: &str, bar: Option<u32>| -> Result<()> {
+            g.text(
+                big,
+                &g.display(pick(24.0, 20.0), BOLD, LEAD),
+                at(14.0, pick(6.0, 4.0), 162.0, pick(28.0, 24.0)),
+                g.ink(1.0),
+            )?;
+            g.text(
+                line,
+                &g.font(pick(11.0, 10.0), NORMAL, LEAD),
+                at(14.0, pick(35.0, 28.0), 162.0, pick(16.0, 14.0)),
+                g.ink(0.6),
+            )?;
+            let Some(percent) = bar else {
+                return Ok(());
+            };
+            // The track and the fill are both capsules; the fill is the one accent here.
+            let (bar_y, bar_h) = (pick(56.0, 43.0), pick(6.0, 5.0));
+            g.fill(at(14.0, bar_y, 162.0, bar_h), None, g.ink(0.18))?;
+            if percent > 0 {
+                g.fill(
+                    at(
+                        14.0,
+                        bar_y,
+                        (162.0 * percent as f32 / 100.0).max(bar_h),
+                        bar_h,
+                    ),
+                    None,
+                    g.accent(1.0),
+                )?;
+            }
+            Ok(())
+        };
+        let percent_text = |p: Option<u32>| p.map_or("--".into(), |p| format!("{p}%"));
         match kind {
             WidgetKind::WeekCalendar => {
                 // SAFETY: GetLocalTime returns a value and needs no resources.
                 let date = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+                let sunday = scene.widgets.week_sunday;
+                // Sunday first is the same week with today one cell further along (`week_numbers`' rotation).
                 let days = crate::widgets::week_numbers(
                     date.wYear,
                     date.wMonth,
                     date.wDay,
-                    date.wDayOfWeek,
+                    if sunday {
+                        (date.wDayOfWeek + 1) % 7
+                    } else {
+                        date.wDayOfWeek
+                    },
                 );
-                let today = usize::from((date.wDayOfWeek + 6) % 7);
-                // The date heads the tile, the week strip sits under it: no empty band.
+                let today = if sunday {
+                    usize::from(date.wDayOfWeek)
+                } else {
+                    usize::from((date.wDayOfWeek + 6) % 7)
+                };
+                let labels = if sunday {
+                    ["S", "M", "T", "W", "T", "F", "S"]
+                } else {
+                    ["M", "T", "W", "T", "F", "S", "S"]
+                };
+                // The date heads the tile, the week strip sits under it: no empty band. Compact: strip first.
                 g.text(
                     scene.date,
-                    &g.font(12.0, SEMI, LEAD),
-                    at(14.0, 8.0, 162.0, 16.0),
+                    &g.font(pick(12.0, 10.0), SEMI, LEAD),
+                    at(14.0, pick(8.0, 38.0), 162.0, pick(16.0, 12.0)),
                     g.ink(0.9),
                 )?;
-                for (i, (label, day)) in ["M", "T", "W", "T", "F", "S", "S"]
-                    .into_iter()
-                    .zip(days)
-                    .enumerate()
-                {
+                for (i, (label, day)) in labels.into_iter().zip(days).enumerate() {
                     let dx = 11.0 + i as f32 * 24.0;
                     g.text(
                         label,
                         &g.font(9.0, SEMI, MIDDLE),
-                        at(dx, 27.0, 22.0, 12.0),
+                        at(dx, pick(27.0, 4.0), 22.0, 12.0),
                         g.ink(0.55),
                     )?;
-                    let cell = at(dx + 1.0, 42.0, 20.0, 20.0);
+                    let cell = at(dx + 1.0, pick(42.0, 17.0), 20.0, 20.0);
                     if i == today {
                         g.fill(cell, None, g.accent(1.0))?;
                     }
@@ -721,80 +774,112 @@ fn widgets_page(g: &Page, scene: &NotchScene) -> Result<()> {
                     g.text(&day.to_string(), &g.font(10.0, SEMI, MIDDLE), cell, colour)?;
                 }
             }
-            WidgetKind::Memory | WidgetKind::Disk | WidgetKind::Cpu | WidgetKind::Network => {
-                use crate::widgets::speed;
-                let percent_text = |p: Option<u32>| p.map_or("--".into(), |p| format!("{p}%"));
-                // The big reading, its line, and the bar's percent (none for a speed).
-                let (big, line, bar): (String, String, Option<u32>) = match kind {
-                    WidgetKind::Network => match scene.stats.1 {
-                        Some((down, up)) => (speed(down), format!("Down, {} up", speed(up)), None),
-                        None => ("--".into(), "Network speed".into(), None),
-                    },
-                    WidgetKind::Cpu => (
-                        percent_text(scene.stats.0),
-                        "Processor in use".into(),
-                        Some(scene.stats.0.unwrap_or(0)),
-                    ),
-                    _ => {
-                        let (title, reading) = if kind == WidgetKind::Memory {
-                            ("Memory in use", crate::widgets::memory())
-                        } else {
-                            ("Disk in use", crate::widgets::disk())
-                        };
-                        (
-                            percent_text(reading.as_ref().map(|r| r.percent)),
-                            reading
-                                .as_ref()
-                                .map_or_else(|| title.into(), |r| format!("{title}, {}", r.detail)),
-                            Some(reading.map_or(0, |r| r.percent)),
-                        )
-                    }
-                };
-                g.text(
-                    &big,
-                    &g.display(24.0, BOLD, LEAD),
-                    at(14.0, 6.0, 162.0, 28.0),
-                    g.ink(1.0),
-                )?;
-                g.text(
-                    &line,
-                    &g.font(11.0, NORMAL, LEAD),
-                    at(14.0, 35.0, 162.0, 16.0),
-                    g.ink(0.6),
-                )?;
-                let Some(percent) = bar else {
-                    continue;
-                };
-                // The track and the fill are both capsules; the fill is the one accent here.
-                g.fill(at(14.0, 56.0, 162.0, 6.0), None, g.ink(0.18))?;
-                if percent > 0 {
-                    g.fill(
-                        at(14.0, 56.0, (162.0 * percent as f32 / 100.0).max(6.0), 6.0),
+            WidgetKind::Network => {
+                let bits = scene.widgets.net_bits;
+                match scene.stats.1 {
+                    Some((down, up)) => reading(
+                        &speed(down, bits),
+                        &format!("Down, {} up", speed(up, bits)),
                         None,
-                        g.accent(1.0),
-                    )?;
+                    )?,
+                    None => reading("--", "Network speed", None)?,
                 }
             }
+            WidgetKind::Cpu => {
+                let busy = scene.stats.0.is_some_and(|p| p >= 90);
+                reading(
+                    &percent_text(scene.stats.0),
+                    if busy {
+                        "Processor is busy"
+                    } else {
+                        "Processor in use"
+                    },
+                    Some(scene.stats.0.unwrap_or(0)),
+                )?;
+            }
+            WidgetKind::Memory | WidgetKind::Disk => {
+                let (title, now) = if kind == WidgetKind::Memory {
+                    ("Memory".to_owned(), crate::widgets::memory())
+                } else {
+                    let drive = scene.widgets.disk_drive;
+                    (
+                        drive.map_or("Disk".to_owned(), |d| format!("Disk {}", d as char)),
+                        crate::widgets::disk(drive),
+                    )
+                };
+                let full = now.as_ref().is_some_and(|r| r.percent >= 90);
+                let line = match &now {
+                    Some(r) if full => format!("{title} getting full, {}", r.detail),
+                    Some(r) => format!("{title} in use, {}", r.detail),
+                    None => format!("{title} in use"),
+                };
+                reading(
+                    &percent_text(now.as_ref().map(|r| r.percent)),
+                    &line,
+                    Some(now.map_or(0, |r| r.percent)),
+                )?;
+            }
+            WidgetKind::Water => match scene.glance.water {
+                Some((drank, goal)) if goal > 0 => reading(
+                    &format!("{drank} of {goal}"),
+                    "Glasses of water today",
+                    Some((u32::from(drank) * 100 / u32::from(goal)).min(100)),
+                )?,
+                _ => reading("--", "Glasses of water today", None)?,
+            },
+            WidgetKind::NextPrayer => match scene.prayer {
+                Some(view) if view.message.is_none() && !view.next.is_empty() => {
+                    reading(&view.next, &format!("Next prayer, {}", view.left), None)?;
+                }
+                Some(view) if view.message.is_some() => {
+                    reading("--", view.message.unwrap_or_default(), None)?;
+                }
+                _ => reading("--", "Turn on the Prayer tab", None)?,
+            },
+            WidgetKind::Weather => match scene.weather {
+                Some(view) if view.message.is_none() && !view.temp.is_empty() => {
+                    let glyph = at(14.0, pick(14.0, 10.0), 32.0, 32.0);
+                    glyphs::draw(g.context, glyph, Glyph::weather(view.icon), g.ink(0.9))?;
+                    g.text(
+                        &view.temp,
+                        &g.display(pick(24.0, 20.0), BOLD, LEAD),
+                        at(56.0, pick(6.0, 4.0), 124.0, pick(28.0, 24.0)),
+                        g.ink(1.0),
+                    )?;
+                    g.text(
+                        view.cond,
+                        &g.font(pick(11.0, 10.0), NORMAL, LEAD),
+                        at(56.0, pick(35.0, 28.0), 124.0, pick(16.0, 14.0)),
+                        g.ink(0.6),
+                    )?;
+                }
+                Some(view) if view.message.is_some() => {
+                    reading("--", view.message.unwrap_or_default(), None)?;
+                }
+                _ => reading("--", "Turn on the Weather tab", None)?,
+            },
             WidgetKind::Battery => {
                 let raw = crate::power::Raw::read();
-                let reading = raw.filter(|r| r.flag & 128 == 0 && r.percent <= 100);
-                let percent = reading.map_or(0, |r| r.percent);
+                let now = raw.filter(|r| r.flag & 128 == 0 && r.percent <= 100);
+                let percent = now.map_or(0, |r| r.percent);
+                // The ring: centre and radius in DIPs on the tile.
+                let (cx, cy, radius, stroke) = if tall {
+                    (28.0, 26.0, 16.0, 3.5)
+                } else {
+                    (38.0, 36.0, 22.0, 4.0)
+                };
+                let glyph = at(cx - 12.0, cy - 12.0, 24.0, 24.0);
                 // No battery: a muted glyph and one line, not an empty ring.
-                if reading.is_none() {
-                    glyphs::draw(
-                        g.context,
-                        at(26.0, 24.0, 24.0, 24.0),
-                        Glyph::Charging,
-                        g.ink(0.35),
-                    )?;
+                if now.is_none() {
+                    glyphs::draw(g.context, glyph, Glyph::Charging, g.ink(0.35))?;
                 } else {
                     // SAFETY: brushes and line segments use the live context; no geometry is retained.
                     unsafe {
                         let track = g.context.CreateSolidColorBrush(&g.ink(0.18), None)?;
                         let accent = g.context.CreateSolidColorBrush(&g.accent(1.0), None)?;
                         let point = |angle: f32| Vector2 {
-                            X: g.body.left + (x + 38.0 + 22.0 * angle.cos()) * g.scale,
-                            Y: g.body.top + (y + 36.0 + 22.0 * angle.sin()) * g.scale,
+                            X: g.body.left + (x + cx + radius * angle.cos()) * g.scale,
+                            Y: g.body.top + (y + cy + radius * angle.sin()) * g.scale,
                         };
                         const STEPS: usize = 48;
                         for step in 0..STEPS {
@@ -810,47 +895,51 @@ fn widgets_page(g: &Page, scene: &NotchScene) -> Result<()> {
                                 } else {
                                     &track
                                 },
-                                4.0 * g.scale,
+                                stroke * g.scale,
                                 None,
                             );
                         }
                     }
                 }
-                let charging = reading.is_some_and(|r| r.flag & 8 != 0);
+                let charging = now.is_some_and(|r| r.flag & 8 != 0);
                 if charging {
-                    glyphs::draw(
-                        g.context,
-                        at(26.0, 24.0, 24.0, 24.0),
-                        Glyph::Charging,
-                        g.accent(1.0),
-                    )?;
+                    glyphs::draw(g.context, glyph, Glyph::Charging, g.accent(1.0))?;
                 }
-                if let Some(r) = reading {
+                let text_x = pick(76.0, 60.0);
+                let text_w = 180.0 - text_x;
+                if let Some(r) = now {
                     g.text(
                         &format!("{}%", r.percent),
-                        &g.display(24.0, BOLD, LEAD),
-                        at(76.0, 12.0, 104.0, 28.0),
+                        &g.display(pick(24.0, 20.0), BOLD, LEAD),
+                        at(text_x, pick(12.0, 4.0), text_w, pick(28.0, 24.0)),
                         g.ink(1.0),
                     )?;
                 }
-                let status = match reading {
-                    None => "No battery here",
-                    Some(_) if charging => "Charging",
-                    Some(r) if r.ac == 1 => "Plugged in",
-                    Some(r) if r.ac == 0 => "On battery",
-                    _ => "Unknown",
+                let status = match now {
+                    None => "No battery here".to_owned(),
+                    Some(r) if r.low() => "Running low".to_owned(),
+                    Some(_) if charging => "Charging".to_owned(),
+                    Some(r) if r.ac == 1 => "Plugged in".to_owned(),
+                    Some(r) if r.ac == 0 => match r.left {
+                        Some(secs) => format!(
+                            "{} left",
+                            crate::prayer_tab::countdown(secs).trim_start_matches("in ")
+                        ),
+                        None => "On battery".to_owned(),
+                    },
+                    _ => "Unknown".to_owned(),
                 };
                 g.text(
-                    status,
-                    &g.font(11.0, NORMAL, LEAD),
-                    if reading.is_some() {
-                        at(76.0, 42.0, 104.0, 16.0)
+                    &status,
+                    &g.font(pick(11.0, 10.0), NORMAL, LEAD),
+                    if now.is_some() {
+                        at(text_x, pick(42.0, 29.0), text_w, pick(16.0, 14.0))
                     } else {
-                        at(76.0, 20.0, 104.0, 16.0)
+                        at(text_x, pick(20.0, 8.0), text_w, 16.0)
                     },
                     g.ink(0.6),
                 )?;
-                if reading.is_none() {
+                if now.is_none() {
                     // One quiet sentence over two lines: a text box is a single line.
                     for (n, line) in ["Pick another widget", "in Settings."]
                         .into_iter()
@@ -859,7 +948,7 @@ fn widgets_page(g: &Page, scene: &NotchScene) -> Result<()> {
                         g.text(
                             line,
                             &g.font(10.0, NORMAL, LEAD),
-                            at(76.0, 38.0 + 13.0 * n as f32, 104.0, 14.0),
+                            at(text_x, pick(38.0, 24.0) + 12.0 * n as f32, text_w, 14.0),
                             g.ink(0.45),
                         )?;
                     }
@@ -869,8 +958,9 @@ fn widgets_page(g: &Page, scene: &NotchScene) -> Result<()> {
     }
     Ok(())
 }
-/// A Widgets tile: 190 x 72 DIPs, two across the 420 wide page.
+/// A Widgets tile: 190 x 72 DIPs, two across the 420 wide page; compact (two rows) 190 x 52.
 const WIDGET_TILE: (f32, f32) = (190.0, 72.0);
+const WIDGET_COMPACT: (f32, f32) = (190.0, 52.0);
 
 /// The Weather page: the condition glyph and the big temperature at the left with the condition and the day's range
 /// under them, the next hours as columns on one soft tile at the right (four, on both panel kinds), and the
@@ -1310,6 +1400,35 @@ pub(super) fn panel_eyes(
         }
     }
     Ok(())
+}
+
+/// The low-battery bolt: a 10 DIP glyph inset 14 from the closed pill's left edge, fading out as the pill opens.
+/// Drawn only while the battery is low and the Widgets setting for it is on (`Glance::low`).
+pub(super) fn draw_low(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    scale: f32,
+    p: &Palette,
+) -> Result<()> {
+    let alpha = 1.0 - scene.progress * 4.0;
+    if !scene.glance.low || alpha <= 0.0 {
+        return Ok(());
+    }
+    let middle =
+        (layout::notch_shape(scene.progress, scene.track.is_some()).height / 2.0).min(15.0);
+    let side = 10.0 * scale;
+    let (x, y) = (
+        body.left + 14.0 * scale,
+        body.top + middle * scale - side / 2.0,
+    );
+    let rect = D2D_RECT_F {
+        left: x,
+        top: y,
+        right: x + side,
+        bottom: y + side,
+    };
+    glyphs::draw(context, rect, Glyph::Charging, with_alpha(p.glyph, alpha))
 }
 
 /// The privacy dots (features B5): 6 DIP circles inset 14 from the body's right edge, on the pill's middle line,

@@ -177,6 +177,8 @@ struct Pages {
     limits: limits::View,
     limits_key: Option<(u32, bool, String)>,
     widgets: crate::widgets::WidgetConfig,
+    /// The Water tile's source: the stored (day, glasses) and the daily goal.
+    water: ((i64, u8), u8),
     /// The system tiles' last readings; sampled only while an open notch shows them (`refresh_stats`).
     stats: crate::widgets::Stats,
     /// The Pomodoro's phase rules; its running phase is a tagged timer in `Desktop::timers`.
@@ -205,6 +207,7 @@ impl Pages {
             limits: limits::View::default(),
             limits_key: None,
             widgets: settings.widgets,
+            water: ((0, 0), 0),
             stats: crate::widgets::Stats::default(),
             pomo: pomo::Pomo::default(),
             held: None,
@@ -632,7 +635,11 @@ impl Surface {
         layout::set_page_height(if page == Tab::Limits {
             layout::limits_height(pages.limits.rows.len())
         } else if page == Tab::Widgets {
-            140
+            if pages.widgets.tall() {
+                layout::WIDGETS_TALL
+            } else {
+                layout::WIDGETS_PAGE
+            }
         } else {
             0
         });
@@ -803,6 +810,15 @@ impl Surface {
             clips: copied,
             tab: page,
             widgets: pages.widgets,
+            glance: crate::widgets::Glance {
+                water: (page == Tab::Widgets
+                    && pages.widgets.uses(crate::widgets::WidgetKind::Water))
+                .then(|| {
+                    let day = prayer_tab::day_number(prayer_os::local_now().ymd);
+                    (water::today(pages.water.0, day), pages.water.1)
+                }),
+                low: pages.widgets.pill_low && power::Raw::read().is_some_and(power::Raw::low),
+            },
             stats: (pages.stats.cpu, pages.stats.net),
             rail: rail.map(|layout| RailScene {
                 layout,
@@ -816,10 +832,12 @@ impl Surface {
             grip: self.grip,
             volume_fill,
             weather: [Some(page), self.page_from]
-                .contains(&Some(Tab::Weather))
+                .iter()
+                .any(|p| matches!(p, Some(Tab::Weather | Tab::Widgets)))
                 .then_some(&pages.weather),
             prayer: [Some(page), self.page_from]
-                .contains(&Some(Tab::Prayer))
+                .iter()
+                .any(|p| matches!(p, Some(Tab::Prayer | Tab::Widgets)))
                 .then_some(&pages.prayer),
             limits: [Some(page), self.page_from]
                 .contains(&Some(Tab::Limits))
@@ -1330,7 +1348,8 @@ impl Desktop {
             shelf.write_to(&mut store); // the cut list leaves the file with its next write
         }
         let clips = Clips::from_store(&store);
-        let pages = Pages::new(&settings, store.last_tab);
+        let mut pages = Pages::new(&settings, store.last_tab);
+        pages.water = (store.water, settings.water_cfg[0] as u8);
         let weather = Feed::new(store.place.clone(), store.report.clone(), settings.detect);
         let timers = Timers::restore(&store.timers, timer::wall_now(), now);
         // The section now mirrors what is running; stale entries leave the file with its next write.
@@ -1746,7 +1765,9 @@ impl Desktop {
         if !weather::feed_wanted(on, prayer, self.weather.place.is_some()) {
             return; // no fetch, no worker, no page
         }
-        let shown = self.page() == Tab::Weather;
+        let shown = self.page() == Tab::Weather
+            || (self.page() == Tab::Widgets
+                && self.pages.widgets.uses(crate::widgets::WidgetKind::Weather));
         let (detect, configured) = (
             self.settings.detect,
             weather::configured(self.settings.detect, &self.settings.city),
@@ -1862,7 +1883,12 @@ impl Desktop {
         if !self.pages.tabs.on(Tab::Prayer) {
             return sound_wait;
         }
-        let shown = self.page() == Tab::Prayer;
+        let shown = self.page() == Tab::Prayer
+            || (self.page() == Tab::Widgets
+                && self
+                    .pages
+                    .widgets
+                    .uses(crate::widgets::WidgetKind::NextPrayer));
         let remind = self.settings.prayer_remind;
         if !shown && !remind {
             return sound_wait;
@@ -2021,6 +2047,7 @@ impl Desktop {
     fn water_drink(&mut self) {
         let day = prayer_tab::day_number(prayer_os::local_now().ymd);
         self.store.water = (day, self.water_today().saturating_add(1));
+        self.pages.water.0 = self.store.water;
         self.pending.mark(Instant::now());
     }
     fn sync_water(&self) {
@@ -2593,6 +2620,7 @@ impl Desktop {
         self.edges_dirty = true;
         let widgets_changed = old.widgets != self.settings.widgets;
         self.pages.widgets = self.settings.widgets;
+        self.pages.water.1 = self.settings.water_cfg[0] as u8;
         let tabs_changed = old.tabs != self.settings.tabs;
         if tabs_changed {
             self.pages.tabs.flags = self.settings.tabs;

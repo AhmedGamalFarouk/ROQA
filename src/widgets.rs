@@ -13,16 +13,25 @@ pub enum WidgetKind {
     Cpu,
     /// Download and upload speed.
     Network,
+    /// The next prayer and the wait for it (the Prayer tab's reading).
+    NextPrayer,
+    /// Glasses of water drunk today.
+    Water,
+    /// The temperature and condition (the Weather tab's reading).
+    Weather,
 }
 
 impl WidgetKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 9] = [
         Self::WeekCalendar,
         Self::Battery,
         Self::Memory,
         Self::Disk,
         Self::Cpu,
         Self::Network,
+        Self::NextPrayer,
+        Self::Water,
+        Self::Weather,
     ];
     pub fn key(self) -> &'static str {
         match self {
@@ -32,6 +41,9 @@ impl WidgetKind {
             Self::Disk => "disk",
             Self::Cpu => "cpu",
             Self::Network => "network",
+            Self::NextPrayer => "prayer",
+            Self::Water => "water",
+            Self::Weather => "weather",
         }
     }
 
@@ -43,15 +55,31 @@ impl WidgetKind {
             "disk" => Some(Self::Disk),
             "cpu" => Some(Self::Cpu),
             "network" => Some(Self::Network),
+            "prayer" => Some(Self::NextPrayer),
+            "water" => Some(Self::Water),
+            "weather" => Some(Self::Weather),
             _ => None,
         }
     }
 }
 
+/// The Widgets page's choices: two tiles, or four when a lower slot is filled (`None` is empty).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WidgetConfig {
     pub slot_left: WidgetKind,
     pub slot_right: WidgetKind,
+    pub slot_left2: Option<WidgetKind>,
+    pub slot_right2: Option<WidgetKind>,
+    /// Network speed in bits per second.
+    pub net_bits: bool,
+    /// The Disk tile's drive letter (upper case); `None` is the system drive.
+    pub disk_drive: Option<u8>,
+    /// Battery percent at or under which the tile and the pill warn (0: only Windows' own low flag).
+    pub low_at: u8,
+    /// The week strip starts on Sunday.
+    pub week_sunday: bool,
+    /// A bolt in the closed pill while the battery is low.
+    pub pill_low: bool,
 }
 
 impl Default for WidgetConfig {
@@ -59,17 +87,55 @@ impl Default for WidgetConfig {
         Self {
             slot_left: WidgetKind::WeekCalendar,
             slot_right: WidgetKind::Battery,
+            slot_left2: None,
+            slot_right2: None,
+            net_bits: false,
+            disk_drive: None,
+            low_at: 20,
+            week_sunday: false,
+            pill_low: true,
         }
     }
 }
 
 impl WidgetConfig {
+    /// The filled slots in page order: top left, top right, then the lower two.
+    pub fn slots(self) -> impl Iterator<Item = WidgetKind> {
+        self.cells().into_iter().flatten()
+    }
+    /// The four cells in grid order (left, right, lower left, lower right); `None` draws nothing.
+    pub fn cells(self) -> [Option<WidgetKind>; 4] {
+        [
+            Some(self.slot_left),
+            Some(self.slot_right),
+            self.slot_left2,
+            self.slot_right2,
+        ]
+    }
+    /// True when a lower slot is filled: the page is two rows of compact tiles.
+    pub fn tall(self) -> bool {
+        self.slot_left2.is_some() || self.slot_right2.is_some()
+    }
+    pub fn uses(self, kind: WidgetKind) -> bool {
+        self.slots().any(|k| k == kind)
+    }
     /// True when a tile shows a reading that changes by itself (memory, disk, CPU, network).
     pub fn live(self) -> bool {
-        [self.slot_left, self.slot_right]
-            .iter()
-            .any(|kind| !matches!(kind, WidgetKind::WeekCalendar | WidgetKind::Battery))
+        self.slots().any(|kind| {
+            matches!(
+                kind,
+                WidgetKind::Memory | WidgetKind::Disk | WidgetKind::Cpu | WidgetKind::Network
+            )
+        })
     }
+}
+
+/// What the notch draws beyond the page's own data: today's water as (drunk, goal), and whether the closed pill
+/// carries the low-battery bolt.
+#[derive(Clone, Copy, Default)]
+pub struct Glance {
+    pub water: Option<(u8, u8)>,
+    pub low: bool,
 }
 
 /// How often the system tiles are read while they show.
@@ -167,15 +233,20 @@ fn net_bytes() -> Option<(u64, u64)> {
     }
 }
 
-/// "2.4 MB/s": a speed in the units the tile shows.
-pub fn speed(bytes_per_second: u64) -> String {
-    let kilo = bytes_per_second as f64 / 1024.0;
-    if kilo < 1000.0 {
-        format!("{kilo:.0} KB/s")
-    } else if kilo < 1000.0 * 1024.0 {
-        format!("{:.1} MB/s", kilo / 1024.0)
+/// "2.4 MB/s", or "19 Mb/s" in bits: a speed in the units the tile shows.
+pub fn speed(bytes_per_second: u64, bits: bool) -> String {
+    let (unit, value) = if bits {
+        ('b', bytes_per_second as f64 * 8.0 / 1000.0)
     } else {
-        format!("{:.1} GB/s", kilo / 1024.0 / 1024.0)
+        ('B', bytes_per_second as f64 / 1024.0)
+    };
+    let step = if bits { 1000.0 } else { 1024.0 };
+    if value < 1000.0 {
+        format!("{value:.0} K{unit}/s")
+    } else if value < 1000.0 * step {
+        format!("{:.1} M{unit}/s", value / step)
+    } else {
+        format!("{:.1} G{unit}/s", value / step / step)
     }
 }
 
@@ -212,10 +283,26 @@ pub fn memory() -> Option<Usage> {
     )
 }
 
-/// The system drive's space in use, read when the tile is drawn.
-pub fn disk() -> Option<Usage> {
+/// The fixed drives' letters, read when Settings lists them.
+pub fn fixed_drives() -> Vec<u8> {
+    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    use windows::core::HSTRING;
+    // SAFETY: no arguments.
+    let mask = unsafe { GetLogicalDrives() };
+    (b'A'..=b'Z')
+        .filter(|letter| mask >> (letter - b'A') & 1 == 1)
+        // SAFETY: the root string outlives the call. 3 is DRIVE_FIXED.
+        .filter(|&letter| unsafe { GetDriveTypeW(&HSTRING::from(format!("{}:\\", letter as char))) } == 3)
+        .collect()
+}
+
+/// A drive's space in use (the chosen one, else the system drive), read when the tile is drawn.
+pub fn disk(letter: Option<u8>) -> Option<Usage> {
     use windows::{Win32::Storage::FileSystem::GetDiskFreeSpaceExW, core::HSTRING};
-    let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+    let drive = letter.map_or_else(
+        || std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()),
+        |letter| format!("{}:", letter as char),
+    );
     let root = HSTRING::from(format!("{drive}\\"));
     let (mut free, mut total) = (0u64, 0u64);
     // SAFETY: `root` and both out values outlive the call.
@@ -302,10 +389,17 @@ mod tests {
         assert_eq!(WidgetKind::from_key("unknown"), None);
         assert!(!config.live());
         let stats = WidgetConfig {
-            slot_left: WidgetKind::WeekCalendar,
             slot_right: WidgetKind::Network,
+            ..config
         };
-        assert!(stats.live());
+        assert!(stats.live() && !stats.tall());
+        // A lower slot makes the page tall and counts for live tiles and for what a page must read.
+        let lower = WidgetConfig {
+            slot_left2: Some(WidgetKind::Cpu),
+            ..config
+        };
+        assert!(lower.tall() && lower.live() && lower.uses(WidgetKind::Cpu));
+        assert_eq!(lower.slots().count(), 3);
     }
 
     #[test]
@@ -335,8 +429,9 @@ mod tests {
             (None, None)
         );
         assert_eq!(rates(b, a).0, None);
-        assert_eq!(speed(512 * 1024), "512 KB/s");
-        assert_eq!(speed(2 * 1024 * 1024 + 400 * 1024), "2.4 MB/s");
+        assert_eq!(speed(512 * 1024, false), "512 KB/s");
+        assert_eq!(speed(2 * 1024 * 1024 + 400 * 1024, false), "2.4 MB/s");
+        assert_eq!(speed(125_000, true), "1.0 Mb/s");
         // Due once a step has passed; the first sample has no rates yet.
         let mut stats = Stats::default();
         assert!(stats.sample(at) && stats.cpu.is_none());

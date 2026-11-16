@@ -238,6 +238,7 @@ impl Settings {
     pub fn apply_globals(&self) {
         crate::motion::configure(self.anim_fast, self.open_click);
         crate::layout::set_pill_percent(self.notch_size);
+        crate::power::set_low_at(self.widgets.low_at);
     }
 
     pub fn kind_on(&self, kind: SurfaceKind) -> bool {
@@ -323,6 +324,36 @@ impl Settings {
             "widgetright" => WidgetKind::from_key(value)
                 .map(|kind| self.widgets.slot_right = kind)
                 .is_some(),
+            "widgetleft2" | "widgetright2" => {
+                let kind = match value {
+                    "none" => Some(None),
+                    _ => WidgetKind::from_key(value).map(Some),
+                };
+                kind.map(|kind| {
+                    if key == "widgetleft2" {
+                        self.widgets.slot_left2 = kind;
+                    } else {
+                        self.widgets.slot_right2 = kind;
+                    }
+                })
+                .is_some()
+            }
+            "netbits" => flag(value).map(|v| self.widgets.net_bits = v).is_some(),
+            "weeksun" => flag(value).map(|v| self.widgets.week_sunday = v).is_some(),
+            "pilllow" => flag(value).map(|v| self.widgets.pill_low = v).is_some(),
+            "lowat" => value
+                .parse()
+                .ok()
+                .filter(|v| *v <= 50)
+                .map(|v| self.widgets.low_at = v)
+                .is_some(),
+            "diskdrive" => match value.as_bytes() {
+                [letter @ b'A'..=b'Z'] => {
+                    self.widgets.disk_drive = Some(*letter);
+                    true
+                }
+                _ => false,
+            },
             "city" if !value.is_empty() => {
                 self.city = value.to_owned();
                 true
@@ -358,11 +389,22 @@ impl Settings {
 
     /// Appends the lines `set` reads. Values that cannot be one line are dropped (`clamped` removes them too).
     pub fn write_lines(&self, out: &mut String) {
+        let w = &self.widgets;
+        let slot = |kind: Option<WidgetKind>| kind.map_or("none", WidgetKind::key);
         out.push_str(&format!(
-            "widgetleft={}\nwidgetright={}\n",
-            self.widgets.slot_left.key(),
-            self.widgets.slot_right.key()
+            "widgetleft={}\nwidgetright={}\nwidgetleft2={}\nwidgetright2={}\nnetbits={}\nweeksun={}\npilllow={}\nlowat={}\n",
+            w.slot_left.key(),
+            w.slot_right.key(),
+            slot(w.slot_left2),
+            slot(w.slot_right2),
+            u8::from(w.net_bits),
+            u8::from(w.week_sunday),
+            u8::from(w.pill_low),
+            w.low_at
         ));
+        if let Some(letter) = w.disk_drive {
+            out.push_str(&format!("diskdrive={}\n", letter as char));
+        }
         out.push_str(&format!("matchaccent={}\n", u8::from(self.match_accent)));
         out.push_str(&format!(
             "dockbadge={}\nclipcopy={}\n",
@@ -531,6 +573,9 @@ mod tests {
         assert!(settings.set("widgetleft", "battery"));
         assert!(settings.set("widgetright", "week"));
         assert!(!settings.set("widgetleft", "unknown"));
+        assert!(settings.set("widgetleft2", "water") && settings.set("diskdrive", "D"));
+        assert!(settings.set("netbits", "1") && settings.set("lowat", "30"));
+        assert!(!settings.set("diskdrive", "dd") && !settings.set("lowat", "99"));
         let mut lines = String::new();
         settings.write_lines(&mut lines);
         let mut restored = Settings::default();
