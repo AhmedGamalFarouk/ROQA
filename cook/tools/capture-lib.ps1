@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$root = 'C:\Users\Ahmed\.t3\projects\roqa'
+$root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $phase = if ($env:ROQA_CAPTURE_PHASE) { $env:ROQA_CAPTURE_PHASE } else { 'r11' }
 $out = if ($env:ROQA_CAPTURE_DIR) { $env:ROQA_CAPTURE_DIR } else { "$root\cook\stills\$phase" }
 $exe = "$root\target\release\roqa.exe"
@@ -40,6 +40,9 @@ function Control($action) {
 }
 function Start-Roqa($tab='media', [string[]]$extra=@(), $tag='default') {
     Raise-Backdrop
+    # ROQA is single-instance: a copy still shutting down makes the new one exit at once, which looked like a crash.
+    for ($i = 0; $i -lt 25 -and (Get-Process roqa -ErrorAction SilentlyContinue); $i++) { Wait-Ms 200 }
+    if (Get-Process roqa -ErrorAction SilentlyContinue) { throw 'Another ROQA is still running; quit it before capturing' }
     $dir = "$out\private\$tag-$([guid]::NewGuid().ToString('N').Substring(0,8))"
     New-Item -ItemType Directory -Force "$dir\ROQA" | Out-Null
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
