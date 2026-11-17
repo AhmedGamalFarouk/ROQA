@@ -162,6 +162,7 @@ impl WindowClass {
                 hInstance: instance,
                 lpszClassName: CLASS,
                 hCursor: LoadCursorW(None, IDC_ARROW)?,
+                hIcon: LoadIconW(Some(instance), w!("ROQA_ICON"))?,
                 ..Default::default()
             };
             if RegisterClassW(&descriptor) == 0 {
