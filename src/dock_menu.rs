@@ -381,6 +381,12 @@ impl Menu {
         );
         self.drawn = None;
     }
+    /// Icons that arrived after the menu opened: repaints at once.
+    pub fn set_icons(&mut self, icons: Vec<Option<Arc<IconPixels>>>) -> Result<()> {
+        self.icons = icons;
+        self.drawn = None;
+        self.paint()
+    }
     pub fn relist(
         &mut self,
         items: Vec<Item>,
@@ -524,6 +530,7 @@ impl Menu {
                 name: row_label(&self.items, &self.titles, index),
                 current: false,
                 icon: self.icons.get(index).and_then(|icon| icon.as_deref()),
+                room: matches!(self.items[index], Item::File(_)),
                 level: None,
                 rect: row_rect(self.dpi, panel, index - self.offset),
             })

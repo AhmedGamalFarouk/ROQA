@@ -3253,6 +3253,9 @@ impl Desktop {
     fn refresh_dock(&mut self, model: &WindowModel) -> Result<()> {
         let icons_arrived = self.icons.collect();
         self.icons_arrived = icons_arrived;
+        if icons_arrived {
+            self.fill_stack_icons();
+        }
         if self.dock_generation == Some(model.generation) && !icons_arrived {
             return Ok(());
         }
@@ -3282,6 +3285,7 @@ impl Desktop {
                 self.icons.retain(|identity| {
                     items.iter().any(|item| &item.identity == identity || item.members.iter().any(|member| &member.identity == identity))
                         || matches!(identity, Identity::Executable(path) if shelf.iter().any(|e| &e.path == path))
+                        || matches!(identity, Identity::Executable(path) if self.stack.iter().any(|file| file.to_string_lossy() == *path))
                 });
             }
             let resized = items.len() != self.dock_items.len();
@@ -3860,6 +3864,8 @@ impl Desktop {
             return;
         }
         let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Slot(slot));
+        // Rows draw now; each file's icon is asked of the icon worker and fills in as it arrives.
+        let size = self.icon_size().unwrap_or(40);
         let name = std::path::Path::new(folder).file_name().map_or_else(
             || "Folder".into(),
             |name| name.to_string_lossy().into_owned(),
@@ -3881,7 +3887,10 @@ impl Desktop {
                         .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
                 })
                 .collect(),
-            icons: Vec::new(),
+            icons: files
+                .iter()
+                .map(|file| self.stack_icon(file, size))
+                .collect(),
             x: bounds.x + left + width / 2,
             below: None,
             return_to: dock::foreground_key(),
@@ -3891,6 +3900,35 @@ impl Desktop {
             Ok(menu) if take_foreground(menu.hwnd()) => self.menu = Some(menu),
             Ok(_) => eprintln!("Folder stack: Windows kept another app in front; not opened"),
             Err(error) => eprintln!("Folder stack: {error}"),
+        }
+    }
+    /// A listed file's shell icon: cached, or queued on the icon worker (`None` until it arrives).
+    fn stack_icon(&mut self, file: &std::path::Path, size: u32) -> Option<Arc<IconPixels>> {
+        let identity = Identity::Executable(file.to_string_lossy().into_owned());
+        let sources = icons::sources(&identity, None);
+        self.icons.icon(&identity, sources, size)
+    }
+    /// Icons arrived while a folder stack is open: its rows pick them up.
+    fn fill_stack_icons(&mut self) {
+        let open = self.menu.as_ref().is_some_and(|menu| {
+            menu.items()
+                .iter()
+                .any(|item| matches!(item, Item::File(_)))
+        });
+        let Some(size) = self.icon_size().filter(|_| open) else {
+            return;
+        };
+        let files = self.stack.clone();
+        let icons = files
+            .iter()
+            .map(|file| self.stack_icon(file, size))
+            .collect();
+        if self
+            .menu
+            .as_mut()
+            .is_some_and(|menu| menu.set_icons(icons).is_err())
+        {
+            self.close_menu();
         }
     }
     /// Applies one quick setting, then shows the new state in the same popup.

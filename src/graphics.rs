@@ -675,8 +675,8 @@ impl Canvas {
                     right: cell.right - 8.0 * scale,
                     ..cell
                 };
-                // A mixer row keeps room for its icon while the icon is still on its way.
-                if row.icon.is_some() || row.level.is_some() {
+                // A mixer or stack row keeps room for its icon while the icon is still on its way.
+                if row.icon.is_some() || row.level.is_some() || row.room {
                     let side = 20.0 * scale;
                     if let Some(pixels) = row.icon {
                         let frame = D2D_RECT_F {

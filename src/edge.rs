@@ -223,8 +223,10 @@ pub fn on_icon(x: i32, y: i32, layout: &Layout, dpi: u32) -> bool {
 pub struct ListRow<'a> {
     pub name: &'a str,
     pub current: bool,
-    /// An app icon drawn before the name (the minimized-apps list); none for plain rows.
+    /// An icon drawn before the name (a folder stack's files, the folder members); none for plain rows.
     pub icon: Option<&'a crate::icons::IconPixels>,
+    /// Keeps the icon's room while the icon is still on its way (a folder stack row).
+    pub room: bool,
     /// A mixer row: the app's level and whether it is muted; drawn as a capsule slider.
     pub level: Option<(u8, bool)>,
     pub rect: Bounds,
@@ -947,6 +949,7 @@ impl Slider {
                             name,
                             current,
                             icon,
+                            room: false,
                             level,
                             rect: row_rect(self.dpi, panel, index),
                         })
