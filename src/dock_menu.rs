@@ -48,6 +48,9 @@ pub enum Item {
     NewInstance,
     Close(WindowKey),
     CloseAll,
+    /// Keep the one window above the others, or let it go (which one is offered follows its state).
+    OnTop(WindowKey),
+    OffTop(WindowKey),
     Pin,
     Unpin,
     /// Hide a running, unpinned app from the dock (Settings lists it to bring back).
@@ -93,6 +96,8 @@ impl Item {
             Item::NewInstance => "New instance",
             Item::Close(_) => "Close window",
             Item::CloseAll => "Close all windows",
+            Item::OnTop(_) => "Keep on top",
+            Item::OffTop(_) => "Stop keeping on top",
             Item::Pin => "Pin to dock",
             Item::Unpin => "Unpin from dock",
             Item::Hide => "Hide from dock",
@@ -120,7 +125,14 @@ pub fn items(item: &DockItem, pins: &Pins) -> Vec<Item> {
     }
     match item.windows.as_slice() {
         [] => {}
-        [key] => list.push(Item::Close(*key)),
+        [key] => {
+            list.push(Item::Close(*key));
+            list.push(if dock::is_on_top(*key) {
+                Item::OffTop(*key)
+            } else {
+                Item::OnTop(*key)
+            });
+        }
         _ => list.push(Item::CloseAll),
     }
     if let Some(pin) = dock::pinned_as(item, pins) {
@@ -660,6 +672,7 @@ mod tests {
             [
                 Item::NewInstance,
                 Item::Close(key_of(1)),
+                Item::OnTop(key_of(1)),
                 Item::Pin,
                 Item::Hide,
                 Item::Group
@@ -683,13 +696,17 @@ mod tests {
             [
                 Item::NewInstance,
                 Item::Close(key_of(3)),
+                Item::OnTop(key_of(3)),
                 Item::Pin,
                 Item::Hide,
                 Item::Group
             ]
         );
         let unknown = dock_item(Identity::Unavailable(9), &[9]);
-        assert_eq!(items(&unknown, &none), [Item::Close(key_of(9))]);
+        assert_eq!(
+            items(&unknown, &none),
+            [Item::Close(key_of(9)), Item::OnTop(key_of(9))]
+        );
     }
 
     #[test]

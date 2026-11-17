@@ -14,10 +14,11 @@ use windows::Win32::{
         },
         Shell::{SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, ShellExecuteExW},
         WindowsAndMessaging::{
-            GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic,
-            IsWindow, IsWindowVisible, PostMessageW, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL,
-            SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
-            ShowWindowAsync, WM_CLOSE,
+            GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
+            GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindow,
+            IsWindowVisible, PostMessageW, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE,
+            SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
+            ShowWindowAsync, WM_CLOSE, WS_EX_TOPMOST,
         },
     },
 };
@@ -844,6 +845,35 @@ pub fn close(windows: &[WindowKey]) {
             )
         };
     }
+}
+
+/// Whether the window is kept above all others right now.
+pub fn is_on_top(key: WindowKey) -> bool {
+    // SAFETY: a scalar style read on a revalidated foreign HWND.
+    valid_target(key)
+        && unsafe { GetWindowLongPtrW(HWND(key.handle as *mut _), GWL_EXSTYLE) } as u32
+            & WS_EX_TOPMOST.0
+            != 0
+}
+
+/// Keeps the window above all others, or lets it fall back. Windows may decline (an elevated window).
+pub fn set_on_top(key: WindowKey, on: bool) {
+    if !valid_target(key) {
+        return;
+    }
+    let order = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    // SAFETY: a z-order change only (no move, size or activation) on a revalidated foreign HWND.
+    let _ = unsafe {
+        SetWindowPos(
+            HWND(key.handle as *mut _),
+            Some(order),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    };
 }
 
 /// Executes a dock action and describes the recovery when Windows declines it.

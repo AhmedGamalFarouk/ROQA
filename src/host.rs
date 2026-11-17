@@ -4161,6 +4161,8 @@ impl Desktop {
             }
             Item::Close(key) => dock::close(&[key]),
             Item::CloseAll => dock::close(&menu.windows),
+            Item::OnTop(key) => dock::set_on_top(key, true),
+            Item::OffTop(key) => dock::set_on_top(key, false),
             Item::NewInstance => {
                 if let Some(launch) = crate::pins::launch_target(&target.identity) {
                     self.run_dock_action(dock::Action::Launch(launch));
