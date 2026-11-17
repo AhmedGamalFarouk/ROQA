@@ -572,8 +572,11 @@ fn mine(spec: &Spec, exe: &Path) -> Result<Json, String> {
     })
 }
 
-/// The one line the notch shows for a permission question, from the hook's JSON on stdin: the tool and its
-/// command, path or address, on one line. `None` when it is not a tool question.
+/// The longest question line sent, in characters: a longer one loses its middle, so its start and end stay.
+const LONGEST: usize = 400;
+
+/// The words the notch shows for a permission question, from the hook's JSON on stdin: the tool and its
+/// command, path or address, with its spaces squeezed. `None` when it is not a tool question.
 pub fn permission_line(input: &str) -> Option<String> {
     let json = Json::parse(input)?;
     let Some(Json::Str(tool)) = json.get("tool_name") else {
@@ -589,7 +592,17 @@ pub fn permission_line(input: &str) -> Option<String> {
     });
     let line = detail.map_or_else(|| tool.clone(), |detail| format!("{tool}: {detail}"));
     let line: Vec<_> = line.split_whitespace().collect();
-    Some(line.join(" ").chars().take(160).collect())
+    let line: Vec<char> = line.join(" ").chars().collect();
+    Some(if line.len() > LONGEST {
+        let half = LONGEST / 2;
+        line[..half]
+            .iter()
+            .chain(&['\u{2026}'])
+            .chain(&line[line.len() - half..])
+            .collect()
+    } else {
+        line.into_iter().collect()
+    })
 }
 
 /// opencode's plugin: it names the program once and reports busy, idle and permission events.
@@ -788,6 +801,17 @@ mod tests {
         assert_eq!(
             line(r#"{"tool_name":"Task","tool_input":{}}"#).as_deref(),
             Some("Task")
+        );
+        let long = format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"{}end"}}}}"#,
+            "a ".repeat(400)
+        );
+        let kept = line(&long).unwrap();
+        assert!(kept.starts_with("Bash: a a") && kept.ends_with("a end"));
+        assert_eq!(
+            kept.chars().count(),
+            LONGEST + 1,
+            "the ellipsis joins the halves"
         );
         assert_eq!(line("not json"), None);
         assert_eq!(line(r#"{"hook_event_name":"Stop"}"#), None);

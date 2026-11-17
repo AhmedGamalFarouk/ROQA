@@ -3,7 +3,7 @@ use crate::{
     dock::{self, Buttons},
     motion,
 };
-use std::sync::atomic::{AtomicU16, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering::Relaxed};
 
 /// Notch outline in DIPs: body size, bottom corner radius and the concave "ear" fillets that
 /// blend the top corners into the screen edge.
@@ -83,6 +83,25 @@ static NOTICE_SHOWN: AtomicU16 = AtomicU16::new(0);
 pub fn set_notice_shown(shown: f32) {
     NOTICE_SHOWN.store((shown.clamp(0.0, 1.0) * 1000.0).round() as u16, Relaxed);
 }
+/// A permission question's row holds two lines of the command, so its panel grows `ASK_ROOM` more. Set by the
+/// host while a notice shows; the last value stays through the notice's fade-out.
+pub const ASK_ROOM: f32 = 14.0;
+static NOTICE_ASK: AtomicBool = AtomicBool::new(false);
+pub fn set_notice_ask(ask: bool) {
+    NOTICE_ASK.store(ask, Relaxed);
+}
+/// Whether the notice row is the two-line permission question.
+pub fn notice_ask() -> bool {
+    NOTICE_ASK.load(Relaxed)
+}
+/// The extra room for a question `shown` (0 to 1) of the way in.
+fn ask_room(shown: f32) -> f32 {
+    if notice_ask() {
+        ASK_ROOM * shown.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
 /// `height` grown for a notice `shown` (0 to 1) of the way in.
 fn with_notice(height: f32, shown: f32) -> f32 {
     height + NOTICE_ROOM * shown.clamp(0.0, 1.0)
@@ -95,9 +114,9 @@ fn tall(shape: NotchShape, notice_row: bool) -> NotchShape {
     let shown = f32::from(NOTICE_SHOWN.load(Relaxed)) / 1000.0;
     NotchShape {
         height: if notice_row || page > 0.0 {
-            with_notice(shape.height.max(page), shown)
+            with_notice(shape.height.max(page), shown) + ask_room(shown)
         } else {
-            shape.height + MEDIA_NOTICE_ROOM * shown
+            shape.height + MEDIA_NOTICE_ROOM * shown + ask_room(shown)
         },
         width: if wide_page() {
             WIDE_W
@@ -719,25 +738,32 @@ const POWER_NOTICE: [(f32, f32, f32, f32); 2] = [
 /// The power pill's text slot in pixels from the body's left and top edges. A tall page (Limits) puts it in its
 /// own row 6 under the page, like the plain panel, spanning the page's width.
 pub fn power_notice(media: bool, dpi: u32) -> Bounds {
-    notice_slot(media, PAGE_HEIGHT.load(Relaxed), dpi)
+    notice_slot(media, PAGE_HEIGHT.load(Relaxed), notice_ask(), dpi)
 }
-fn notice_slot(media: bool, page: u16, dpi: u32) -> Bounds {
-    if page > 0 {
+/// The row, two lines high for a permission question (`ask`): the room it grows by is exactly the line it adds.
+fn notice_slot(media: bool, page: u16, ask: bool, dpi: u32) -> Bounds {
+    let slot = if page > 0 {
         let width = MEDIA_EXPANDED.width - 52.0;
-        return scaled_bounds((12.0, f32::from(page) - 16.0, width, 14.0), dpi);
+        scaled_bounds((12.0, f32::from(page) - 16.0, width, 14.0), dpi)
+    } else {
+        scaled_bounds(POWER_NOTICE[usize::from(media)], dpi)
+    };
+    Bounds {
+        height: slot.height + if ask { scaled(ASK_ROOM, dpi) } else { 0 },
+        ..slot
     }
-    scaled_bounds(POWER_NOTICE[usize::from(media)], dpi)
 }
 
-/// A button on the notice row, counted from the right (0 is the last): 52 DIPs wide and 6 apart, in pixels from the
-/// body's left and top edges. Eject, Snooze, and Deny with Allow use it.
+/// A button on the notice row, counted from the right (0 is the last): 52 DIPs wide, 14 high and 6 apart, in pixels
+/// from the body's left and top edges, centred in a two-line row. Eject, Snooze, and Deny with Allow use it.
 pub fn notice_button(media: bool, dpi: u32, from_right: usize) -> Bounds {
     let slot = power_notice(media, dpi);
-    let width = scaled(52.0, dpi);
+    let (width, height) = (scaled(52.0, dpi), scaled(14.0, dpi));
     Bounds {
         x: slot.x + slot.width - width - from_right as i32 * scaled(58.0, dpi),
+        y: slot.y + (slot.height - height) / 2,
         width,
-        ..slot
+        height,
     }
 }
 /// Whether a window point is on that notice button at `progress`; none while the row is not drawn.
@@ -1867,7 +1893,7 @@ mod tests {
             (true, limits_height(3), MEDIA_EXPANDED.width),
         ] {
             for dpi in [96, 120, 144, 192, 240] {
-                let notice = notice_slot(media, page, dpi);
+                let notice = notice_slot(media, page, false, dpi);
                 let settings_left = scaled(width - 16.0 - GEAR_SIZE, dpi) - scaled(6.0, dpi);
                 assert!(
                     notice.x + notice.width < settings_left,
@@ -1878,9 +1904,38 @@ mod tests {
     }
 
     #[test]
+    fn a_question_row_is_two_lines_inside_its_grown_panel_with_its_buttons_centred() {
+        for dpi in [96, 144, 192] {
+            for (media, page, room, body) in [
+                (false, 0, NOTICE_ROOM, NOTCH_EXPANDED.height),
+                (true, 0, MEDIA_NOTICE_ROOM, MEDIA_EXPANDED.height),
+                (
+                    true,
+                    limits_height(3),
+                    NOTICE_ROOM,
+                    f32::from(limits_height(3)),
+                ),
+            ] {
+                let (one, two) = (
+                    notice_slot(media, page, false, dpi),
+                    notice_slot(media, page, true, dpi),
+                );
+                assert_eq!((two.x, two.y, two.width), (one.x, one.y, one.width));
+                assert_eq!(two.height, one.height + scaled(ASK_ROOM, dpi), "two lines");
+                // The room it grows by keeps the single row's 10 DIP of padding under it.
+                let panel = scaled(body + room + ASK_ROOM, dpi);
+                assert!(
+                    panel - (two.y + two.height) >= scaled(10.0, dpi) - 1,
+                    "{media} {dpi}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_tall_page_gets_its_notice_row_under_its_content_inside_the_grown_panel() {
         let page = limits_height(3);
-        let notice = notice_slot(true, page, 96);
+        let notice = notice_slot(true, page, false, 96);
         // 6 under the last row, 10 above the grown panel's bottom.
         assert_eq!(notice.y, i32::from(page) - 16);
         assert!(
@@ -1893,7 +1948,7 @@ mod tests {
         );
         assert!(notice.x + notice.width <= MEDIA_EXPANDED.width as i32);
         assert_eq!(
-            notice_slot(false, 0, 96),
+            notice_slot(false, 0, false, 96),
             power_notice(false, 96),
             "plain panel unchanged"
         );

@@ -705,6 +705,9 @@ impl Surface {
         let fading_out = notice.is_none() && self.notice_fx.running(now);
         let notice = notice.or(fading_out.then_some(self.last_notice.as_str()));
         // The plain panel makes room for the notice's row as it eases in, and gives it back as it leaves.
+        if power.text().is_some() {
+            layout::set_notice_ask(matches!(power.extra(), power::Extra::Ask(_)));
+        }
         layout::set_notice_shown(if notice.is_some() {
             self.notice_fx.value(now)
         } else {
