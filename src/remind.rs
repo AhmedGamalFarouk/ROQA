@@ -88,6 +88,18 @@ impl Reminders {
         true
     }
 
+    /// The reminders waiting as `(expiry, label)`, soonest first.
+    pub fn waiting(&self) -> &[(u64, String)] {
+        &self.list
+    }
+
+    /// Drops the waiting reminder at `index` of `waiting`; false when there is none.
+    pub fn cancel(&mut self, index: usize) -> bool {
+        (index < self.list.len())
+            .then(|| self.list.remove(index))
+            .is_some()
+    }
+
     /// The soonest reminder whose time has come, removed. One at a time, so each gets its own notice.
     pub fn take_due(&mut self, wall: u64) -> Option<String> {
         (self.list.first()?.0 <= wall).then(|| self.list.remove(0).1)
@@ -188,5 +200,24 @@ mod tests {
         list.write_to(&mut store, &mut Pending::default(), Instant::now());
         assert_eq!(Reminders::from_store(&store).wait_secs(0), Some(60));
         assert_eq!(store.reminders.len(), MAX);
+    }
+
+    #[test]
+    fn a_waiting_reminder_can_be_cancelled_by_its_place() {
+        let mut list = Reminders::default();
+        for (delay, label) in [(300, "c"), (100, "a"), (200, "b")] {
+            list.add(0, delay, label.into());
+        }
+        let labels = |list: &Reminders| -> Vec<String> {
+            list.waiting()
+                .iter()
+                .map(|(_, label)| label.clone())
+                .collect()
+        };
+        assert_eq!(labels(&list), ["a", "b", "c"], "soonest first");
+        assert!(list.cancel(1));
+        assert_eq!(labels(&list), ["a", "c"]);
+        assert!(!list.cancel(2), "nothing there");
+        assert_eq!(list.wait_secs(0), Some(100));
     }
 }

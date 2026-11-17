@@ -449,7 +449,8 @@ fn timer_page(g: &Page, scene: &NotchScene) -> Result<()> {
             g.chip(g.slot(slot), &control.label())?;
         }
         g.chip(g.slot(layout::remind_button(scene.dpi)), "Remind")?;
-        return g.chip(g.slot(layout::watch_button(scene.dpi)), "Stopwatch");
+        g.chip(g.slot(layout::watch_button(scene.dpi)), "Stopwatch")?;
+        return reminder_rows(g, scene);
     };
     g.text(
         &view.panel,
@@ -477,6 +478,35 @@ fn timer_page(g: &Page, scene: &NotchScene) -> Result<()> {
         g.at(layout::PAD, 92.0, 200.0, 14.0),
         g.ink(0.6),
     )
+}
+
+/// The waiting reminders under the presets: the time, the words and a quiet cancel on each row.
+fn reminder_rows(g: &Page, scene: &NotchScene) -> Result<()> {
+    for (index, (time, words)) in scene.reminders.iter().enumerate() {
+        let row = g.slot(layout::remind_row(index, scene.dpi));
+        let cancel = g.slot(layout::remind_cancel(index, scene.dpi));
+        let time_end = row.left + 52.0 * g.scale;
+        let font = g.font(11.0, NORMAL, LEAD);
+        let across = D2D_RECT_F {
+            right: time_end,
+            ..row
+        };
+        g.text(time, &font, across, g.ink(0.6))?;
+        let across = D2D_RECT_F {
+            left: time_end + 4.0 * g.scale,
+            right: cancel.left,
+            ..row
+        };
+        g.text(words, &font, across, g.ink(0.85))?;
+        let side = 12.0 * g.scale;
+        let square = pixel_square(
+            cancel.left + (cancel.right - cancel.left - side) / 2.0,
+            cancel.top + (cancel.bottom - cancel.top - side) / 2.0,
+            side,
+        );
+        glyphs::draw(g.context, square, Glyph::Close, g.ink(0.45))?;
+    }
+    Ok(())
 }
 
 /// The countdown's capsule: one track with its fill, or for a Pomodoro the round's segments (focus 4 units, a

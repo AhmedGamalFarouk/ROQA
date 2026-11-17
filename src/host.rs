@@ -193,6 +193,8 @@ struct Pages {
     held: Option<(u64, u64)>,
     /// The Timer page's stopwatch: shown when no countdown is.
     stopwatch: Stopwatch,
+    /// Reminders waiting: the idle Timer page lists them.
+    reminders: remind::Reminders,
 }
 impl Pages {
     fn new(settings: &Settings, last: Tab) -> Self {
@@ -221,9 +223,23 @@ impl Pages {
             pomo: pomo::Pomo::default(),
             held: None,
             stopwatch: Stopwatch::default(),
+            reminders: remind::Reminders::default(),
         };
         pages.set_privacy(settings.privacy, Instant::now());
         pages
+    }
+    /// The idle Timer page's waiting reminders as (clock time, words), the soonest first, at most what it has rows for.
+    fn reminder_rows(&self) -> Vec<(String, String)> {
+        let (wall, day) = (timer::wall_now(), i64::from(prayer_os::local_now().secs));
+        self.reminders
+            .waiting()
+            .iter()
+            .take(layout::REMIND_ROWS)
+            .map(|(expiry, label)| {
+                let secs = day + *expiry as i64 - wall as i64;
+                (prayer_os::time_label(secs as i32), remind::shown(label))
+            })
+            .collect()
     }
     /// The Timer page's content: the soonest countdown, named for its Pomodoro phase, or a paused phase
     /// when nothing runs.
@@ -646,6 +662,19 @@ impl Surface {
     ) -> Result<()> {
         let track = pages.track(media);
         let page = pages.page(track.is_some());
+        let now = Instant::now();
+        // A switched-off Timer tab draws and ticks nothing.
+        let timer = pages
+            .tabs
+            .on(Tab::Timer)
+            .then(|| pages.timer_view(timers, now))
+            .flatten();
+        // The idle Timer page lists the reminders waiting and grows to hold them.
+        let reminders = if page == Tab::Timer && timer.as_ref().is_none_or(|view| view.done) {
+            pages.reminder_rows()
+        } else {
+            Vec::new()
+        };
         layout::set_page_height(if page == Tab::Limits {
             layout::limits_height(pages.limits.rows.len())
         } else if page == Tab::Widgets {
@@ -655,16 +684,9 @@ impl Surface {
                 layout::WIDGETS_PAGE
             }
         } else {
-            0
+            layout::reminders_height(reminders.len())
         });
-        let now = Instant::now();
         let progress = self.motion.value(now);
-        // A switched-off Timer tab draws and ticks nothing.
-        let timer = pages
-            .tabs
-            .on(Tab::Timer)
-            .then(|| pages.timer_view(timers, now))
-            .flatten();
         let notice = power.text();
         // A switch of page while the panel is open slides and fades the new one in; a notice eases in.
         if let Some(dir) = motion::page_switch(self.page_at, page.index(), progress > 0.9)
@@ -820,6 +842,7 @@ impl Surface {
             volume: audio.level(),
             bars: self.bars,
             timer: timer.as_ref(),
+            reminders: &reminders,
             notice,
             extra: power.extra(),
             shelf: &slots,
@@ -1304,8 +1327,7 @@ struct Desktop {
     picker: Option<Picker>,
     /// The reminder line box, open only while the user types into it.
     remind_box: Option<RemindBox>,
-    /// Reminders waiting, and the label of the one shown last (what Snooze sets again).
-    reminders: remind::Reminders,
+    /// The label of the reminder shown last (what Snooze sets again); the waiting ones are `pages.reminders`.
     last_reminder: String,
     /// Open only while the user has it up; created on demand, destroyed on close, so it costs nothing closed.
     palette: Palette,
@@ -1460,7 +1482,7 @@ impl Desktop {
         let weather = Feed::new(store.place.clone(), store.report.clone(), settings.detect);
         let timers = Timers::restore(&store.timers, timer::wall_now(), now);
         // One that came due while ROQA was not running shows at the first pass.
-        let reminders = remind::Reminders::from_store(&store);
+        pages.reminders = remind::Reminders::from_store(&store);
         // The section now mirrors what is running; stale entries leave the file with its next write.
         timers.write_to(&mut store, &mut Pending::default(), now);
         let effective_accent = if settings.match_accent {
@@ -1493,7 +1515,6 @@ impl Desktop {
             rebuild: Rebuild::new(Instant::now()),
             picker: None,
             remind_box: None,
-            reminders,
             last_reminder: String::new(),
             palette: crate::theme::system_palette(settings.theme, effective_accent),
             palette_dirty: false,
@@ -2203,9 +2224,10 @@ impl Desktop {
     #[inline(never)]
     fn refresh_reminders(&mut self) -> u32 {
         let wall = timer::wall_now();
-        if let Some(label) = self.reminders.take_due(wall) {
+        if let Some(label) = self.pages.reminders.take_due(wall) {
             let now = Instant::now();
-            self.reminders
+            self.pages
+                .reminders
                 .write_to(&mut self.store, &mut self.pending, now);
             if self.settings.reminder_plays() {
                 chime();
@@ -2213,9 +2235,13 @@ impl Desktop {
             self.show_notice_with(remind::shown(&label), now, power::Extra::Snooze);
             self.last_reminder = label;
         }
-        self.reminders.wait_secs(wall).map_or(INFINITE, |secs| {
-            u32::try_from(secs.saturating_mul(1000)).map_or(INFINITE - 1, |ms| ms.min(INFINITE - 1))
-        })
+        self.pages
+            .reminders
+            .wait_secs(wall)
+            .map_or(INFINITE, |secs| {
+                u32::try_from(secs.saturating_mul(1000))
+                    .map_or(INFINITE - 1, |ms| ms.min(INFINITE - 1))
+            })
     }
     /// What the reminder box made: set it and say when it will come.
     fn remind_message(&mut self, message: &MSG) -> Result<bool> {
@@ -2236,8 +2262,9 @@ impl Desktop {
     }
     fn set_reminder(&mut self, delay: u64, label: String) {
         let now = Instant::now();
-        let text = if self.reminders.add(timer::wall_now(), delay, label) {
-            self.reminders
+        let text = if self.pages.reminders.add(timer::wall_now(), delay, label) {
+            self.pages
+                .reminders
                 .write_to(&mut self.store, &mut self.pending, now);
             let (hours, minutes) = (delay / 3600, delay % 3600 / 60);
             match (hours, minutes) {
@@ -2256,8 +2283,11 @@ impl Desktop {
     fn snooze(&mut self) {
         let now = Instant::now();
         let label = std::mem::take(&mut self.last_reminder);
-        self.reminders.add(timer::wall_now(), remind::SNOOZE, label);
-        self.reminders
+        self.pages
+            .reminders
+            .add(timer::wall_now(), remind::SNOOZE, label);
+        self.pages
+            .reminders
             .write_to(&mut self.store, &mut self.pending, now);
         self.power
             .announce("Snoozed for 10 min".into(), now, DEVICE_NOTICE);
@@ -4897,6 +4927,19 @@ impl Desktop {
             _ => (0, false),
         };
         let idle = view.as_ref().is_none_or(|view| view.done);
+        let waiting = self.pages.reminders.waiting().len();
+        if page == Tab::Timer
+            && idle
+            && let Some(index) =
+                layout::remind_cancel_at(width, dpi, progress, live, waiting, (x, y))
+        {
+            self.pages.reminders.cancel(index);
+            self.pages
+                .reminders
+                .write_to(&mut self.store, &mut self.pending, now);
+            self.request_notches(Repaint::Full, |_| true);
+            return true;
+        }
         if page == Tab::Timer
             && idle
             && layout::remind_button_at(width, dpi, progress, live, (x, y))

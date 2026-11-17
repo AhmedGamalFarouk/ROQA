@@ -811,6 +811,58 @@ pub fn remind_button_at(
     on_slot(target, window_width, dpi, progress, media, x, y)
 }
 
+/// The idle Timer page lists the reminders waiting, at most `REMIND_ROWS`: 16 high rows from y 98, each with its
+/// time, its label and a quiet cancel at the right end, which stops short of the media panel's settings button. The page grows to hold them, plus the 22 the notice row needs
+/// under the last (as the Limits page does), so a list is never taller than three rows.
+pub const REMIND_ROWS: usize = 3;
+const REMIND_TOP: f32 = 98.0;
+const REMIND_ROW: f32 = 16.0;
+const REMIND_CANCEL: f32 = 28.0;
+/// The panel height for `count` reminders; 0 with none, which leaves the plain panel.
+pub fn reminders_height(count: usize) -> u16 {
+    match count.min(REMIND_ROWS) {
+        0 => 0,
+        rows => (REMIND_TOP + REMIND_ROW * rows as f32) as u16 + 22,
+    }
+}
+/// Row `index`, across the width left of that button, in pixels from the body's left and top edges.
+pub fn remind_row(index: usize, dpi: u32) -> Bounds {
+    let top = REMIND_TOP + REMIND_ROW * index as f32;
+    let width = MEDIA_EXPANDED.width - 16.0 - GEAR_SIZE - 6.0 - PAD;
+    scaled_bounds((PAD, top, width, REMIND_ROW), dpi)
+}
+/// Row `index`'s cancel, at the row's right end.
+pub fn remind_cancel(index: usize, dpi: u32) -> Bounds {
+    let row = remind_row(index, dpi);
+    let width = scaled(REMIND_CANCEL, dpi);
+    Bounds {
+        x: row.x + row.width - width,
+        width,
+        ..row
+    }
+}
+/// The cancel of one of the first `count` rows under a window point; none while the panel is closed.
+pub fn remind_cancel_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    count: usize,
+    (x, y): (i32, i32),
+) -> Option<usize> {
+    (0..count.min(REMIND_ROWS)).find(|&index| {
+        on_slot(
+            remind_cancel(index, dpi),
+            window_width,
+            dpi,
+            progress,
+            media,
+            x,
+            y,
+        )
+    })
+}
+
 /// Two 160 x 32 DIP file capsules share one focal row, with the pager below.
 const SHELF_CELL_W: f32 = 160.0;
 const SHELF_CELL_H: f32 = 32.0;
@@ -1898,6 +1950,80 @@ mod tests {
                 assert!(
                     notice.x + notice.width < settings_left,
                     "{media} {page} {dpi}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_reminder_rows_stack_under_the_presets_and_leave_the_notice_room() {
+        assert_eq!(reminders_height(0), 0);
+        assert!(reminders_height(1) < reminders_height(2));
+        assert_eq!(
+            reminders_height(9),
+            reminders_height(REMIND_ROWS),
+            "three rows at most"
+        );
+        let tallest = NOTCH.height
+            + (f32::from(reminders_height(REMIND_ROWS)) + NOTICE_ROOM - NOTCH.height) * 1.07;
+        let rail = Rail {
+            count: 6,
+            active: 0,
+            expansion: [0.0; 7],
+        };
+        assert!(tallest + rail_size(rail).1 <= NOTCH_WINDOW.1 as f32);
+        for dpi in [96, 144, 192, 240] {
+            let preset = page_button(0, 0, dpi);
+            let width = scaled(NOTCH_WINDOW.0 as f32, dpi);
+            let body = notch_body(width, dpi, NOTCH_EXPANDED);
+            for index in 0..REMIND_ROWS {
+                let (row, cancel) = (remind_row(index, dpi), remind_cancel(index, dpi));
+                assert!(
+                    row.y >= preset.y + preset.height + scaled(4.0, dpi),
+                    "{dpi}"
+                );
+                assert_eq!((cancel.y, cancel.height), (row.y, row.height));
+                assert_eq!(cancel.x + cancel.width, row.x + row.width);
+                // The media panel's settings button sits at its bottom right, 6 clear of the cancel.
+                assert!(
+                    cancel.x + cancel.width
+                        <= scaled(MEDIA_EXPANDED.width - 16.0 - GEAR_SIZE - 6.0, dpi)
+                );
+                if index > 0 {
+                    let above = remind_row(index - 1, dpi);
+                    assert!(row.y >= above.y + above.height, "rows never overlap");
+                }
+                // The notice row of the grown page starts 6 DIP under this row at least when it is the last.
+                let page = reminders_height(index + 1);
+                let notice = notice_slot(false, page, false, dpi);
+                assert!(
+                    notice.y >= row.y + row.height + scaled(6.0, dpi) - 1,
+                    "{dpi}"
+                );
+                // Its cancel is a hit target; the words are not.
+                let at = |x: i32| {
+                    remind_cancel_at(
+                        width,
+                        dpi,
+                        1.0,
+                        false,
+                        REMIND_ROWS,
+                        (body.left + x, cancel.y + 1),
+                    )
+                };
+                assert_eq!(at(cancel.x + 1), Some(index));
+                assert_eq!(at(row.x + 4), None);
+                assert_eq!(
+                    remind_cancel_at(
+                        width,
+                        dpi,
+                        1.0,
+                        false,
+                        index,
+                        (body.left + cancel.x + 1, cancel.y + 1)
+                    ),
+                    None,
+                    "only the rows shown"
                 );
             }
         }

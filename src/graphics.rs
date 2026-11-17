@@ -206,6 +206,8 @@ pub struct NotchScene<'a> {
     pub bars: [i32; BARS],
     /// The soonest countdown timer (S5, PROVISIONAL); `None` draws nothing.
     pub timer: Option<&'a timer::View>,
+    /// The idle Timer page's waiting reminders as (time, words), at most `layout::REMIND_ROWS`.
+    pub reminders: &'a [(String, String)],
     /// The power pill's text (features B1), drawn in the open panel; `None` draws nothing.
     pub notice: Option<&'a str>,
     /// What the notice row carries besides its text: an Eject button or a progress bar.
@@ -3293,6 +3295,7 @@ mod media_tests {
             volume,
             bars: [0; BARS],
             timer: None,
+            reminders: &[],
             notice: None,
             extra: Extra::None,
             shelf: &[],
@@ -3339,6 +3342,7 @@ mod media_tests {
                 volume: None,
                 bars: [0; BARS],
                 timer: None,
+                reminders: &[],
                 notice: None,
                 extra: Extra::None,
                 shelf: &[],
@@ -3586,6 +3590,7 @@ mod media_tests {
                 volume: None,
                 bars: [4, 20, 12, 8, 4],
                 timer: None,
+                reminders: &[],
                 notice: None,
                 extra: Extra::None,
                 shelf: &[],
@@ -3654,6 +3659,7 @@ mod media_tests {
                     volume: None,
                     bars: heights,
                     timer: None,
+                    reminders: &[],
                     notice: None,
                     extra: Extra::None,
                     shelf: &[],
@@ -3710,6 +3716,7 @@ mod media_tests {
             }),
             bars: [0; BARS],
             timer: None,
+            reminders: &[],
             notice: None,
             extra: Extra::None,
             shelf: &[],
