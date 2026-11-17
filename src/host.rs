@@ -16,6 +16,7 @@ use crate::{
     hotkeys,
     icons::{self, IconPixels, IconService},
     ipc::{Command, Controls},
+    keys,
     layout::{self, Bounds, DockStyle, SurfaceKind, placement_styled},
     limits::{self, Limits},
     limits_os,
@@ -1309,6 +1310,8 @@ struct Desktop {
     remind_box: Option<RemindBox>,
     /// The label of the reminder shown last (what Snooze sets again); the waiting ones are `pages.reminders`.
     last_reminder: String,
+    /// The keyboard language and Caps Lock pills (`keys.rs`).
+    keys: keys::Keys,
     /// Open only while the user has it up; created on demand, destroyed on close, so it costs nothing closed.
     palette: Palette,
     palette_dirty: bool,
@@ -1422,6 +1425,8 @@ struct PrayerRun {
 }
 /// How long a prayer reminder holds the notch open.
 const PRAYER_NOTICE: Duration = Duration::from_secs(8);
+/// How long a keyboard pill holds the notch open.
+const KEY_NOTICE: Duration = Duration::from_secs(2);
 /// How long a device alert holds the notch open.
 const DEVICE_NOTICE: Duration = Duration::from_secs(4);
 /// How long a drive alert holds the notch open: long enough to press Eject.
@@ -1495,6 +1500,7 @@ impl Desktop {
             rebuild: Rebuild::new(Instant::now()),
             remind_box: None,
             last_reminder: String::new(),
+            keys: keys::Keys::new(),
             palette: crate::theme::system_palette(settings.theme, effective_accent),
             palette_dirty: false,
             settings_window: None,
@@ -2255,6 +2261,20 @@ impl Desktop {
             format!("{} reminders are already waiting.", remind::MAX)
         };
         self.power.announce(text, now, DEVICE_NOTICE);
+        self.open_notches();
+        self.request_notches(Repaint::Full, |_| true);
+    }
+    /// A keyboard pill (the language, or Caps Lock's state) on the notice row for a moment; it never replaces a question
+    /// or another notice that carries a button.
+    fn key_pill(&mut self, text: Option<String>) {
+        let Some(text) = text else {
+            return;
+        };
+        if self.power.extra() != power::Extra::None {
+            return;
+        }
+        let now = Instant::now();
+        self.power.announce(text, now, KEY_NOTICE);
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
     }
@@ -6036,7 +6056,17 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 return Ok(false);
             }
             if message.message == WM_HOTKEY {
-                desktop.hotkey(message.wParam.0)?;
+                if keys::Keys::is_caps(message.wParam.0) {
+                    let said = desktop.keys.caps_pressed();
+                    desktop.key_pill(said);
+                } else {
+                    desktop.hotkey(message.wParam.0)?;
+                }
+                continue;
+            }
+            if message.message == keys::LOOK {
+                let said = desktop.keys.looked();
+                desktop.key_pill(said);
                 continue;
             }
             if desktop.shell_hook != 0 && message.message == desktop.shell_hook {

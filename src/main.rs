@@ -28,6 +28,7 @@ mod host;
 mod hotkeys;
 mod icons;
 mod ipc;
+mod keys;
 mod layout;
 mod limits;
 mod limits_os;
