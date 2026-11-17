@@ -66,6 +66,10 @@ pub enum Item {
     Quick(Quick),
     /// A row of the Places popup (an index into the host's list); its text is in `Spec::titles`.
     Place(usize),
+    /// A row of a folder stack (an index into the host's list of files); its text is in `Spec::titles`.
+    File(usize),
+    /// Pin the Downloads folder to the dock (offered in the app menu until it is pinned).
+    PinDownloads,
 }
 /// What a quick settings row does when pressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +112,8 @@ impl Item {
             Item::Restore(_) => "Window",
             Item::Quick(_) => "Setting",
             Item::Place(_) => "Place",
+            Item::File(_) => "File",
+            Item::PinDownloads => "Pin Downloads",
         }
     }
 }

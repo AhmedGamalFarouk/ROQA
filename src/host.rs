@@ -1298,6 +1298,8 @@ struct Desktop {
     peek_title: Option<String>,
     /// The Places popup's rows while it is open.
     places: Vec<crate::places::Place>,
+    /// The files a folder stack's popup lists while it is open.
+    stack: Vec<std::path::PathBuf>,
     graphics: Graphics,
     rebuild: Rebuild,
     picker: Option<Picker>,
@@ -1487,6 +1489,7 @@ impl Desktop {
             peek: None,
             peek_title: None,
             places: Vec::new(),
+            stack: Vec::new(),
             graphics: Graphics::create()?,
             rebuild: Rebuild::new(Instant::now()),
             picker: None,
@@ -3348,6 +3351,15 @@ impl Desktop {
                     }
                     return Ok(());
                 }
+                if let Some(item) = self.dock_items.get(slot - 1)
+                    && item.windows.is_empty()
+                    && let Identity::Executable(path) = &item.identity
+                    && std::path::Path::new(path).is_dir()
+                {
+                    let folder = path.clone();
+                    self.open_stack(hwnd, slot, &folder);
+                    return Ok(());
+                }
                 if let Some(action) = self
                     .dock_items
                     .get(slot - 1)
@@ -3812,6 +3824,67 @@ impl Desktop {
             Err(error) => eprintln!("Places: {error}"),
         }
     }
+    /// A pinned folder's stack above its dock slot: its newest files as rows, read now; a click opens that file
+    /// and an empty folder opens in Explorer instead.
+    fn open_stack(&mut self, hwnd: HWND, slot: usize, folder: &str) {
+        self.dismiss_preview();
+        self.close_menu();
+        let Some(dock) = self.dock_at(hwnd).filter(|dock| dock.visible) else {
+            return;
+        };
+        let (bounds, dpi, monitor, buttons) = (
+            dock.bounds,
+            dock.dpi,
+            dock.monitor.clone(),
+            dock.dock_buttons,
+        );
+        let Some(work) = self
+            .monitors
+            .iter()
+            .find(|m| m.device == monitor)
+            .map(|m| m.work)
+        else {
+            return;
+        };
+        let files = crate::places::newest_files(std::path::Path::new(folder), crate::places::STACK);
+        if files.is_empty() {
+            dock::launch(folder);
+            return;
+        }
+        let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Slot(slot));
+        let name = std::path::Path::new(folder).file_name().map_or_else(
+            || "Folder".into(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let spec = dock_menu::Spec {
+            dock: hwnd,
+            slot: 0,
+            windows: Vec::new(),
+            identity: Identity::Unavailable(0),
+            items: (0..files.len()).map(Item::File).collect(),
+            dock_bounds: bounds,
+            work,
+            dpi,
+            app: name,
+            titles: files
+                .iter()
+                .map(|file| {
+                    file.file_name()
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+                })
+                .collect(),
+            icons: Vec::new(),
+            x: bounds.x + left + width / 2,
+            below: None,
+            return_to: dock::foreground_key(),
+        };
+        self.stack = files;
+        match dock_menu::Menu::open(&self.graphics, self.palette, spec) {
+            Ok(menu) if take_foreground(menu.hwnd()) => self.menu = Some(menu),
+            Ok(_) => eprintln!("Folder stack: Windows kept another app in front; not opened"),
+            Err(error) => eprintln!("Folder stack: {error}"),
+        }
+    }
     /// Applies one quick setting, then shows the new state in the same popup.
     fn run_quick(
         &mut self,
@@ -4058,6 +4131,13 @@ impl Desktop {
         } else {
             dock_menu::APP_ITEMS.to_vec()
         };
+        // The dock offers its Downloads stack until it is pinned.
+        if surface.kind() == SurfaceKind::Dock
+            && let Some(path) = crate::places::downloads()
+            && self.pins.position(&Identity::Executable(path)).is_none()
+        {
+            items.insert(0, Item::PinDownloads);
+        }
         let shelf_menu = surface.kind() == SurfaceKind::Notch && self.page() == Tab::Shelf;
         if shelf_menu && self.shelf.removed.is_some() {
             items.push(Item::UndoShelf);
@@ -4217,6 +4297,18 @@ impl Desktop {
                 Item::Restore(key) => {
                     self.run_dock_action(dock::Action::Activate(key));
                 }
+                Item::File(index) => {
+                    if let Some(file) = self.stack.get(index)
+                        && !dock::launch(&file.to_string_lossy())
+                    {
+                        eprintln!("Folder stack: the shell did not open {}", file.display());
+                    }
+                }
+                Item::PinDownloads => {
+                    if let Some(path) = crate::places::downloads() {
+                        self.change_pins(|pins| pins.add(Identity::Executable(path)).is_ok());
+                    }
+                }
                 Item::Place(index) => {
                     if let Some(place) = self.places.get(index)
                         && !dock::launch(&place.target)
@@ -4306,6 +4398,8 @@ impl Desktop {
             | Item::Restore(_)
             | Item::Quick(_)
             | Item::Place(_)
+            | Item::File(_)
+            | Item::PinDownloads
             | Item::RemoveShelf
             | Item::UndoShelf
             | Item::Group

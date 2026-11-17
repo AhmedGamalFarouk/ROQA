@@ -1,12 +1,57 @@
 //! The dock's Places button: the Recycle Bin and each fixed or removable drive, read when the popup opens.
 //! Network drives are left out (a stat on one can hang the host thread) and nothing is kept or polled.
+//! A pinned folder's stack (its newest files) is read here too, once per click.
+use std::path::{Path, PathBuf};
 use windows::{
     Win32::{
         Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW},
-        UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW},
+        System::Com::CoTaskMemFree,
+        UI::Shell::{
+            FOLDERID_Downloads, KF_FLAG_DEFAULT, SHGetKnownFolderPath, SHQUERYRBINFO,
+            SHQueryRecycleBinW,
+        },
     },
     core::{HSTRING, PCWSTR},
 };
+
+/// How many files a folder stack lists.
+pub const STACK: usize = 8;
+
+/// The user's Downloads folder, as the shell knows it (it may be moved off the profile).
+pub fn downloads() -> Option<String> {
+    // SAFETY: the shell returns a COM string that is copied here and then freed once.
+    unsafe {
+        let path = SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, None).ok()?;
+        let text = path.to_string().ok();
+        CoTaskMemFree(Some(path.0.cast()));
+        text
+    }
+}
+
+/// The newest `count` files of `dir` (folders, hidden files and `desktop.ini` left out), newest first.
+pub fn newest_files(dir: &Path, count: usize) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !meta.is_file() || name.starts_with('.') || name == "desktop.ini" {
+                return None;
+            }
+            Some((meta.modified().ok()?, entry.path()))
+        })
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files
+        .into_iter()
+        .take(count)
+        .map(|(_, path)| path)
+        .collect()
+}
 
 /// `GetDriveTypeW` answers for a removable and a fixed drive.
 const DRIVE_REMOVABLE: u32 = 2;
@@ -84,6 +129,31 @@ mod tests {
         assert_eq!(bin_text(12), "Recycle Bin, 12 items");
         assert_eq!(drive_text("", 'C'), "Drive (C:)");
         assert_eq!(drive_text("Data", 'D'), "Data (D:)");
+    }
+    #[test]
+    fn a_stack_lists_the_newest_files_only() {
+        let dir = std::env::temp_dir().join(format!("roqa-stack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a folder")).unwrap();
+        let start = std::time::SystemTime::now() - std::time::Duration::from_secs(1000);
+        for (n, name) in ["old.txt", "mid.txt", "new.txt", "desktop.ini", ".hidden"]
+            .into_iter()
+            .enumerate()
+        {
+            let file = std::fs::File::create(dir.join(name)).unwrap();
+            file.set_modified(start + std::time::Duration::from_secs(n as u64 * 10))
+                .unwrap();
+        }
+        let names = |count| -> Vec<_> {
+            newest_files(&dir, count)
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(names(8), ["new.txt", "mid.txt", "old.txt"]);
+        assert_eq!(names(2), ["new.txt", "mid.txt"]);
+        assert!(newest_files(&dir.join("missing"), 8).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
     fn the_bin_comes_first() {
