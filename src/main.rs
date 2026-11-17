@@ -96,6 +96,10 @@ fn run() -> Result<()> {
             host::run(host::Probe::None, Some(std::path::PathBuf::from(path)))
         }
         [command] => ipc::Command::parse(command)?.signal(),
+        [command, ask, name] if command == "agent" && ask == "ask" => {
+            agent::ask(name);
+            Ok(())
+        }
         [command, name, state] if command == "agent" => {
             let (Some(name), Some(state)) = (agent::clean(name), agent::State::parse(state)) else {
                 return Err(Error::new(

@@ -139,6 +139,8 @@ const PILLLOW: usize = 213;
 /// The agent-status switch, then one button per `agent_hooks::AGENTS` entry.
 const AGENT_ON: usize = 214;
 const AGENT_BTN: usize = 215;
+/// The row after them: the Claude Code permission questions (the last `agent_hooks::AGENTS` entry).
+const ASK_BTN: usize = 236;
 /// The four shortcut switches (`hotkeys::KEYS` order).
 const HOTKEY: usize = 222;
 /// The hidden-apps list and its "Show in dock" button.
@@ -582,6 +584,12 @@ const PAGES: &[Page] = &[
                     r(AGENT_BTN + 4, Kind::Btn, "Add hook", "Cursor"),
                     r(AGENT_BTN + 5, Kind::Btn, "Add hook", "Copilot CLI"),
                     r(AGENT_BTN + 6, Kind::Btn, "Add hook", "opencode"),
+                    r(
+                        ASK_BTN,
+                        Kind::Btn,
+                        "Add hook",
+                        "Allow or deny Claude's questions in the notch",
+                    ),
                 ],
             },
         ],
@@ -1694,7 +1702,8 @@ impl SettingsWindow {
     fn refresh_agents(&self) {
         let home = agent_hooks::home().unwrap_or_default();
         for (i, spec) in agent_hooks::AGENTS.iter().enumerate() {
-            let Some(item) = self.items.iter().find(|item| item.id == AGENT_BTN + i) else {
+            let id = if i < 7 { AGENT_BTN + i } else { ASK_BTN };
+            let Some(item) = self.items.iter().find(|item| item.id == id) else {
                 continue;
             };
             let status = agent_hooks::status(spec, &home);
@@ -2409,6 +2418,7 @@ Other hooks stay. A copy of the file is kept.",
                     (AGENT_BTN..=221, _) if notification == BN_CLICKED => {
                         self.agent_click(id - AGENT_BTN)
                     }
+                    (ASK_BTN, _) if notification == BN_CLICKED => self.agent_click(7),
                     (LIMCOPY, _) if notification == BN_CLICKED => {
                         // SAFETY: select-all then copy on our own read-only edit.
                         unsafe {

@@ -36,11 +36,16 @@ impl State {
 }
 
 /// One line of the spool: an agent's state, or a script's progress in percent (100 is done).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Report {
     State(State),
     Percent(u8),
+    /// A permission question: the hook's process id and the line to show.
+    Ask(u32, String),
 }
+
+/// How long a permission question waits for a click, in seconds, before the agent's own prompt takes over.
+pub const ASK_SECS: u64 = 30;
 
 /// "0-100" or "done" as `roqa.exe progress` takes it.
 pub fn percent(word: &str) -> Option<u8> {
@@ -161,9 +166,25 @@ fn spool() -> Option<PathBuf> {
     Some(path)
 }
 
+/// A permission question from the hook `roqa.exe agent ask <name>`, as a spool line `ask <id> <name> <text>`: `id`
+/// is the hook process, whose answer events the click will set.
+pub fn write_ask(name: &str, id: u32, text: &str) -> std::io::Result<()> {
+    append(&format!("ask {id} {name} {text}\n"))
+}
+
 /// The client's half: appends `name state` (or `name 42%`) for the resident process. Called only after its event
 /// opened.
 pub fn write(name: &str, report: Report) -> std::io::Result<()> {
+    let word = match report {
+        Report::State(state) => state.word().to_owned(),
+        Report::Percent(percent) => format!("{percent}%"),
+        // A question has its own writer, `write_ask`.
+        Report::Ask(..) => return Ok(()),
+    };
+    append(&format!("{name} {word}\n"))
+}
+
+fn append(line: &str) -> std::io::Result<()> {
     let mut path = spool().ok_or(std::io::ErrorKind::NotFound)?;
     fs::create_dir_all(&path)?;
     path.push("agent.txt");
@@ -172,11 +193,7 @@ pub fn write(name: &str, report: Report) -> std::io::Result<()> {
         .append(true)
         .open(path)?;
     // One write, so two clients cannot interleave a line.
-    let word = match report {
-        Report::State(state) => state.word().to_owned(),
-        Report::Percent(percent) => format!("{percent}%"),
-    };
-    file.write_all(format!("{name} {word}\n").as_bytes())
+    file.write_all(line.as_bytes())
 }
 
 /// The resident half: the reports since the last call, oldest first. Anything unreadable is dropped.
@@ -197,6 +214,13 @@ pub fn take() -> Vec<(String, Report)> {
 }
 
 fn parse(line: &str) -> Option<(String, Report)> {
+    if let Some(ask) = line.strip_prefix("ask ") {
+        let mut parts = ask.trim_end().splitn(3, ' ');
+        let id = parts.next()?.parse().ok()?;
+        let name = clean(parts.next()?)?;
+        let text = parts.next().filter(|text| !text.is_empty())?;
+        return Some((name.to_owned(), Report::Ask(id, text.to_owned())));
+    }
     let (name, word) = line.split_once(' ')?;
     let word = word.trim();
     let report = match word.strip_suffix('%') {
@@ -204,6 +228,41 @@ fn parse(line: &str) -> Option<(String, Report)> {
         None => Report::State(State::parse(word)?),
     };
     Some((clean(name)?.to_owned(), report))
+}
+
+/// The hook `roqa.exe agent ask <name>`: reads the permission question from stdin, shows it in the notch and waits
+/// for the click, then prints Allow or Deny as the hook's answer. It prints nothing, so the agent asks as usual,
+/// when ROQA is not running, the input is not a tool question or no click comes within `ASK_SECS`.
+pub fn ask(name: &str) {
+    use std::io::Read;
+    use windows::Win32::{Foundation::WAIT_OBJECT_0, System::Threading::WaitForMultipleObjects};
+    let mut input = String::new();
+    let _ = std::io::stdin().take(64 * 1024).read_to_string(&mut input);
+    let (Some(name), Some(line)) = (clean(name), crate::agent_hooks::permission_line(&input))
+    else {
+        return;
+    };
+    let id = std::process::id();
+    let Ok(events) = crate::ipc::answer_events(id) else {
+        return;
+    };
+    let shown = crate::ipc::Command::Agent.signal_after(|| {
+        let _ = write_ask(name, id, &line);
+    });
+    if shown.is_err() {
+        return;
+    }
+    let handles = [events[0].0, events[1].0];
+    // SAFETY: both handles stay open until this function returns.
+    let woke = unsafe { WaitForMultipleObjects(&handles, false, (ASK_SECS * 1000) as u32) };
+    let decision = match woke.0.wrapping_sub(WAIT_OBJECT_0.0) {
+        0 => r#"{"behavior":"allow"}"#,
+        1 => r#"{"behavior":"deny","message":"Denied from ROQA"}"#,
+        _ => return,
+    };
+    println!(
+        r#"{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{decision}}}}}"#
+    );
 }
 
 #[cfg(test)]
@@ -226,6 +285,16 @@ mod tests {
         assert_eq!(parse("codex done"), done);
         assert_eq!(parse("codex done\r"), done);
         assert!(parse("codex later").is_none() && parse("codex").is_none());
+    }
+
+    #[test]
+    fn a_question_line_carries_the_hook_and_the_words() {
+        assert_eq!(
+            parse("ask 4242 claude Bash: git push\r"),
+            Some(("claude".into(), Report::Ask(4242, "Bash: git push".into())))
+        );
+        assert!(parse("ask x claude Bash").is_none() && parse("ask 1 claude").is_none());
+        assert!(parse("ask 1 bad!name text").is_none());
     }
 
     #[test]

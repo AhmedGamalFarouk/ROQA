@@ -1311,12 +1311,15 @@ fn notice_text(
         return Ok(());
     };
     let slot = layout::power_notice(scene.track.is_some(), scene.dpi);
-    let label = match scene.extra {
-        Extra::Eject(_) => Some("Eject"),
-        Extra::Snooze => Some("Snooze"),
-        _ => None,
+    // Buttons from the right: the first is the alert's one primary action, a solid accent capsule; a second is quiet.
+    let labels: &[&str] = match scene.extra {
+        Extra::Eject(_) => &["Eject"],
+        Extra::Snooze => &["Snooze"],
+        Extra::Ask(_) => &["Allow", "Deny"],
+        _ => &[],
     };
-    let button = label.map(|_| layout::notice_button(scene.track.is_some(), scene.dpi, 0));
+    let button = (!labels.is_empty())
+        .then(|| layout::notice_button(scene.track.is_some(), scene.dpi, labels.len() - 1));
     // A progress row gives the text its left share and the bar the rest.
     let bar_left = matches!(scene.extra, Extra::Progress(_)).then(|| slot.width as f32 * 0.5);
     let left = body.left + slot.x as f32;
@@ -1373,18 +1376,23 @@ fn notice_text(
             context.FillRoundedRectangle(&rounded(fill, height / 2.0), &front);
         }
     }
-    if let (Some(button), Some(name)) = (button, label) {
-        // The one primary action of the alert: a solid accent capsule.
+    for (from_right, name) in labels.iter().enumerate() {
+        let button = layout::notice_button(scene.track.is_some(), scene.dpi, from_right);
         let cell = D2D_RECT_F {
             left: body.left + button.x as f32,
             top,
             right: body.left + (button.x + button.width) as f32,
             bottom: top + button.height as f32,
         };
+        let primary = from_right == 0;
+        let (fill, ink) = if primary {
+            (with_alpha(p.accent, p.ink_alpha(alpha)), p.ink_on_accent())
+        } else {
+            (with_alpha(p.ink, p.ink_alpha(0.18 * alpha)), p.ink)
+        };
         // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw.
         unsafe {
-            let fill =
-                context.CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(alpha)), None)?;
+            let fill = context.CreateSolidColorBrush(&fill, None)?;
             context.FillRoundedRectangle(&rounded(cell, (cell.bottom - cell.top) / 2.0), &fill);
         }
         let label = Font {
@@ -1396,7 +1404,7 @@ fn notice_text(
             name,
             &label,
             cell,
-            with_alpha(p.ink_on_accent(), p.ink_alpha(alpha)),
+            with_alpha(ink, p.ink_alpha(alpha)),
         )?;
     }
     Ok(())

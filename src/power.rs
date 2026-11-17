@@ -105,6 +105,8 @@ pub enum Extra {
     Progress(u8),
     /// A Snooze button (a due reminder).
     Snooze,
+    /// Deny and Allow buttons for the permission question of this hook process.
+    Ask(u32),
 }
 
 #[derive(Default)]

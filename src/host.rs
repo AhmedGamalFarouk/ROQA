@@ -2162,6 +2162,7 @@ impl Desktop {
         for (name, report) in agent::take() {
             match report {
                 agent::Report::Percent(percent) => self.show_progress(&name, percent, now),
+                agent::Report::Ask(id, text) => self.show_ask(id, text, now),
                 agent::Report::State(_) if !self.settings.agent_status => {}
                 agent::Report::State(state) => {
                     if let Some(text) = self.agents.set(&name, state, now) {
@@ -2170,6 +2171,15 @@ impl Desktop {
                 }
             }
         }
+    }
+    /// A permission question from a hook shows on the notice row with Allow and Deny, a short peek that stays under
+    /// a full-screen app (the agent's own prompt is still there). It waits as long as the hook does.
+    fn show_ask(&mut self, id: u32, text: String, now: Instant) {
+        self.power
+            .announce(text, now, Duration::from_secs(agent::ASK_SECS));
+        self.power.offer(power::Extra::Ask(id));
+        self.open_notches();
+        self.request_notches(Repaint::Full, |_| true);
     }
     /// A script's progress shows on the notice row with an accent bar; like a device alert it is a short peek
     /// that stays under a full-screen app. Each report renews the hold; "done" shows briefly and hides.
@@ -4902,6 +4912,23 @@ impl Desktop {
             } else {
                 "Still in use"
             };
+            self.power
+                .announce(text.into(), Instant::now(), DEVICE_NOTICE);
+            self.request_notches(Repaint::Full, |_| true);
+            return true;
+        }
+        if let power::Extra::Ask(hook) = self.power.extra()
+            && let Some(allow) =
+                [true, false]
+                    .into_iter()
+                    .enumerate()
+                    .find_map(|(from_right, allow)| {
+                        layout::notice_button_at(width, dpi, progress, live, from_right, (x, y))
+                            .then_some(allow)
+                    })
+        {
+            crate::ipc::answer(hook, allow);
+            let text = if allow { "Allowed" } else { "Denied" };
             self.power
                 .announce(text.into(), Instant::now(), DEVICE_NOTICE);
             self.request_notches(Repaint::Full, |_| true);

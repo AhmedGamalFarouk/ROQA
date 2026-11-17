@@ -313,6 +313,9 @@ enum Kind {
     Copilot(Events),
     /// opencode loads every script in its plugins folder; ROQA owns one.
     Plugin,
+    /// Claude Code's `PermissionRequest` hook: the question goes to the notch (`roqa.exe agent ask claude`) and
+    /// waits there for Allow or Deny. Its own id, `ask`, keeps it apart from the status lines.
+    Ask,
 }
 
 pub struct Spec {
@@ -328,7 +331,7 @@ pub struct Spec {
 /// Claude Code `hooks` in settings.json; Codex `hooks.json` (the user trusts new hooks once in `/hooks`);
 /// Gemini CLI `hooks` in settings.json; Antigravity CLI `hooks.json`; Cursor `hooks.json`; GitHub Copilot CLI
 /// `~/.copilot/hooks/*.json`; opencode plugin file.
-pub static AGENTS: [Spec; 7] = [
+pub static AGENTS: [Spec; 8] = [
     Spec {
         id: "claude",
         label: "Claude Code",
@@ -397,6 +400,13 @@ pub static AGENTS: [Spec; 7] = [
         present: ".config/opencode",
         file: ".config/opencode/plugins/roqa-agent-status.js",
         kind: Kind::Plugin,
+    },
+    Spec {
+        id: "ask",
+        label: "Claude Code questions",
+        present: ".claude",
+        file: ".claude/settings.json",
+        kind: Kind::Ask,
     },
 ];
 
@@ -543,7 +553,43 @@ fn mine(spec: &Spec, exe: &Path) -> Result<Json, String> {
             ])
         }
         Kind::Plugin => Json::Str(plugin(&exe.to_string_lossy())),
+        Kind::Ask => {
+            let hook = obj([
+                ("type", string("command")),
+                (
+                    "command",
+                    Json::Str(format!("{} agent ask claude", shell_path(exe)?)),
+                ),
+                // A little over the 30 seconds ROQA waits for a click.
+                ("timeout", number(40)),
+            ]);
+            let group = obj([("hooks", Json::Arr(vec![hook]))]);
+            obj([(
+                "hooks",
+                obj([("PermissionRequest", Json::Arr(vec![group]))]),
+            )])
+        }
     })
+}
+
+/// The one line the notch shows for a permission question, from the hook's JSON on stdin: the tool and its
+/// command, path or address, on one line. `None` when it is not a tool question.
+pub fn permission_line(input: &str) -> Option<String> {
+    let json = Json::parse(input)?;
+    let Some(Json::Str(tool)) = json.get("tool_name") else {
+        return None;
+    };
+    let detail = json.get("tool_input").and_then(|input| {
+        ["command", "file_path", "url", "pattern", "path", "query"]
+            .into_iter()
+            .find_map(|key| match input.get(key) {
+                Some(Json::Str(text)) => Some(text.as_str()),
+                _ => None,
+            })
+    });
+    let line = detail.map_or_else(|| tool.clone(), |detail| format!("{tool}: {detail}"));
+    let line: Vec<_> = line.split_whitespace().collect();
+    Some(line.join(" ").chars().take(160).collect())
 }
 
 /// opencode's plugin: it names the program once and reports busy, idle and permission events.
@@ -694,6 +740,58 @@ mod tests {
     }
 
     const CLAUDE: &str = r#"{"model":"x","hooks":{"Stop":[{"hooks":[{"type":"command","command":"node a.cjs stop","timeout":10}],"_src":"é\u00e9"}],"PostToolUse":[]}}"#;
+
+    #[test]
+    fn the_question_hook_adds_beside_the_status_lines_and_undoes_alone() {
+        let home = home("ask", &[(".claude/settings.json", CLAUDE)]);
+        add("claude", &home);
+        add("ask", &home);
+        let file = home.join(".claude/settings.json");
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(text.contains("PermissionRequest") && text.contains("agent ask claude"));
+        assert!(text.contains("node a.cjs stop"), "their hook stays");
+        assert_eq!(status(spec("ask"), &home), Status::Added);
+        undo("ask", &home);
+        assert_eq!(status(spec("ask"), &home), Status::Ready);
+        assert_eq!(
+            status(spec("claude"), &home),
+            Status::Added,
+            "status lines stay"
+        );
+        assert!(
+            !fs::read_to_string(&file)
+                .unwrap()
+                .contains("PermissionRequest")
+        );
+        undo("claude", &home);
+        let mut original = Json::parse(CLAUDE).unwrap();
+        assert_eq!(
+            Json::parse(&fs::read_to_string(&file).unwrap()).unwrap(),
+            original
+        );
+        assert!(!strip(&mut original, "ask"));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn the_question_line_names_the_tool_and_what_it_touches() {
+        let line = |text: &str| permission_line(text);
+        assert_eq!(
+            line(r#"{"tool_name":"Bash","tool_input":{"command":"git  push\n--force"}}"#)
+                .as_deref(),
+            Some("Bash: git push --force")
+        );
+        assert_eq!(
+            line(r#"{"tool_name":"Edit","tool_input":{"file_path":"C:\\a.txt"}}"#).as_deref(),
+            Some("Edit: C:\\a.txt")
+        );
+        assert_eq!(
+            line(r#"{"tool_name":"Task","tool_input":{}}"#).as_deref(),
+            Some("Task")
+        );
+        assert_eq!(line("not json"), None);
+        assert_eq!(line(r#"{"hook_event_name":"Stop"}"#), None);
+    }
 
     #[test]
     fn json_round_trips_and_rejects_bad_text() {

@@ -87,6 +87,41 @@ impl Command {
     }
 }
 
+/// The events a permission question is answered on, made by the hook before it asks and named for its process:
+/// ROQA sets `allow` or `deny` when the click comes. Returned in that order.
+pub fn answer_events(id: u32) -> Result<[OwnedHandle; 2]> {
+    let make = |word: &str| -> Result<OwnedHandle> {
+        let name = object_name(&format!("ask.{id}.{word}"))?;
+        // SAFETY: valid terminated name; auto-reset event, no inheritance, default user DACL.
+        unsafe {
+            Ok(OwnedHandle(CreateEventW(
+                None,
+                false,
+                false,
+                PCWSTR(name.as_ptr()),
+            )?))
+        }
+    };
+    Ok([make("allow")?, make("deny")?])
+}
+
+/// ROQA's side of the click: sets the answer event of hook process `id`; nothing happens if it already gave up.
+pub fn answer(id: u32, allow: bool) {
+    let Ok(name) = object_name(&format!(
+        "ask.{id}.{}",
+        if allow { "allow" } else { "deny" }
+    )) else {
+        return;
+    };
+    // SAFETY: the name is NUL-terminated; OpenEvent requests only signaling rights.
+    unsafe {
+        if let Ok(event) = OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(name.as_ptr())) {
+            let event = OwnedHandle(event);
+            let _ = SetEvent(event.0);
+        }
+    }
+}
+
 /// An explicit picker or settings request comes from whatever app the user is in, so this client usually holds the
 /// foreground right; pass it to the resident ROQA process only. Without the right Windows refuses,
 /// and the picker reports the refusal instead of forcing focus.
