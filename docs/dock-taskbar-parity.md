@@ -23,7 +23,7 @@ or should not be (ROQA is not the shell).
 | Middle click: new window | New instance | has | 0 |
 | Right-click menu | New instance, close, close all, pin, folder items | has | 0 |
 | Jump lists (recent files, tasks) | Not available | gap | ~12,000 (reads the shell's jump list files; fragile) |
-| Minimized apps list | Chevron button with a list | has | 0 |
+| Minimized apps list | Not shown (minimized apps keep their dock icons) | no | n/a |
 | Right-click on empty bar | ROQA menu (Settings, Quit), not taskbar settings | has | 0 |
 | Clock and date | On the notch, not the dock | has (notch) | 0 |
 | Volume, brightness, battery | On the notch (volume, brightness, charging notice) | has (notch) | 0 |

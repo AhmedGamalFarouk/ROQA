@@ -423,11 +423,10 @@ const PAGES: &[Page] = &[
                     r(DBTN, C, "Start button", ""),
                     r(DBTN + 1, C, "Search button", ""),
                     r(DBTN + 2, C, "Task View button", ""),
-                    r(DBTN + 3, C, "Minimized apps list", ""),
-                    r(DBTN + 4, C, "Show desktop pill", ""),
-                    r(DBTN + 5, C, "Quick settings button", ""),
-                    r(DBTN + 6, C, "Drives and Recycle Bin button", ""),
-                    r(DBTN + 7, C, "Hidden icons button", ""),
+                    r(DBTN + 3, C, "Show desktop pill", ""),
+                    r(DBTN + 4, C, "Quick settings button", ""),
+                    r(DBTN + 5, C, "Drives and Recycle Bin button", ""),
+                    r(DBTN + 6, C, "Hidden icons button", ""),
                 ],
             },
             Card {
@@ -1526,7 +1525,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         AGENT_ON => &mut s.agent_status,
         HOTKEY..=225 => &mut s.hotkeys[id - HOTKEY],
         TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
-        DBTN..=137 => &mut s.dock_buttons.shown[id - DBTN],
+        DBTN..=136 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,
     })
 }

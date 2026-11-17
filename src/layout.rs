@@ -1228,7 +1228,7 @@ mod tests {
                     SurfaceKind::Notch,
                     0,
                     style,
-                    Buttons::of([true; 8])
+                    Buttons::of([true; 7])
                 ),
                 placement(work, 144, SurfaceKind::Notch, 0)
             );
@@ -1239,7 +1239,7 @@ mod tests {
                 SurfaceKind::Dock,
                 100,
                 style,
-                Buttons::of([true; 8]),
+                Buttons::of([true; 7]),
             );
             assert_eq!(wide.width, work.width);
         }

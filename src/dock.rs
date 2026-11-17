@@ -1,6 +1,6 @@
 use crate::pins::{self, Pins};
 use crate::sort;
-use crate::window_model::{Identity, WindowKey, WindowModel, WindowRecord};
+use crate::window_model::{Identity, WindowKey, WindowModel};
 use windows::Win32::{
     Foundation::{HWND, LPARAM, RECT, WPARAM},
     Globalization::{
@@ -220,7 +220,7 @@ pub fn items_with_pins(model: &WindowModel, pins: &Pins, desktop_only: bool) -> 
 }
 
 /// Taskbar-style buttons beside the app slots (features D2). Start, Search and Task View sit left of the
-/// picker; quick settings, the minimized-apps chevron and the show-desktop pill sit at the right end.
+/// picker; quick settings, the hidden-icons chevron and the show-desktop pill sit at the right end.
 pub const BTN_DIPS: i32 = 44;
 pub const SEP_DIPS: i32 = 8;
 /// The show-desktop cell: a full button plus the end pad. Its pill hugs the dock's end and the click target runs
@@ -232,7 +232,6 @@ pub enum Button {
     Start,
     Search,
     TaskView,
-    Minimized,
     Desktop,
     /// Volume, Wi-Fi, Bluetooth and power mode in ROQA's own popover.
     Quick,
@@ -242,11 +241,10 @@ pub enum Button {
     Tray,
 }
 impl Button {
-    pub const ALL: [Button; 8] = [
+    pub const ALL: [Button; 7] = [
         Button::Start,
         Button::Search,
         Button::TaskView,
-        Button::Minimized,
         Button::Desktop,
         Button::Quick,
         Button::Places,
@@ -261,7 +259,6 @@ impl Button {
             "Start",
             "Search",
             "Task View",
-            "Show minimized apps",
             "Show desktop",
             "Quick settings",
             "Drives and Recycle Bin",
@@ -271,26 +268,26 @@ impl Button {
     /// Settings store key.
     pub fn key(self) -> &'static str {
         [
-            "dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk", "dbquick", "dbplaces", "dbtray",
+            "dbstart", "dbsearch", "dbtask", "dbdesk", "dbquick", "dbplaces", "dbtray",
         ][self.index()]
     }
     /// The keys a click sends: the Windows key alone opens Start; the rest are shell shortcuts. None for the
-    /// chevron and quick settings, which open ROQA's own popups.
+    /// tray chevron, quick settings and places, which open their own popups.
     pub fn keys(self) -> Option<&'static [VIRTUAL_KEY]> {
         match self {
             Button::Start => Some(&[VK_LWIN]),
             Button::Search => Some(&[VK_LWIN, VK_S]),
             Button::TaskView => Some(&[VK_LWIN, VK_TAB]),
             Button::Desktop => Some(&[VK_LWIN, VK_D]),
-            Button::Minimized | Button::Quick | Button::Places | Button::Tray => None,
+            Button::Quick | Button::Places | Button::Tray => None,
         }
     }
 }
 
-/// Which buttons are on, and the dock's reading direction. Default: Start, Search, the minimized list and show-desktop; Task View off.
+/// Which buttons are on, and the dock's reading direction. Default: Start, Search, quick settings, the hidden-icons chevron and show-desktop; Task View off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Buttons {
-    pub shown: [bool; 8],
+    pub shown: [bool; 7],
     /// Mirrored for a right-to-left UI language: the dock runs from the right edge, as the taskbar does.
     /// The host sets it from the system; it is not a stored setting.
     pub rtl: bool,
@@ -300,8 +297,8 @@ pub struct Buttons {
 }
 impl Buttons {
     #[cfg(test)]
-    pub const NONE: Buttons = Buttons::of([false; 8]);
-    pub const fn of(shown: [bool; 8]) -> Self {
+    pub const NONE: Buttons = Buttons::of([false; 7]);
+    pub const fn of(shown: [bool; 7]) -> Self {
         Self {
             shown,
             rtl: false,
@@ -325,21 +322,16 @@ impl Buttons {
     fn has_tail(self) -> bool {
         self.tail().next().is_some()
     }
-    /// The hidden-icons chevron, quick settings, the minimized chevron, then the pill.
+    /// The hidden-icons chevron, quick settings, then the pill.
     fn tail(self) -> impl Iterator<Item = Button> {
-        [
-            Button::Tray,
-            Button::Quick,
-            Button::Minimized,
-            Button::Desktop,
-        ]
-        .into_iter()
-        .filter(move |b| self.on(*b))
+        [Button::Tray, Button::Quick, Button::Desktop]
+            .into_iter()
+            .filter(move |b| self.on(*b))
     }
 }
 impl Default for Buttons {
     fn default() -> Self {
-        Buttons::of([true, true, false, true, true, true, false, true])
+        Buttons::of([true, true, false, true, true, false, true])
     }
 }
 
@@ -390,26 +382,6 @@ pub fn cell_index(buttons: Buttons, slots: usize, hit: Hit) -> Option<usize> {
                 .map(|at| lead + slots + at),
         },
     }
-}
-
-/// Whether a catalog window belongs in the minimized-apps list: minimized, and on this desktop when the
-/// dock is limited to it.
-pub fn lists_minimized(window: &WindowRecord, desktop_only: bool) -> bool {
-    window.minimized && (window.current_desktop || !desktop_only)
-}
-
-/// The most rows the minimized popup shows.
-pub const MINIMIZED_MAX: usize = 12;
-
-/// Minimized windows for the chevron, in title order (then key) so the list is stable.
-pub fn minimized_windows(model: &WindowModel, desktop_only: bool) -> Vec<&WindowRecord> {
-    let mut list: Vec<_> = model
-        .windows
-        .iter()
-        .filter(|window| lists_minimized(window, desktop_only))
-        .collect();
-    sort::by(&mut list, |a, b| (&a.title, a.key).cmp(&(&b.title, b.key)));
-    list
 }
 
 /// Whether the user's Windows display language reads right to left (Arabic, Hebrew, ...), which mirrors the
@@ -521,7 +493,7 @@ fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
             px(SLOT_DIPS, dpi),
         ),
         Hit::Button(Button::Desktop) => (width_px - strip, strip),
-        Hit::Button(button @ (Button::Minimized | Button::Quick | Button::Tray)) => {
+        Hit::Button(button @ (Button::Quick | Button::Tray)) => {
             let end = if buttons.on(Button::Desktop) {
                 STRIP_DIPS
             } else {
@@ -1463,17 +1435,17 @@ mod tests {
     }
 
     fn only(button: Button) -> Buttons {
-        let mut on = [false; 8];
+        let mut on = [false; 7];
         on[button.index()] = true;
         Buttons::of(on)
     }
-    const ALL: Buttons = Buttons::of([true; 8]);
+    const ALL: Buttons = Buttons::of([true; 7]);
 
     #[test]
     fn width_grows_by_each_button_and_none_keeps_the_old_dock() {
         let base = width_px(N, 3, 96);
         assert_eq!(base, PAD_DIPS * 2 + SLOT_DIPS * 3);
-        // Lead buttons share one separator; the tail has one separator, the chevron and the strip.
+        // Lead buttons share one separator; the tail has one separator, the hidden-icons chevron and the strip.
         assert_eq!(
             width_px(only(Button::Start), 3, 96),
             base + BTN_DIPS + SEP_DIPS
@@ -1483,7 +1455,7 @@ mod tests {
             base + BTN_DIPS + SEP_DIPS
         );
         assert_eq!(
-            width_px(only(Button::Minimized), 3, 96),
+            width_px(only(Button::Tray), 3, 96),
             base + SEP_DIPS + BTN_DIPS
         );
         assert_eq!(
@@ -1497,12 +1469,12 @@ mod tests {
                 + SEP_DIPS
                 + SLOT_DIPS * 3
                 + SEP_DIPS
-                + 3 * BTN_DIPS
+                + 2 * BTN_DIPS
                 + STRIP_DIPS
         );
         assert_eq!(
             Buttons::default().shown,
-            [true, true, false, true, true, true, false, true]
+            [true, true, false, true, true, false, true]
         );
     }
 
@@ -1532,8 +1504,8 @@ mod tests {
 
     #[test]
     fn hit_testing_maps_buttons_slots_and_gaps() {
-        // 96 dpi, Start + Search + chevron + strip, 2 slots: pad 8, buttons 44, sep 8, slots 56.
-        let b = Buttons::of([true, true, false, true, true, false, false, false]);
+        // 96 dpi, Start + Search + hidden-icons chevron + strip, 2 slots: pad 8, buttons 44, sep 8, slots 56.
+        let b = Buttons::of([true, true, false, true, false, false, true]);
         let width = width_px(b, 2, 96);
         let at = |x| hit_at(b, x, width, 96, 2);
         assert_eq!(at(7), None);
@@ -1543,18 +1515,15 @@ mod tests {
         assert_eq!(at(8 + 88 + 8), Some(Hit::Slot(0)));
         assert_eq!(at(8 + 88 + 8 + 56), Some(Hit::Slot(1)));
         assert_eq!(at(8 + 88 + 8 + 112), None); // the tail separator
-        assert_eq!(
-            at(width - STRIP_DIPS - 44),
-            Some(Hit::Button(Button::Minimized))
-        );
+        assert_eq!(at(width - STRIP_DIPS - 44), Some(Hit::Button(Button::Tray)));
         assert_eq!(at(width - STRIP_DIPS), Some(Hit::Button(Button::Desktop)));
         assert_eq!(at(width - 1), Some(Hit::Button(Button::Desktop)));
         // Without a strip the chevron ends one pad from the edge.
-        let b = only(Button::Minimized);
+        let b = only(Button::Tray);
         let width = width_px(b, 1, 96);
         assert_eq!(
             hit_at(b, width - 8 - 1, width, 96, 1),
-            Some(Hit::Button(Button::Minimized))
+            Some(Hit::Button(Button::Tray))
         );
         assert_eq!(hit_at(b, width - 1, width, 96, 1), None);
         // A narrow work area clips slots, never the buttons at either end.
@@ -1573,7 +1542,7 @@ mod tests {
 
     #[test]
     fn slot_centres_and_drops_follow_the_lead_buttons() {
-        let b = Buttons::of([true, true, false, false, false, false, false, false]);
+        let b = Buttons::of([true, true, false, false, false, false, false]);
         // pad 8 + two buttons 88 + separator 8 = 104; slot 1 centre = 104 + 56 + 28.
         let width = width_px(b, 6, 96);
         assert_eq!(slot_center_x(1000, b, width, 1, 96), 1000 + 104 + 56 + 28);
@@ -1588,40 +1557,15 @@ mod tests {
         assert_eq!(Button::Search.keys(), Some(&[VK_LWIN, VK_S][..]));
         assert_eq!(Button::TaskView.keys(), Some(&[VK_LWIN, VK_TAB][..]));
         assert_eq!(Button::Desktop.keys(), Some(&[VK_LWIN, VK_D][..]));
-        assert_eq!(Button::Minimized.keys(), None);
         assert_eq!(Button::Quick.keys(), None);
         assert_eq!(Button::Tray.keys(), None);
         let keys: Vec<_> = Button::ALL.iter().map(|b| b.key()).collect();
         assert_eq!(
             keys,
             [
-                "dbstart", "dbsearch", "dbtask", "dbmin", "dbdesk", "dbquick", "dbplaces", "dbtray"
+                "dbstart", "dbsearch", "dbtask", "dbdesk", "dbquick", "dbplaces", "dbtray"
             ]
         );
-    }
-
-    #[test]
-    fn minimized_filter_keeps_minimized_windows_on_this_desktop() {
-        let mut model = WindowModel::default();
-        for (handle, title, minimized, here) in [
-            (1, "zeta", true, true),
-            (2, "alpha", true, true),
-            (3, "open", false, true),
-            (4, "away", true, false),
-        ] {
-            let mut w = record(handle, Identity::Unavailable(handle as u32), false);
-            (w.title, w.minimized, w.current_desktop) = (title.into(), minimized, here);
-            model.windows.push(w);
-        }
-        let titles = |desktop_only| -> Vec<_> {
-            minimized_windows(&model, desktop_only)
-                .iter()
-                .map(|w| w.title.clone())
-                .collect()
-        };
-        assert_eq!(titles(false), ["alpha", "away", "zeta"]);
-        assert_eq!(titles(true), ["alpha", "zeta"]);
-        assert!(minimized_windows(&WindowModel::default(), false).is_empty());
     }
 
     fn mirrored(b: Buttons) -> Buttons {
@@ -1674,8 +1618,8 @@ mod tests {
         // Lead: pad 8 + two buttons 88 = 96, then half of the 8 separator.
         let [lead, tail] = separators(Buttons::default(), width, 96);
         assert_eq!(lead, Some(8 + 88 + 2));
-        // Tail: separator 8, hidden icons 44, quick settings 44, chevron 44, the desktop control at the right edge.
-        assert_eq!(tail, Some(width - (8 + 44 + 44 + 44 + STRIP_DIPS) + 8));
+        // Tail: separator 8, hidden icons 44, quick settings 44, the desktop control at the right edge.
+        assert_eq!(tail, Some(width - (8 + 44 + 44 + STRIP_DIPS) + 8));
         assert_eq!(separators(N, width, 96), [None, None]);
         assert_eq!(separators(only(Button::Start), width, 96)[1], None);
         assert_eq!(separators(only(Button::Desktop), width, 96)[0], None);

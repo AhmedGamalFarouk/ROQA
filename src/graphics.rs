@@ -2650,7 +2650,6 @@ fn draw_button(
         dock::Button::TaskView => Glyph::TaskView,
         dock::Button::Desktop => unreachable!("drawn above"),
         dock::Button::Quick => Glyph::Gear,
-        dock::Button::Minimized => Glyph::Chevron,
         dock::Button::Places => Glyph::Drive,
         dock::Button::Tray => Glyph::Tray,
     };

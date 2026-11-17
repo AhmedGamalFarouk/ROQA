@@ -3379,7 +3379,7 @@ impl Desktop {
                 Ok(())
             }
             Some(Hit::Button(button)) => {
-                self.press_button(hwnd, button, catalog.model());
+                self.press_button(hwnd, button);
                 Ok(())
             }
             None => Ok(()),
@@ -3598,8 +3598,8 @@ impl Desktop {
             }
         }
     }
-    /// A taskbar button: the shell shortcut it stands for (sent on this click only), or the minimized list.
-    fn press_button(&mut self, hwnd: HWND, button: Button, model: &WindowModel) {
+    /// A taskbar button: the shell shortcut it stands for (sent on this click only), or its own popup.
+    fn press_button(&mut self, hwnd: HWND, button: Button) {
         match (button, button.keys()) {
             (Button::Quick, _) => self.open_quick_menu(hwnd),
             (Button::Places, _) => self.open_places_menu(hwnd),
@@ -3609,7 +3609,7 @@ impl Desktop {
                     eprintln!("Dock button: Windows refused the key input");
                 }
             }
-            (_, None) => self.open_minimized_menu(hwnd, model),
+            (_, None) => {}
         }
     }
     /// The hidden-icons button: Windows' own flyout, set above the button.
@@ -3969,77 +3969,6 @@ impl Desktop {
             dock::restore_foreground(menu.hwnd(), menu.return_to);
         }
     }
-    /// The chevron's popup above it: the minimized windows right now (at most `MINIMIZED_MAX`), each with
-    /// its icon from the cache; a click restores and activates that window. Nothing is listed, and nothing
-    /// opens, when none is minimized.
-    fn open_minimized_menu(&mut self, hwnd: HWND, model: &WindowModel) {
-        self.dismiss_preview();
-        self.close_menu();
-        let Some(dock) = self.dock_at(hwnd).filter(|dock| dock.visible) else {
-            return;
-        };
-        let (bounds, dpi, monitor, buttons) = (
-            dock.bounds,
-            dock.dpi,
-            dock.monitor.clone(),
-            dock.dock_buttons,
-        );
-        let return_to = dock::foreground_key();
-        let Some(work) = self
-            .monitors
-            .iter()
-            .find(|m| m.device == monitor)
-            .map(|m| m.work)
-        else {
-            return;
-        };
-        let windows: Vec<_> = dock::minimized_windows(model, self.settings.desktop_only)
-            .into_iter()
-            .take(dock::MINIMIZED_MAX)
-            .collect();
-        if windows.is_empty() {
-            return;
-        }
-        let size = self.icon_size();
-        let icons = windows
-            .iter()
-            .map(|window| {
-                let sources = icons::sources(&window.identity, window.executable.as_deref());
-                size.and_then(|size| self.icons.icon(&window.identity, sources, size))
-            })
-            .collect();
-        let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Button(Button::Minimized));
-        let spec = dock_menu::Spec {
-            dock: hwnd,
-            slot: 0,
-            windows: Vec::new(),
-            identity: Identity::Unavailable(0),
-            items: windows.iter().map(|w| Item::Restore(w.key)).collect(),
-            dock_bounds: bounds,
-            work,
-            dpi,
-            app: "Minimized apps".into(),
-            titles: windows
-                .iter()
-                .map(|w| {
-                    if w.title.is_empty() {
-                        "Window".to_owned()
-                    } else {
-                        w.title.clone()
-                    }
-                })
-                .collect(),
-            icons,
-            x: bounds.x + left + width / 2,
-            below: None,
-            return_to,
-        };
-        match dock_menu::Menu::open(&self.graphics, self.palette, spec) {
-            Ok(menu) if take_foreground(menu.hwnd()) => self.menu = Some(menu),
-            Ok(_) => eprintln!("Minimized list: Windows kept another app in front; not opened"),
-            Err(error) => eprintln!("Minimized list: {error}"),
-        }
-    }
     /// Middle-click on a dock slot launches a new instance when the app can be launched.
     fn middle_click_slot(&mut self, slot: usize) {
         if let Some(index) = slot.checked_sub(1)
@@ -4296,8 +4225,8 @@ impl Desktop {
             dock::restore_foreground(menu.hwnd(), menu.return_to);
             return;
         }
-        // A new instance or a restored window takes the foreground itself.
-        if !matches!(item, Item::NewInstance | Item::Restore(_)) {
+        // A new instance takes the foreground itself.
+        if !matches!(item, Item::NewInstance) {
             dock::restore_foreground(menu.hwnd(), menu.return_to);
         }
         if menu.slot == 0 {
@@ -4309,9 +4238,6 @@ impl Desktop {
                 }
                 // SAFETY: a scalar quit request to this thread's own message loop.
                 Item::Quit => unsafe { PostQuitMessage(0) },
-                Item::Restore(key) => {
-                    self.run_dock_action(dock::Action::Activate(key));
-                }
                 Item::File(index) => {
                     if let Some(file) = self.stack.get(index)
                         && !dock::launch(&file.to_string_lossy())
@@ -4410,7 +4336,6 @@ impl Desktop {
             Item::Hide => self.change_pins(|pins| pins.hide(target.identity)),
             Item::Settings
             | Item::Quit
-            | Item::Restore(_)
             | Item::Quick(_)
             | Item::Place(_)
             | Item::File(_)

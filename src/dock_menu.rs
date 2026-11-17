@@ -60,8 +60,6 @@ pub enum Item {
     /// The app menu (right-click on the notch or the dock outside an app slot).
     Settings,
     Quit,
-    /// A minimized window in the chevron's list; its row shows the window's title (`Spec::titles`).
-    Restore(WindowKey),
     /// A row of the quick settings popup; its text is the setting's state (`Spec::titles`).
     Quick(Quick),
     /// A row of the Places popup (an index into the host's list); its text is in `Spec::titles`.
@@ -109,7 +107,6 @@ impl Item {
             Item::UndoShelf => "Undo removal",
             Item::Settings => "Settings",
             Item::Quit => "Quit ROQA",
-            Item::Restore(_) => "Window",
             Item::Quick(_) => "Setting",
             Item::Place(_) => "Place",
             Item::File(_) => "File",
@@ -893,12 +890,12 @@ mod tests {
     }
 
     #[test]
-    fn restore_rows_show_the_window_title_and_other_rows_their_label() {
-        let items = [Item::Restore(key_of(4)), Item::Close(key_of(4))];
+    fn rows_show_their_title_and_other_rows_their_label() {
+        let items = [Item::File(0), Item::Close(key_of(4))];
         let titles = vec!["Report".to_string()];
         assert_eq!(row_label(&items, &titles, 0), "Report");
         // No title for the row (a fixed-label menu): the action's own label.
         assert_eq!(row_label(&items, &titles, 1), "Close window");
-        assert_eq!(row_label(&items, &[], 0), "Window");
+        assert_eq!(row_label(&items, &[], 0), "File");
     }
 }

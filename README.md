@@ -39,7 +39,7 @@
 - **Window Switching & Minimizing:** Single-click activation, window cycling within groups, and minimizing.
 - **Dock Context Menu:** Clean right-click menu with options to launch new instances, pin/unpin apps, and close windows.
 - **Notification Badges:** Real-time unread counter and status indicator dots on application icons.
-- **Desktop & Minimized Strip:** Quick show-desktop strip and minimized window drawer.
+- **Desktop Strip:** Quick show-desktop strip.
 - **Window Picker:** Modeless search dialog (`--show-picker`) to instantly filter and jump to any active window.
 
 ### Personalization & Settings
