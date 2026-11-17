@@ -1118,6 +1118,8 @@ fn take_foreground(notch: HWND) -> bool {
 }
 /// The notch volume bar eases to a new level over this long.
 const VOLUME_EASE: Duration = Duration::from_millis(120);
+/// After a swipe skips a track, further sideways wheel movement is ignored this long.
+const SWIPE_PAUSE: Duration = Duration::from_millis(600);
 /// Transient topology reads are retried this often, at most `TOPOLOGY_RETRIES` times per change.
 const TOPOLOGY_RETRY: Duration = Duration::from_millis(250);
 const TOPOLOGY_RETRIES: u32 = 8;
@@ -1360,8 +1362,11 @@ struct Desktop {
     menu: Option<dock_menu::Menu>,
     hover_popup: Option<dock_menu::Menu>,
     hover_spot: Option<(usize, Hit, Instant)>,
-    /// Wheel movement left over after the last whole notch on the volume bar.
+    /// Wheel movement left over after the last whole notch on the volume bar or the open notch.
     volume_wheel: i32,
+    /// Sideways wheel movement kept toward a track skip, and when the next skip is allowed (one skip per swipe).
+    swipe: i32,
+    swipe_until: Instant,
     /// The volume and brightness sliders on every monitor's edges, rebuilt to match the monitors and
     /// settings whenever either changes (`edges_dirty`).
     edges: Edges,
@@ -1514,6 +1519,8 @@ impl Desktop {
             hover_popup: None,
             hover_spot: None,
             volume_wheel: 0,
+            swipe: 0,
+            swipe_until: Instant::now(),
             edges: Edges::default(),
             edges_dirty: true,
             pages,
@@ -1825,6 +1832,17 @@ impl Desktop {
             .chain(self.pages.stopwatch.next_tick(now).filter(|_| expanded))
             .min()
             .map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+    /// The wheel over the open notch: `by` tabs along the bar (positive is later), stopping at the ends.
+    fn flip_tab(&mut self, by: i32) {
+        let visible = self.pages.tabs.visible();
+        let Some(at) = visible.position(self.page()) else {
+            return;
+        };
+        let to = (at as i32 + by).clamp(0, visible.as_slice().len() as i32 - 1);
+        if let Some(&tab) = visible.as_slice().get(to as usize) {
+            self.select_tab(tab);
+        }
     }
     /// The page the open panel shows now.
     fn page(&self) -> Tab {
@@ -5052,6 +5070,32 @@ impl Desktop {
                     let fine = message.wParam.0 & 0x0004 != 0; // MK_SHIFT
                     self.audio
                         .set(f32::from(edge::step_level(level.percent, steps, fine)) / 100.0);
+                }
+            }
+            // The open notch: the wheel flips the tabs, a sideways swipe on a live Music page skips the track.
+            WM_MOUSEWHEEL if surface.expanded() => {
+                let delta = i32::from((message.wParam.0 >> 16) as u16 as i16);
+                let (steps, rest) = edge::wheel_steps(self.volume_wheel, delta);
+                self.volume_wheel = rest;
+                if steps != 0 {
+                    self.flip_tab(-steps);
+                }
+            }
+            WM_MOUSEHWHEEL if surface.expanded() && volume_ui => {
+                let delta = i32::from((message.wParam.0 >> 16) as u16 as i16);
+                let now = Instant::now();
+                if now >= self.swipe_until {
+                    let (steps, rest) = edge::wheel_steps(self.swipe, delta);
+                    self.swipe = rest;
+                    if steps != 0 {
+                        self.swipe = 0;
+                        self.swipe_until = now + SWIPE_PAUSE;
+                        self.media.command(if steps > 0 {
+                            crate::media::NEXT
+                        } else {
+                            crate::media::PREVIOUS
+                        });
+                    }
                 }
             }
             WM_MOUSELEAVE => {
