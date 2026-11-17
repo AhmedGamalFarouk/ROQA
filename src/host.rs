@@ -5423,8 +5423,9 @@ impl Desktop {
         if self.text.take_changed() {
             self.rescale_text()?;
         }
-        // A pick made during one open ends once every notch has closed.
-        if self.pages.tabs.choice.is_some() {
+        // A pick made during one open, and the month grid, end once every notch has closed: the next open
+        // starts on the tiles.
+        if self.pages.tabs.choice.is_some() || self.pages.month.is_some() {
             let now = Instant::now();
             if self
                 .surfaces
@@ -5433,6 +5434,7 @@ impl Desktop {
                 .all(|s| s.collapsed(now))
             {
                 self.pages.tabs.choice = None;
+                self.pages.month = None;
             }
         }
         let media_on = self.pages.tabs.on(Tab::Media);
