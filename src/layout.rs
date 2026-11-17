@@ -729,26 +729,60 @@ fn notice_slot(media: bool, page: u16, dpi: u32) -> Bounds {
     scaled_bounds(POWER_NOTICE[usize::from(media)], dpi)
 }
 
-/// The alert's Eject button: the notice row's right 52 DIPs, in pixels from the body's left and top edges.
-pub fn eject_button(media: bool, dpi: u32) -> Bounds {
+/// A button on the notice row, counted from the right (0 is the last): 52 DIPs wide and 6 apart, in pixels from the
+/// body's left and top edges. Eject, Snooze, and Deny with Allow use it.
+pub fn notice_button(media: bool, dpi: u32, from_right: usize) -> Bounds {
     let slot = power_notice(media, dpi);
     let width = scaled(52.0, dpi);
     Bounds {
-        x: slot.x + slot.width - width,
+        x: slot.x + slot.width - width - from_right as i32 * scaled(58.0, dpi),
         width,
         ..slot
     }
 }
-/// Whether a window point is on the Eject button at `progress`; none while the row is not drawn.
-pub fn eject_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, y: i32) -> bool {
+/// Whether a window point is on that notice button at `progress`; none while the row is not drawn.
+pub fn notice_button_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    from_right: usize,
+    (x, y): (i32, i32),
+) -> bool {
     panel_offset(
         window_width,
         dpi,
         progress,
-        eject_button(media, dpi),
+        notice_button(media, dpi, from_right),
         (x, y),
     )
     .is_some()
+}
+
+/// The idle Timer page's "Remind" chip: 60 x 24 left of "Stopwatch" on the "Pick a time" row (y 40).
+pub fn remind_button(dpi: u32) -> Bounds {
+    scaled_bounds(
+        (
+            NOTCH_EXPANDED.width - PAD - 72.0 - 6.0 - 60.0,
+            40.0,
+            60.0,
+            CHIP_H,
+        ),
+        dpi,
+    )
+}
+pub fn remind_button_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    (x, y): (i32, i32),
+) -> bool {
+    let vertical_padding = scaled(3.0, dpi);
+    let mut target = remind_button(dpi);
+    target.y -= vertical_padding;
+    target.height += 2 * vertical_padding;
+    on_slot(target, window_width, dpi, progress, media, x, y)
 }
 
 /// Two 160 x 32 DIP file capsules share one focal row, with the pager below.

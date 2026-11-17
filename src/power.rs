@@ -103,6 +103,8 @@ pub enum Extra {
     Eject(char),
     /// A progress bar, in percent.
     Progress(u8),
+    /// A Snooze button (a due reminder).
+    Snooze,
 }
 
 #[derive(Default)]

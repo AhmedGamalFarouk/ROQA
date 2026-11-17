@@ -47,6 +47,8 @@ mod prayer_tab;
 mod preview;
 mod privacy;
 mod quick;
+mod remind;
+mod remind_box;
 mod settings;
 mod settings_window;
 mod shelf;

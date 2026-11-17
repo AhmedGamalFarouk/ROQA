@@ -35,6 +35,8 @@ pub struct Store {
     pub clips: Vec<String>,
     /// Running countdown timers as absolute wall-clock expiries (Unix seconds), soonest first.
     pub timers: Vec<u64>,
+    /// Reminders waiting (`remind.rs`): the Unix-second expiry and the label, soonest first.
+    pub reminders: Vec<(u64, String)>,
     /// User settings; version 1 files had none, so they load as the defaults.
     pub settings: Settings,
     /// The notch tab used last (a state, not a setting: the settings window must not write it back).
@@ -173,6 +175,15 @@ fn parse(text: &str) -> Option<Store> {
                 store.clips.push(crate::clipboard::decode(value))
             }
             Some(("timer", value)) => store.timers.extend(value.parse::<u64>()),
+            Some(("remind", value)) => {
+                if let Some((expiry, label)) = value.split_once(',')
+                    && let Ok(expiry) = expiry.parse()
+                {
+                    store
+                        .reminders
+                        .push((expiry, crate::clipboard::decode(label)));
+                }
+            }
             Some(("lasttab", value)) => {
                 store.last_tab = Tab::from_key(value)
                     .filter(|tab| tab.available())
@@ -234,6 +245,12 @@ impl Store {
         }
         for expiry in &self.timers {
             out.push_str(&format!("timer={expiry}\n"));
+        }
+        for (expiry, label) in &self.reminders {
+            out.push_str(&format!(
+                "remind={expiry},{}\n",
+                crate::clipboard::encode(label)
+            ));
         }
         out.push_str(&format!("lasttab={}\n", self.last_tab.key()));
         if self.water.1 > 0 {
@@ -315,6 +332,7 @@ mod tests {
             shelf: vec![r"C:\Users\me\doc.txt".into()],
             clips: vec!["two\nlines \\ and = sign".into()],
             timers: vec![1_800_000_000, 1_800_000_060],
+            reminders: vec![(1_800_000_300, "call mum, 17:30".into())],
             settings: Settings {
                 dock: false,
                 off_monitors: vec![r"\\.\DISPLAY2".into()],
@@ -399,6 +417,7 @@ mod tests {
                 shelf: vec!["b".into()],
                 clips: Vec::new(),
                 timers: vec![77], // unparsable timer values are skipped
+                reminders: Vec::new(),
                 settings: Settings::default(),
                 last_tab: Tab::Media,
                 place: None,

@@ -1311,8 +1311,12 @@ fn notice_text(
         return Ok(());
     };
     let slot = layout::power_notice(scene.track.is_some(), scene.dpi);
-    let button = matches!(scene.extra, Extra::Eject(_))
-        .then(|| layout::eject_button(scene.track.is_some(), scene.dpi));
+    let label = match scene.extra {
+        Extra::Eject(_) => Some("Eject"),
+        Extra::Snooze => Some("Snooze"),
+        _ => None,
+    };
+    let button = label.map(|_| layout::notice_button(scene.track.is_some(), scene.dpi, 0));
     // A progress row gives the text its left share and the bar the rest.
     let bar_left = matches!(scene.extra, Extra::Progress(_)).then(|| slot.width as f32 * 0.5);
     let left = body.left + slot.x as f32;
@@ -1369,7 +1373,7 @@ fn notice_text(
             context.FillRoundedRectangle(&rounded(fill, height / 2.0), &front);
         }
     }
-    if let Some(button) = button {
+    if let (Some(button), Some(name)) = (button, label) {
         // The one primary action of the alert: a solid accent capsule.
         let cell = D2D_RECT_F {
             left: body.left + button.x as f32,
@@ -1389,7 +1393,7 @@ fn notice_text(
         };
         draw_text(
             context,
-            "Eject",
+            name,
             &label,
             cell,
             with_alpha(p.ink_on_accent(), p.ink_alpha(alpha)),

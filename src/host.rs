@@ -26,7 +26,8 @@ use crate::{
     pins::Pins,
     pomo,
     power::{self, Power},
-    prayer_os, prayer_tab, preview, privacy, quick,
+    prayer_os, prayer_tab, preview, privacy, quick, remind,
+    remind_box::RemindBox,
     settings::{self, Settings},
     settings_window::{SettingsWindow, SoundAction},
     shelf::{self, Check, Shelf},
@@ -1300,6 +1301,11 @@ struct Desktop {
     graphics: Graphics,
     rebuild: Rebuild,
     picker: Option<Picker>,
+    /// The reminder line box, open only while the user types into it.
+    remind_box: Option<RemindBox>,
+    /// Reminders waiting, and the label of the one shown last (what Snooze sets again).
+    reminders: remind::Reminders,
+    last_reminder: String,
     /// Open only while the user has it up; created on demand, destroyed on close, so it costs nothing closed.
     palette: Palette,
     palette_dirty: bool,
@@ -1452,6 +1458,8 @@ impl Desktop {
         pages.water = (store.water, settings.water_cfg[0] as u8);
         let weather = Feed::new(store.place.clone(), store.report.clone(), settings.detect);
         let timers = Timers::restore(&store.timers, timer::wall_now(), now);
+        // One that came due while ROQA was not running shows at the first pass.
+        let reminders = remind::Reminders::from_store(&store);
         // The section now mirrors what is running; stale entries leave the file with its next write.
         timers.write_to(&mut store, &mut Pending::default(), now);
         let effective_accent = if settings.match_accent {
@@ -1482,6 +1490,9 @@ impl Desktop {
             graphics: Graphics::create()?,
             rebuild: Rebuild::new(Instant::now()),
             picker: None,
+            remind_box: None,
+            reminders,
+            last_reminder: String::new(),
             palette: crate::theme::system_palette(settings.theme, effective_accent),
             palette_dirty: false,
             settings_window: None,
@@ -2118,7 +2129,12 @@ impl Desktop {
     /// Expands every notch with `text` for `PRAYER_NOTICE`; on a monitor a full-screen app covers it appears
     /// over the app (topmost, never activated) and hides again once retracted.
     fn show_notice(&mut self, text: String, now: Instant) {
+        self.show_notice_with(text, now, power::Extra::None);
+    }
+    /// `show_notice`, with a button or bar on its row.
+    fn show_notice_with(&mut self, text: String, now: Instant, extra: power::Extra) {
         self.power.announce(text, now, PRAYER_NOTICE);
+        self.power.offer(extra);
         for surface in &mut self.surfaces {
             if surface.kind() == SurfaceKind::Notch && !surface.visible {
                 // Painted before it shows, as when a full-screen app ends.
@@ -2168,6 +2184,71 @@ impl Desktop {
             .announce(agent::progress_text(name, percent), now, hold);
         self.power.offer(power::Extra::Progress(percent));
         self.open_notches();
+        self.request_notches(Repaint::Full, |_| true);
+    }
+    /// Reminders: the wait is the soonest one's time, none with nothing set. A due one chimes (unless reminder
+    /// sounds are off) and shows with a Snooze button; one that came due while ROQA was off shows at the start.
+    #[inline(never)]
+    fn refresh_reminders(&mut self) -> u32 {
+        let wall = timer::wall_now();
+        if let Some(label) = self.reminders.take_due(wall) {
+            let now = Instant::now();
+            self.reminders
+                .write_to(&mut self.store, &mut self.pending, now);
+            if self.settings.reminder_plays() {
+                chime();
+            }
+            self.show_notice_with(remind::shown(&label), now, power::Extra::Snooze);
+            self.last_reminder = label;
+        }
+        self.reminders.wait_secs(wall).map_or(INFINITE, |secs| {
+            u32::try_from(secs.saturating_mul(1000)).map_or(INFINITE - 1, |ms| ms.min(INFINITE - 1))
+        })
+    }
+    /// What the reminder box made: set it and say when it will come.
+    fn remind_message(&mut self, message: &MSG) -> Result<bool> {
+        let Some(window) = &mut self.remind_box else {
+            return Ok(false);
+        };
+        if !window.message(message)? {
+            return Ok(false);
+        }
+        let made = window.take();
+        if window.closed() {
+            self.remind_box = None;
+        }
+        if let Some((delay, label)) = made {
+            self.set_reminder(delay, label);
+        }
+        Ok(true)
+    }
+    fn set_reminder(&mut self, delay: u64, label: String) {
+        let now = Instant::now();
+        let text = if self.reminders.add(timer::wall_now(), delay, label) {
+            self.reminders
+                .write_to(&mut self.store, &mut self.pending, now);
+            let (hours, minutes) = (delay / 3600, delay % 3600 / 60);
+            match (hours, minutes) {
+                (0, minutes) => format!("I'll remind you in {minutes} min"),
+                (hours, 0) => format!("I'll remind you in {hours} h"),
+                (hours, minutes) => format!("I'll remind you in {hours} h {minutes} min"),
+            }
+        } else {
+            format!("{} reminders are already waiting.", remind::MAX)
+        };
+        self.power.announce(text, now, DEVICE_NOTICE);
+        self.open_notches();
+        self.request_notches(Repaint::Full, |_| true);
+    }
+    /// The Snooze button on a due reminder: the same words again in ten minutes.
+    fn snooze(&mut self) {
+        let now = Instant::now();
+        let label = std::mem::take(&mut self.last_reminder);
+        self.reminders.add(timer::wall_now(), remind::SNOOZE, label);
+        self.reminders
+            .write_to(&mut self.store, &mut self.pending, now);
+        self.power
+            .announce("Snoozed for 10 min".into(), now, DEVICE_NOTICE);
         self.request_notches(Repaint::Full, |_| true);
     }
     /// Water reminders (F5): one deadline to the next slot, none while the switch is off. A due slot shows
@@ -4688,7 +4769,7 @@ impl Desktop {
             return true;
         }
         if let Some(letter) = self.power.eject()
-            && layout::eject_at(width, dpi, progress, live, x, y)
+            && layout::notice_button_at(width, dpi, progress, live, 0, (x, y))
         {
             let text = if crate::system_os::eject(letter) {
                 "Safe to remove"
@@ -4698,6 +4779,12 @@ impl Desktop {
             self.power
                 .announce(text.into(), Instant::now(), DEVICE_NOTICE);
             self.request_notches(Repaint::Full, |_| true);
+            return true;
+        }
+        if self.power.extra() == power::Extra::Snooze
+            && layout::notice_button_at(width, dpi, progress, live, 0, (x, y))
+        {
+            self.snooze();
             return true;
         }
         if layout::gear_at(width, dpi, progress, live, x, y) {
@@ -4723,6 +4810,17 @@ impl Desktop {
             _ => (0, false),
         };
         let idle = view.as_ref().is_none_or(|view| view.done);
+        if page == Tab::Timer
+            && idle
+            && layout::remind_button_at(width, dpi, progress, live, (x, y))
+        {
+            self.remind_box.take();
+            match RemindBox::create() {
+                Ok(window) => self.remind_box = Some(window),
+                Err(error) => eprintln!("Reminder box: {error}"),
+            }
+            return true;
+        }
         if page == Tab::Timer && idle && layout::watch_button_at(width, dpi, progress, live, (x, y))
         {
             self.timer_press(timer::Ctl::Watch, now);
@@ -5516,6 +5614,7 @@ impl Desktop {
             .min(self.refresh_privacy())
             .min(self.refresh_prayer())
             .min(self.refresh_water())
+            .min(self.refresh_reminders())
             .min(self.refresh_close())
             .min(self.refresh_stats());
         self.refresh_menu();
@@ -5891,6 +5990,9 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             if let Some(picker) = &mut desktop.picker
                 && picker.message(&message)?
             {
+                continue;
+            }
+            if desktop.remind_message(&message)? {
                 continue;
             }
             desktop.message(&message)?;

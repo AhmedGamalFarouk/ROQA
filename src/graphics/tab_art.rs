@@ -448,6 +448,7 @@ fn timer_page(g: &Page, scene: &NotchScene) -> Result<()> {
             let slot = layout::page_button(index, 0, scene.dpi);
             g.chip(g.slot(slot), &control.label())?;
         }
+        g.chip(g.slot(layout::remind_button(scene.dpi)), "Remind")?;
         return g.chip(g.slot(layout::watch_button(scene.dpi)), "Stopwatch");
     };
     g.text(
