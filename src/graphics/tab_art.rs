@@ -680,8 +680,15 @@ fn drop_zone(
 /// battery ring, a usage bar's fill, the water bar.
 fn widgets_page(g: &Page, scene: &NotchScene) -> Result<()> {
     use crate::widgets::{WidgetKind, speed};
+    if let Some(month) = scene.month {
+        return month_page(g, scene, month);
+    }
     let tall = scene.widgets.tall();
-    let tile = if tall { WIDGET_COMPACT } else { WIDGET_TILE };
+    let tile = if tall {
+        layout::WIDGET_COMPACT
+    } else {
+        layout::WIDGET_TILE
+    };
     // A standard value, or its compact twin.
     let pick = |standard: f32, compact: f32| if tall { compact } else { standard };
     for (index, kind) in scene.widgets.cells().into_iter().enumerate() {
@@ -966,10 +973,87 @@ fn widgets_page(g: &Page, scene: &NotchScene) -> Result<()> {
     }
     Ok(())
 }
-/// A Widgets tile: 190 x 72 DIPs, two across the 420 wide page; compact (two rows) 190 x 52.
-const WIDGET_TILE: (f32, f32) = (190.0, 72.0);
-const WIDGET_COMPACT: (f32, f32) = (190.0, 52.0);
-
+/// The month page: two tiles, the month's name with its arrows on the left and six weeks on the right. Today is
+/// the one accent.
+fn month_page(g: &Page, scene: &NotchScene, (year, month): (u16, u16)) -> Result<()> {
+    use crate::widgets::{MONTHS, month_grid};
+    let (w, h) = (
+        layout::WIDGET_TILE.0,
+        layout::WIDGET_COMPACT.1 * 2.0 + layout::GUTTER,
+    );
+    let at = |x: f32, y: f32, w: f32, h: f32| g.at(layout::PAD + x, layout::BODY_Y + y, w, h);
+    g.tile(at(0.0, 0.0, w, h))?;
+    g.tile(at(w + layout::GUTTER, 0.0, w, h))?;
+    g.text(
+        MONTHS[usize::from(month - 1)],
+        &g.display(24.0, BOLD, LEAD),
+        at(14.0, 8.0, 162.0, 28.0),
+        g.ink(1.0),
+    )?;
+    g.text(
+        &year.to_string(),
+        &g.font(11.0, NORMAL, LEAD),
+        at(14.0, 38.0, 162.0, 16.0),
+        g.ink(0.6),
+    )?;
+    for ((x, y, width, height), glyph) in layout::MONTH_ARROWS
+        .into_iter()
+        .zip([Glyph::Back, Glyph::Forward])
+    {
+        g.fill(g.at(x, y, width, height), None, g.ink(0.14))?;
+        glyphs::draw(
+            g.context,
+            g.at(
+                x + (width - 16.0) / 2.0,
+                y + (height - 16.0) / 2.0,
+                16.0,
+                16.0,
+            ),
+            glyph,
+            g.ink(0.9),
+        )?;
+    }
+    // SAFETY: GetLocalTime returns a value and needs no resources.
+    let date = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    let today = (date.wYear, date.wMonth) == (year, month);
+    let sunday = scene.widgets.week_sunday;
+    let labels = if sunday {
+        ["S", "M", "T", "W", "T", "F", "S"]
+    } else {
+        ["M", "T", "W", "T", "F", "S", "S"]
+    };
+    let left = w + layout::GUTTER + 8.0;
+    for (i, label) in labels.into_iter().enumerate() {
+        g.text(
+            label,
+            &g.font(9.0, SEMI, MIDDLE),
+            at(left + i as f32 * 25.0, 4.0, 25.0, 12.0),
+            g.ink(0.55),
+        )?;
+    }
+    for (cell, (day, inside)) in month_grid(year, month, sunday).into_iter().enumerate() {
+        let (x, y) = (
+            left + (cell % 7) as f32 * 25.0,
+            18.0 + (cell / 7) as f32 * 15.0,
+        );
+        let now = inside && today && day == date.wDay;
+        if now {
+            g.fill(at(x + 5.5, y + 0.5, 14.0, 14.0), None, g.accent(1.0))?;
+        }
+        let colour = match (now, inside) {
+            (true, _) => g.on_accent(),
+            (_, true) => g.ink(0.9),
+            _ => g.ink(0.3),
+        };
+        g.text(
+            &day.to_string(),
+            &g.font(10.0, SEMI, MIDDLE),
+            at(x, y, 25.0, 15.0),
+            colour,
+        )?;
+    }
+    Ok(())
+}
 /// The Weather page: the condition glyph and the big temperature at the left with the condition and the day's range
 /// under them, the next hours as columns on one soft tile at the right (four, on both panel kinds), and the
 /// attribution as the footer. With no data one line says why.

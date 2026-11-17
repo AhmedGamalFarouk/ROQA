@@ -180,6 +180,8 @@ struct Pages {
     limits: limits::View,
     limits_key: Option<(u32, bool, String)>,
     widgets: crate::widgets::WidgetConfig,
+    /// The Widgets page's month grid: the (year, month) shown, `None` for the tiles.
+    month: Option<(u16, u16)>,
     /// The Water tile's source: the stored (day, glasses) and the daily goal.
     water: ((i64, u8), u8),
     /// The system tiles' last readings; sampled only while an open notch shows them (`refresh_stats`).
@@ -212,6 +214,7 @@ impl Pages {
             limits: limits::View::default(),
             limits_key: None,
             widgets: settings.widgets,
+            month: None,
             water: ((0, 0), 0),
             stats: crate::widgets::Stats::default(),
             pomo: pomo::Pomo::default(),
@@ -649,7 +652,7 @@ impl Surface {
         layout::set_page_height(if page == Tab::Limits {
             layout::limits_height(pages.limits.rows.len())
         } else if page == Tab::Widgets {
-            if pages.widgets.tall() {
+            if pages.widgets.tall() || pages.month.is_some() {
                 layout::WIDGETS_TALL
             } else {
                 layout::WIDGETS_PAGE
@@ -824,6 +827,7 @@ impl Surface {
             clips: copied,
             tab: page,
             widgets: pages.widgets,
+            month: pages.month,
             glance: crate::widgets::Glance {
                 water: (page == Tab::Widgets
                     && pages.widgets.uses(crate::widgets::WidgetKind::Water))
@@ -1836,6 +1840,7 @@ impl Desktop {
         if !self.pages.tabs.select(tab, live) {
             return;
         }
+        self.pages.month = None;
         if self.store.last_tab != tab {
             self.store.last_tab = tab;
             self.pending.mark(Instant::now());
@@ -2795,6 +2800,7 @@ impl Desktop {
         }
         let widgets_changed = old.widgets != self.settings.widgets;
         self.pages.widgets = self.settings.widgets;
+        self.pages.month = None;
         self.pages.water.1 = self.settings.water_cfg[0] as u8;
         let tabs_changed = old.tabs != self.settings.tabs;
         if tabs_changed {
@@ -4662,6 +4668,9 @@ impl Desktop {
             }
             return false;
         }
+        if page == Tab::Widgets {
+            return self.click_widgets(notch, (x, y));
+        }
         if page != Tab::Media || !live {
             return false;
         }
@@ -4678,6 +4687,47 @@ impl Desktop {
             return false;
         }
         true
+    }
+    /// A click on the Widgets page: the calendar tile opens its month grid; there, an arrow steps the month and
+    /// anywhere else goes back to the tiles.
+    fn click_widgets(&mut self, notch: usize, (x, y): (i32, i32)) -> bool {
+        let surface = &self.surfaces[notch];
+        let (width, dpi) = (surface.bounds.width, surface.dpi);
+        let progress = surface.motion.value(Instant::now());
+        let Some((year, month)) = self.pages.month else {
+            let cell = layout::widget_at(width, dpi, progress, self.pages.widgets.tall(), x, y);
+            if cell.and_then(|cell| self.pages.widgets.cells()[cell])
+                != Some(crate::widgets::WidgetKind::WeekCalendar)
+            {
+                return false;
+            }
+            let (year, month, _) = prayer_os::local_now().ymd;
+            self.show_month(notch, Some((year as u16, month as u16)), 1.0);
+            return true;
+        };
+        match layout::month_arrow_at(width, dpi, progress, x, y) {
+            None => self.show_month(notch, None, -1.0),
+            Some(arrow) => {
+                let index =
+                    i32::from(year) * 12 + i32::from(month) - 1 + if arrow == 0 { -1 } else { 1 };
+                // Years 1601 to 9999: before that the calendar helpers have nothing to say.
+                if (1601 * 12..10_000 * 12).contains(&index) {
+                    let next = ((index / 12) as u16, (index % 12) as u16 + 1);
+                    self.show_month(notch, Some(next), if arrow == 0 { -1.0 } else { 1.0 });
+                }
+            }
+        }
+        true
+    }
+    /// Shows a month grid or the tiles again; the page eases in on the pop curve from the side `dir` points to.
+    fn show_month(&mut self, notch: usize, month: Option<(u16, u16)>, dir: f32) {
+        self.pages.month = month;
+        let surface = &mut self.surfaces[notch];
+        surface.page_dir = dir;
+        surface.page_fx = Tween::rest(0.0);
+        surface.page_fx.retarget(1.0, motion::POP_TIME, motion::POP);
+        surface.live = true;
+        self.request_notches(Repaint::Full, |_| true);
     }
     /// Presses a shown media control or the mute toggle.
     fn press(&mut self, control: usize) {

@@ -329,6 +329,38 @@ pub fn week_numbers(year: u16, month: u16, day: u16, sunday_first_weekday: u16) 
     })
 }
 
+pub const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// Six weeks of a month, 42 cells in reading order: (day number, in this month). The first row is
+/// `week_numbers` of the 1st, so the leading days come from the previous month; the tail runs into the next.
+pub fn month_grid(year: u16, month: u16, sunday_first: bool) -> [(u16, bool); 42] {
+    // Days since 1970-01-01 (a Thursday) to a Sunday-based weekday of the 1st.
+    let first = (crate::prayer_tab::day_number((year.into(), month.into(), 1)) + 4).rem_euclid(7);
+    let row = week_numbers(year, month, 1, (first as u16 + u16::from(sunday_first)) % 7);
+    let lead = row.iter().position(|&day| day == 1).unwrap_or(0);
+    let days = month_days(year, month);
+    std::array::from_fn(|cell| match cell {
+        0..7 => (row[cell], cell >= lead),
+        _ => match (cell - lead + 1) as u16 {
+            day if day <= days => (day, true),
+            day => (day - days, false),
+        },
+    })
+}
+
 fn month_days(year: u16, month: u16) -> u16 {
     match month {
         2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
@@ -376,6 +408,31 @@ mod tests {
         }
         assert_eq!(month_days(2000, 2), 29);
         assert_eq!(month_days(2100, 2), 28);
+    }
+
+    #[test]
+    fn month_grid_places_the_first_and_spills_into_neighbours() {
+        // November 2026 starts on a Sunday; February 2024 on a Thursday.
+        let nov = month_grid(2026, 11, false);
+        assert_eq!(
+            (nov[5], nov[6], nov[7]),
+            ((31, false), (1, true), (2, true))
+        );
+        assert_eq!(
+            (nov[35], nov[36], nov[37]),
+            ((30, true), (1, false), (2, false))
+        );
+        let sunday = month_grid(2026, 11, true);
+        assert_eq!(
+            (sunday[0], sunday[29], sunday[30]),
+            ((1, true), (30, true), (1, false))
+        );
+        let feb = month_grid(2024, 2, false);
+        assert_eq!(
+            (feb[2], feb[3], feb[31], feb[32]),
+            ((31, false), (1, true), (29, true), (1, false))
+        );
+        assert_eq!(month_grid(2023, 1, true)[0], (1, true));
     }
 
     #[test]

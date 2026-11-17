@@ -216,6 +216,8 @@ pub struct NotchScene<'a> {
     /// The page the open panel shows. Media is the media and clock panel; the others draw their own content.
     pub tab: Tab,
     pub widgets: crate::widgets::WidgetConfig,
+    /// The Widgets page shows this (year, month) as a grid instead of its tiles.
+    pub month: Option<(u16, u16)>,
     pub glance: crate::widgets::Glance,
     /// The Processor tile's percent and the Network tile's bytes per second down and up (`widgets::Stats`).
     pub stats: (Option<u32>, Option<(u64, u64)>),
@@ -3089,6 +3091,7 @@ mod media_tests {
             shelf_hover: false,
             clips: false,
             widgets: crate::widgets::WidgetConfig::default(),
+            month: None,
             glance: Default::default(),
             stats: (None, None),
             tab: Tab::Media,
@@ -3133,6 +3136,7 @@ mod media_tests {
                 shelf_hover: false,
                 clips: false,
                 widgets: crate::widgets::WidgetConfig::default(),
+                month: None,
                 glance: Default::default(),
                 stats: (None, None),
                 tab: Tab::Media,
@@ -3378,6 +3382,7 @@ mod media_tests {
                 shelf_hover: false,
                 clips: false,
                 widgets: crate::widgets::WidgetConfig::default(),
+                month: None,
                 glance: Default::default(),
                 stats: (None, None),
                 tab: Tab::Media,
@@ -3444,6 +3449,7 @@ mod media_tests {
                     shelf_hover: false,
                     clips: false,
                     widgets: crate::widgets::WidgetConfig::default(),
+                    month: None,
                     glance: Default::default(),
                     stats: (None, None),
                     tab: Tab::Media,
@@ -3498,6 +3504,7 @@ mod media_tests {
             shelf_hover: false,
             clips: false,
             widgets: crate::widgets::WidgetConfig::default(),
+            month: None,
             glance: Default::default(),
             stats: (None, None),
             tab: Tab::Media,

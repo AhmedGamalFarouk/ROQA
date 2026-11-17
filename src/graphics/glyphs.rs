@@ -66,8 +66,11 @@ pub enum Glyph {
     Tray,
     /// Settings' Hotkeys page: a keyboard.
     Keys,
+    /// The month page's arrows: a chevron left and right.
+    Back,
+    Forward,
 }
-const ALL: [Glyph; 38] = [
+const ALL: [Glyph; 40] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -106,6 +109,8 @@ const ALL: [Glyph; 38] = [
     Glyph::Drive,
     Glyph::Tray,
     Glyph::Keys,
+    Glyph::Back,
+    Glyph::Forward,
 ];
 /// Grid size and stroke, in grid units.
 const GRID: f32 = 24.0;
@@ -213,6 +218,8 @@ impl Glyph {
             }
             Glyph::Chevron => "M6 15l6-6 6 6",
             Glyph::Expand => "M6 9l6 6 6-6",
+            Glyph::Back => "M15 6l-6 6 6 6",
+            Glyph::Forward => "M9 6l6 6-6 6",
             Glyph::Charging => "M13 2L5 13h6l-1 9 9-12h-6z",
             Glyph::Add => "M12 4v16M4 12h16",
             Glyph::More => "M5 12h.01M12 12h.01M19 12h.01",
