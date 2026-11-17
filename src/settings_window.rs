@@ -2246,6 +2246,14 @@ Other hooks stay. A copy of the file is kept.",
         select(self.h(PSOUND), Some(self.sound_row(setting)));
     }
 
+    /// Quick settings flipped the theme while this window is open: the box and the colours follow, and the
+    /// window's own copy keeps it, so the next edit here does not flip it back.
+    pub fn set_theme(&mut self, theme: Theme) -> Result<()> {
+        self.current.theme = theme;
+        select(self.h(THEME), Some(row_of(&Theme::ALL, &theme)));
+        self.relayout()
+    }
+
     /// What the user asked of the sound since the host last asked.
     pub fn take_sound_action(&mut self) -> Option<SoundAction> {
         self.sound_action.take()

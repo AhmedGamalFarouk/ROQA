@@ -3940,6 +3940,12 @@ impl Desktop {
                 if let Err(error) = self.apply_settings(next, catalog) {
                     eprintln!("Theme: {error}");
                 }
+                // An open Settings window shows the theme it last knew.
+                if let Some(window) = &mut self.settings_window
+                    && let Err(error) = window.set_theme(self.settings.theme)
+                {
+                    eprintln!("Settings theme: {error}");
+                }
                 return;
             }
             Quick::Lock | Quick::Sleep => {
