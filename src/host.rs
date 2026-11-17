@@ -1370,6 +1370,8 @@ struct Desktop {
     power: Power,
     /// Dock hover thumbnails: the pointer's rest on a slot, and the popup while one shows.
     preview: preview::Intent,
+    /// A file drag resting on a dock slot: its window comes forward once (`dock::RAISE_DELAY`).
+    raise: preview::Intent,
     popup: Option<preview::Popup>,
     /// The dock's right-click menu while open; nothing exists, and nothing is polled, otherwise.
     menu: Option<dock_menu::Menu>,
@@ -1539,6 +1541,7 @@ impl Desktop {
             timer_shown: String::new(),
             power: Power::new(power::Raw::read()),
             preview: preview::Intent::default(),
+            raise: preview::Intent::default(),
             popup: None,
             menu: None,
             hover_popup: None,
@@ -4530,8 +4533,44 @@ impl Desktop {
                 }
                 DropEvent::Files(_) => {}
                 DropEvent::Dock(hwnd, x, paths) => self.drop_on_dock(hwnd, x, &paths),
+                DropEvent::DockOver(hwnd, x) => self.drag_over_dock(hwnd, x),
             }
         }
+    }
+    /// A file drag moved over a dock (`x` is the screen column) or left it: the slot under it starts or restarts
+    /// the raise delay; `refresh_raise` fires it.
+    fn drag_over_dock(&mut self, hwnd: HWND, x: Option<i32>) {
+        let slots = self.dock_slots();
+        let spot = x.and_then(|x| {
+            let dock = self.dock_at(hwnd)?;
+            match dock::hit_at(
+                dock.dock_buttons,
+                x - dock.bounds.x,
+                dock.bounds.width,
+                dock.dpi,
+                slots,
+            )? {
+                Hit::Slot(slot) => Some((hwnd.0 as usize, slot)),
+                Hit::Button(_) => None,
+            }
+        });
+        self.raise
+            .point_after(spot, Instant::now(), dock::RAISE_DELAY);
+    }
+    /// A file drag rested on a running app's slot: its window comes forward, once per rest. A group of apps
+    /// and an app with no window are left alone. The wait is the one deadline, none while nothing is armed.
+    fn refresh_raise(&mut self) -> u32 {
+        let now = Instant::now();
+        if let Some((_, slot)) = self.raise.take_due(now)
+            && let Some(item) = self.dock_items.get(slot)
+            && item.members.is_empty()
+            && let Some(&key) = item.windows.first()
+        {
+            let _ = dock::perform(dock::Action::Activate(key));
+        }
+        self.raise
+            .deadline()
+            .map_or(INFINITE, |due| milliseconds_until(due, now))
     }
     /// Files dropped on a dock slot open with that app: its program is started with the paths. A group of apps,
     /// a folder and an app with no program path (a packaged one) are told so instead.
@@ -5760,6 +5799,7 @@ impl Desktop {
             .min(self.refresh_timers())
             .min(self.refresh_power())
             .min(self.refresh_preview())
+            .min(self.refresh_raise())
             .min(self.refresh_hover_popup())
             .min(self.refresh_edges())
             .min(self.refresh_eyes())

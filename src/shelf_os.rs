@@ -38,6 +38,8 @@ pub enum DropEvent {
     Files(Vec<String>),
     /// Files dropped on a dock at this screen column: the app under it opens them.
     Dock(HWND, i32, Vec<String>),
+    /// A file drag is over a dock at this screen column, or (`None`) has left it or dropped.
+    DockOver(HWND, Option<i32>),
 }
 pub type Drops = Rc<RefCell<Vec<DropEvent>>>;
 
@@ -87,6 +89,8 @@ struct DropTarget {
     dock: bool,
     /// The drag now over the notch carries files; set at enter, so over/drop need not ask again.
     accepts: Cell<bool>,
+    /// The screen column last reported over a dock, so a drag resting still adds no events.
+    column: Cell<i32>,
 }
 
 fn answer(effect: *mut DROPEFFECT, accepts: bool) {
@@ -102,12 +106,21 @@ fn answer(effect: *mut DROPEFFECT, accepts: bool) {
     }
 }
 
+impl DropTarget {
+    fn over(&self, x: i32) {
+        self.column.set(x);
+        self.drops
+            .borrow_mut()
+            .push(DropEvent::DockOver(self.hwnd, Some(x)));
+    }
+}
+
 impl IDropTarget_Impl for DropTarget_Impl {
     fn DragEnter(
         &self,
         data: Ref<'_, IDataObject>,
         _keys: MODIFIERKEYS_FLAGS,
-        _point: &POINTL,
+        point: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> Result<()> {
         // SAFETY: `data` is the live object OLE hands this call; the format is a plain value.
@@ -120,23 +133,35 @@ impl IDropTarget_Impl for DropTarget_Impl {
                 .borrow_mut()
                 .push(DropEvent::Hover(self.hwnd, true));
         }
+        if files && self.dock {
+            self.over(point.x);
+        }
         answer(effect, files);
         Ok(())
     }
     fn DragOver(
         &self,
         _keys: MODIFIERKEYS_FLAGS,
-        _point: &POINTL,
+        point: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> Result<()> {
+        if self.dock && self.accepts.get() && point.x != self.column.get() {
+            self.over(point.x);
+        }
         answer(effect, self.accepts.get());
         Ok(())
     }
     fn DragLeave(&self) -> Result<()> {
-        if self.accepts.replace(false) && !self.dock {
-            self.drops
-                .borrow_mut()
-                .push(DropEvent::Hover(self.hwnd, false));
+        if self.accepts.replace(false) {
+            if self.dock {
+                self.drops
+                    .borrow_mut()
+                    .push(DropEvent::DockOver(self.hwnd, None));
+            } else {
+                self.drops
+                    .borrow_mut()
+                    .push(DropEvent::Hover(self.hwnd, false));
+            }
         }
         Ok(())
     }
@@ -147,11 +172,17 @@ impl IDropTarget_Impl for DropTarget_Impl {
         point: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> Result<()> {
-        let files = if self.accepts.replace(false) {
+        let accepted = self.accepts.replace(false);
+        let files = if accepted {
             data.as_ref().map(dropped_files).unwrap_or_default()
         } else {
             Vec::new()
         };
+        if accepted && self.dock {
+            self.drops
+                .borrow_mut()
+                .push(DropEvent::DockOver(self.hwnd, None));
+        }
         answer(effect, !files.is_empty());
         if self.dock {
             if !files.is_empty() {
@@ -178,6 +209,7 @@ pub fn register(hwnd: HWND, drops: &Drops, dock: bool) -> Result<()> {
         drops: Rc::clone(drops),
         dock,
         accepts: Cell::new(false),
+        column: Cell::new(i32::MIN),
     }
     .into();
     // SAFETY: `hwnd` is our own live window on this OLE-initialised STA thread.

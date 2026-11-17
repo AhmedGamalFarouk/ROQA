@@ -564,6 +564,9 @@ pub fn separators(buttons: Buttons, width_px: i32, dpi: u32) -> [Option<i32>; 2]
     ]
 }
 
+/// How long a file dragged over a dock slot rests there before that app's window comes forward.
+pub const RAISE_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
+
 /// Pointer travel (DIPs) before a press on a pinned slot becomes a reorder drag instead of a click.
 pub const DRAG_DIPS: i32 = 6;
 

@@ -39,13 +39,17 @@ impl Intent {
     /// Follows the pointer (`None` is off the dock's slots). A new spot restarts the delay; returns true
     /// when that ends a preview that was shown.
     pub fn point(&mut self, spot: Option<Spot>, now: Instant) -> bool {
+        self.point_after(spot, now, DELAY)
+    }
+    /// `point` with its own delay (a file drag resting on a slot raises its window after `dock::RAISE_DELAY`).
+    pub fn point_after(&mut self, spot: Option<Spot>, now: Instant, delay: Duration) -> bool {
         if spot == self.spot {
             return false;
         }
         let ended = self.shown;
         *self = Self {
             spot,
-            due: spot.map(|_| now + DELAY),
+            due: spot.map(|_| now + delay),
             shown: false,
         };
         ended
@@ -228,6 +232,30 @@ mod tests {
         assert!(!intent.point(Some((1, 3)), at(2000)));
         assert!(!intent.point(Some((2, 3)), at(2100)));
         assert_eq!(intent.deadline(), Some(at(2500)));
+    }
+
+    #[test]
+    fn a_resting_drag_fires_once_after_its_own_delay_and_leaving_cancels_it() {
+        let t0 = Instant::now();
+        let delay = Duration::from_millis(600);
+        let mut intent = Intent::default();
+        intent.point_after(Some((1, 2)), t0, delay);
+        assert_eq!(intent.deadline(), Some(t0 + delay));
+        assert_eq!(intent.take_due(t0 + delay - Duration::from_millis(1)), None);
+        assert_eq!(intent.take_due(t0 + delay), Some((1, 2)));
+        // The drag keeps resting on that slot: it does not fire again.
+        intent.point_after(Some((1, 2)), t0 + delay * 2, delay);
+        assert_eq!(
+            (intent.deadline(), intent.take_due(t0 + delay * 3)),
+            (None, None)
+        );
+        // A drag that leaves before the delay never fires.
+        intent.point_after(Some((1, 3)), t0 + delay * 4, delay);
+        intent.point_after(None, t0 + delay * 4 + Duration::from_millis(100), delay);
+        assert_eq!(
+            (intent.deadline(), intent.take_due(t0 + delay * 9)),
+            (None, None)
+        );
     }
 
     #[test]
