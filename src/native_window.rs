@@ -99,6 +99,13 @@ pub const DRIVE_BIT: u32 = 1;
 pub const CAMERA_BIT: u32 = 2;
 pub const SPEAKER_BIT: u32 = 4;
 static DEVICE_BITS: AtomicU32 = AtomicU32::new(0);
+/// The drive letters (bit 0 is A) of the arrivals since the last `drive_read`.
+static DRIVE_MASK: AtomicU32 = AtomicU32::new(0);
+/// The letter of the first drive that arrived since the last read, for the alert's Eject button.
+pub fn drive_read() -> Option<char> {
+    let mask = DRIVE_MASK.swap(0, Ordering::AcqRel);
+    (mask != 0).then(|| char::from(b'A' + mask.trailing_zeros() as u8))
+}
 const CAMERA: GUID = GUID::from_u128(0xe5323777_f976_4f5b_9b55_b94699c46e44);
 const SPEAKER: GUID = GUID::from_u128(0x65e8773e_8f56_11d0_a3b9_00a0c9223196);
 /// The arrivals since the last read; the next arrival posts again.
@@ -670,6 +677,10 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
                     & (DBTF_MEDIA.0 | DBTF_NET.0)
                     != 0;
             let bit = device_bit(kind, interface, not_a_drive);
+            if bit == DRIVE_BIT {
+                let volume = &*(lparam.0 as *const DEV_BROADCAST_VOLUME);
+                DRIVE_MASK.fetch_or(volume.dbcv_unitmask & 0x03FF_FFFF, Ordering::AcqRel);
+            }
             if bit != 0
                 && DEVICE_BITS.fetch_or(bit, Ordering::AcqRel) == 0
                 && PostMessageW(None, DEVICE, WPARAM(0), LPARAM(0)).is_err()

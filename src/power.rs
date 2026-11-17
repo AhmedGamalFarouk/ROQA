@@ -98,6 +98,8 @@ fn text(state: State, percent: u8) -> String {
 pub struct Power {
     last: Option<State>,
     notice: Option<(String, Instant)>,
+    /// The drive the notice offers to eject, while that notice shows.
+    eject: Option<char>,
 }
 
 impl Power {
@@ -106,6 +108,7 @@ impl Power {
         Self {
             last: raw.and_then(Raw::state).map(|(state, _)| state),
             notice: None,
+            eject: None,
         }
     }
 
@@ -125,6 +128,17 @@ impl Power {
     /// Shows `text` for `hold` in place of any power notice: the prayer reminder reuses the notice row.
     pub fn announce(&mut self, text: String, now: Instant, hold: Duration) {
         self.notice = Some((text, now + hold));
+        self.eject = None;
+    }
+
+    /// The notice just announced offers an Eject button for drive `letter`.
+    pub fn offer_eject(&mut self, letter: char) {
+        self.eject = Some(letter);
+    }
+
+    /// The drive to eject while its notice shows.
+    pub fn eject(&self) -> Option<char> {
+        self.notice.as_ref().and(self.eject)
     }
 
     /// Drops the notice at once (a state change that makes it stale); true if one was showing.

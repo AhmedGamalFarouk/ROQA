@@ -821,6 +821,7 @@ impl Surface {
             bars: self.bars,
             timer: timer.as_ref(),
             notice,
+            eject: power.eject().is_some(),
             shelf: &slots,
             shelf_undo: shelf.removed.is_some() && !copied,
             shelf_hover: self.hovered,
@@ -1414,6 +1415,8 @@ struct PrayerRun {
 const PRAYER_NOTICE: Duration = Duration::from_secs(8);
 /// How long a device alert holds the notch open.
 const DEVICE_NOTICE: Duration = Duration::from_secs(4);
+/// How long a drive alert holds the notch open: long enough to press Eject.
+const DRIVE_NOTICE: Duration = Duration::from_secs(8);
 /// How long a volume change from outside ROQA holds the notch open.
 const VOLUME_NOTICE: Duration = Duration::from_millis(1500);
 /// The system sound for a finished timer or a due reminder (callers check the sound settings).
@@ -4664,6 +4667,19 @@ impl Desktop {
             }
             return true;
         }
+        if let Some(letter) = self.power.eject()
+            && layout::eject_at(width, dpi, progress, live, x, y)
+        {
+            let text = if crate::system_os::eject(letter) {
+                "Safe to remove"
+            } else {
+                "Still in use"
+            };
+            self.power
+                .announce(text.into(), Instant::now(), DEVICE_NOTICE);
+            self.request_notches(Repaint::Full, |_| true);
+            return true;
+        }
         if layout::gear_at(width, dpi, progress, live, x, y) {
             if let Err(error) = self.open_settings() {
                 eprintln!("Settings: {error}");
@@ -4868,8 +4884,17 @@ impl Desktop {
                 "Speaker connected"
             };
             // A short peek, unlike a prayer alert: it does not show over a full-screen app.
-            self.power
-                .announce(text.into(), Instant::now(), DEVICE_NOTICE);
+            let letter =
+                native_window::drive_read().filter(|_| bits & native_window::DRIVE_BIT != 0);
+            let hold = if letter.is_some() {
+                DRIVE_NOTICE
+            } else {
+                DEVICE_NOTICE
+            };
+            self.power.announce(text.into(), Instant::now(), hold);
+            if let Some(letter) = letter {
+                self.power.offer_eject(letter);
+            }
             self.open_notches();
             self.request_notches(Repaint::Full, |_| true);
             return Ok(());

@@ -207,6 +207,8 @@ pub struct NotchScene<'a> {
     pub timer: Option<&'a timer::View>,
     /// The power pill's text (features B1), drawn in the open panel; `None` draws nothing.
     pub notice: Option<&'a str>,
+    /// The notice offers an Eject button (a drive alert).
+    pub eject: bool,
     /// The file shelf's visible entries (S6, PROVISIONAL); empty draws nothing.
     pub shelf: &'a [ShelfSlot<'a>],
     pub shelf_undo: bool,
@@ -1308,6 +1310,9 @@ fn notice_text(
         return Ok(());
     };
     let slot = layout::power_notice(scene.track.is_some(), scene.dpi);
+    let button = scene
+        .eject
+        .then(|| layout::eject_button(scene.track.is_some(), scene.dpi));
     let left = body.left + slot.x as f32;
     // The notice rises 5 DIP into place as it fades in.
     let top = body.top + slot.y as f32 + (1.0 - scene.fx.notice) * 5.0 * scale;
@@ -1318,19 +1323,51 @@ fn notice_text(
         designator: 1.0,
         align: DWRITE_TEXT_ALIGNMENT_CENTER,
     };
+    // The text gives the button its place at the row's right.
+    let right = button.map_or(slot.width as f32, |button| {
+        (button.x - slot.x) as f32 - 6.0 * scale
+    });
     let rect = D2D_RECT_F {
         left,
         top,
-        right: left + slot.width as f32,
+        right: left + right,
         bottom: top + slot.height as f32,
     };
+    let alpha = reveal * scene.fx.notice;
     draw_text(
         context,
         text,
         &font,
         rect,
-        with_alpha(p.ink, p.ink_alpha(0.85 * reveal * scene.fx.notice)),
-    )
+        with_alpha(p.ink, p.ink_alpha(0.85 * alpha)),
+    )?;
+    if let Some(button) = button {
+        // The one primary action of the alert: a solid accent capsule.
+        let cell = D2D_RECT_F {
+            left: body.left + button.x as f32,
+            top,
+            right: body.left + (button.x + button.width) as f32,
+            bottom: top + button.height as f32,
+        };
+        // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw.
+        unsafe {
+            let fill =
+                context.CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(alpha)), None)?;
+            context.FillRoundedRectangle(&rounded(cell, (cell.bottom - cell.top) / 2.0), &fill);
+        }
+        let label = Font {
+            size: 11.0 * scale,
+            ..font
+        };
+        draw_text(
+            context,
+            "Eject",
+            &label,
+            cell,
+            with_alpha(p.ink_on_accent(), p.ink_alpha(alpha)),
+        )?;
+    }
+    Ok(())
 }
 
 /// Side of a shelf icon inside its capsule, in DIPs.
@@ -3143,6 +3180,7 @@ mod media_tests {
             bars: [0; BARS],
             timer: None,
             notice: None,
+            eject: false,
             shelf: &[],
             shelf_undo: false,
             shelf_hover: false,
@@ -3188,6 +3226,7 @@ mod media_tests {
                 bars: [0; BARS],
                 timer: None,
                 notice: None,
+                eject: false,
                 shelf: &[],
                 shelf_undo: false,
                 shelf_hover: false,
@@ -3434,6 +3473,7 @@ mod media_tests {
                 bars: [4, 20, 12, 8, 4],
                 timer: None,
                 notice: None,
+                eject: false,
                 shelf: &[],
                 shelf_undo: false,
                 shelf_hover: false,
@@ -3501,6 +3541,7 @@ mod media_tests {
                     bars: heights,
                     timer: None,
                     notice: None,
+                    eject: false,
                     shelf: &[],
                     shelf_undo: false,
                     shelf_hover: false,
@@ -3556,6 +3597,7 @@ mod media_tests {
             bars: [0; BARS],
             timer: None,
             notice: None,
+            eject: false,
             shelf: &[],
             shelf_undo: false,
             shelf_hover: false,

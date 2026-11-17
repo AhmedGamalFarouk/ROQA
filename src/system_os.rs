@@ -3,7 +3,10 @@
 
 use windows::{
     Win32::{
-        Foundation::ERROR_SUCCESS,
+        Foundation::{CloseHandle, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE},
+        Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        },
         System::{
             Power::{
                 ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetSuspendState,
@@ -15,7 +18,7 @@ use windows::{
             },
         },
     },
-    core::w,
+    core::{HSTRING, w},
 };
 
 /// Writes (on) or removes (off) ROQA's value under the user's Run key. Off by default and never touched
@@ -64,6 +67,63 @@ pub fn keep_awake(on: bool) {
     // SAFETY: a scalar flag call with no pointers.
     unsafe {
         SetThreadExecutionState(flags);
+    }
+}
+
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn DeviceIoControl(
+        device: HANDLE,
+        code: u32,
+        input: *const u8,
+        input_len: u32,
+        output: *mut u8,
+        output_len: u32,
+        returned: *mut u32,
+        overlapped: *mut u8,
+    ) -> i32;
+}
+
+/// Ejects drive `letter` the way Safe Remove does: lock (it fails while a file is open, so nothing is lost),
+/// dismount, allow removal, eject. False when any step is refused.
+pub fn eject(letter: char) -> bool {
+    const LOCK: u32 = 0x0009_0018;
+    const DISMOUNT: u32 = 0x0009_0020;
+    const ALLOW_REMOVAL: u32 = 0x002D_4804;
+    const EJECT: u32 = 0x002D_4808;
+    let path = HSTRING::from(format!(r"\\.\{letter}:"));
+    // SAFETY: a volume handle closed below; each call passes a live buffer of the length it states.
+    unsafe {
+        let Ok(volume) = CreateFileW(
+            &path,
+            GENERIC_READ.0 | GENERIC_WRITE.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        ) else {
+            return false;
+        };
+        let mut returned = 0;
+        let mut control = |code: u32, input: &[u8]| {
+            DeviceIoControl(
+                volume,
+                code,
+                input.as_ptr(),
+                input.len() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            ) != 0
+        };
+        let done = control(LOCK, &[])
+            && control(DISMOUNT, &[])
+            && control(ALLOW_REMOVAL, &[0])
+            && control(EJECT, &[]);
+        let _ = CloseHandle(volume);
+        done
     }
 }
 

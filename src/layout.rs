@@ -729,6 +729,28 @@ fn notice_slot(media: bool, page: u16, dpi: u32) -> Bounds {
     scaled_bounds(POWER_NOTICE[usize::from(media)], dpi)
 }
 
+/// The alert's Eject button: the notice row's right 52 DIPs, in pixels from the body's left and top edges.
+pub fn eject_button(media: bool, dpi: u32) -> Bounds {
+    let slot = power_notice(media, dpi);
+    let width = scaled(52.0, dpi);
+    Bounds {
+        x: slot.x + slot.width - width,
+        width,
+        ..slot
+    }
+}
+/// Whether a window point is on the Eject button at `progress`; none while the row is not drawn.
+pub fn eject_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, y: i32) -> bool {
+    panel_offset(
+        window_width,
+        dpi,
+        progress,
+        eject_button(media, dpi),
+        (x, y),
+    )
+    .is_some()
+}
+
 /// Two 160 x 32 DIP file capsules share one focal row, with the pager below.
 const SHELF_CELL_W: f32 = 160.0;
 const SHELF_CELL_H: f32 = 32.0;
