@@ -25,7 +25,7 @@ pub struct Palette {
     pub accent: Rgb,
     /// A glyph on an ink-filled circle, and the badge circle.
     pub on_ink: Rgb,
-    /// The dock's picker tiles.
+    /// The dock's button glyphs.
     pub glyph: Rgb,
     /// A dock group whose icon is unavailable.
     pub tile: Rgba,

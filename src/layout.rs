@@ -367,6 +367,46 @@ pub fn player_at(
     })
 }
 
+/// Where the shuffle and repeat chips sit when two or more players are open and the row under the cover is theirs:
+/// 14 high under the mute toggle and the volume bar (which end at y 108), 34 wide and 4 apart, clear of the settings
+/// button; x, y, width, height in DIPs from the body's left and top edges.
+const MODE_CHIPS: (f32, f32, f32, f32) = (244.0, 110.0, 34.0, 14.0);
+const MODE_GAP: f32 = 4.0;
+
+/// Mode chip `index` (0 shuffle, 1 repeat) in pixels from the body's left and top edges: the two cells of the row
+/// under the cover while fewer than two players are open, else the strip under the volume controls.
+pub fn mode_chip(dpi: u32, players: usize, index: usize) -> Bounds {
+    if players < 2 {
+        return player_chip(dpi, 2, index);
+    }
+    let (x, y, width, height) = MODE_CHIPS;
+    scaled_bounds(
+        (x + index as f32 * (width + MODE_GAP), y, width, height),
+        dpi,
+    )
+}
+
+/// The mode chip under a window point; none while the panel rows are not drawn.
+pub fn mode_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    players: usize,
+    x: i32,
+    y: i32,
+) -> Option<usize> {
+    (0..2).find(|&index| {
+        panel_offset(
+            window_width,
+            dpi,
+            progress,
+            mode_chip(dpi, players, index),
+            (x, y),
+        )
+        .is_some()
+    })
+}
+
 /// The Music page's cover (80 square at 16, 24) under a window point at `progress`; the click on it opens the player.
 pub fn media_cover_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32) -> bool {
     let cover = scaled_bounds((16.0, 24.0, 80.0, 80.0), dpi);
@@ -1188,7 +1228,7 @@ pub fn placement(work: Bounds, dpi: u32, kind: SurfaceKind, dock_slots: usize) -
     )
 }
 
-/// `dock_slots` and `buttons` size the dock (picker slot plus app groups, taskbar buttons); the notch ignores them and `style`.
+/// `dock_slots` and `buttons` size the dock (the app groups, taskbar buttons); the notch ignores them and `style`.
 pub fn placement_styled(
     work: Bounds,
     dpi: u32,
@@ -1951,6 +1991,71 @@ mod tests {
                     notice.x + notice.width < settings_left,
                     "{media} {page} {dpi}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn the_mode_chips_sit_clear_of_every_media_element_with_one_player_or_several() {
+        let hit = |a: Bounds, b: Bounds| {
+            a.x < b.x + b.width
+                && b.x < a.x + a.width
+                && a.y < b.y + b.height
+                && b.y < a.y + a.height
+        };
+        for dpi in [96, 120, 144, 192, 240] {
+            let gear = scaled_bounds(
+                (
+                    MEDIA_EXPANDED.width - 16.0 - GEAR_SIZE,
+                    MEDIA_EXPANDED.height - 18.0 - GEAR_SIZE,
+                    GEAR_SIZE,
+                    GEAR_SIZE,
+                ),
+                dpi,
+            );
+            let cover = scaled_bounds((16.0, 24.0, 80.0, 80.0), dpi);
+            let fixed: Vec<Bounds> = media_controls(dpi)
+                .into_iter()
+                .chain([
+                    cover,
+                    media_progress(dpi),
+                    volume_bar(dpi),
+                    meter(dpi).0,
+                    gear,
+                ])
+                .collect();
+            let body = (
+                scaled(MEDIA_EXPANDED.width, dpi),
+                scaled(MEDIA_EXPANDED.height, dpi),
+            );
+            for players in [0, 1, 2, 3, 4] {
+                let chips: Vec<Bounds> =
+                    (0..2).map(|index| mode_chip(dpi, players, index)).collect();
+                assert!(!hit(chips[0], chips[1]), "{players} {dpi}");
+                let others: Vec<Bounds> = if players < 2 {
+                    Vec::new()
+                } else {
+                    (0..players)
+                        .map(|index| player_chip(dpi, players, index))
+                        .collect()
+                };
+                for chip in &chips {
+                    assert!(
+                        chip.x >= 0 && chip.x + chip.width <= body.0,
+                        "{players} {dpi}"
+                    );
+                    assert!(
+                        chip.y + chip.height <= body.1 - scaled(2.0, dpi),
+                        "{players} {dpi}"
+                    );
+                    for other in &fixed {
+                        assert!(!hit(*chip, *other), "{players} {dpi}: {chip:?} {other:?}");
+                    }
+                    assert!(
+                        others.iter().all(|other| !hit(*chip, *other)),
+                        "{players} {dpi}"
+                    );
+                }
             }
         }
     }

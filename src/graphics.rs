@@ -137,7 +137,7 @@ fn is_loss(code: HRESULT) -> bool {
     .contains(&code)
 }
 
-/// What one dock slot shows. Slot 0 is the picker glyph; the others are real app groups.
+/// What one dock slot shows: a real app group.
 pub struct DockSlot<'a> {
     pub icon: Option<&'a IconPixels>,
     pub mini: Vec<Option<&'a IconPixels>>,
@@ -145,7 +145,6 @@ pub struct DockSlot<'a> {
     /// Open windows in the group: a resting group shows up to three dots, one per window.
     pub windows: usize,
     pub active: bool,
-    pub picker: bool,
     pub badge: dock::Badge,
     /// Hover animation progress, 0 (rest) to 1 (hovered).
     pub hover: f32,
@@ -1612,11 +1611,12 @@ struct PlayerChip<'a> {
     alpha: f32,
     font: Font,
 }
-/// The shuffle and repeat chips under the cover, where the player chips go: shown only for a player that accepts
-/// the change and while fewer than two players are open. A mode that is on wears the accent.
+/// The shuffle and repeat chips of the shown player, for a player that accepts the change: under the cover while
+/// fewer than two players are open, else (the player chips have that row) under the volume controls. A mode that is
+/// on wears the accent.
 fn mode_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip> {
     let reveal = motion::reveal(scene.progress);
-    if reveal <= 0.0 || track.players.len() >= 2 {
+    if reveal <= 0.0 {
         return Vec::new();
     }
     let scale = scene.dpi as f32 / 96.0;
@@ -1632,7 +1632,7 @@ fn mode_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip>
     .enumerate()
     .filter_map(|(index, (offered, shape, lit))| {
         offered?;
-        let cell = layout::player_chip(scene.dpi, 2, index);
+        let cell = layout::mode_chip(scene.dpi, track.players.len(), index);
         let rect = D2D_RECT_F {
             left: body.left + cell.x as f32,
             top: body.top + cell.y as f32,
@@ -2606,7 +2606,7 @@ fn paint_slots(
     Ok(())
 }
 
-/// The one box (DIPs) every dock glyph, buttons and picker alike, is stroked in: about 19 DIPs of ink beside the 40 DIP icons.
+/// The one box (DIPs) every dock button glyph is stroked in: about 19 DIPs of ink beside the 40 DIP icons.
 const DOCK_GLYPH: i32 = 26;
 
 /// One taskbar button: the hover chip, then its glyph.
@@ -2840,15 +2840,6 @@ fn draw_slot(
                     glyphs::draw(context, mini, Glyph::Apps, with_alpha(p.glyph, 1.0))?;
                 }
             }
-        } else if slot.picker {
-            let side = px(DOCK_GLYPH);
-            let glyph = D2D_RECT_F {
-                left: center_x - side / 2.0,
-                top: center_y - side / 2.0,
-                right: center_x + side / 2.0,
-                bottom: center_y + side / 2.0,
-            };
-            glyphs::draw(context, glyph, Glyph::Apps, with_alpha(p.glyph, 1.0))?;
         } else if let Some(pixels) = slot.icon {
             // shortcut: bitmaps are rebuilt per paint (catalog/icon/hover changes and the frames of a ~0.2 s hover animation); cache per device if profiling shows cost.
             context.DrawBitmap(

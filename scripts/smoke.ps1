@@ -96,7 +96,7 @@ function Assert-NoMedia {
     if ($states.Count -gt 0 -and $states[-1].Matches[0].Groups[1].Value -in @('playing', 'paused')) { throw 'INTERFERENCE: A media session is active; the plain-notch shape checks need none.' }
 }
 function Test-DockWidth([int]$Width, [int]$Dpi) {
-    # Dock = 8-DIP padding each side plus one 56-DIP slot per item (picker + real app groups).
+    # Dock = 8-DIP padding each side plus one 56-DIP slot per item (real app groups).
     foreach ($slots in 1..64) { if ($Width -eq [int][Math]::Floor(((16 + 56 * $slots) * $Dpi + 48) / 96)) { return $true } }
     return $false
 }
@@ -118,7 +118,7 @@ function Assert-Pixels([IntPtr]$Window, [string]$File, [string]$Expected, [int]$
         $after = New-Object NativeProbe+Point
         if (![NativeProbe]::GetCursorPos([ref]$after) -or $after.X -ne $X -or $after.Y -ne $Y) { continue }
         if ($null -ne $Points) {
-            # The dock shows real app icons, so only its background strip and our own picker glyph are known colors.
+            # The dock shows real app icons, so only its background strip is a known color.
             foreach ($point in $Points) {
                 $observed = [NativeProbe]::PixelAt($path, $point.X, $point.Y)
                 Assert-Check ($observed -eq $point.Color) "Screen pixel $File $($point.Name) = $($point.Color) (observed $observed)"
@@ -205,10 +205,8 @@ try {
             $settle = 1100
         } elseif ($surface.Name -eq 'dock') {
             $midY = [int]($rect.Height / 2); $padX = [int](& $px 4)
-            $glyphX = [int]((& $px 8) + (& $px 28) - (& $px 8)); $glyphY = [int]($midY - (& $px 8))
-            $glyph = @{ Name = 'picker glyph'; X = $glyphX; Y = $glyphY; Color = '220,225,232' }
-            $idlePoints = @(@{ Name = 'background'; X = $padX; Y = $midY; Color = '0,0,0' }, $glyph)
-            $hoverPoints = @(@{ Name = 'background'; X = $padX; Y = $midY; Color = '20,20,22' }, $glyph)
+            $idlePoints = @(@{ Name = 'background'; X = $padX; Y = $midY; Color = '0,0,0' })
+            $hoverPoints = @(@{ Name = 'background'; X = $padX; Y = $midY; Color = '20,20,22' })
         }
         Assert-Pixels $surface.Window "$($surface.Name)-idle.png" '0,0,0' $awayX $awayY $idlePoints
         Assert-Pixels $surface.Window "$($surface.Name)-hover.png" '0,0,0' $hoverX $hoverY $hoverPoints $settle

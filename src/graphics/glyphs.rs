@@ -40,7 +40,7 @@ pub enum Glyph {
     Timer,
     Shelf,
     Limits,
-    /// The dock picker: a grid of nine dots, not the Start panes.
+    /// A grid of nine dots: the stand-in for a folder tile's missing app icon.
     Apps,
     Search,
     TaskView,

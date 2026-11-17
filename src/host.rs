@@ -22,7 +22,6 @@ use crate::{
     media::{self, Media, Progress, Track},
     motion::{self, Tween},
     native_window::{self, NativeWindow, WindowClass},
-    picker::Picker,
     pins::Pins,
     pomo,
     power::{self, Power},
@@ -992,69 +991,51 @@ impl Surface {
         let Role::Dock { slots: tweens, .. } = &self.role else {
             return Ok(());
         };
-        let count = items.len() + 1;
+        let count = items.len();
         let hover = |hit| {
             dock::cell_index(self.dock_buttons, count, hit)
                 .and_then(|cell| tweens.get(cell))
                 .map_or(0.0, |t| t.value(now))
         };
-        let mut slots = vec![DockSlot {
-            icon: None,
-            mini: Vec::new(),
-            running: false,
-            windows: 0,
-            active: false,
-            picker: true,
-            badge: dock::Badge::None,
-            hover: hover(Hit::Slot(0)),
-            dx: 0.0,
-            held: false,
-        }];
-        slots.extend(
-            items
-                .iter()
-                .zip(icons)
-                .enumerate()
-                .map(|(index, (item, icon))| {
-                    // The held icon follows the pointer, lifted; the others slide to open the gap.
-                    let held = drag.is_some_and(|drag| drag.from == index);
-                    let dx = match drag {
-                        Some(drag) if held => {
-                            let (left, cell) = dock::span(
-                                self.dock_buttons,
-                                self.bounds.width,
-                                self.dpi,
-                                Hit::Slot(index + 1),
-                            );
-                            (drag.at - left - cell / 2) as f32
-                        }
-                        Some(drag) if !calm => {
-                            dock::drag_shift(drag.from, drag.gap.value(now), index) * step
-                        }
-                        _ => 0.0,
-                    };
-                    DockSlot {
-                        icon: icon.first().and_then(Option::as_deref),
-                        mini: if item.members.is_empty() {
-                            Vec::new()
-                        } else {
-                            icon.iter().map(Option::as_deref).collect()
-                        },
-                        running: !item.windows.is_empty(),
-                        windows: item.windows.len(),
-                        active: item.active,
-                        picker: false,
-                        badge: item.badge,
-                        hover: if held {
-                            1.0
-                        } else {
-                            hover(Hit::Slot(index + 1))
-                        },
-                        dx,
-                        held,
+        let slots: Vec<DockSlot> = items
+            .iter()
+            .zip(icons)
+            .enumerate()
+            .map(|(index, (item, icon))| {
+                // The held icon follows the pointer, lifted; the others slide to open the gap.
+                let held = drag.is_some_and(|drag| drag.from == index);
+                let dx = match drag {
+                    Some(drag) if held => {
+                        let (left, cell) = dock::span(
+                            self.dock_buttons,
+                            self.bounds.width,
+                            self.dpi,
+                            Hit::Slot(index),
+                        );
+                        (drag.at - left - cell / 2) as f32
                     }
-                }),
-        );
+                    Some(drag) if !calm => {
+                        dock::drag_shift(drag.from, drag.gap.value(now), index) * step
+                    }
+                    _ => 0.0,
+                };
+                DockSlot {
+                    icon: icon.first().and_then(Option::as_deref),
+                    mini: if item.members.is_empty() {
+                        Vec::new()
+                    } else {
+                        icon.iter().map(Option::as_deref).collect()
+                    },
+                    running: !item.windows.is_empty(),
+                    windows: item.windows.len(),
+                    active: item.active,
+                    badge: item.badge,
+                    hover: if held { 1.0 } else { hover(Hit::Slot(index)) },
+                    dx,
+                    held,
+                }
+            })
+            .collect();
         // Reduced motion: no sliding, a Lamp capsule on the edge where the icon would land.
         let marker = drag
             .filter(|drag| calm && drag.group.is_none() && drag.gap.target() != drag.from as f32)
@@ -1064,7 +1045,7 @@ impl Surface {
                     self.dock_buttons,
                     self.bounds.width,
                     self.dpi,
-                    Hit::Slot(slot + 1),
+                    Hit::Slot(slot),
                 );
                 (if (slot > drag.from) != rtl {
                     left + cell
@@ -1106,7 +1087,7 @@ impl Surface {
     fn drop_at(&self, x: i32, items: usize, slots: usize) -> Option<(usize, bool)> {
         let (buttons, width, dpi) = (self.dock_buttons, self.bounds.width, self.dpi);
         let slot = dock::drop_index(buttons, x, width, dpi, slots, items)?;
-        let (left, cell) = dock::span(buttons, width, dpi, Hit::Slot(slot + 1));
+        let (left, cell) = dock::span(buttons, width, dpi, Hit::Slot(slot));
         Some((slot, dock::folder_drop(x - left, cell, dpi)))
     }
     /// The pointer's cell index (the hover tween and UIA child), if over a slot or button.
@@ -1324,7 +1305,6 @@ struct Desktop {
     stack: Vec<std::path::PathBuf>,
     graphics: Graphics,
     rebuild: Rebuild,
-    picker: Option<Picker>,
     /// The reminder line box, open only while the user types into it.
     remind_box: Option<RemindBox>,
     /// The label of the reminder shown last (what Snooze sets again); the waiting ones are `pages.reminders`.
@@ -1513,7 +1493,6 @@ impl Desktop {
             stack: Vec::new(),
             graphics: Graphics::create()?,
             rebuild: Rebuild::new(Instant::now()),
-            picker: None,
             remind_box: None,
             last_reminder: String::new(),
             palette: crate::theme::system_palette(settings.theme, effective_accent),
@@ -1596,7 +1575,7 @@ impl Desktop {
         Ok(desktop)
     }
     fn dock_slots(&self) -> usize {
-        self.dock_items.len() + 1
+        self.dock_items.len()
     }
     /// The chosen buttons with the system reading direction applied.
     fn dock_buttons(&self) -> Buttons {
@@ -2583,13 +2562,12 @@ impl Desktop {
                 else {
                     return None;
                 };
-                // Slot 0 is the picker and buttons have no windows; a pinned app that is not running has
-                // nothing to show.
+                // Buttons have no windows; a pinned app that is not running has nothing to show.
                 let slot = dock::cell(surface.dock_buttons, slots, cell)?
                     .slot()
-                    .filter(|slot| *slot >= 1 && surface.visible)?;
+                    .filter(|_| surface.visible)?;
                 self.dock_items
-                    .get(slot - 1)
+                    .get(slot)
                     .filter(|item| !item.windows.is_empty() && item.members.is_empty())
                     .map(|item| (index, slot, item))
             });
@@ -3201,11 +3179,6 @@ impl Desktop {
         self.request_notches(Repaint::Full, |_| true);
         "Timer started.".to_owned()
     }
-    fn open_picker(&mut self, catalog: &Catalog) -> Result<()> {
-        self.picker.take();
-        self.picker = Some(Picker::create(catalog.model())?);
-        Ok(())
-    }
     fn effective_accent(&self) -> Option<crate::theme::Rgb> {
         if self.settings.match_accent {
             crate::theme::windows_accent_color().or_else(|| Some(self.text.accent()))
@@ -3376,12 +3349,11 @@ impl Desktop {
             })
             .collect()
     }
-    /// Slot 0 opens the picker, other slots act on their real window group, a button does its job.
-    fn activate(&mut self, hwnd: HWND, hit: Option<Hit>, catalog: &Catalog) -> Result<()> {
+    /// A slot acts on its real window group, a button does its job.
+    fn activate(&mut self, hwnd: HWND, hit: Option<Hit>) -> Result<()> {
         match hit {
-            Some(Hit::Slot(0)) => self.open_picker(catalog),
             Some(Hit::Slot(slot)) => {
-                if let Some(item) = self.dock_items.get(slot - 1)
+                if let Some(item) = self.dock_items.get(slot)
                     && !item.members.is_empty()
                 {
                     let members = item.members.clone();
@@ -3390,7 +3362,7 @@ impl Desktop {
                     }
                     return Ok(());
                 }
-                if let Some(item) = self.dock_items.get(slot - 1)
+                if let Some(item) = self.dock_items.get(slot)
                     && item.windows.is_empty()
                     && let Identity::Executable(path) = &item.identity
                     && std::path::Path::new(path).is_dir()
@@ -3401,7 +3373,7 @@ impl Desktop {
                 }
                 if let Some(action) = self
                     .dock_items
-                    .get(slot - 1)
+                    .get(slot)
                     .and_then(|item| dock::action(item, dock::foreground_key()))
                 {
                     self.run_dock_action(action);
@@ -3501,10 +3473,7 @@ impl Desktop {
     }
 
     fn show_hover_popup(&mut self, hwnd: HWND, hit: Hit) {
-        let item = hit
-            .slot()
-            .and_then(|slot| slot.checked_sub(1))
-            .and_then(|index| self.dock_items.get(index));
+        let item = hit.slot().and_then(|slot| self.dock_items.get(slot));
         if item.is_some_and(|item| item.members.is_empty() && !item.windows.is_empty()) {
             return;
         }
@@ -3525,7 +3494,7 @@ impl Desktop {
                 Vec::new(),
                 match hit {
                     Hit::Button(button) => button.label().into(),
-                    _ => "Your apps".into(),
+                    Hit::Slot(_) => return,
                 },
             ),
         };
@@ -3543,7 +3512,7 @@ impl Desktop {
         let (left, width) = dock::span(dock.dock_buttons, dock.bounds.width, dock.dpi, hit);
         let spec = dock_menu::Spec {
             dock: hwnd,
-            slot: hit.slot().unwrap_or(usize::MAX),
+            slot: hit.slot().unwrap_or(dock_menu::APP),
             identity,
             windows: Vec::new(),
             items: std::iter::once(Item::Label)
@@ -3601,7 +3570,7 @@ impl Desktop {
             Event::Choose(Item::Member(index)) => {
                 let member = self
                     .dock_items
-                    .get(slot - 1)
+                    .get(slot)
                     .and_then(|tile| tile.members.get(index))
                     .cloned();
                 self.hover_popup = None;
@@ -3613,7 +3582,7 @@ impl Desktop {
             Event::Choose(Item::MemberMenu(index)) => {
                 let member = self
                     .dock_items
-                    .get(slot - 1)
+                    .get(slot)
                     .and_then(|tile| tile.members.get(index))
                     .cloned();
                 self.hover_popup = None;
@@ -3664,7 +3633,7 @@ impl Desktop {
         }
     }
     /// A global shortcut (`hotkeys.rs`) fired; a message queued just before its switch went off is ignored.
-    fn hotkey(&mut self, id: usize, catalog: &Catalog) -> Result<()> {
+    fn hotkey(&mut self, id: usize) -> Result<()> {
         let Some((group, index)) =
             hotkeys::action(id).filter(|&(group, _)| self.settings.hotkeys[group])
         else {
@@ -3672,7 +3641,7 @@ impl Desktop {
         };
         match group {
             0 => self.toggle_notch(),
-            1 => self.activate(HWND::default(), Some(Hit::Slot(index + 1)), catalog)?,
+            1 => self.activate(HWND::default(), Some(Hit::Slot(index)))?,
             2 => {
                 self.dock_away = !self.dock_away;
                 self.apply_visibility()?;
@@ -3795,7 +3764,7 @@ impl Desktop {
         let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Button(Button::Quick));
         let spec = dock_menu::Spec {
             dock: hwnd,
-            slot: 0,
+            slot: dock_menu::APP,
             windows: Vec::new(),
             identity: Identity::Unavailable(0),
             items,
@@ -3842,7 +3811,7 @@ impl Desktop {
         let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Button(Button::Places));
         let spec = dock_menu::Spec {
             dock: hwnd,
-            slot: 0,
+            slot: dock_menu::APP,
             windows: Vec::new(),
             identity: Identity::Unavailable(0),
             items: (0..places.len()).map(Item::Place).collect(),
@@ -3897,7 +3866,7 @@ impl Desktop {
         );
         let spec = dock_menu::Spec {
             dock: hwnd,
-            slot: 0,
+            slot: dock_menu::APP,
             windows: Vec::new(),
             identity: Identity::Unavailable(0),
             items: (0..files.len()).map(Item::File).collect(),
@@ -4001,31 +3970,30 @@ impl Desktop {
     }
     /// Middle-click on a dock slot launches a new instance when the app can be launched.
     fn middle_click_slot(&mut self, slot: usize) {
-        if let Some(index) = slot.checked_sub(1)
-            && let Some(item) = self.dock_items.get(index)
+        if let Some(item) = self.dock_items.get(slot)
             && let Some(launch) = crate::pins::launch_target(&item.identity)
         {
             self.run_dock_action(dock::Action::Launch(launch));
         }
     }
-    /// Right-click on a dock slot opens its menu above it (the picker slot has none). It needs the
+    /// Right-click on a dock slot opens its menu above it (a gap has none). It needs the
     /// foreground for dismissal; if Windows refuses, no menu opens rather than one that
     /// a click elsewhere could never dismiss.
     fn open_menu(&mut self, hwnd: HWND, slot: Option<usize>, lparam: LPARAM) {
-        // Outside an app slot (the picker slot, a gap) the dock offers the app menu instead.
-        if !slot.is_some_and(|slot| slot >= 1 && slot <= self.dock_items.len()) {
+        // Outside an app slot (a gap) the dock offers the app menu instead.
+        if slot.is_none_or(|slot| slot >= self.dock_items.len()) {
             return self.open_app_menu(hwnd, lparam);
         }
         self.dismiss_preview();
         self.close_menu();
         let Some((_, slot)) = self
             .dock_at(hwnd)
-            .zip(slot.filter(|&slot| slot >= 1))
+            .zip(slot)
             .filter(|(dock, _)| dock.visible)
         else {
             return;
         };
-        let Some(item) = self.dock_items.get(slot - 1).cloned() else {
+        let Some(item) = self.dock_items.get(slot).cloned() else {
             return;
         };
         self.open_item_menu(hwnd, slot, item);
@@ -4118,7 +4086,7 @@ impl Desktop {
         }
         let spec = dock_menu::Spec {
             dock: hwnd,
-            slot: 0,
+            slot: dock_menu::APP,
             windows: Vec::new(),
             identity: shelf_path.map_or(Identity::Unavailable(0), Identity::Executable),
             items,
@@ -4259,7 +4227,7 @@ impl Desktop {
         if !matches!(item, Item::NewInstance) {
             dock::restore_foreground(menu.hwnd(), menu.return_to);
         }
-        if menu.slot == 0 {
+        if menu.slot == dock_menu::APP {
             match item {
                 Item::Settings => {
                     if let Err(error) = self.open_settings() {
@@ -4299,7 +4267,7 @@ impl Desktop {
         }
         let target = self
             .dock_items
-            .get(menu.slot - 1)
+            .get(menu.slot)
             .and_then(|tile| {
                 if menu.items().contains(&Item::RemoveMember) {
                     tile.members
@@ -4391,14 +4359,14 @@ impl Desktop {
             .surfaces
             .iter()
             .any(|s| s.window.0 == menu.dock() && s.visible);
-        // The app menu (slot 0) describes no dock item, so only its surface being shown matters.
+        // The app menu (`dock_menu::APP`) describes no dock item, so only its surface being shown matters.
         let current = shown
-            && (menu.slot == 0
+            && (menu.slot == dock_menu::APP
                 || dock_menu::describes(
                     &menu.identity,
                     menu.items(),
                     &menu.windows,
-                    self.dock_items.get(menu.slot - 1),
+                    self.dock_items.get(menu.slot),
                     &self.pins,
                 ));
         if !current || menu.paint().is_err() {
@@ -4520,10 +4488,10 @@ impl Desktop {
             dock.dpi,
             self.dock_slots(),
         );
-        let Some(Hit::Slot(slot @ 1..)) = hit else {
+        let Some(Hit::Slot(slot)) = hit else {
             return;
         };
-        let Some(item) = self.dock_items.get(slot - 1) else {
+        let Some(item) = self.dock_items.get(slot) else {
             return;
         };
         let program = match &item.identity {
@@ -4800,7 +4768,7 @@ impl Desktop {
     fn command(&mut self, command: Command) -> Result<bool> {
         match command {
             Command::Quit => return Ok(false),
-            Command::ShowPicker | Command::ShowSettings | Command::Agent => {}
+            Command::ShowSettings | Command::Agent => {}
             Command::ShowNotch => self.show(SurfaceKind::Notch)?,
             Command::ShowDock => self.show(SurfaceKind::Dock)?,
             Command::HideNotch => self.close(SurfaceKind::Notch),
@@ -5209,7 +5177,6 @@ impl Desktop {
                 let from = surface
                     .dock_hit(message.lParam, slots)
                     .and_then(Hit::slot)
-                    .and_then(|slot| slot.checked_sub(1))
                     .filter(|&index| {
                         self.dock_items.get(index).is_some_and(|item| {
                             crate::pins::launch_target(&item.identity).is_some()
@@ -5258,7 +5225,7 @@ impl Desktop {
                     // While dragging, only the folder target lights up.
                     let cell = match &self.drag {
                         Some(drag) if drag.active => drag.group.and_then(|slot| {
-                            dock::cell_index(surface.dock_buttons, slots, Hit::Slot(slot + 1))
+                            dock::cell_index(surface.dock_buttons, slots, Hit::Slot(slot))
                         }),
                         _ => surface.dock_cell(message.lParam, slots),
                     };
@@ -5749,12 +5716,6 @@ impl Desktop {
             .min(self.refresh_stats());
         self.refresh_menu();
         self.paint_requested()?;
-        if let Some(picker) = &mut self.picker {
-            picker.synchronize(model)?;
-            if picker.closed() {
-                self.picker.take();
-            }
-        }
         if self
             .settings_window
             .as_ref()
@@ -5926,7 +5887,6 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
             desktop.privacy_signal();
         } else if index < base {
             match Command::ALL[index] {
-                Command::ShowPicker => desktop.open_picker(catalog)?,
                 Command::ShowSettings => desktop.open_settings()?,
                 Command::Agent => desktop.agent_reports(),
                 command => {
@@ -6040,7 +6000,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 return Ok(false);
             }
             if message.message == WM_HOTKEY {
-                desktop.hotkey(message.wParam.0, catalog)?;
+                desktop.hotkey(message.wParam.0)?;
                 continue;
             }
             if desktop.shell_hook != 0 && message.message == desktop.shell_hook {
@@ -6065,7 +6025,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                     let hit = desktop
                         .dock_at(message.hwnd)
                         .and_then(|dock| dock.dock_hit(message.lParam, desktop.dock_slots()));
-                    desktop.activate(message.hwnd, hit, catalog)?;
+                    desktop.activate(message.hwnd, hit)?;
                 }
                 continue;
             }
@@ -6115,11 +6075,6 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             if settings {
                 let applied = desktop.settings_changed(catalog);
                 desktop.survive(applied, ())?;
-                continue;
-            }
-            if let Some(picker) = &mut desktop.picker
-                && picker.message(&message)?
-            {
                 continue;
             }
             if desktop.remind_message(&message)? {

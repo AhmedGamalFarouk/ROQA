@@ -40,7 +40,6 @@
 - **Dock Context Menu:** Clean right-click menu with options to launch new instances, pin/unpin apps, and close windows.
 - **Notification Badges:** Real-time unread counter and status indicator dots on application icons.
 - **Desktop Strip:** Quick show-desktop strip.
-- **Window Picker:** Modeless search dialog (`--show-picker`) to instantly filter and jump to any active window.
 
 ### Personalization & Settings
 - **Theme Palette:** Five themes sharing one shape, icon and motion system: *Classic, Light, Midnight, Frosted tint* and *Liquid glass*, with a single warm accent (Lamp `#FFB454`).
@@ -106,7 +105,6 @@ roqa --show-dock         # Show the dock
 roqa --hide-dock         # Hide the dock
 
 # UI dialogs
-roqa --show-picker       # Open the window search picker
 roqa --show-settings     # Open the settings panel
 
 # Diagnostics & Shutdown

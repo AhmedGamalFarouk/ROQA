@@ -220,6 +220,9 @@ pub enum Event {
     Choose(Item),
 }
 
+/// `Spec::slot` of a menu that describes no dock item (the app menu, quick settings, places, a folder stack).
+pub const APP: usize = usize::MAX;
+
 /// What to open: the dock slot and what it holds.
 pub struct Spec {
     pub dock: HWND,

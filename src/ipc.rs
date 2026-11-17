@@ -33,19 +33,17 @@ pub enum Command {
     HideNotch,
     ShowDock,
     HideDock,
-    ShowPicker,
     ShowSettings,
     /// A coding agent's report: `roqa.exe agent <name> <state>` (see `agent.rs`).
     Agent,
 }
 impl Command {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::Quit,
         Self::ShowNotch,
         Self::HideNotch,
         Self::ShowDock,
         Self::HideDock,
-        Self::ShowPicker,
         Self::ShowSettings,
         Self::Agent,
     ];
@@ -56,14 +54,13 @@ impl Command {
             Self::HideNotch => "hide-notch",
             Self::ShowDock => "show-dock",
             Self::HideDock => "hide-dock",
-            Self::ShowPicker => "show-picker",
             Self::ShowSettings => "show-settings",
             Self::Agent => "agent",
         }
     }
     pub fn parse(argument: &str) -> Result<Self> {
         Self::ALL.into_iter().find(|command| argument == format!("--{}", command.name()))
-            .ok_or_else(|| Error::new(E_INVALIDARG, "Unknown command. Use --quit, --show-notch, --hide-notch, --show-dock, --hide-dock, --show-picker or --show-settings."))
+            .ok_or_else(|| Error::new(E_INVALIDARG, "Unknown command. Use --quit, --show-notch, --hide-notch, --show-dock, --hide-dock or --show-settings."))
     }
     pub fn signal(self) -> Result<()> {
         self.signal_after(|| {})
@@ -78,7 +75,7 @@ impl Command {
                 false,
                 PCWSTR(name.as_ptr()),
             )?);
-            if matches!(self, Self::ShowPicker | Self::ShowSettings) {
+            if matches!(self, Self::ShowSettings) {
                 grant_foreground_to_resident();
             }
             before();
@@ -122,9 +119,9 @@ pub fn answer(id: u32, allow: bool) {
     }
 }
 
-/// An explicit picker or settings request comes from whatever app the user is in, so this client usually holds the
+/// An explicit settings request comes from whatever app the user is in, so this client usually holds the
 /// foreground right; pass it to the resident ROQA process only. Without the right Windows refuses,
-/// and the picker reports the refusal instead of forcing focus.
+/// and Settings reports the refusal instead of forcing focus.
 fn grant_foreground_to_resident() {
     // SAFETY: scalar lookups of this session's ROQA surface; no messages or foreign memory.
     unsafe {
@@ -256,10 +253,6 @@ mod tests {
         assert_eq!(Command::parse("--hide-notch").unwrap(), Command::HideNotch);
         assert_eq!(Command::parse("--show-dock").unwrap(), Command::ShowDock);
         assert_eq!(Command::parse("--hide-dock").unwrap(), Command::HideDock);
-        assert_eq!(
-            Command::parse("--show-picker").unwrap(),
-            Command::ShowPicker
-        );
         assert_eq!(
             Command::parse("--show-settings").unwrap(),
             Command::ShowSettings

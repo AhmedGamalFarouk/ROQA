@@ -24,7 +24,7 @@ use windows::Win32::{
 };
 use windows::core::{HSTRING, PCWSTR};
 
-/// Dock geometry in DIPs. Slot 0 is the "all windows" picker; app groups follow.
+/// Dock geometry in DIPs. Slots are the app groups, in `items` order.
 pub const SLOT_DIPS: i32 = 56;
 pub const PAD_DIPS: i32 = 8;
 pub const ICON_DIPS: i32 = 40;
@@ -220,7 +220,7 @@ pub fn items_with_pins(model: &WindowModel, pins: &Pins, desktop_only: bool) -> 
 }
 
 /// Taskbar-style buttons beside the app slots (features D2). Start, Search and Task View sit left of the
-/// picker; quick settings, the hidden-icons chevron and the show-desktop pill sit at the right end.
+/// slots; quick settings, the hidden-icons chevron and the show-desktop pill sit at the right end.
 pub const BTN_DIPS: i32 = 44;
 pub const SEP_DIPS: i32 = 8;
 /// The show-desktop cell: a full button plus the end pad. Its pill hugs the dock's end and the click target runs
@@ -291,7 +291,7 @@ pub struct Buttons {
     /// Mirrored for a right-to-left UI language: the dock runs from the right edge, as the taskbar does.
     /// The host sets it from the system; it is not a stored setting.
     pub rtl: bool,
-    /// App slots (picker included) to centre in a bar wider than they are; 0 leaves them at the start.
+    /// App slots to centre in a bar wider than they are; 0 leaves them at the start.
     /// The host sets it from the "Icons at the start" setting and the dock's slot count; it is not stored.
     pub centre: usize,
 }
@@ -335,7 +335,7 @@ impl Default for Buttons {
     }
 }
 
-/// What a point is: an app slot (0 is the picker) or a button.
+/// What a point is: an app slot or a button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
     Slot(usize),
@@ -515,13 +515,13 @@ fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
     }
 }
 
-/// The centre of dock slot `slot` (slot 0 is the picker) for a dock `width_px` wide whose left edge is `dock_x`.
+/// The centre of dock slot `slot` for a dock `width_px` wide whose left edge is `dock_x`.
 pub fn slot_center_x(dock_x: i32, buttons: Buttons, width_px: i32, slot: usize, dpi: u32) -> i32 {
     let (left, width) = span(buttons, width_px, dpi, Hit::Slot(slot));
     dock_x + left + width / 2
 }
 
-/// Slots that fit inside the realized window width; the rest stay reachable through the picker.
+/// Slots that fit inside the realized window width; the rest are clipped.
 #[inline(never)]
 pub fn visible_slots(buttons: Buttons, width_px: i32, dpi: u32, slots: usize) -> usize {
     let room = width_px - lead_px(buttons, dpi) - tail_px(buttons, dpi);
@@ -597,12 +597,11 @@ pub fn drop_index(
     pins: usize,
 ) -> Option<usize> {
     let last = visible_slots(buttons, width_px, dpi, slots)
-        .saturating_sub(1)
         .min(pins)
         .checked_sub(1)?;
     let x_px = ltr_x(buttons, x_px, width_px);
     let slot = (x_px - lead_px(buttons, dpi)).div_euclid(px(SLOT_DIPS, dpi).max(1));
-    Some((slot - 1).clamp(0, last as i32) as usize)
+    Some(slot.clamp(0, last as i32) as usize)
 }
 
 /// How far item `index` sits from its place, in slots (+1 toward the end), while item `from` is held and the gap
@@ -1352,32 +1351,31 @@ mod tests {
 
     #[test]
     fn drop_index_uses_the_dock_slots_and_clamps_to_the_pins() {
-        // 96 dpi: pad 8, slot 56; slot 0 is the picker, so item i is slot i + 1 at x = 8 + 56 * (i + 1).
+        // 96 dpi: pad 8, slot 56; item i is slot i at x = 8 + 56 * i.
         let at = |x, slots, pins| drop_index(N, x, width_px(N, slots, 96), 96, slots, pins);
-        // 4 pins among 8 slots (picker, 4 pins, 3 running): slots 1..=4 are pins.
-        assert_eq!(at(8 + 56, 8, 4), Some(0));
-        assert_eq!(at(8 + 56 * 3 + 55, 8, 4), Some(2));
-        assert_eq!(at(8 + 56 * 4, 8, 4), Some(3));
-        // On the picker, left of the bar, or beyond the pins: first and last pin.
-        assert_eq!(at(8 + 10, 8, 4), Some(0));
-        assert_eq!(at(-300, 8, 4), Some(0));
-        assert_eq!(at(8 + 56 * 7, 8, 4), Some(3));
-        assert_eq!(at(10_000, 8, 4), Some(3));
+        // 4 pins among 7 slots (4 pins, 3 running): slots 0..=3 are pins.
+        assert_eq!(at(8, 7, 4), Some(0));
+        assert_eq!(at(8 + 56 * 2 + 55, 7, 4), Some(2));
+        assert_eq!(at(8 + 56 * 3, 7, 4), Some(3));
+        // Left of the bar, or beyond the pins: first and last pin.
+        assert_eq!(at(-300, 7, 4), Some(0));
+        assert_eq!(at(8 + 56 * 6, 7, 4), Some(3));
+        assert_eq!(at(10_000, 7, 4), Some(3));
         // No pins: nothing to drop on.
-        assert_eq!(at(70, 8, 0), None);
-        // Clipped bar (width for 3 slots, so only 2 pins visible): the drop never lands on a hidden pin.
-        assert_eq!(drop_index(N, 10_000, width_px(N, 3, 96), 96, 8, 4), Some(1));
+        assert_eq!(at(70, 7, 0), None);
+        // Clipped bar (width for 2 slots, so only 2 pins visible): the drop never lands on a hidden pin.
+        assert_eq!(drop_index(N, 10_000, width_px(N, 2, 96), 96, 7, 4), Some(1));
         // Agrees with `slot_at`: the slot a click would hit is the slot a drop lands on.
-        let width = width_px(N, 8, 96);
+        let width = width_px(N, 7, 96);
         for x in 0..width {
-            if let Some(slot @ 1..=4) = slot_at(x, width, 96, 8) {
-                assert_eq!(drop_index(N, x, width, 96, 8, 4), Some(slot - 1), "x {x}");
+            if let Some(slot @ 0..=3) = slot_at(x, width, 96, 7) {
+                assert_eq!(drop_index(N, x, width, 96, 7, 4), Some(slot), "x {x}");
             }
         }
         // 150%: pad 12, slot 84.
         assert_eq!(
             drop_index(N, 12 + 84 * 2, width_px(N, 5, 144), 144, 5, 3),
-            Some(1)
+            Some(2)
         );
     }
 
@@ -1547,7 +1545,7 @@ mod tests {
         let width = width_px(b, 6, 96);
         assert_eq!(slot_center_x(1000, b, width, 1, 96), 1000 + 104 + 56 + 28);
         assert_eq!(slot_center_x(1000, N, 0, 0, 96), 1000 + 8 + 28);
-        assert_eq!(drop_index(b, 104 + 56 * 2, width, 96, 6, 3), Some(1));
+        assert_eq!(drop_index(b, 104 + 56, width, 96, 6, 3), Some(1));
         assert_eq!(drop_index(b, 0, width, 96, 6, 3), Some(0));
     }
 
