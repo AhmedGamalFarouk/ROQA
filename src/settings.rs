@@ -111,6 +111,8 @@ pub struct Settings {
     pub match_accent: bool,
     /// Global shortcuts (`hotkeys.rs`), one switch per group; all off until asked for.
     pub hotkeys: [bool; hotkeys::COUNT],
+    /// Start ROQA at sign-in (one Run value, written only when this changes); off by default.
+    pub autostart: bool,
 }
 
 impl Default for Settings {
@@ -163,6 +165,7 @@ impl Default for Settings {
             pomo_cfg: pomo::DEFAULT,
             match_accent: false,
             hotkeys: [false; hotkeys::COUNT],
+            autostart: false,
         }
     }
 }
@@ -296,6 +299,7 @@ impl Settings {
             "hidedelay" => value.parse().map(|v| self.hide_delay = v).is_ok(),
             "dockleft" => flag(value).map(|v| self.dock_left = v).is_some(),
             "fshide" => flag(value).map(|v| self.hide_fullscreen = v).is_some(),
+            "autostart" => flag(value).map(|v| self.autostart = v).is_some(),
             "rsounds" => flag(value).map(|v| self.reminder_sounds = v).is_some(),
             "ppause" => flag(value).map(|v| self.prayer_pause = v).is_some(),
             "notchopen" => matches!(value, "hover" | "click")
@@ -429,7 +433,11 @@ impl Settings {
         if let Some(letter) = w.disk_drive {
             out.push_str(&format!("diskdrive={}\n", letter as char));
         }
-        out.push_str(&format!("matchaccent={}\n", u8::from(self.match_accent)));
+        out.push_str(&format!(
+            "matchaccent={}\nautostart={}\n",
+            u8::from(self.match_accent),
+            u8::from(self.autostart)
+        ));
         out.push_str(&format!(
             "dockbadge={}\nclipcopy={}\n",
             u8::from(self.dock_badges),
@@ -821,11 +829,13 @@ mod tests {
             water: true,
             water_cfg: [6, 300, 8, 20, 45],
             pomo_cfg: [50, 10, 30, 3],
+            autostart: true,
             ..Settings::default()
         };
         let mut text = String::new();
         custom.write_lines(&mut text);
         for line in [
+            "autostart=1",
             "fshide=0",
             "notchopen=click",
             "notchsize=130",

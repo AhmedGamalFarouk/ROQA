@@ -179,6 +179,8 @@ Write-Host "Performing system state audit..."
 # A. Registry Audit
 $regViolations = @()
 $runKeyHKCU = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+# The Start with Windows switch writes this one value; an uninstall must not leave it behind.
+if (-not $DryRun) { Remove-ItemProperty -LiteralPath $runKeyHKCU -Name 'ROQA' -ErrorAction SilentlyContinue }
 if (Test-Path -LiteralPath $runKeyHKCU) {
     $props = Get-ItemProperty -LiteralPath $runKeyHKCU
     foreach ($p in $props.PSObject.Properties) {

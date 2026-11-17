@@ -2780,6 +2780,9 @@ impl Desktop {
         if old.hide_fullscreen != self.settings.hide_fullscreen {
             self.fullscreen_generation = None; // the next pass hides or shows again
         }
+        if old.autostart != self.settings.autostart {
+            crate::system_os::set_autostart(self.settings.autostart);
+        }
         if (
             old.dock_hide,
             old.notch_hide,

@@ -121,6 +121,7 @@ const DOCK_BADGES: usize = 202;
 const CLIP: usize = 203;
 const DOCK_HIDE: usize = 204;
 const NOTCH_HIDE: usize = 205;
+const AUTOSTART: usize = 234;
 const DOCK_LEFT: usize = 206;
 /// The reveal and hide delay lists.
 const REVEAL: usize = 232;
@@ -215,6 +216,12 @@ const PAGES: &[Page] = &[
             Card {
                 label: "Behaviour",
                 rows: &[
+                    r(
+                        AUTOSTART,
+                        C,
+                        "Start with Windows",
+                        "Open ROQA when you sign in",
+                    ),
                     r(DESKTOP, C, "Show only windows on this desktop", ""),
                     r(
                         FSHIDE,
@@ -1490,6 +1497,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         LIMCODEX => &mut s.limits_codex,
         LIMAGY => &mut s.limits_agy,
         FSHIDE => &mut s.hide_fullscreen,
+        AUTOSTART => &mut s.autostart,
         RSOUNDS => &mut s.reminder_sounds,
         PPAUSE => &mut s.prayer_pause,
         WATER => &mut s.water,

@@ -54,6 +54,7 @@ mod shelf_os;
 mod sort;
 mod stopwatch;
 mod store;
+mod system_os;
 mod tabs;
 mod text_settings;
 mod theme;
