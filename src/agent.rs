@@ -1,4 +1,5 @@
-//! AI agent status: what a coding agent reported with `roqa.exe agent <name> <state>` (working, needs you, done).
+//! AI agent status: what a coding agent reported with `roqa.exe agent <name> <state>` (working, needs you, done),
+//! and the progress any script reports with `roqa.exe progress <name> <0-100|done>`.
 //! The client appends one line to a spool file and signals the resident process, which reads and removes it
 //! (a name cannot travel in a named event). The tracker is pure: the host asks it for the pill text, the eyes'
 //! state and the one deadline it must wake for.
@@ -34,6 +35,31 @@ impl State {
     }
 }
 
+/// One line of the spool: an agent's state, or a script's progress in percent (100 is done).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Report {
+    State(State),
+    Percent(u8),
+}
+
+/// "0-100" or "done" as `roqa.exe progress` takes it.
+pub fn percent(word: &str) -> Option<u8> {
+    match word {
+        "done" => Some(100),
+        _ => word.parse().ok().filter(|p| *p <= 100),
+    }
+}
+
+/// The progress pill's words: "Build 42%", "Build done".
+pub fn progress_text(name: &str, percent: u8) -> String {
+    let shown = title(name);
+    if percent >= 100 {
+        format!("{shown} done")
+    } else {
+        format!("{shown} {percent}%")
+    }
+}
+
 /// How long a "needs you" or "done" shows on the eyes (the pill's notice lasts as long).
 const SHOWN: Duration = Duration::from_secs(8);
 /// A "working" report holds until the agent says otherwise; this ends one that never did (an interrupted run).
@@ -57,16 +83,20 @@ pub fn clean(name: &str) -> Option<&str> {
 
 /// The words the pill shows: "Codex needs you", "Gemini is done".
 pub fn text(name: &str, state: State) -> String {
-    let mut chars = name.chars();
-    let shown: String = chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default();
+    let shown = title(name);
     match state {
         State::Working => format!("{shown} is working"),
         State::Needs => format!("{shown} needs you"),
         State::Done => format!("{shown} is done"),
     }
+}
+
+fn title(name: &str) -> String {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 struct Entry {
@@ -131,8 +161,9 @@ fn spool() -> Option<PathBuf> {
     Some(path)
 }
 
-/// The client's half: appends `name state` for the resident process. Called only after its event opened.
-pub fn write(name: &str, state: State) -> std::io::Result<()> {
+/// The client's half: appends `name state` (or `name 42%`) for the resident process. Called only after its event
+/// opened.
+pub fn write(name: &str, report: Report) -> std::io::Result<()> {
     let mut path = spool().ok_or(std::io::ErrorKind::NotFound)?;
     fs::create_dir_all(&path)?;
     path.push("agent.txt");
@@ -141,11 +172,15 @@ pub fn write(name: &str, state: State) -> std::io::Result<()> {
         .append(true)
         .open(path)?;
     // One write, so two clients cannot interleave a line.
-    file.write_all(format!("{name} {}\n", state.word()).as_bytes())
+    let word = match report {
+        Report::State(state) => state.word().to_owned(),
+        Report::Percent(percent) => format!("{percent}%"),
+    };
+    file.write_all(format!("{name} {word}\n").as_bytes())
 }
 
 /// The resident half: the reports since the last call, oldest first. Anything unreadable is dropped.
-pub fn take() -> Vec<(String, State)> {
+pub fn take() -> Vec<(String, Report)> {
     let Some(path) = spool().map(|p| p.join("agent.txt")) else {
         return Vec::new();
     };
@@ -161,9 +196,14 @@ pub fn take() -> Vec<(String, State)> {
         .collect()
 }
 
-fn parse(line: &str) -> Option<(String, State)> {
-    let (name, state) = line.split_once(' ')?;
-    Some((clean(name)?.to_owned(), State::parse(state.trim())?))
+fn parse(line: &str) -> Option<(String, Report)> {
+    let (name, word) = line.split_once(' ')?;
+    let word = word.trim();
+    let report = match word.strip_suffix('%') {
+        Some(number) => Report::Percent(percent(number)?),
+        None => Report::State(State::parse(word)?),
+    };
+    Some((clean(name)?.to_owned(), report))
 }
 
 #[cfg(test)]
@@ -182,9 +222,24 @@ mod tests {
         assert!(clean("claude").is_some() && clean("my-agent_2.x").is_some());
         assert!(clean("").is_none() && clean("a b").is_none() && clean("a\"b").is_none());
         assert!(clean(&"x".repeat(NAME + 1)).is_none());
-        assert_eq!(parse("codex done"), Some(("codex".into(), State::Done)));
-        assert_eq!(parse("codex done\r"), Some(("codex".into(), State::Done)));
+        let done = Some(("codex".into(), Report::State(State::Done)));
+        assert_eq!(parse("codex done"), done);
+        assert_eq!(parse("codex done\r"), done);
         assert!(parse("codex later").is_none() && parse("codex").is_none());
+    }
+
+    #[test]
+    fn progress_takes_a_percent_or_done() {
+        assert_eq!(percent("42"), Some(42));
+        assert_eq!(percent("done"), Some(100));
+        assert!(percent("101").is_none() && percent("-1").is_none() && percent("x").is_none());
+        assert_eq!(progress_text("build", 42), "Build 42%");
+        assert_eq!(progress_text("build", 100), "Build done");
+        assert_eq!(
+            parse("build 42%"),
+            Some(("build".into(), Report::Percent(42)))
+        );
+        assert!(parse("build 142%").is_none());
     }
 
     #[test]

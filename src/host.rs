@@ -821,7 +821,7 @@ impl Surface {
             bars: self.bars,
             timer: timer.as_ref(),
             notice,
-            eject: power.eject().is_some(),
+            extra: power.extra(),
             shelf: &slots,
             shelf_undo: shelf.removed.is_some() && !copied,
             shelf_hover: self.hovered,
@@ -1417,6 +1417,9 @@ const PRAYER_NOTICE: Duration = Duration::from_secs(8);
 const DEVICE_NOTICE: Duration = Duration::from_secs(4);
 /// How long a drive alert holds the notch open: long enough to press Eject.
 const DRIVE_NOTICE: Duration = Duration::from_secs(8);
+/// How long a progress report holds the notch open (the next report renews it), and a finished one.
+const PROGRESS_HOLD: Duration = Duration::from_secs(10);
+const PROGRESS_DONE: Duration = Duration::from_secs(2);
 /// How long a volume change from outside ROQA holds the notch open.
 const VOLUME_NOTICE: Duration = Duration::from_millis(1500);
 /// The system sound for a finished timer or a due reminder (callers check the sound settings).
@@ -2141,14 +2144,31 @@ impl Desktop {
     /// length. With the switch off they are read and dropped.
     fn agent_reports(&mut self) {
         let now = Instant::now();
-        for (name, state) in agent::take() {
-            if !self.settings.agent_status {
-                continue;
-            }
-            if let Some(text) = self.agents.set(&name, state, now) {
-                self.show_notice(text, now);
+        for (name, report) in agent::take() {
+            match report {
+                agent::Report::Percent(percent) => self.show_progress(&name, percent, now),
+                agent::Report::State(_) if !self.settings.agent_status => {}
+                agent::Report::State(state) => {
+                    if let Some(text) = self.agents.set(&name, state, now) {
+                        self.show_notice(text, now);
+                    }
+                }
             }
         }
+    }
+    /// A script's progress shows on the notice row with an accent bar; like a device alert it is a short peek
+    /// that stays under a full-screen app. Each report renews the hold; "done" shows briefly and hides.
+    fn show_progress(&mut self, name: &str, percent: u8, now: Instant) {
+        let hold = if percent >= 100 {
+            PROGRESS_DONE
+        } else {
+            PROGRESS_HOLD
+        };
+        self.power
+            .announce(agent::progress_text(name, percent), now, hold);
+        self.power.offer(power::Extra::Progress(percent));
+        self.open_notches();
+        self.request_notches(Repaint::Full, |_| true);
     }
     /// Water reminders (F5): one deadline to the next slot, none while the switch is off. A due slot shows
     /// the progress notice (silent once the goal is met) and the next deadline is computed from the clock.
@@ -4893,7 +4913,7 @@ impl Desktop {
             };
             self.power.announce(text.into(), Instant::now(), hold);
             if let Some(letter) = letter {
-                self.power.offer_eject(letter);
+                self.power.offer(power::Extra::Eject(letter));
             }
             self.open_notches();
             self.request_notches(Repaint::Full, |_| true);

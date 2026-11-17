@@ -7,6 +7,7 @@ use crate::{
     layout::{self, Bounds},
     media::{PLAY_PAUSE, Progress, Track},
     motion,
+    power::Extra,
     tabs::Tab,
     theme::{Palette, Rgba, Sheen},
     timer,
@@ -207,8 +208,8 @@ pub struct NotchScene<'a> {
     pub timer: Option<&'a timer::View>,
     /// The power pill's text (features B1), drawn in the open panel; `None` draws nothing.
     pub notice: Option<&'a str>,
-    /// The notice offers an Eject button (a drive alert).
-    pub eject: bool,
+    /// What the notice row carries besides its text: an Eject button or a progress bar.
+    pub extra: Extra,
     /// The file shelf's visible entries (S6, PROVISIONAL); empty draws nothing.
     pub shelf: &'a [ShelfSlot<'a>],
     pub shelf_undo: bool,
@@ -1310,9 +1311,10 @@ fn notice_text(
         return Ok(());
     };
     let slot = layout::power_notice(scene.track.is_some(), scene.dpi);
-    let button = scene
-        .eject
+    let button = matches!(scene.extra, Extra::Eject(_))
         .then(|| layout::eject_button(scene.track.is_some(), scene.dpi));
+    // A progress row gives the text its left share and the bar the rest.
+    let bar_left = matches!(scene.extra, Extra::Progress(_)).then(|| slot.width as f32 * 0.5);
     let left = body.left + slot.x as f32;
     // The notice rises 5 DIP into place as it fades in.
     let top = body.top + slot.y as f32 + (1.0 - scene.fx.notice) * 5.0 * scale;
@@ -1324,8 +1326,10 @@ fn notice_text(
         align: DWRITE_TEXT_ALIGNMENT_CENTER,
     };
     // The text gives the button its place at the row's right.
-    let right = button.map_or(slot.width as f32, |button| {
-        (button.x - slot.x) as f32 - 6.0 * scale
+    let right = bar_left.unwrap_or_else(|| {
+        button.map_or(slot.width as f32, |button| {
+            (button.x - slot.x) as f32 - 6.0 * scale
+        })
     });
     let rect = D2D_RECT_F {
         left,
@@ -1341,6 +1345,30 @@ fn notice_text(
         rect,
         with_alpha(p.ink, p.ink_alpha(0.85 * alpha)),
     )?;
+    if let (Some(left_edge), Extra::Progress(percent)) = (bar_left, scene.extra) {
+        // A quiet track with the accent fill: the one progress fill.
+        let height = 4.0 * scale;
+        let mid = top + slot.height as f32 / 2.0;
+        let track = D2D_RECT_F {
+            left: left + left_edge + 6.0 * scale,
+            top: mid - height / 2.0,
+            right: left + slot.width as f32,
+            bottom: mid + height / 2.0,
+        };
+        let fill = D2D_RECT_F {
+            right: track.left + (track.right - track.left) * f32::from(percent) / 100.0,
+            ..track
+        };
+        // SAFETY: context is live between surface BeginDraw/EndDraw; the brushes are scoped to this draw.
+        unsafe {
+            let back = context
+                .CreateSolidColorBrush(&with_alpha(p.ink, p.ink_alpha(0.18 * alpha)), None)?;
+            context.FillRoundedRectangle(&rounded(track, height / 2.0), &back);
+            let front =
+                context.CreateSolidColorBrush(&with_alpha(p.accent, p.ink_alpha(alpha)), None)?;
+            context.FillRoundedRectangle(&rounded(fill, height / 2.0), &front);
+        }
+    }
     if let Some(button) = button {
         // The one primary action of the alert: a solid accent capsule.
         let cell = D2D_RECT_F {
@@ -3180,7 +3208,7 @@ mod media_tests {
             bars: [0; BARS],
             timer: None,
             notice: None,
-            eject: false,
+            extra: Extra::None,
             shelf: &[],
             shelf_undo: false,
             shelf_hover: false,
@@ -3226,7 +3254,7 @@ mod media_tests {
                 bars: [0; BARS],
                 timer: None,
                 notice: None,
-                eject: false,
+                extra: Extra::None,
                 shelf: &[],
                 shelf_undo: false,
                 shelf_hover: false,
@@ -3473,7 +3501,7 @@ mod media_tests {
                 bars: [4, 20, 12, 8, 4],
                 timer: None,
                 notice: None,
-                eject: false,
+                extra: Extra::None,
                 shelf: &[],
                 shelf_undo: false,
                 shelf_hover: false,
@@ -3541,7 +3569,7 @@ mod media_tests {
                     bars: heights,
                     timer: None,
                     notice: None,
-                    eject: false,
+                    extra: Extra::None,
                     shelf: &[],
                     shelf_undo: false,
                     shelf_hover: false,
@@ -3597,7 +3625,7 @@ mod media_tests {
             bars: [0; BARS],
             timer: None,
             notice: None,
-            eject: false,
+            extra: Extra::None,
             shelf: &[],
             shelf_undo: false,
             shelf_hover: false,

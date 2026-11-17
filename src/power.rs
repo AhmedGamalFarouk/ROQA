@@ -94,12 +94,22 @@ fn text(state: State, percent: u8) -> String {
     }
 }
 
+/// What the notice row carries besides its text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Extra {
+    #[default]
+    None,
+    /// An Eject button for this drive.
+    Eject(char),
+    /// A progress bar, in percent.
+    Progress(u8),
+}
+
 #[derive(Default)]
 pub struct Power {
     last: Option<State>,
     notice: Option<(String, Instant)>,
-    /// The drive the notice offers to eject, while that notice shows.
-    eject: Option<char>,
+    extra: Extra,
 }
 
 impl Power {
@@ -108,7 +118,7 @@ impl Power {
         Self {
             last: raw.and_then(Raw::state).map(|(state, _)| state),
             notice: None,
-            eject: None,
+            extra: Extra::None,
         }
     }
 
@@ -128,17 +138,25 @@ impl Power {
     /// Shows `text` for `hold` in place of any power notice: the prayer reminder reuses the notice row.
     pub fn announce(&mut self, text: String, now: Instant, hold: Duration) {
         self.notice = Some((text, now + hold));
-        self.eject = None;
+        self.extra = Extra::None;
     }
 
-    /// The notice just announced offers an Eject button for drive `letter`.
-    pub fn offer_eject(&mut self, letter: char) {
-        self.eject = Some(letter);
+    /// The notice just announced carries `extra`.
+    pub fn offer(&mut self, extra: Extra) {
+        self.extra = extra;
+    }
+
+    /// The extra of the notice that shows now.
+    pub fn extra(&self) -> Extra {
+        self.notice.as_ref().map_or(Extra::None, |_| self.extra)
     }
 
     /// The drive to eject while its notice shows.
     pub fn eject(&self) -> Option<char> {
-        self.notice.as_ref().and(self.eject)
+        match self.extra() {
+            Extra::Eject(letter) => Some(letter),
+            _ => None,
+        }
     }
 
     /// Drops the notice at once (a state change that makes it stale); true if one was showing.

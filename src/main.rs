@@ -103,7 +103,19 @@ fn run() -> Result<()> {
             };
             // A hook runs whether or not ROQA does: not running is not an error.
             let _ = ipc::Command::Agent.signal_after(|| {
-                let _ = agent::write(name, state);
+                let _ = agent::write(name, agent::Report::State(state));
+            });
+            Ok(())
+        }
+        [command, name, value] if command == "progress" => {
+            let (Some(name), Some(percent)) = (agent::clean(name), agent::percent(value)) else {
+                return Err(Error::new(
+                    E_INVALIDARG,
+                    "Use: progress <name> <0-100|done>.",
+                ));
+            };
+            let _ = ipc::Command::Agent.signal_after(|| {
+                let _ = agent::write(name, agent::Report::Percent(percent));
             });
             Ok(())
         }
