@@ -36,6 +36,8 @@ pub enum DropEvent {
     /// A file drag is over the notch (true) or left it (false): the notch opens, or closes again.
     Hover(HWND, bool),
     Files(Vec<String>),
+    /// Files dropped on a dock at this screen column: the app under it opens them.
+    Dock(HWND, i32, Vec<String>),
 }
 pub type Drops = Rc<RefCell<Vec<DropEvent>>>;
 
@@ -81,6 +83,8 @@ fn dropped_files(data: &IDataObject) -> Vec<String> {
 struct DropTarget {
     hwnd: HWND,
     drops: Drops,
+    /// A dock takes the drop but never opens for the hover (the notch does, for the shelf).
+    dock: bool,
     /// The drag now over the notch carries files; set at enter, so over/drop need not ask again.
     accepts: Cell<bool>,
 }
@@ -111,7 +115,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
             .as_ref()
             .is_some_and(|data| unsafe { data.QueryGetData(&hdrop_format()) }.is_ok());
         self.accepts.set(files);
-        if files {
+        if files && !self.dock {
             self.drops
                 .borrow_mut()
                 .push(DropEvent::Hover(self.hwnd, true));
@@ -129,7 +133,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         Ok(())
     }
     fn DragLeave(&self) -> Result<()> {
-        if self.accepts.replace(false) {
+        if self.accepts.replace(false) && !self.dock {
             self.drops
                 .borrow_mut()
                 .push(DropEvent::Hover(self.hwnd, false));
@@ -140,7 +144,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         &self,
         data: Ref<'_, IDataObject>,
         _keys: MODIFIERKEYS_FLAGS,
-        _point: &POINTL,
+        point: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> Result<()> {
         let files = if self.accepts.replace(false) {
@@ -149,7 +153,13 @@ impl IDropTarget_Impl for DropTarget_Impl {
             Vec::new()
         };
         answer(effect, !files.is_empty());
-        if !files.is_empty() {
+        if self.dock {
+            if !files.is_empty() {
+                self.drops
+                    .borrow_mut()
+                    .push(DropEvent::Dock(self.hwnd, point.x, files));
+            }
+        } else if !files.is_empty() {
             // The pointer is still over the notch: it stays open until the pointer leaves.
             self.drops.borrow_mut().push(DropEvent::Files(files));
         } else {
@@ -161,11 +171,12 @@ impl IDropTarget_Impl for DropTarget_Impl {
     }
 }
 
-/// Makes `hwnd` (a notch) accept file drops. OLE holds its own reference until `revoke`.
-pub fn register(hwnd: HWND, drops: &Drops) -> Result<()> {
+/// Makes `hwnd` (a notch, or with `dock` a dock) accept file drops. OLE holds its own reference until `revoke`.
+pub fn register(hwnd: HWND, drops: &Drops, dock: bool) -> Result<()> {
     let target: IDropTarget = DropTarget {
         hwnd,
         drops: Rc::clone(drops),
+        dock,
         accepts: Cell::new(false),
     }
     .into();

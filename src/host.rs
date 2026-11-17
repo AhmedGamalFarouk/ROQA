@@ -382,9 +382,7 @@ impl Surface {
 }
 impl Drop for Surface {
     fn drop(&mut self) {
-        if matches!(self.role, Role::Notch { .. }) {
-            shelf_os::revoke(self.window.0);
-        }
+        shelf_os::revoke(self.window.0);
     }
 }
 /// State only one surface kind needs.
@@ -434,10 +432,8 @@ impl Surface {
             None
         };
         let window = NativeWindow::create(bounds, kind)?;
-        if kind == SurfaceKind::Notch
-            && let Err(error) = shelf_os::register(window.0, drops)
-        {
-            eprintln!("Shelf: file drops unavailable: {error}");
+        if let Err(error) = shelf_os::register(window.0, drops, kind == SurfaceKind::Dock) {
+            eprintln!("File drops unavailable: {error}");
         }
         let role = match shadow {
             None => Role::Dock {
@@ -4533,7 +4529,43 @@ impl Desktop {
                     self.add_shelf_files(&paths)
                 }
                 DropEvent::Files(_) => {}
+                DropEvent::Dock(hwnd, x, paths) => self.drop_on_dock(hwnd, x, &paths),
             }
+        }
+    }
+    /// Files dropped on a dock slot open with that app: its program is started with the paths. A group of apps,
+    /// a folder and an app with no program path (a packaged one) are told so instead.
+    fn drop_on_dock(&mut self, hwnd: HWND, x: i32, paths: &[String]) {
+        let Some(dock) = self.dock_at(hwnd) else {
+            return;
+        };
+        let hit = dock::hit_at(
+            dock.dock_buttons,
+            x - dock.bounds.x,
+            dock.bounds.width,
+            dock.dpi,
+            self.dock_slots(),
+        );
+        let Some(Hit::Slot(slot @ 1..)) = hit else {
+            return;
+        };
+        let Some(item) = self.dock_items.get(slot - 1) else {
+            return;
+        };
+        let program = match &item.identity {
+            Identity::Executable(path) => Some(path.as_str()),
+            _ => item.executable.as_deref(),
+        }
+        .filter(|path| {
+            item.members.is_empty()
+                && path.ends_with(".exe")
+                && std::path::Path::new(path).is_file()
+        });
+        let quoted: Vec<_> = paths.iter().map(|path| format!("\"{path}\"")).collect();
+        let opened =
+            program.is_some_and(|program| dock::launch_with(program, Some(&quoted.join(" "))));
+        if !opened {
+            self.show_notice("That app can't open files".into(), Instant::now());
         }
     }
     /// Opens the picker; a finished one whose completion wake was lost is collected instead of stranding it.
