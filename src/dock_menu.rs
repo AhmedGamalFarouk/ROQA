@@ -76,6 +76,7 @@ pub enum Quick {
     KeepAwake,
     Lock,
     Sleep,
+    Theme,
 }
 impl Item {
     pub fn label(self) -> &'static str {

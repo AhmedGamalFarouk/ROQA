@@ -1287,6 +1287,8 @@ struct Desktop {
     tuck_generation: Option<u64>,
     /// Keep awake from the quick settings is on (not stored: Windows drops it when ROQA quits).
     keep_awake: bool,
+    /// The look the quick settings' theme row returns to from Light (the last non-Light theme).
+    dark_theme: crate::theme::Theme,
     /// A new song opened the notch on its own: when it closes again, and the song it showed.
     peek: Option<Instant>,
     peek_title: Option<String>,
@@ -1462,6 +1464,7 @@ impl Desktop {
             tuck_notch: dock_tuck::Tuck::top(),
             tuck_generation: None,
             keep_awake: false,
+            dark_theme: crate::theme::Theme::Classic,
             peek: None,
             peek_title: None,
             places: Vec::new(),
@@ -3578,6 +3581,11 @@ impl Desktop {
             Quick::KeepAwake,
             format!("Keep awake {}", if self.keep_awake { "on" } else { "off" }),
         ));
+        let light = self.settings.theme == crate::theme::Theme::Light;
+        rows.push((
+            Quick::Theme,
+            format!("Theme {}", if light { "light" } else { "dark" }),
+        ));
         rows.push((Quick::Lock, "Lock".to_owned()));
         rows.push((Quick::Sleep, "Sleep".to_owned()));
         rows.into_iter()
@@ -3683,7 +3691,12 @@ impl Desktop {
         }
     }
     /// Applies one quick setting, then shows the new state in the same popup.
-    fn run_quick(&mut self, mut menu: dock_menu::Menu, row: dock_menu::Quick) {
+    fn run_quick(
+        &mut self,
+        mut menu: dock_menu::Menu,
+        row: dock_menu::Quick,
+        catalog: &mut Catalog,
+    ) {
         use dock_menu::Quick;
         let step = |level: Option<audio::Level>, up: bool| {
             level.map(|level| {
@@ -3708,6 +3721,25 @@ impl Desktop {
             Quick::KeepAwake => {
                 self.keep_awake = !self.keep_awake;
                 crate::system_os::keep_awake(self.keep_awake);
+            }
+            Quick::Theme => {
+                use crate::theme::Theme;
+                let theme = if self.settings.theme == Theme::Light {
+                    self.dark_theme
+                } else {
+                    self.dark_theme = self.settings.theme;
+                    Theme::Light
+                };
+                let next = Settings {
+                    theme,
+                    ..self.settings.clone()
+                };
+                // A new theme rebuilds every surface, popup included, so nothing is listed again.
+                dock::restore_foreground(menu.hwnd(), menu.return_to);
+                if let Err(error) = self.apply_settings(next, catalog) {
+                    eprintln!("Theme: {error}");
+                }
+                return;
             }
             Quick::Lock | Quick::Sleep => {
                 if row == Quick::Lock {
@@ -3943,7 +3975,7 @@ impl Desktop {
         }
     }
     /// Input for the open menu. Returns true when the message is consumed.
-    fn menu_message(&mut self, message: &MSG) -> bool {
+    fn menu_message(&mut self, message: &MSG, catalog: &mut Catalog) -> bool {
         let Some(menu) = &mut self.menu else {
             return false;
         };
@@ -3956,19 +3988,19 @@ impl Desktop {
                 own // a press on another ROQA window still reaches it
             }
             Event::Choose(item) => {
-                self.run_menu(item);
+                self.run_menu(item, catalog);
                 true
             }
         }
     }
     /// Does the chosen action on the slot's app, if the slot still holds it. A new instance leaves the
     /// foreground to the app it starts; the rest return it to the window the menu came from.
-    fn run_menu(&mut self, item: Item) {
+    fn run_menu(&mut self, item: Item, catalog: &mut Catalog) {
         let Some(mut menu) = self.menu.take() else {
             return;
         };
         if let Item::Quick(row) = item {
-            self.run_quick(menu, row);
+            self.run_quick(menu, row, catalog);
             return;
         }
         if item == Item::Rename {
@@ -5682,7 +5714,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             if catalog.message(&message)? {
                 continue;
             }
-            if desktop.hover_popup_message(&message) || desktop.menu_message(&message) {
+            if desktop.hover_popup_message(&message) || desktop.menu_message(&message, catalog) {
                 continue;
             }
             if matches!(
