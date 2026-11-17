@@ -348,6 +348,12 @@ pub fn player_at(
     })
 }
 
+/// The Music page's cover (80 square at 16, 24) under a window point at `progress`; the click on it opens the player.
+pub fn media_cover_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32) -> bool {
+    let cover = scaled_bounds((16.0, 24.0, 80.0, 80.0), dpi);
+    panel_offset(window_width, dpi, progress, cover, (x, y)).is_some()
+}
+
 /// A Widgets tile in DIPs: 190 x 72, or 190 x 52 when a lower slot is filled; two across, `GUTTER` apart.
 pub const WIDGET_TILE: (f32, f32) = (190.0, 72.0);
 pub const WIDGET_COMPACT: (f32, f32) = (190.0, 52.0);

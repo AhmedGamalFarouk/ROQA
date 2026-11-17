@@ -4755,6 +4755,20 @@ impl Desktop {
         let players = self.pages.track(&self.media).map_or(0, |t| t.players.len());
         if let Some(player) = layout::player_at(width, dpi, progress, players, x, y) {
             self.media.choose(player);
+        } else if players < 2
+            && let Some(mode) = layout::player_at(width, dpi, progress, 2, x, y)
+        {
+            self.media.mode(mode);
+        } else if layout::media_cover_at(width, dpi, progress, x, y) {
+            // Only a packaged player can be opened from its id; any other click on the cover does nothing.
+            let target = self
+                .media
+                .packaged_player()
+                .and_then(|id| crate::pins::launch_target(&Identity::Application(id)));
+            let Some(target) = target else {
+                return false;
+            };
+            self.run_dock_action(dock::Action::Launch(target));
         } else if let Some(control) = layout::media_control_at(width, dpi, progress, x, y) {
             self.press(control);
         } else if let Some(fraction) = layout::media_seek_at(width, dpi, progress, x, y) {

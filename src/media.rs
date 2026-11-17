@@ -13,11 +13,14 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use windows::{
     Foundation::TypedEventHandler,
-    Media::Control::{
-        GlobalSystemMediaTransportControlsSession as Session,
-        GlobalSystemMediaTransportControlsSessionManager as Manager,
-        GlobalSystemMediaTransportControlsSessionMediaProperties as Properties,
-        GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
+    Media::{
+        Control::{
+            GlobalSystemMediaTransportControlsSession as Session,
+            GlobalSystemMediaTransportControlsSessionManager as Manager,
+            GlobalSystemMediaTransportControlsSessionMediaProperties as Properties,
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
+        },
+        MediaPlaybackAutoRepeatMode,
     },
     Storage::Streams::{
         IRandomAccessStream, IRandomAccessStreamReference, IRandomAccessStreamWithContentType,
@@ -74,6 +77,10 @@ pub struct Track {
     pub controls: [bool; 3],
     /// The player accepts a new playback position (`IsPlaybackPositionEnabled`).
     pub seekable: bool,
+    /// Shuffle is on, for a player that accepts a change; none for one that does not.
+    pub shuffle: Option<bool>,
+    /// Repeat for a player that accepts a change: 0 off, 1 this track, 2 the list.
+    pub repeat: Option<u8>,
     pub rate: f64,
     pub timeline: Timeline,
     /// Short names of the players, oldest first, when two or more are open (at most `MAX_PLAYERS`,
@@ -95,9 +102,13 @@ pub struct Progress {
     pub filled: i32,
 }
 impl Progress {
-    /// Elapsed and total time as `m:ss`.
+    /// Elapsed time as `m:ss` and the time left as `-m:ss`.
     pub fn times(self) -> [String; 2] {
-        [self.elapsed, self.total].map(|seconds| format!("{}:{:02}", seconds / 60, seconds % 60))
+        let clock = |seconds: i64| format!("{}:{:02}", seconds / 60, seconds % 60);
+        [
+            clock(self.elapsed),
+            format!("-{}", clock((self.total - self.elapsed).max(0))),
+        ]
     }
 }
 
@@ -220,7 +231,15 @@ impl View {
 /// enabled controls changed. Timeline and rate updates, and changes among the no-media views, draw
 /// nothing new. Every track field the notch draws must be compared here.
 pub fn redraw(before: &View, after: &View) -> bool {
-    type Drawn<'a> = (&'a str, &'a str, bool, [bool; 3], &'a [String], usize);
+    type Drawn<'a> = (
+        &'a str,
+        &'a str,
+        bool,
+        [bool; 3],
+        &'a [String],
+        usize,
+        (Option<bool>, Option<u8>),
+    );
     fn drawn(view: &View) -> Option<Drawn<'_>> {
         view.shown().map(|t| {
             (
@@ -230,6 +249,7 @@ pub fn redraw(before: &View, after: &View) -> bool {
                 t.controls,
                 t.players.as_slice(),
                 t.chosen,
+                (t.shuffle, t.repeat),
             )
         })
     }
@@ -247,6 +267,8 @@ pub enum Change {
         observed: Instant,
         controls: [bool; 3],
         seekable: bool,
+        shuffle: Option<bool>,
+        repeat: Option<u8>,
         rate: f64,
         timeline: Timeline,
     },
@@ -292,6 +314,8 @@ impl State {
                 observed,
                 controls,
                 seekable,
+                shuffle,
+                repeat,
                 rate,
                 timeline,
             } => {
@@ -304,6 +328,7 @@ impl State {
                         track.paused_until = Some(observed + PAUSED_GRACE);
                     }
                     (track.playing, track.controls, track.seekable) = (playing, controls, seekable);
+                    (track.shuffle, track.repeat) = (shuffle, repeat);
                     (track.rate, track.timeline) = (rate, timeline);
                 }
             }
@@ -559,6 +584,15 @@ fn admit_command(
     Ok(())
 }
 
+/// The repeat mode after `mode` when the chip is pressed: off, then the list, then this track, then off.
+fn repeat_after(mode: u8) -> u8 {
+    match mode {
+        0 => 2,
+        2 => 1,
+        _ => 0,
+    }
+}
+
 fn bounded(text: HSTRING) -> String {
     let units: &[u16] = &text;
     let mut end = units.len().min(TEXT_LIMIT);
@@ -601,6 +635,17 @@ fn read_playback(session: &Session, observed: Instant) -> Result<Change> {
             controls.IsNextEnabled()?,
         ],
         seekable: controls.IsPlaybackPositionEnabled()?,
+        // A player that accepts the change but does not say its state shows as off.
+        shuffle: controls.IsShuffleEnabled()?.then(|| {
+            info.IsShuffleActive()
+                .and_then(|on| on.Value())
+                .unwrap_or(false)
+        }),
+        repeat: controls.IsRepeatEnabled()?.then(|| {
+            info.AutoRepeatMode()
+                .and_then(|mode| mode.Value())
+                .map_or(0, |mode| mode.0 as u8)
+        }),
         rate: rate.unwrap_or(1.0),
         timeline: read_timeline(session)?,
     })
@@ -817,6 +862,48 @@ impl Media {
             Ok(()) => {}
             Err(error) => eprintln!("Media: seek: {error}"),
         }
+    }
+    /// The Music page's mode chips on the shown player: 0 flips shuffle, 1 steps repeat (off, list, track).
+    /// Nothing happens for a player that does not accept the change.
+    pub fn mode(&mut self, index: usize) {
+        let (Some(session), Some(track)) = (&self.session, self.state.view.shown()) else {
+            return;
+        };
+        let source = &session.source;
+        let (shuffle, repeat) = (track.shuffle, track.repeat);
+        if !(index == 0 && shuffle.is_some() || index == 1 && repeat.is_some()) {
+            return;
+        }
+        let start = || {
+            if index == 0 {
+                source.TryChangeShuffleActiveAsync(!shuffle.unwrap_or(false))
+            } else {
+                let next = repeat_after(repeat.unwrap_or(0));
+                source.TryChangeAutoRepeatModeAsync(MediaPlaybackAutoRepeatMode(i32::from(next)))
+            }
+        };
+        let generation = self.state.generation;
+        if let Err(error) = admit_command(
+            &mut self.command,
+            &mut self.orphans,
+            generation,
+            &self.wake,
+            start,
+        ) {
+            eprintln!("Media: mode {index}: {error}");
+        }
+    }
+    /// The shown player's app id when it is a packaged app, the only kind Windows opens from an id (the
+    /// click on the cover); none for any other.
+    pub fn packaged_player(&self) -> Option<String> {
+        let id = self
+            .session
+            .as_ref()?
+            .source
+            .SourceAppUserModelId()
+            .ok()?
+            .to_string_lossy();
+        id.contains('!').then_some(id)
     }
     /// Whether any visible notch is open. Opening reads the timeline once: no event keeps it
     /// current, and a collapsed notch draws no progress.
@@ -1219,6 +1306,8 @@ mod tests {
             observed: Instant::now(),
             controls: [false, true, true],
             seekable: true,
+            shuffle: None,
+            repeat: None,
             rate: 1.0,
             timeline: Timeline::default(),
         });
@@ -1253,6 +1342,8 @@ mod tests {
             observed: Instant::now(),
             controls: [true; 3],
             seekable: true,
+            shuffle: None,
+            repeat: None,
             rate: 1.0,
             timeline: Timeline::default(),
         });
@@ -1326,6 +1417,11 @@ mod tests {
     }
 
     #[test]
+    fn repeat_steps_off_list_track_and_back() {
+        assert_eq!([0, 2, 1].map(repeat_after), [2, 1, 0]);
+    }
+
+    #[test]
     fn progress_shows_whole_seconds_and_floored_pixels_and_needs_a_duration() {
         // Started 20 s in, stamped at 1000 s; 2:00 long on a 120 px bar.
         let playing = track(true, 1.0, 0, 120 * SECOND, 20 * SECOND);
@@ -1339,7 +1435,7 @@ mod tests {
                 filled: 30
             }
         );
-        assert_eq!(shown.times(), ["0:30", "2:00"]);
+        assert_eq!(shown.times(), ["0:30", "-1:30"]);
         // Clamped at both ends of the timeline.
         assert_eq!(playing.progress(at(500.0), 120).unwrap().filled, 120);
         let rewound = track(true, -4.0, 0, 120 * SECOND, 20 * SECOND);
@@ -1355,7 +1451,7 @@ mod tests {
                 filled: 0
             }
             .times(),
-            ["62:05", "0:59"]
+            ["62:05", "-0:00"]
         );
         // No EndTime, or one not after StartTime: no bar, no deadline and no seek.
         for (start, end) in [(0, 0), (60 * SECOND, 30 * SECOND), (5, 5)] {
@@ -1747,6 +1843,8 @@ mod tests {
             observed,
             controls: [true; 3],
             seekable: false,
+            shuffle: None,
+            repeat: None,
             rate: 1.0,
             timeline: Timeline::default(),
         }

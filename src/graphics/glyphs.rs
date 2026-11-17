@@ -69,8 +69,12 @@ pub enum Glyph {
     /// The month page's arrows: a chevron left and right.
     Back,
     Forward,
+    /// The Music page's mode chips: two arrows crossing, a loop of two arrows, and the loop with a 1.
+    Shuffle,
+    Repeat,
+    RepeatOne,
 }
-const ALL: [Glyph; 40] = [
+const ALL: [Glyph; 43] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -111,6 +115,9 @@ const ALL: [Glyph; 40] = [
     Glyph::Keys,
     Glyph::Back,
     Glyph::Forward,
+    Glyph::Shuffle,
+    Glyph::Repeat,
+    Glyph::RepeatOne,
 ];
 /// Grid size and stroke, in grid units.
 const GRID: f32 = 24.0;
@@ -220,6 +227,13 @@ impl Glyph {
             Glyph::Expand => "M6 9l6 6 6-6",
             Glyph::Back => "M15 6l-6 6 6 6",
             Glyph::Forward => "M9 6l6 6-6 6",
+            Glyph::Shuffle => "M4 7h3l10 10h3M17 14l3 3l-3 3M4 17h3l3-3M14 10l3-3h3M17 4l3 3l-3 3",
+            Glyph::Repeat => {
+                "M17 3l3 3l-3 3M20 6H8a4 4 0 0 0-4 4v1M7 21l-3-3l3-3M4 18h12a4 4 0 0 0 4-4v-1"
+            }
+            Glyph::RepeatOne => {
+                "M17 3l3 3l-3 3M20 6H8a4 4 0 0 0-4 4v1M7 21l-3-3l3-3M4 18h12a4 4 0 0 0 4-4v-1M11 10.5l1.5-1.2V15"
+            }
             Glyph::Charging => "M13 2L5 13h6l-1 9 9-12h-6z",
             Glyph::Add => "M12 4v16M4 12h16",
             Glyph::More => "M5 12h.01M12 12h.01M19 12h.01",

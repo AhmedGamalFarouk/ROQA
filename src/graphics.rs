@@ -1500,6 +1500,8 @@ struct Chip {
     alpha: f32,
     /// The player does not accept it now: high contrast draws it in the system grey-text colour.
     disabled: bool,
+    /// A mode that is on (shuffle, repeat): its glyph wears the accent.
+    lit: bool,
 }
 /// Opacity of a control the player does not accept now.
 const DISABLED: f32 = 0.30;
@@ -1512,6 +1514,52 @@ struct PlayerChip<'a> {
     alpha: f32,
     font: Font,
 }
+/// The shuffle and repeat chips under the cover, where the player chips go: shown only for a player that accepts
+/// the change and while fewer than two players are open. A mode that is on wears the accent.
+fn mode_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip> {
+    let reveal = motion::reveal(scene.progress);
+    if reveal <= 0.0 || track.players.len() >= 2 {
+        return Vec::new();
+    }
+    let scale = scene.dpi as f32 / 96.0;
+    let repeat = match track.repeat {
+        Some(1) => Glyph::RepeatOne,
+        _ => Glyph::Repeat,
+    };
+    [
+        (track.shuffle, Glyph::Shuffle, track.shuffle == Some(true)),
+        (track.repeat.map(|_| true), repeat, track.repeat > Some(0)),
+    ]
+    .into_iter()
+    .enumerate()
+    .filter_map(|(index, (offered, shape, lit))| {
+        offered?;
+        let cell = layout::player_chip(scene.dpi, 2, index);
+        let rect = D2D_RECT_F {
+            left: body.left + cell.x as f32,
+            top: body.top + cell.y as f32,
+            right: body.left + (cell.x + cell.width) as f32,
+            bottom: body.top + (cell.y + cell.height) as f32,
+        };
+        let size = (12.0 * scale).round();
+        Some(Chip {
+            rect,
+            glyph: pixel_square(
+                rect.left + ((cell.width as f32 - size) / 2.0).round(),
+                rect.top + ((cell.height as f32 - size) / 2.0).round(),
+                size,
+            ),
+            shape,
+            filled: false,
+            capsule: true,
+            alpha: reveal,
+            disabled: false,
+            lit,
+        })
+    })
+    .collect()
+}
+
 /// The chips for `track`'s players, placed like the controls and faded in with them.
 fn player_chips<'a>(
     scene: &NotchScene,
@@ -1701,7 +1749,8 @@ fn media_plan<'a>(
         },
     ];
     let bar = progress_row(&mut lines, scene, body);
-    let chips = media_chips(scene, track, body);
+    let mut chips = media_chips(scene, track, body);
+    chips.extend(mode_chips(scene, track, body));
     let players = player_chips(scene, track, body);
     MediaPlan {
         cover: rounded(cover, at(5.0, layout::TILE_RADIUS) * scale),
@@ -1933,6 +1982,7 @@ fn media_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip
                 capsule: index < PLAY_PAUSE + 2,
                 alpha: reveal * if enabled[index] { 1.0 } else { DISABLED },
                 disabled: !enabled[index],
+                lit: false,
             }
         })
         .collect()
@@ -2015,6 +2065,13 @@ fn media_text(
                 chip.glyph,
                 chip.shape,
                 with_alpha(p.ink_on_accent(), p.ink_alpha(chip.alpha)),
+            )?;
+        } else if chip.lit {
+            glyphs::draw(
+                context,
+                chip.glyph,
+                chip.shape,
+                with_alpha(p.accent, p.ink_alpha(chip.alpha)),
             )?;
         } else {
             glyphs::draw(context, chip.glyph, chip.shape, color)?;
@@ -3325,7 +3382,7 @@ mod media_tests {
             lines(&panel)[3..],
             [
                 ("1:23", rect(148.0, 63.0, 184.0, 79.0), 11.0, 0.60),
-                ("4:56", rect(348.0, 63.0, 384.0, 79.0), 11.0, 0.60),
+                ("-3:33", rect(348.0, 63.0, 384.0, 79.0), 11.0, 0.60),
             ]
         );
         let total = &panel.lines[4].font;
