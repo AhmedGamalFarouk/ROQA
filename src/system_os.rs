@@ -1,12 +1,17 @@
-//! Small Windows switches the settings and quick settings reach: start at sign-in. Each is one call made
-//! when the user asks; nothing here runs on its own.
+//! Small Windows switches the settings and quick settings reach: start at sign-in and keep awake. Each is one
+//! call made when the user asks; nothing here runs on its own.
 
 use windows::{
     Win32::{
         Foundation::ERROR_SUCCESS,
-        System::Registry::{
-            HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW,
-            RegOpenKeyExW, RegSetValueExW,
+        System::{
+            Power::{
+                ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
+            },
+            Registry::{
+                HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW,
+                RegOpenKeyExW, RegSetValueExW,
+            },
         },
     },
     core::w,
@@ -44,5 +49,19 @@ pub fn set_autostart(on: bool) {
             let _ = RegDeleteValueW(key, w!("ROQA"));
         }
         let _ = RegCloseKey(key);
+    }
+}
+
+/// Keeps the screen and the PC awake while on. The request belongs to the calling (host) thread, so
+/// Windows drops it when ROQA quits.
+pub fn keep_awake(on: bool) {
+    let flags = if on {
+        ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED
+    } else {
+        ES_CONTINUOUS
+    };
+    // SAFETY: a scalar flag call with no pointers.
+    unsafe {
+        SetThreadExecutionState(flags);
     }
 }

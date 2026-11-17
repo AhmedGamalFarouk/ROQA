@@ -1285,6 +1285,8 @@ struct Desktop {
     tuck: dock_tuck::Tuck,
     tuck_notch: dock_tuck::Tuck,
     tuck_generation: Option<u64>,
+    /// Keep awake from the quick settings is on (not stored: Windows drops it when ROQA quits).
+    keep_awake: bool,
     /// A new song opened the notch on its own: when it closes again, and the song it showed.
     peek: Option<Instant>,
     peek_title: Option<String>,
@@ -1459,6 +1461,7 @@ impl Desktop {
             tuck: dock_tuck::Tuck::default(),
             tuck_notch: dock_tuck::Tuck::top(),
             tuck_generation: None,
+            keep_awake: false,
             peek: None,
             peek_title: None,
             places: Vec::new(),
@@ -3571,6 +3574,10 @@ impl Desktop {
                 ),
             ));
         }
+        rows.push((
+            Quick::KeepAwake,
+            format!("Keep awake {}", if self.keep_awake { "on" } else { "off" }),
+        ));
         rows.into_iter()
             .map(|(row, text)| (Item::Quick(row), text))
             .unzip()
@@ -3696,6 +3703,10 @@ impl Desktop {
                 quick::toggle_radio(quick::Kind::Bluetooth);
             }
             Quick::Power => quick::next_mode(),
+            Quick::KeepAwake => {
+                self.keep_awake = !self.keep_awake;
+                crate::system_os::keep_awake(self.keep_awake);
+            }
         }
         let (items, titles) = self.quick_rows();
         if menu.relist(items, titles, Vec::new()).is_ok() {
