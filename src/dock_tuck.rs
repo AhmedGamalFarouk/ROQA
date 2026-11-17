@@ -197,7 +197,9 @@ impl Tuck {
             }
             WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
             | WM_MBUTTONUP => strip.pass(message.message, now),
-            _ => {}
+            // Anything else (a WM_PAINT above all) goes on to the window procedure: a paint taken here is never
+            // validated and comes back at once, which kept the loop awake and starved the control events.
+            _ => return false,
         }
         true
     }
