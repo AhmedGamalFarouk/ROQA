@@ -3578,6 +3578,8 @@ impl Desktop {
             Quick::KeepAwake,
             format!("Keep awake {}", if self.keep_awake { "on" } else { "off" }),
         ));
+        rows.push((Quick::Lock, "Lock".to_owned()));
+        rows.push((Quick::Sleep, "Sleep".to_owned()));
         rows.into_iter()
             .map(|(row, text)| (Item::Quick(row), text))
             .unzip()
@@ -3706,6 +3708,16 @@ impl Desktop {
             Quick::KeepAwake => {
                 self.keep_awake = !self.keep_awake;
                 crate::system_os::keep_awake(self.keep_awake);
+            }
+            Quick::Lock | Quick::Sleep => {
+                if row == Quick::Lock {
+                    crate::system_os::lock();
+                } else {
+                    crate::system_os::sleep();
+                }
+                // Nothing to show after it: the popup closes instead of listing the new state.
+                dock::restore_foreground(menu.hwnd(), menu.return_to);
+                return;
             }
         }
         let (items, titles) = self.quick_rows();

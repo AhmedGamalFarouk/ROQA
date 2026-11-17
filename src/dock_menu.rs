@@ -74,6 +74,8 @@ pub enum Quick {
     Bluetooth,
     Power,
     KeepAwake,
+    Lock,
+    Sleep,
 }
 impl Item {
     pub fn label(self) -> &'static str {

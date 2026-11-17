@@ -1,4 +1,4 @@
-//! Small Windows switches the settings and quick settings reach: start at sign-in and keep awake. Each is one
+//! Small Windows switches the settings and quick settings reach: start at sign-in, keep awake, lock and sleep. Each is one
 //! call made when the user asks; nothing here runs on its own.
 
 use windows::{
@@ -6,7 +6,8 @@ use windows::{
         Foundation::ERROR_SUCCESS,
         System::{
             Power::{
-                ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
+                ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetSuspendState,
+                SetThreadExecutionState,
             },
             Registry::{
                 HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW,
@@ -63,5 +64,26 @@ pub fn keep_awake(on: bool) {
     // SAFETY: a scalar flag call with no pointers.
     unsafe {
         SetThreadExecutionState(flags);
+    }
+}
+
+#[link(name = "user32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn LockWorkStation() -> i32;
+}
+
+/// Locks the session, as Win+L does.
+pub fn lock() {
+    // SAFETY: no arguments; Windows refuses quietly when it cannot lock.
+    unsafe {
+        LockWorkStation();
+    }
+}
+
+/// Puts the PC to sleep (not hibernate), asking running apps nothing.
+pub fn sleep() {
+    // SAFETY: scalar flags only.
+    unsafe {
+        let _ = SetSuspendState(false, false, false);
     }
 }
