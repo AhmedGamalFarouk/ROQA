@@ -122,6 +122,7 @@ const CLIP: usize = 203;
 const DOCK_HIDE: usize = 204;
 const NOTCH_HIDE: usize = 205;
 const AUTOSTART: usize = 234;
+const HIDE_CAPTURE: usize = 235;
 const DOCK_LEFT: usize = 206;
 /// The reveal and hide delay lists.
 const REVEAL: usize = 232;
@@ -223,6 +224,12 @@ const PAGES: &[Page] = &[
                         "Open ROQA when you sign in",
                     ),
                     r(DESKTOP, C, "Show only windows on this desktop", ""),
+                    r(
+                        HIDE_CAPTURE,
+                        C,
+                        "Hide from screen sharing",
+                        "Recordings and shared screens skip ROQA",
+                    ),
                     r(
                         FSHIDE,
                         C,
@@ -1498,6 +1505,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         LIMAGY => &mut s.limits_agy,
         FSHIDE => &mut s.hide_fullscreen,
         AUTOSTART => &mut s.autostart,
+        HIDE_CAPTURE => &mut s.hide_capture,
         RSOUNDS => &mut s.reminder_sounds,
         PPAUSE => &mut s.prayer_pause,
         WATER => &mut s.water,

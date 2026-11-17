@@ -51,6 +51,39 @@ pub const POWER_STATUS: u32 = WM_APP + 7;
 /// A `POWER_STATUS` post is queued and the host has not read the status yet.
 static POWER_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// ROQA's windows are left out of screen recordings and shares (the Settings switch).
+static HIDE_CAPTURE: AtomicBool = AtomicBool::new(false);
+
+/// Applies the capture choice to one window; every window made after the switch calls it too.
+pub fn capture_affinity(window: HWND) {
+    let mode = if HIDE_CAPTURE.load(Ordering::Relaxed) {
+        WDA_EXCLUDEFROMCAPTURE
+    } else {
+        WDA_NONE
+    };
+    // SAFETY: a scalar call on one of our own windows; older Windows refuses it and the window stays visible.
+    let _ = unsafe { SetWindowDisplayAffinity(window, mode) };
+}
+
+unsafe extern "system" fn capture_one(window: HWND, _: LPARAM) -> BOOL {
+    capture_affinity(window);
+    BOOL(1)
+}
+
+/// Switches the choice for every open ROQA window (all live on the host thread) and each made later.
+pub fn hide_from_capture(on: bool) {
+    if HIDE_CAPTURE.swap(on, Ordering::Relaxed) != on {
+        // SAFETY: the callback only reads the static and calls `capture_affinity` on the window it is given.
+        let _ = unsafe {
+            EnumThreadWindows(
+                windows::Win32::System::Threading::GetCurrentThreadId(),
+                Some(capture_one),
+                LPARAM(0),
+            )
+        };
+    }
+}
+
 /// Sets `flag`; true for the caller that found it clear (and so must post).
 fn claim(flag: &AtomicBool) -> bool {
     !flag.swap(true, Ordering::AcqRel)
@@ -228,6 +261,7 @@ impl NativeWindow {
                 Some(HINSTANCE(GetModuleHandleW(None)?.0)),
                 None,
             )?;
+            capture_affinity(hwnd);
             Ok(Self(hwnd, None, Vec::new()))
         }
     }
@@ -250,6 +284,7 @@ impl NativeWindow {
                 Some(HINSTANCE(GetModuleHandleW(None)?.0)),
                 None,
             )?;
+            capture_affinity(hwnd);
             Ok(Self(hwnd, None, Vec::new()))
         }
     }

@@ -113,6 +113,8 @@ pub struct Settings {
     pub hotkeys: [bool; hotkeys::COUNT],
     /// Start ROQA at sign-in (one Run value, written only when this changes); off by default.
     pub autostart: bool,
+    /// Leave ROQA's windows out of screen recordings and shares; off by default.
+    pub hide_capture: bool,
 }
 
 impl Default for Settings {
@@ -166,6 +168,7 @@ impl Default for Settings {
             match_accent: false,
             hotkeys: [false; hotkeys::COUNT],
             autostart: false,
+            hide_capture: false,
         }
     }
 }
@@ -257,6 +260,7 @@ impl Settings {
         crate::motion::configure(self.anim_fast, self.open_click);
         crate::layout::set_pill_percent(self.notch_size);
         crate::power::set_low_at(self.widgets.low_at);
+        crate::native_window::hide_from_capture(self.hide_capture);
     }
 
     pub fn kind_on(&self, kind: SurfaceKind) -> bool {
@@ -300,6 +304,7 @@ impl Settings {
             "dockleft" => flag(value).map(|v| self.dock_left = v).is_some(),
             "fshide" => flag(value).map(|v| self.hide_fullscreen = v).is_some(),
             "autostart" => flag(value).map(|v| self.autostart = v).is_some(),
+            "hidecapture" => flag(value).map(|v| self.hide_capture = v).is_some(),
             "rsounds" => flag(value).map(|v| self.reminder_sounds = v).is_some(),
             "ppause" => flag(value).map(|v| self.prayer_pause = v).is_some(),
             "notchopen" => matches!(value, "hover" | "click")
@@ -434,9 +439,10 @@ impl Settings {
             out.push_str(&format!("diskdrive={}\n", letter as char));
         }
         out.push_str(&format!(
-            "matchaccent={}\nautostart={}\n",
+            "matchaccent={}\nautostart={}\nhidecapture={}\n",
             u8::from(self.match_accent),
-            u8::from(self.autostart)
+            u8::from(self.autostart),
+            u8::from(self.hide_capture)
         ));
         out.push_str(&format!(
             "dockbadge={}\nclipcopy={}\n",
@@ -830,12 +836,14 @@ mod tests {
             water_cfg: [6, 300, 8, 20, 45],
             pomo_cfg: [50, 10, 30, 3],
             autostart: true,
+            hide_capture: true,
             ..Settings::default()
         };
         let mut text = String::new();
         custom.write_lines(&mut text);
         for line in [
             "autostart=1",
+            "hidecapture=1",
             "fshide=0",
             "notchopen=click",
             "notchsize=130",

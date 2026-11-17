@@ -428,7 +428,7 @@ pub(crate) fn empty_dialog(cx: i16, cy: i16, proc: DLGPROC) -> Result<HWND> {
         title: 0,
     };
     // SAFETY: properly aligned, zero-child standard template remains live throughout synchronous creation.
-    unsafe {
+    let dialog = unsafe {
         CreateDialogIndirectParamW(
             Some(HINSTANCE(GetModuleHandleW(None)?.0)),
             &template.header,
@@ -436,7 +436,9 @@ pub(crate) fn empty_dialog(cx: i16, cy: i16, proc: DLGPROC) -> Result<HWND> {
             proc,
             LPARAM(0),
         )
-    }
+    }?;
+    crate::native_window::capture_affinity(dialog);
+    Ok(dialog)
 }
 impl Drop for Picker {
     fn drop(&mut self) {
