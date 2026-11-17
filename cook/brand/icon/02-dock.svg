@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">ROQA Dock concept</title>
+  <desc id="desc">Near-black capsules with two warm Lamp capsule eyes.</desc>
+  <rect x="40" y="40" width="176" height="136" rx="68" fill="#0E0E10"/>
+  <rect x="16" y="176" width="224" height="40" rx="20" fill="#0E0E10"/>
+  <rect x="88" y="85" width="24" height="46" rx="12" fill="#FFB454"/>
+  <rect x="144" y="85" width="24" height="46" rx="12" fill="#FFB454"/>
+</svg>
