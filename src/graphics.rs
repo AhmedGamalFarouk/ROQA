@@ -1786,7 +1786,8 @@ fn media_plan<'a>(
     let title_fade = tab_art::clock_shown(scene);
     // The pill's lane: five level bars, then the elapsed time. They fade with the title's lane.
     let pill_text = leading + 24.0 * scale;
-    let fade = title_fade * (1.0 - open);
+    // The pill's lane is gone by 40 % open and the title only starts there, so the two never overlap.
+    let fade = title_fade * (1.0 - open / 0.4).max(0.0);
     let pill_meter = (fade > 0.0).then(|| {
         let full = layout::meter(scene.dpi).0.height.max(1) as f32;
         let bars = std::array::from_fn(|index| {
@@ -1823,7 +1824,7 @@ fn media_plan<'a>(
             ),
             rect: row(title, at(middle, 30.0), 12.0),
             // The pill shows the elapsed time and level bars instead; the title arrives with the panel.
-            alpha: at(0.85, 1.0) * dim * title_fade * open,
+            alpha: at(0.85, 1.0) * dim * title_fade * ((open - 0.4) / 0.6).max(0.0),
         },
         Line {
             text: scene
@@ -1832,7 +1833,7 @@ fn media_plan<'a>(
                 .into(),
             font: font(12.0, DWRITE_FONT_WEIGHT_NORMAL),
             rect: row((pill_text, title.1.max(pill_text)), middle, 12.0),
-            alpha: dim * title_fade * (1.0 - open),
+            alpha: dim * fade,
         },
         Line {
             text: track.artist.as_str().into(),
@@ -3831,7 +3832,7 @@ mod media_tests {
         ] {
             for dpi in [96, 144, 192] {
                 let scale = dpi as f32 / 96.0;
-                for progress in [0.1, 0.5, 1.0] {
+                for progress in [0.5, 0.75, 1.0] {
                     let clock = clock_width(time, progress, dpi);
                     let plan = plan(&song, time, progress, dpi);
                     let title = plan.lines[1].rect;
@@ -3847,7 +3848,7 @@ mod media_tests {
             }
         }
         // A clock wider than the row leaves an empty, not inverted, title column.
-        let plan = plan(&song, long, 0.1, 96);
+        let plan = plan(&song, long, 0.5, 96);
         assert_eq!(plan.lines[1].rect.right, plan.lines[1].rect.left);
     }
 
