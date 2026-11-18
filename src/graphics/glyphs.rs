@@ -62,8 +62,6 @@ pub enum Glyph {
     Info,
     /// The dock's Places button: a hard drive.
     Drive,
-    /// The dock's hidden-icons button: a chevron over three dots.
-    Tray,
     /// Settings' Hotkeys page: a keyboard.
     Keys,
     /// The month page's arrows: a chevron left and right.
@@ -74,7 +72,7 @@ pub enum Glyph {
     Repeat,
     RepeatOne,
 }
-const ALL: [Glyph; 43] = [
+const ALL: [Glyph; 42] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -111,7 +109,6 @@ const ALL: [Glyph; 43] = [
     Glyph::Notch,
     Glyph::Info,
     Glyph::Drive,
-    Glyph::Tray,
     Glyph::Keys,
     Glyph::Back,
     Glyph::Forward,
@@ -250,7 +247,6 @@ impl Glyph {
             Glyph::Drive => {
                 "M4 14.5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM4 14.5l2.3-7.6A2 2 0 0 1 8.2 5.5h7.6a2 2 0 0 1 1.9 1.4l2.3 7.6M16.5 16h.01"
             }
-            Glyph::Tray => "M8 11l4-4 4 4M7 17h.01M12 17h.01M17 17h.01",
             Glyph::Keys => {
                 "M6 6.5h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2zM8 10.2h.01M12 10.2h.01M16 10.2h.01M8.5 14h7"
             }
