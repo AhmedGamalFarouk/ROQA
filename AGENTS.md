@@ -3,7 +3,7 @@
 Every agent reads this file first. Briefs point here by path and never paste it. If a brief conflicts with this file, this file wins unless the brief quotes the owner.
 
 ## What it is
-Native Windows 11 dock + notch in Rust: Win32, DirectComposition/Direct2D, some GDI text. One ~1.18 MB exe, no dependencies beyond Cargo.lock.
+Native Windows 11 dock + notch in Rust: Win32, DirectComposition/Direct2D, some GDI text. One ~1.5 MB exe, no dependencies beyond Cargo.lock.
 Owner: Ahmed (they/them), does not read code. Report in plain language.
 One folder, one branch: work on `main` in this checkout. No branches, no worktrees.
 

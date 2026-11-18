@@ -2,7 +2,7 @@
   <img src="assets/icon.svg" width="72" height="72" alt="ROQA Logo">
   <h1>ROQA</h1>
   <p><strong>A fast, ultra-lightweight native Windows dock and dynamic notch island built in Rust.</strong></p>
-  <p>Pure Win32 &bull; DirectComposition &bull; Direct2D &bull; 0% WebView &bull; Single ~1 MB Binary</p>
+  <p>Pure Win32 &bull; DirectComposition &bull; Direct2D &bull; 0% WebView &bull; Single ~1.5 MB Binary</p>
 </div>
 
 ---
@@ -11,7 +11,7 @@
 
 **ROQA** is a modern desktop enhancement shell for Windows 11 built entirely in native Rust. It delivers a fluid, interactive top dynamic notch island and bottom application dock with zero runtime bloat.
 
-- **Ultra-lightweight:** Self-contained single-binary executable (~1.18 MB) compiled with full LTO and stripped debug info.
+- **Ultra-lightweight:** Self-contained single-binary executable (~1.5 MB) compiled with full LTO and stripped debug info.
 - **Hardware-Accelerated DirectComposition:** Sub-pixel Direct2D and DirectWrite rendering with smooth 60fps springs and transitions.
 - **Pure Event-Driven Win32:** Zero polling loops or invasive system hooks; sleeps quietly when idle.
 - **Non-Invasive:** Leaves the native Windows taskbar intact, registers no background services, and makes zero unsolicited startup or registry modifications.
