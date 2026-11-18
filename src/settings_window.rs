@@ -1198,7 +1198,7 @@ fn draw_tile(note: &NMCUSTOMDRAW, p: &Paint) {
     // SAFETY: the DC and rectangle come from this custom-draw notification.
     unsafe {
         fill(dc, r, p.pal.card);
-        // A capsule-cornered tile, lit by its fill and an accent dot; no outline.
+        // A capsule-cornered tile, lit by its fill (accent is not for status text); no outline.
         round(dc, r, px(14), fill_colour, fill_colour);
         SetBkMode(dc, TRANSPARENT);
         // The display's name leads in semibold; its mode and ROQA's state follow, quiet, in one line each.
@@ -1206,7 +1206,7 @@ fn draw_tile(note: &NMCUSTOMDRAW, p: &Paint) {
         let lines = [
             (head.as_str(), p.bold, ink),
             (rest[0], p.font, quiet),
-            (rest[1], p.font, if on { p.pal.accent } else { quiet }),
+            (rest[1], p.font, if on { ink } else { quiet }),
         ];
         for (n, (line, font, colour)) in lines.into_iter().enumerate() {
             let top = r.top + px(8) + n as i32 * px(18);
@@ -2918,7 +2918,7 @@ Other hooks stay. A copy of the file is kept.",
                     px(40)
                 };
                 put(item.h, a, y + top, b - a, height - top)?;
-                put(item.cap, a + px(22), y + px(30), w, cap)?;
+                put(item.cap, a, y + px(30), w, cap)?;
                 if !item.cap.0.is_null() {
                     // The switch spans the caption's line; above it the caption shows (it was hidden under it).
                     // SAFETY: our own live child; only its place in the stacking order changes.
