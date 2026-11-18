@@ -1703,6 +1703,8 @@ pub struct Grip {
     pub hover: bool,
     pub drag: bool,
 }
+/// The collapsed pill's bar levels while a track plays.
+const PILL_LEVELS: [f32; BARS] = [0.4, 0.8, 1.0, 0.6, 0.3];
 /// The media clock at `open` (`smooth(progress)`): the pill's 15 DIP bold clock settles into the
 /// panel's 12 DIP regular one, trailing-aligned so it is never trimmed.
 fn media_clock(open: f32, scale: f32) -> Font {
@@ -1789,9 +1791,13 @@ fn media_plan<'a>(
     // The pill's lane is gone by 40 % open and the title only starts there, so the two never overlap.
     let fade = title_fade * (1.0 - open / 0.4).max(0.0);
     let pill_meter = (fade > 0.0).then(|| {
-        let full = layout::meter(scene.dpi).0.height.max(1) as f32;
         let bars = std::array::from_fn(|index| {
-            let level = (scene.bars[index] as f32 / full).min(1.0);
+            // Still bars (the live level would cost a redraw 15 times a second for as long as music plays); flat when paused.
+            let level = if track.playing {
+                PILL_LEVELS[index]
+            } else {
+                0.0
+            };
             let height = ((3.0 + 9.0 * level) * scale).round();
             let left = (leading + index as f32 * 4.0 * scale).round();
             let top = body.top + middle * scale - height / 2.0;

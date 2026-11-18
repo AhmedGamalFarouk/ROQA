@@ -1771,26 +1771,9 @@ impl Desktop {
         let track = self.pages.track(&self.media);
         let (shown, playing) = (track.is_some(), track.is_some_and(|track| track.playing));
         // Only the Media page draws the visualizer; any other page, or no Media tab, makes no meter call.
-        // A visible collapsed notch shows the meter in its pill while a track plays.
+        // The collapsed pill's bars are still (no sampling, no frames while it only sits there).
         let open = self.page() == Tab::Media && self.surfaces.iter().any(Surface::expanded);
-        // The pill draws bars only while the mascot's eyes are not in their lane.
-        let eyes_away = self
-            .pages
-            .eyes
-            .as_ref()
-            .is_none_or(|eyes| eyes.frame().is_none());
-        let pill = eyes_away
-            && self
-                .surfaces
-                .iter()
-                .any(|s| s.visible && s.kind() == SurfaceKind::Notch && !s.expanded());
-        let due = meter_due(
-            open || pill,
-            playing,
-            self.audio.metered(),
-            self.sampled,
-            now,
-        );
+        let due = meter_due(open, playing, self.audio.metered(), self.sampled, now);
         match due {
             None => self.audio.stop(),
             Some(due) if due > now => return Ok(milliseconds_until(due, now)),
@@ -1805,13 +1788,13 @@ impl Desktop {
             .iter_mut()
             .filter(|s| s.visible && s.kind() == SurfaceKind::Notch)
         {
-            // A running animation paints every frame already; the pill has no meter slot to patch.
-            if shown && !notch.live && notch.bars != layout::meter_heights(peaks, notch.dpi) {
-                notch.request(if notch.expanded() {
-                    Repaint::Meter
-                } else {
-                    Repaint::Full
-                });
+            // A running animation paints every frame already; the pill's bars are still and has no slot to patch.
+            if shown
+                && !notch.live
+                && notch.expanded()
+                && notch.bars != layout::meter_heights(peaks, notch.dpi)
+            {
+                notch.request(Repaint::Meter);
             }
         }
         Ok(due.map_or(INFINITE, |_| milliseconds_until(now + METER_PERIOD, now)))
