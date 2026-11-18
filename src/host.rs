@@ -309,6 +309,8 @@ struct RailFx {
     pop: Tween,
     expansion: [Tween; 7],
     press: Tween,
+    /// The selected tab: it stays open (glyph and name) so the rail reads as tabs, not as dots.
+    active: usize,
 }
 
 impl RailFx {
@@ -316,8 +318,9 @@ impl RailFx {
         Self {
             ind: Tween::rest(0.0),
             pop: Tween::rest(1.0),
-            expansion: [Tween::rest(0.0); 7],
+            expansion: std::array::from_fn(|index| Tween::rest(f32::from(index == 0))),
             press: Tween::rest(0.0),
+            active: 0,
         }
     }
     fn running(&self, now: Instant) -> bool {
@@ -325,6 +328,26 @@ impl RailFx {
             .iter()
             .chain(self.expansion.iter())
             .any(|tween| tween.running(now))
+    }
+    /// Opens the hovered dot and the selected one; the others settle, including interrupted transitions.
+    fn aim(&mut self, hover: Option<usize>) {
+        for (index, tween) in self.expansion.iter_mut().enumerate() {
+            let hovered = hover == Some(index);
+            Self::go(
+                tween,
+                if hovered || index == self.active {
+                    1.0
+                } else {
+                    0.0
+                },
+                if hovered {
+                    motion::POP_TIME
+                } else {
+                    motion::HOVER_IN_TIME
+                },
+                if hovered { motion::POP } else { motion::SETTLE },
+            );
+        }
     }
     fn go(tween: &mut Tween, to: f32, time: Duration, curve: motion::Curve) {
         tween.retarget(
@@ -564,7 +587,9 @@ impl Surface {
             (self.hovered, self.live, self.motion) = (false, false, Tween::rest(0.0));
             self.slide = Tween::rest(0.0);
             self.tab_hover = None;
-            self.rail_fx.expansion.fill(Tween::rest(0.0));
+            let active = self.rail_fx.active;
+            self.rail_fx.expansion =
+                std::array::from_fn(|index| Tween::rest(f32::from(index == active)));
             self.rail_fx.press = Tween::rest(0.0);
             match &mut self.role {
                 Role::Notch {
@@ -588,27 +613,14 @@ impl Surface {
             self.live = true;
         }
     }
-    /// Expand only the hovered dot and settle the others, including interrupted transitions.
+    /// The pointer is on a rail dot (or left it): that dot opens.
     fn set_tab_hover(&mut self, tab: Option<usize>) {
         if tab == self.tab_hover {
             return;
         }
         self.tab_hover = tab;
-        let fx = &mut self.rail_fx;
-        RailFx::go(&mut fx.press, 0.0, motion::POP_TIME, motion::POP);
-        for (index, tween) in fx.expansion.iter_mut().enumerate() {
-            let hovered = tab == Some(index);
-            RailFx::go(
-                tween,
-                if hovered { 1.0 } else { 0.0 },
-                if hovered {
-                    motion::POP_TIME
-                } else {
-                    motion::HOVER_IN_TIME
-                },
-                if hovered { motion::POP } else { motion::SETTLE },
-            );
-        }
+        RailFx::go(&mut self.rail_fx.press, 0.0, motion::POP_TIME, motion::POP);
+        self.rail_fx.aim(self.tab_hover);
         self.live = true;
     }
     fn tab_rail(&self, pages: &Pages, media: bool, now: Instant) -> Option<layout::Rail> {
@@ -766,6 +778,11 @@ impl Surface {
         // changed tab set puts it in place without a frame.
         if let Some(rail) = rail {
             let at = rail.active as f32;
+            if self.rail_fx.active != rail.active {
+                self.rail_fx.active = rail.active;
+                self.rail_fx.aim(self.tab_hover);
+                self.live = true;
+            }
             let fx = &mut self.rail_fx;
             if fx.ind.target() != at {
                 if self.visible && progress > 0.9 && !motion::calm() {
