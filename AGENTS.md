@@ -15,6 +15,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 ## Hard rules (owner decisions, do not reopen)
 - No size limit (owner decision 2026-11-16): `verify.ps1` reports the exe size; put the byte delta in every report. Performance rules above still hold.
 - Live tests and screenshots happen on the second (non-primary) monitor only, so the owner's main screen is left alone (owner decision 2026-11-18). Never place ROQA, Settings, a backdrop or the mouse on the primary monitor for a test.
+- Answers to the owner are concise (owner decision 2026-11-18): short plain lines with only what changed, what is left and what they must decide; no recaps, no detail they did not ask for.
 - No new dependencies.
 - Never touch, delete or rebuild anything under `.tools`. Never run rustup or `scripts/bootstrap.ps1`.
 - Pushing `main` to origin needs no approval (owner decision 2026-11-16): push after a commit that passes `verify.ps1`. Never force-push, rewrite pushed history, publish releases or delete remote things. Only the Chief commits unless the brief says otherwise.
