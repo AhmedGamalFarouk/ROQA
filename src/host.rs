@@ -1427,6 +1427,8 @@ struct PrayerRun {
 }
 /// How long a prayer reminder holds the notch open.
 const PRAYER_NOTICE: Duration = Duration::from_secs(8);
+/// A show command brings an auto-hidden dock or notch back for this long (the pointer on it keeps it).
+const SHOW_COMMAND: Duration = Duration::from_secs(6);
 /// How long a keyboard pill holds the notch open.
 const KEY_NOTICE: Duration = Duration::from_secs(2);
 /// How long a device alert holds the notch open.
@@ -4888,6 +4890,15 @@ impl Desktop {
         if matches!(command, Command::ShowNotch | Command::ShowDock) {
             // Also recovers monitors whose earlier placement ran out of retries.
             self.request_topology();
+            // A dock or notch auto-hidden behind a window (or put away by its hotkey) comes back for a while.
+            let now = Instant::now();
+            if command == Command::ShowDock {
+                self.dock_away = false;
+                self.tuck.reveal(now, SHOW_COMMAND);
+            } else {
+                self.tuck_notch.reveal(now, SHOW_COMMAND);
+            }
+            self.apply_visibility()?;
         }
         Ok(!self.shown.is_empty())
     }

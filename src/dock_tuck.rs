@@ -212,6 +212,13 @@ impl Tuck {
         self.peek = Some(device.to_owned());
         true
     }
+    /// Shows every tucked surface for `delay`, as a show command asks.
+    pub fn reveal(&mut self, now: Instant, delay: Duration) {
+        let devices: Vec<_> = self.strips.iter().map(|s| s.monitor.clone()).collect();
+        for device in devices {
+            self.alert(&device, now, delay);
+        }
+    }
     /// The pointer left the dock on `device`: a revealed dock leaves after `LEAVE`.
     pub fn release(&mut self, device: &str, now: Instant) {
         if self.peek.as_deref() == Some(device)
@@ -231,18 +238,16 @@ impl Tuck {
 }
 impl Strip {
     /// Along the work area's bottom: on the screen edge when the taskbar shows (the work area ends above it, so the
-    /// strip never takes the taskbar's clicks), one strip higher when the taskbar hides (the work area is the whole
-    /// screen, and the screen's last row must stay free to bring the taskbar back).
+    /// strip never takes the taskbar's clicks) and on the screen's last rows when it hides (the work area is the whole
+    /// screen): a pointer pushed to the bottom stops on the last row, so a strip above it was never reached.
     fn place(monitor: &Monitor, dock: Bounds, top: bool) -> Bounds {
         let height = px(STRIP, monitor.dpi).max(2);
-        let hidden_taskbar =
-            monitor.work.y + monitor.work.height >= monitor.rect.y + monitor.rect.height;
         Bounds {
             x: dock.x,
             y: if top {
                 monitor.work.y
             } else {
-                monitor.work.y + monitor.work.height - height * (1 + i32::from(hidden_taskbar))
+                monitor.work.y + monitor.work.height - height
             },
             width: dock.width,
             height,
@@ -317,6 +322,23 @@ mod tests {
     }
     fn frame(handle: usize, device: &str, at: Bounds) -> Frame {
         Some((k(handle), device.to_owned(), at))
+    }
+    #[test]
+    fn the_bottom_strip_reaches_the_last_row_when_the_taskbar_hides() {
+        let monitor = |work: Bounds| Monitor {
+            device: "A".to_owned(),
+            work,
+            rect: b(0, 0, 1920, 1080),
+            dpi: 96,
+            taskbar: 0,
+        };
+        let dock = b(400, 1000, 500, 60);
+        // Auto-hidden taskbar: the work area is the whole screen and the strip ends on row 1079.
+        let strip = Strip::place(&monitor(b(0, 0, 1920, 1080)), dock, false);
+        assert_eq!((strip.y, strip.y + strip.height), (1078, 1080));
+        // A shown taskbar ends the work area above it, and the strip sits on that edge.
+        let strip = Strip::place(&monitor(b(0, 0, 1920, 1032)), dock, false);
+        assert_eq!(strip.y + strip.height, 1032);
     }
     #[test]
     fn delays_start_at_todays_and_stay_in_range() {
