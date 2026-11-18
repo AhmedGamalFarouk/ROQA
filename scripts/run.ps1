@@ -11,7 +11,19 @@ if ($Action -eq 'start') {
     # Launched through the shell so ROQA inherits none of the caller's pipes; a caller that
     # captures output would otherwise wait on ROQA forever.
     $command = '/c start "" /b "{0}" 2> "{1}"' -f ($executable -replace '/', '\'), ($log -replace '/', '\')
-    Start-Process -FilePath $env:ComSpec -ArgumentList $command -WindowStyle Hidden
+    # ROQA runs on the test monitor only (scripts/monitor.ps1): a private copy of the owner's store with the
+    # other monitors switched off, so the real store is never changed. Refreshed from the real store each start.
+    . "$PSScriptRoot/monitor.ps1"
+    $profileDir = Join-Path $logDirectory 'profile'
+    New-Item -ItemType Directory -Force -Path (Join-Path $profileDir 'ROQA') | Out-Null
+    $real = Join-Path $env:LOCALAPPDATA 'ROQA\store.roqa'
+    $lines = @(Get-Content -LiteralPath $real -ErrorAction SilentlyContinue | Where-Object { $_ -ne 'end' -and $_ -notmatch '^off=' }) + @(Get-TestOffLines) + 'end'
+    [IO.File]::WriteAllLines((Join-Path $profileDir 'ROQA\store.roqa'), $lines, (New-Object Text.UTF8Encoding $false))
+    $realLocal = $env:LOCALAPPDATA
+    try {
+        $env:LOCALAPPDATA = $profileDir
+        Start-Process -FilePath $env:ComSpec -ArgumentList $command -WindowStyle Hidden
+    } finally { $env:LOCALAPPDATA = $realLocal }
     Start-Sleep -Milliseconds 1000
     $hostInstance = Get-Process roqa -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $hostInstance) { throw "ROQA did not stay running. Diagnostics: $log" }

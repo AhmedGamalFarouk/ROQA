@@ -9,6 +9,10 @@ Add-Type -Path "$root\tests\NativeProbe.cs" -ReferencedAssemblies System.Drawing
 Add-Type -Path "$PSScriptRoot\Cap.cs" -ReferencedAssemblies System.Drawing -ErrorAction SilentlyContinue
 
 [NativeProbe]::EnablePhysicalPixels()
+# All coordinates below are local to the test monitor (scripts\monitor.ps1); Mouse07 and Shot add its origin.
+. "$root\scripts\monitor.ps1"
+$screen = Get-TestScreen
+[Mouse07]::Ox = $screen.Bounds.X; [Mouse07]::Oy = $screen.Bounds.Y
 New-Item -ItemType Directory -Force $out | Out-Null
 if (Test-Path -LiteralPath $exe) {
     $provFile = "$out\provenance.json"
@@ -29,10 +33,10 @@ function Shot($name, $x=560, $y=0, $w=800, $h=300) {
     # The window can exist yet be covered (r14 caught the desktop): check a pixel ROQA never draws on.
     $probe = New-Object Drawing.Bitmap 1, 1
     $pg = [Drawing.Graphics]::FromImage($probe)
-    $pg.CopyFromScreen(40, 540, 0, 0, $probe.Size)
+    $pg.CopyFromScreen(40 + $screen.Bounds.X, 540 + $screen.Bounds.Y, 0, 0, $probe.Size)
     $c = $probe.GetPixel(0, 0); $pg.Dispose(); $probe.Dispose()
     if ($c.R -ne 105 -or $c.G -ne 105 -or $c.B -ne 105) { throw 'Backdrop not visible; refusing to capture the desktop' }
-    [Cap]::Still($x, $y, $w, $h, "$out\$name.png")
+    [Cap]::Still(($x + $screen.Bounds.X), ($y + $screen.Bounds.Y), $w, $h, "$out\$name.png")
 }
 function Control($action) {
     $control = Start-Process $exe -ArgumentList "--$action" -WindowStyle Hidden -PassThru
@@ -47,7 +51,7 @@ function Start-Roqa($tab='media', [string[]]$extra=@(), $tag='default') {
     New-Item -ItemType Directory -Force "$dir\ROQA" | Out-Null
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $hour = (Get-Date).Hour
-    $lines = @('version=2','dock=1','eyes=0','fshide=0','city=Cairo','wxplace=300444,312357,0,Cairo',"wxdata=$now,285,1,310,190,$($hour):285:1,$(($hour+1)%24):290:2,$(($hour+2)%24):280:3", "lasttab=$tab",'tablimits=1') + $extra + @('end')
+    $lines = @('version=2','dock=1','eyes=0','fshide=0','city=Cairo','notchauto=0','dockauto=0','wxplace=300444,312357,0,Cairo',"wxdata=$now,285,1,310,190,$($hour):285:1,$(($hour+1)%24):290:2,$(($hour+2)%24):280:3", "lasttab=$tab",'tablimits=1') + $extra + @(Get-TestOffLines) + @('end')
     [IO.File]::WriteAllLines("$dir\ROQA\store.roqa", $lines, (New-Object Text.UTF8Encoding $false))
     $old = $env:LOCALAPPDATA
     try {
@@ -79,6 +83,14 @@ function Settings-Rect {
         if ($handle -ne [IntPtr]::Zero) {
             $rect = New-Object NativeProbe+Rect
             if ([NativeProbe]::GetWindowRect($handle, [ref]$rect)) {
+                $b = $screen.Bounds
+                if ($rect.Left -lt $b.Left -or $rect.Top -lt $b.Top -or $rect.Right -gt $b.Right -or $rect.Bottom -gt $b.Bottom) {
+                    # The dialog opens on the primary monitor: centre it on the test monitor.
+                    [void][NativeProbe]::SetWindowPos($handle, [IntPtr]::Zero, ($b.Left + [int](($b.Width - $rect.Width) / 2)), ($b.Top + [int](($b.Height - $rect.Height) / 2)), 0, 0, 69)
+                    [void][NativeProbe]::GetWindowRect($handle, [ref]$rect)
+                }
+                # Local to the test monitor, like every other coordinate here.
+                $rect.Left -= $b.X; $rect.Right -= $b.X; $rect.Top -= $b.Y; $rect.Bottom -= $b.Y
                 return $rect
             }
         }

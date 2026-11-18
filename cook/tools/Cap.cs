@@ -59,7 +59,9 @@ public static class Mouse07 {
             mouse_event(flags, 0, 0, 0, UIntPtr.Zero);
         }
     }
-    public static void Move(int x, int y) { SetCursorPos(x, y); Send(1); }
+    // Origin of the test monitor: callers pass monitor-local coordinates.
+    public static int Ox, Oy;
+    public static void Move(int x, int y) { SetCursorPos(x + Ox, y + Oy); Send(1); }
     public static void Click(int x, int y) { Move(x, y); Thread.Sleep(60); Send(2); Thread.Sleep(35); Send(4); }
     public static void Right(int x, int y) { Move(x, y); Thread.Sleep(60); Send(8); Thread.Sleep(35); Send(16); }
 }
