@@ -10,8 +10,7 @@ use crate::{
     dock::{foreground_key, restore_foreground},
     graphics::{Glyph, draw_settings_glyph, round_gdi},
     hotkeys,
-    layout::DockStyle,
-    native_window,
+    layout::{Bounds, DockStyle},
     picker::{
         ACTION, CLOSE, DIALOG_STYLE, RELAYOUT, SCROLL, control, dialog_proc, empty_dialog, wide,
     },
@@ -682,6 +681,8 @@ pub struct SettingsWindow {
     page: usize,
     move_pin: Option<(usize, bool)>,
     show_hidden: Option<usize>,
+    /// The work area it opens in: the monitor ROQA is used on.
+    work: Bounds,
     /// The connected monitors' GDI devices (at most `MAX_OFF`); monitor `n` is the checkbox `MONITOR + n`.
     devices: Vec<String>,
     /// The same monitors with their size and place, for the map.
@@ -1621,7 +1622,12 @@ fn fill_combo(h: HWND, id: usize) {
 }
 
 impl SettingsWindow {
-    pub fn create(current: &Settings, monitors: &[Monitor], factor: f64) -> Result<Self> {
+    pub fn create(
+        current: &Settings,
+        monitors: &[Monitor],
+        factor: f64,
+        work: Bounds,
+    ) -> Result<Self> {
         let window = empty_dialog(480, 300, Some(settings_proc))?;
         if crate::dock::system_rtl() {
             // Children created after this inherit the mirrored layout.
@@ -1656,6 +1662,7 @@ impl SettingsWindow {
             pomo: None,
             return_to: foreground_key(),
             closed: false,
+            work,
         };
         // SAFETY: the owned dialog keeps this subclass until its HWND is destroyed.
         unsafe {
@@ -2541,7 +2548,7 @@ Other hooks stay. A copy of the file is kept.",
 
     /// New font (DPI or text size changed): applies it to every control, sizes the window, then lays out.
     fn relayout(&mut self) -> Result<()> {
-        let work = native_window::primary_work_area()?;
+        let work = self.work;
         // SAFETY: owned dialog is live.
         let dpi = unsafe { GetDpiForWindow(self.window) }.max(96);
         let font = PickerFont::create(dpi, self.factor)?;

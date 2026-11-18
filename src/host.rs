@@ -2773,10 +2773,30 @@ impl Desktop {
     /// Opens the settings window (or replaces an open one) on the connected monitors.
     fn open_settings(&mut self) -> Result<()> {
         self.settings_window.take();
+        // The monitor under the pointer when ROQA is on it, else the first one ROQA is on, else the main one.
+        let mut at = Default::default();
+        // SAFETY: fills a local point.
+        let _ = unsafe { GetCursorPos(&mut at) };
+        let shown = |m: &&Monitor| self.surfaces.iter().any(|s| s.monitor == m.device);
+        let under = |m: &&Monitor| {
+            (m.rect.x..m.rect.x + m.rect.width).contains(&at.x)
+                && (m.rect.y..m.rect.y + m.rect.height).contains(&at.y)
+        };
+        let work = match self
+            .monitors
+            .iter()
+            .filter(shown)
+            .find(under)
+            .or_else(|| self.monitors.iter().find(shown))
+        {
+            Some(monitor) => monitor.work,
+            None => native_window::primary_work_area()?,
+        };
         self.settings_window = Some(SettingsWindow::create(
             &self.settings,
             &self.monitors,
             self.text_factor,
+            work,
         )?);
         self.sync_settings_pins(0);
         self.sync_water();
