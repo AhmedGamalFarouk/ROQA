@@ -2234,7 +2234,16 @@ Other hooks stay. A copy of the file is kept.",
         }
         add_row(combo, "None (silent)");
         for sound in &self.sounds {
-            add_row(combo, prayer_tab::label(sound));
+            let missing = !std::path::Path::new(sound).is_file();
+            let label = prayer_tab::label(sound);
+            add_row(
+                combo,
+                &if missing {
+                    format!("{label} (file missing)")
+                } else {
+                    label.to_owned()
+                },
+            );
         }
     }
 

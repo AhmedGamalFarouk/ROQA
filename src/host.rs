@@ -2346,9 +2346,16 @@ impl Desktop {
     /// Plays the chosen sound (none when silent or no default exists); false when nothing played.
     fn play_prayer_sound(&mut self, now: Instant) -> bool {
         let found = prayer_os::discover();
-        let Some(path) = prayer_tab::resolve(&self.settings.prayer_sound, &found) else {
+        let Some(mut path) = prayer_tab::resolve(&self.settings.prayer_sound, &found) else {
             return false;
         };
+        // A file that is gone plays the default instead; the stored setting is left as it is.
+        if !std::path::Path::new(path).is_file() {
+            let Some(default) = prayer_tab::default_sound(&found) else {
+                return false;
+            };
+            path = default;
+        }
         let length = self.prayer.player.play(path);
         self.prayer.sound_end = length.map(|length| now + length);
         length.is_some()
@@ -2841,10 +2848,14 @@ impl Desktop {
                 }
             }
             Some(SoundAction::Test) => {
-                let status = if self.play_prayer_sound(Instant::now()) {
-                    "Playing the prayer sound."
-                } else {
+                let missing = prayer_tab::resolve(&self.settings.prayer_sound, &[])
+                    .is_some_and(|path| !std::path::Path::new(path).is_file());
+                let status = if !self.play_prayer_sound(Instant::now()) {
                     "No sound to play. Pick another file."
+                } else if missing {
+                    "Sound file missing. Playing the default."
+                } else {
+                    "Playing the prayer sound."
                 };
                 if let Some(window) = &self.settings_window {
                     let _ = window.say(status);
