@@ -3662,7 +3662,7 @@ impl Desktop {
         match (button, button.keys()) {
             (Button::Quick, _) => self.open_quick_menu(hwnd),
             (Button::Places, _) => self.open_places_menu(hwnd),
-            (Button::Tray, _) => self.open_tray(hwnd),
+            (Button::Tray, _) => self.open_flyout(hwnd, Button::Tray),
             (_, Some(keys)) => {
                 if !dock::send_keys(keys) {
                     eprintln!("Dock button: Windows refused the key input");
@@ -3671,8 +3671,8 @@ impl Desktop {
             (_, None) => {}
         }
     }
-    /// The hidden-icons button: Windows' own flyout, set above the button.
-    fn open_tray(&mut self, hwnd: HWND) {
+    /// The hidden-icons or Start button: Windows' own flyout or menu, set above the button.
+    fn open_flyout(&mut self, hwnd: HWND, button: Button) {
         let Some(dock) = self.dock_at(hwnd) else {
             return;
         };
@@ -3680,7 +3680,7 @@ impl Desktop {
             dock.dock_buttons,
             dock.bounds.width,
             dock.dpi,
-            Hit::Button(Button::Tray),
+            Hit::Button(button),
         );
         if let Some(work) = self
             .monitors
@@ -3689,7 +3689,13 @@ impl Desktop {
             .map(|m| m.work)
         {
             let top = dock.bounds.y - dock::px(8, dock.dpi);
-            dock::open_tray_flyout((dock.bounds.x + left + width / 2, top), work);
+            let inset = if button == Button::Start {
+                0
+            } else {
+                width / 2
+            };
+            let x = dock.bounds.x + left + inset;
+            dock::open_flyout(button, (x, top), work);
         }
     }
     /// A global shortcut (`hotkeys.rs`) fired; a message queued just before its switch went off is ignored.
@@ -3715,7 +3721,7 @@ impl Desktop {
                 if let Some(hwnd) = dock {
                     // The keys are still down: lift Ctrl and Alt so the flyout's Win+B is not Ctrl+Alt+Win+B.
                     dock::release_keys(&[VK_CONTROL, VK_MENU]);
-                    self.open_tray(hwnd);
+                    self.open_flyout(hwnd, Button::Tray);
                 } else {
                     self.show_notice("Turn on the hidden icons button.".into(), Instant::now());
                 }
@@ -6192,10 +6198,16 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             if message.message == WM_RBUTTONUP
                 && let Some(dock) = desktop.dock_at(message.hwnd)
             {
-                let slot = dock
-                    .dock_hit(message.lParam, desktop.dock_slots())
-                    .and_then(Hit::slot);
-                desktop.open_menu(message.hwnd, slot, message.lParam);
+                let hit = dock.dock_hit(message.lParam, desktop.dock_slots());
+                if hit == Some(Hit::Button(Button::Start)) {
+                    desktop.dismiss_preview();
+                    // The "Start" hover label would sit over the menu: drop it and restart its delay.
+                    desktop.hover_popup = None;
+                    desktop.hover_spot = None;
+                    desktop.open_flyout(message.hwnd, Button::Start);
+                    continue;
+                }
+                desktop.open_menu(message.hwnd, hit.and_then(Hit::slot), message.lParam);
                 continue;
             }
             if message.message == WM_RBUTTONUP

@@ -10,19 +10,19 @@ use windows::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
-            VK_B, VK_D, VK_LWIN, VK_RETURN, VK_S, VK_TAB,
+            VK_B, VK_D, VK_LWIN, VK_RETURN, VK_S, VK_TAB, VK_X,
         },
         Shell::{SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, ShellExecuteExW},
         WindowsAndMessaging::{
-            GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-            GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindow,
-            IsWindowVisible, PostMessageW, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE,
-            SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
-            ShowWindowAsync, WM_CLOSE, WS_EX_TOPMOST,
+            EnumWindows, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW,
+            GetWindowRect, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic,
+            IsWindow, IsWindowVisible, PostMessageW, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
+            SetWindowPos, ShowWindowAsync, WM_CLOSE, WS_EX_TOPMOST,
         },
     },
 };
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{BOOL, HSTRING, PCWSTR};
 
 /// Dock geometry in DIPs. Slots are the app groups, in `items` order.
 pub const SLOT_DIPS: i32 = 56;
@@ -766,46 +766,98 @@ fn send_events(events: &[INPUT]) -> bool {
     unsafe { SendInput(events, std::mem::size_of::<INPUT>() as i32) as usize == events.len() }
 }
 
-/// How long the shell is given to move focus to the tray (after Win+B) and to draw the flyout (after Enter).
+/// The visible top-level window of `class`. `FindWindow` cannot see the shell's popups, so the windows are enumerated.
+fn find_popup(class: &str) -> Option<HWND> {
+    unsafe extern "system" fn visit(hwnd: HWND, parameter: LPARAM) -> BOOL {
+        // SAFETY: `parameter` is the tuple below, alive for the whole synchronous EnumWindows call.
+        let (class, found) = unsafe { &mut *(parameter.0 as *mut (&str, Option<HWND>)) };
+        let mut name = [0u16; 64];
+        // SAFETY: scalar window queries on a handle EnumWindows just gave and a local buffer.
+        let (len, shown) = unsafe { (GetClassNameW(hwnd, &mut name), IsWindowVisible(hwnd)) };
+        let hit =
+            shown.as_bool() && String::from_utf16_lossy(&name[..len.max(0) as usize]) == *class;
+        if hit {
+            *found = Some(hwnd);
+        }
+        BOOL(i32::from(!hit))
+    }
+    let mut search = (class, None);
+    // SAFETY: the callback does not keep the pointer and cannot panic.
+    let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut search as *mut _ as isize)) };
+    search.1
+}
+
+/// How long the shell is given to move focus to the tray (after Win+B) and to draw the flyout or menu (after Enter, Win+X).
 const TRAY_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// Opens Windows' own hidden-icons flyout on the user's click (Win+B, then Enter; Windows draws it and handles
-/// every click in it) and sets it centred above `anchor` (the button's screen x, the dock's top y), inside `work`.
-/// A thread that lives about half a second waits out the shell's focus moves; nothing runs between clicks.
-/// The flyout is only moved when the foreground window is the flyout itself.
-pub fn open_tray_flyout(anchor: (i32, i32), work: crate::layout::Bounds) {
+/// Opens Windows' own popup for a dock button on the user's click (hidden icons: Win+B, then Enter; Start: the
+/// Win+X power-user menu; Windows draws it and handles every click in it) and sets it above `anchor` (the button's
+/// screen x, the dock's top y), inside `work`: centred on the hidden-icons button, left edges level on Start.
+/// A thread that lives about half a second (the Start menu: two and a half, as Windows places that menu again
+/// while it opens, so it is put back each time) waits out the shell's focus moves; nothing runs between clicks.
+/// The popup is only moved when its class is the expected one.
+pub fn open_flyout(button: Button, anchor: (i32, i32), work: crate::layout::Bounds) {
+    let start = button == Button::Start;
+    let (steps, popup): (&[&[VIRTUAL_KEY]], _) = if start {
+        (&[&[VK_LWIN, VK_X]], "Xaml_WindowedPopupClass")
+    } else {
+        (
+            &[&[VK_LWIN, VK_B], &[VK_RETURN]],
+            "TopLevelWindowForOverflowXamlIsland",
+        )
+    };
     let _ = std::thread::Builder::new().spawn(move || {
-        let sent = |keys| send_keys(keys).then(|| std::thread::sleep(TRAY_WAIT));
-        if sent(&[VK_LWIN, VK_B]).is_none() || sent(&[VK_RETURN]).is_none() {
-            return;
-        }
-        // SAFETY: scalar window queries and one move of a foreign window revalidated by its class name.
-        unsafe {
-            let flyout = GetForegroundWindow();
-            let mut class = [0u16; 64];
-            let len = GetClassNameW(flyout, &mut class).max(0) as usize;
-            let mut rect = RECT::default();
-            if String::from_utf16_lossy(&class[..len]) != "TopLevelWindowForOverflowXamlIsland"
-                || GetWindowRect(flyout, &mut rect).is_err()
-            {
+        for keys in steps {
+            if !send_keys(keys) {
                 return;
             }
-            let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
-            let x = (anchor.0 - width / 2).clamp(work.x, (work.x + work.width - width).max(work.x));
-            let y = (anchor.1 - height).max(work.y);
-            let _ = SetWindowPos(
-                flyout,
-                None,
-                x,
-                y,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
+            std::thread::sleep(TRAY_WAIT);
+        }
+        let place = |flyout: HWND| {
+            let mut class = [0u16; 64];
+            let mut rect = RECT::default();
+            // SAFETY: scalar window queries and one move of a foreign window revalidated by its class name.
+            unsafe {
+                let len = GetClassNameW(flyout, &mut class).max(0) as usize;
+                if String::from_utf16_lossy(&class[..len]) != popup
+                    || GetWindowRect(flyout, &mut rect).is_err()
+                {
+                    return;
+                }
+                let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+                let left = if start {
+                    anchor.0
+                } else {
+                    anchor.0 - width / 2
+                };
+                let x = left.clamp(work.x, (work.x + work.width - width).max(work.x));
+                let y = (anchor.1 - height).max(work.y);
+                if (rect.left, rect.top) != (x, y) {
+                    let _ = SetWindowPos(
+                        flyout,
+                        None,
+                        x,
+                        y,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+            }
+        };
+        if !start {
+            // SAFETY: a scalar query.
+            return place(unsafe { GetForegroundWindow() });
+        }
+        // The Win+X menu never takes the foreground (the taskbar keeps it), so it is found by class.
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            if let Some(menu) = find_popup(popup) {
+                place(menu);
+            }
         }
     });
 }
-
 /// Asks each window to close (`WM_CLOSE`, posted: an app may refuse or prompt, and ROQA never waits).
 pub fn close(windows: &[WindowKey]) {
     for key in windows.iter().filter(|&&key| valid_target(key)) {
