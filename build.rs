@@ -9,6 +9,24 @@ fn main() {
         "cargo:rustc-link-arg-bin=roqa=/MANIFESTINPUT:{}",
         manifest.display()
     );
+    // The build's commit for the About page ("+" when the tree has changes); "unknown" without git.
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    };
+    let commit = git(&["rev-parse", "--short", "HEAD"]).map_or("unknown".into(), |hash| {
+        let dirty =
+            git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
+        format!("{hash}{}", if dirty { "+" } else { "" })
+    });
+    println!("cargo:rustc-env=ROQA_COMMIT={commit}");
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/index");
     println!("cargo:rerun-if-changed=assets/icon.rc");
     println!("cargo:rerun-if-changed=assets/icon.ico");
     let resource =

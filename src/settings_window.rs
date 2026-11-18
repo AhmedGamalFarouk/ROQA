@@ -641,7 +641,13 @@ const PAGES: &[Page] = &[
                 rows: &[r(
                     LABEL,
                     Kind::Note,
-                    concat!("ROQA ", env!("CARGO_PKG_VERSION")),
+                    concat!(
+                        "ROQA ",
+                        env!("CARGO_PKG_VERSION"),
+                        " (",
+                        env!("ROQA_COMMIT"),
+                        ")"
+                    ),
                     "",
                 )],
             },
