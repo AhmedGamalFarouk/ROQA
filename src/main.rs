@@ -62,6 +62,7 @@ mod tabs;
 mod text_settings;
 mod theme;
 mod timer;
+mod toast;
 mod topology;
 mod water;
 mod weather;

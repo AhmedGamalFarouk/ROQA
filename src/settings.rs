@@ -62,6 +62,8 @@ pub struct Settings {
     pub privacy: bool,
     /// Remember text copied to the Windows clipboard on the Shelf's Copied list; off removes the listener.
     pub clipboard: bool,
+    /// Windows notifications peek on the notch row (`toast.rs`); off removes the window hook.
+    pub notifications: bool,
     /// The weather city as typed (empty is none), the opt-in device location (it wins over the city while
     /// it works) and °C or °F. Nothing is requested until a city is set or detection is on.
     pub city: String,
@@ -140,6 +142,7 @@ impl Default for Settings {
             agent_status: false,
             privacy: true,
             clipboard: true,
+            notifications: true,
             city: String::new(),
             detect: false,
             units: Units::Auto,
@@ -289,6 +292,7 @@ impl Settings {
             "agents" => flag(value).map(|v| self.agent_status = v).is_some(),
             "privacy" => flag(value).map(|v| self.privacy = v).is_some(),
             "clipcopy" => flag(value).map(|v| self.clipboard = v).is_some(),
+            "notifs" => flag(value).map(|v| self.notifications = v).is_some(),
             "detect" => flag(value).map(|v| self.detect = v).is_some(),
             "premind" => flag(value).map(|v| self.prayer_remind = v).is_some(),
             "pmethod" => Method::from_key(value)
@@ -445,9 +449,10 @@ impl Settings {
             u8::from(self.hide_capture)
         ));
         out.push_str(&format!(
-            "dockbadge={}\nclipcopy={}\n",
+            "dockbadge={}\nclipcopy={}\nnotifs={}\n",
             u8::from(self.dock_badges),
-            u8::from(self.clipboard)
+            u8::from(self.clipboard),
+            u8::from(self.notifications)
         ));
         let one_line = |v: &&String| !v.contains(['\n', '\r']);
         out.push_str(&format!(
@@ -1031,6 +1036,7 @@ mod tests {
             limits_group: 1,
             eyes: false,
             agent_status: true,
+            notifications: false,
             city: "Washington, D.C.".into(),
             detect: true,
             units: Units::Celsius,

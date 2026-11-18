@@ -140,6 +140,8 @@ const AGENT_ON: usize = 214;
 const AGENT_BTN: usize = 215;
 /// The row after them: the Claude Code permission questions (the last `agent_hooks::AGENTS` entry).
 const ASK_BTN: usize = 236;
+/// The Windows notifications peek.
+const NOTIFS: usize = 237;
 /// The four shortcut switches (`hotkeys::KEYS` order).
 const HOTKEY: usize = 222;
 /// The hidden-apps list and its "Show in dock" button.
@@ -364,6 +366,7 @@ const PAGES: &[Page] = &[
                     r(EYES, C, "Mascot eyes", ""),
                     r(PRIVACY, C, "Privacy indicator", ""),
                     r(CLIP, C, "Keep copied text on the Shelf", ""),
+                    r(NOTIFS, C, "Show Windows notifications", ""),
                 ],
             },
             Card {
@@ -1513,6 +1516,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         EYES => &mut s.eyes,
         PRIVACY => &mut s.privacy,
         CLIP => &mut s.clipboard,
+        NOTIFS => &mut s.notifications,
         DETECT => &mut s.detect,
         PRAYER => &mut s.prayer_remind,
         LIMCODEX => &mut s.limits_codex,

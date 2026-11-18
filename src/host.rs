@@ -39,6 +39,7 @@ use crate::{
     text_settings::TextSettings,
     theme::Palette,
     timer::{self, Timers},
+    toast,
     topology::{self, Monitor},
     water,
     weather::{self, Feed},
@@ -1329,6 +1330,8 @@ struct Desktop {
     last_reminder: String,
     /// The keyboard language and Caps Lock pills (`keys.rs`).
     keys: keys::Keys,
+    /// The Windows notifications peek (`toast.rs`); none while its switch is off.
+    toasts: Option<toast::Toasts>,
     /// Open only while the user has it up; created on demand, destroyed on close, so it costs nothing closed.
     palette: Palette,
     palette_dirty: bool,
@@ -1522,6 +1525,7 @@ impl Desktop {
             remind_box: None,
             last_reminder: String::new(),
             keys: keys::Keys::new(),
+            toasts: settings.notifications.then(toast::Toasts::new),
             palette: crate::theme::system_palette(settings.theme, effective_accent),
             palette_dirty: false,
             settings_window: None,
@@ -2272,6 +2276,13 @@ impl Desktop {
     /// A keyboard pill (the language, or Caps Lock's state) on the notice row for a moment; it never replaces a question
     /// or another notice that carries a button.
     fn key_pill(&mut self, text: Option<String>) {
+        self.pill(text, KEY_NOTICE);
+    }
+    /// A Windows notification's line (`toast.rs`) on the notice row, a short peek like a device alert.
+    fn notification_peek(&mut self) {
+        self.pill(toast::take(), DEVICE_NOTICE);
+    }
+    fn pill(&mut self, text: Option<String>, hold: Duration) {
         let Some(text) = text else {
             return;
         };
@@ -2279,7 +2290,7 @@ impl Desktop {
             return;
         }
         let now = Instant::now();
-        self.power.announce(text, now, KEY_NOTICE);
+        self.power.announce(text, now, hold);
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
     }
@@ -2968,6 +2979,9 @@ impl Desktop {
             {
                 clipboard_os::watch(notch.window.0, self.settings.clipboard);
             }
+        }
+        if old.notifications != self.settings.notifications {
+            self.toasts = self.settings.notifications.then(toast::Toasts::new);
         }
         // A new theme, pill size or accent mode is fixed when a surface is created, so they rebuild the surfaces.
         let restyle = old.theme != self.settings.theme
@@ -6150,6 +6164,10 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 } else {
                     desktop.hotkey(message.wParam.0)?;
                 }
+                continue;
+            }
+            if message.message == toast::SHOWN {
+                desktop.notification_peek();
                 continue;
             }
             if message.message == keys::LOOK {
