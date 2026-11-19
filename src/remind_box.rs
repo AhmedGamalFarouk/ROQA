@@ -41,7 +41,7 @@ pub struct RemindBox {
 
 impl RemindBox {
     pub fn create(work: Bounds) -> Result<Self> {
-        let window = empty_dialog(300, 120, Some(dialog_proc))?;
+        let window = empty_dialog(300, 120, Some(dialog_proc), WINDOW_EX_STYLE(0))?;
         let text =
             |class, title, id, style, extended| control(window, class, title, id, style, extended);
         let none = WINDOW_EX_STYLE(0);

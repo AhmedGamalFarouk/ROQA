@@ -1350,6 +1350,7 @@ unsafe extern "system" fn frame_proc(
             | WM_PAINT
             | WM_VSCROLL
             | WM_NCMOUSEMOVE
+            | WM_NCMOUSELEAVE
             | WM_NCLBUTTONDOWN
             | WM_NCLBUTTONUP
     ) {
@@ -1638,7 +1639,8 @@ impl SettingsWindow {
         factor: f64,
         work: Bounds,
     ) -> Result<Self> {
-        let window = empty_dialog(480, 300, Some(settings_proc))?;
+        // Composited: the dialog and its children paint into one back buffer shown whole, never half drawn.
+        let window = empty_dialog(480, 300, Some(settings_proc), WS_EX_COMPOSITED)?;
         if crate::dock::system_rtl() {
             // Children created after this inherit the mirrored layout.
             // SAFETY: our own dialog, before any child exists.
@@ -2169,10 +2171,7 @@ Other hooks stay. A copy of the file is kept.",
                 }
             }
         }
-        self.layout()?;
-        // SAFETY: our own live window.
-        let _ = unsafe { InvalidateRect(Some(self.window), None, true) };
-        Ok(())
+        self.layout()
     }
 
     /// Writes `settings` into the controls (not the timer length, which is not a setting).
@@ -2541,18 +2540,6 @@ Other hooks stay. A copy of the file is kept.",
         if next != self.scroll {
             self.scroll = next;
             self.layout()?;
-            // The title, cards and dividers are painted by the parent, not moved with the children.
-            // The children are invalidated too: with WS_CLIPCHILDREN the parent's own repaint skips them, and
-            // moved controls would keep stale pixels.
-            // SAFETY: our own live window.
-            let _ = unsafe {
-                RedrawWindow(
-                    Some(self.window),
-                    None,
-                    None,
-                    RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
-                )
-            };
         }
         Ok(())
     }
@@ -2661,22 +2648,33 @@ Other hooks stay. A copy of the file is kept.",
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             )?;
         }
-        self.layout()?;
-        // Children must repaint after PAINT receives the new tokens, not during WM_SETFONT with the old ones.
-        // SAFETY: the dialog and all its children are owned by this settings window.
-        let _ = unsafe {
-            RedrawWindow(
-                Some(self.window),
-                None,
-                None,
-                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME,
-            )
-        };
-        Ok(())
+        // Its repaint comes after PAINT has the new tokens, not during WM_SETFONT with the old ones.
+        self.layout()
+    }
+
+    /// Lays out with drawing frozen, then repaints once (frame and scroll bar too): moving and showing each
+    /// control on screen showed the page coming apart row by row.
+    fn layout(&mut self) -> Result<()> {
+        let window = self.window;
+        // SAFETY: our own live window; WM_SETREDRAW TRUE also shows a window, so a hidden one is left alone.
+        let shown = unsafe { IsWindowVisible(window) }.as_bool();
+        if !shown {
+            return self.arrange();
+        }
+        // SAFETY: a scalar message to our own live window.
+        unsafe { SendMessageW(window, WM_SETREDRAW, Some(WPARAM(0)), None) };
+        let placed = self.arrange();
+        let all = RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME;
+        // SAFETY: our own live window and its children.
+        unsafe {
+            SendMessageW(window, WM_SETREDRAW, Some(WPARAM(1)), None);
+            let _ = RedrawWindow(Some(window), None, None, all);
+        }
+        placed
     }
 
     /// Places the sidebar, the current page's rows and the footer, and hands the painter what to draw.
-    fn layout(&mut self) -> Result<()> {
+    fn arrange(&mut self) -> Result<()> {
         let Some(font) = self.font.as_ref() else {
             return Ok(());
         };

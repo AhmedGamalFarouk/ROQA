@@ -50,8 +50,8 @@ pub(crate) fn control(
     }
 }
 /// An empty standard dialog (caption and close box) whose commands `dialog_proc` posts to the host loop.
-/// The settings window reuses it.
-pub(crate) fn empty_dialog(cx: i16, cy: i16, proc: DLGPROC) -> Result<HWND> {
+/// The settings window reuses it; `ex` is set at creation (WS_EX_COMPOSITED is ignored when added later).
+pub(crate) fn empty_dialog(cx: i16, cy: i16, proc: DLGPROC, ex: WINDOW_EX_STYLE) -> Result<HWND> {
     // SAFETY: initialize standard themed classes before creating this process's first interactive controls.
     unsafe {
         InitCommonControlsEx(&INITCOMMONCONTROLSEX {
@@ -63,6 +63,7 @@ pub(crate) fn empty_dialog(cx: i16, cy: i16, proc: DLGPROC) -> Result<HWND> {
     let template = EmptyDialog {
         header: DLGTEMPLATE {
             style: DIALOG_STYLE,
+            dwExtendedStyle: ex.0,
             cx,
             cy,
             ..Default::default()

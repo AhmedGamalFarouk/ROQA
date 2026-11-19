@@ -3,7 +3,7 @@
 Every agent reads this file first. Briefs point here by path and never paste it. If a brief conflicts with this file, this file wins unless the brief quotes the owner.
 
 ## What it is
-Native Windows 11 dock + notch in Rust: Win32, DirectComposition/Direct2D, some GDI text. One ~1.5 MB exe, no dependencies beyond Cargo.lock.
+Native Windows 11 dock + notch in Rust: Win32, DirectComposition/Direct2D, some GDI text. One ~1.5 MB exe, dependencies only when they earn their size.
 Owner: Ahmed (they/them), does not read code. Report in plain language.
 One folder, one branch: work on `main` in this checkout. No branches, no worktrees.
 
@@ -17,7 +17,6 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 - No size limit (owner decision 2026-11-16): `verify.ps1` reports the exe size; put the byte delta in every report. Performance rules above still hold.
 - Live tests and screenshots happen on the second (non-primary) monitor only, so the owner's main screen is left alone (owner decision 2026-11-18). Never place ROQA, Settings, a backdrop or the mouse on the primary monitor for a test.
 - Answers to the owner are concise (owner decision 2026-11-18): short plain lines with only what changed, what is left and what they must decide; no recaps, no detail they did not ask for.
-- No new dependencies.
 - Never touch, delete or rebuild anything under `.tools`. Never run rustup or `scripts/bootstrap.ps1`.
 - Pushing `main` to origin needs no approval (owner decision 2026-11-16): push after a commit that passes `verify.ps1`. Never force-push, rewrite pushed history, publish releases or delete remote things. Only the Chief commits unless the brief says otherwise.
 - Several threads may share this checkout. Stage and commit only the paths you changed (`git commit -- <paths>`), never `git add -A`; if `verify.ps1` fails in files you did not touch, another thread is mid-edit: wait a few minutes and retry. Before pushing, `git pull --rebase origin main` if the push is rejected.
@@ -66,7 +65,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 - History only, never needed for a task: `cook/archive/` (old briefs, Nusa shot notes, old fix lists). If a rule there differs from this file, this file wins.
 
 ## Handoff contract
-Every brief for Rust work names the rust-best-practices skill (`.agents/skills/rust-best-practices`); if it conflicts with this file (new dependencies such as thiserror), this file wins.
+Every brief for Rust work names the rust-best-practices skill (`.agents/skills/rust-best-practices`); if it conflicts with this file, this file wins.
 Brief (Chief to worker), at most 15 lines:
 ```
 Read AGENTS.md first. Role: implement | capture | critic | test.
