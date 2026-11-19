@@ -44,6 +44,10 @@ unsafe extern "system" fn foreground(
 ) {
     let host = HOST.load(Relaxed);
     if host != 0 && !LOOKING.swap(true, Relaxed) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
+        )]
         // SAFETY: a scalar-only message to the host thread; no window memory is touched.
         if unsafe { PostThreadMessageW(host, LOOK, WPARAM(0), LPARAM(0)) }.is_err() {
             LOOKING.store(false, Relaxed);

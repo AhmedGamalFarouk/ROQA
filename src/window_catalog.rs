@@ -72,6 +72,10 @@ unsafe extern "system" fn changed(
         OVERFLOW.store(true, Ordering::Relaxed);
     }
     if !NOTIFIED.swap(true, Ordering::Relaxed) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
+        )]
         // SAFETY: scalar-only notification; no window memory or retained callback data. No panicking operations.
         if unsafe { PostThreadMessageW(target, DIRTY, WPARAM(0), LPARAM(0)) }.is_err() {
             NOTIFIED.store(false, Ordering::Relaxed);
@@ -95,6 +99,10 @@ unsafe extern "system" fn moved(
     FRAMES.fetch_add(1, Ordering::Relaxed);
     let target = TARGET.load(Ordering::Relaxed);
     if target != 0 && !FRAME_POSTED.swap(true, Ordering::Relaxed) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
+        )]
         // SAFETY: scalar-only notification; no window memory or retained callback data. No panicking operations.
         if unsafe { PostThreadMessageW(target, FRAME, WPARAM(0), LPARAM(0)) }.is_err() {
             FRAME_POSTED.store(false, Ordering::Relaxed);
@@ -210,6 +218,7 @@ impl Catalog {
                             break;
                         }
                         // SAFETY: scalar wake for the owning thread. A missed wake is recovered by reconciliation.
+                        #[expect(clippy::disallowed_methods, reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it")]
                         let _ =
                             unsafe { PostThreadMessageW(target, COMPLETE, WPARAM(0), LPARAM(0)) };
                     }

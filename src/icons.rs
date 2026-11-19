@@ -133,6 +133,7 @@ impl IconService {
                         break;
                     }
                     // SAFETY: scalar wake only; the UI loop also polls results on every pass.
+                    #[expect(clippy::disallowed_methods, reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it")]
                     let _ = unsafe { PostThreadMessageW(target, ICON_READY, WPARAM(0), LPARAM(0)) };
                 }
                 // Jobs still queued after an early exit hold agile references: release them before COM.
@@ -236,6 +237,10 @@ impl Drop for IconService {
         // A shell extraction cannot be cancelled; bound shutdown instead of hanging on a stuck source.
         let deadline = Instant::now() + Duration::from_secs(1);
         while !worker.is_finished() && Instant::now() < deadline {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "bounded 1 s wait for the icon worker at shutdown, no other event to wait on"
+            )]
             thread::sleep(Duration::from_millis(5));
         }
         if worker.is_finished() {

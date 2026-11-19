@@ -445,6 +445,10 @@ impl Wake {
         // Release: a completion's slot write is visible to the host once it sees this bit.
         if self.dirty.fetch_or(bit, Ordering::Release) == 0 {
             // SAFETY: a scalar thread message with no pointers.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
+            )]
             let _ = unsafe { PostThreadMessageW(self.host, WAKE, WPARAM(0), LPARAM(0)) };
         }
     }
@@ -1532,7 +1536,7 @@ mod tests {
             track(true, -1.0, 0, 120 * SECOND, 60).next_tick(at(0.0), 120, Duration::ZERO),
             None
         );
-        let mut unstamped = even.clone();
+        let mut unstamped = even;
         unstamped.timeline.updated = 0;
         assert_eq!(unstamped.next_tick(at(0.0), 120, Duration::ZERO), None);
         // A zero-width bar still changes on each second.
@@ -2008,6 +2012,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test waits for a worker, bounded to ten seconds"
+    )]
     fn a_hung_command_blocks_its_own_session_only_and_orphans_are_bounded() {
         let mut media = Media::create();
         let admitted = Cell::new(0);

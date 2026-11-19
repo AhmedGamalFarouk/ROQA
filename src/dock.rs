@@ -887,6 +887,10 @@ pub fn open_flyout(button: Button, anchor: (i32, i32), work: crate::layout::Boun
         if !send_keys(&[VK_LWIN, VK_B]) {
             return;
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the tray needs a moment after the key press, on a worker"
+        )]
         std::thread::sleep(TRAY_WAIT);
         // Enter must reach the taskbar: when the shell was slow to take the focus it would land in the user's app.
         // SAFETY: a scalar query.
@@ -894,6 +898,10 @@ pub fn open_flyout(button: Button, anchor: (i32, i32), work: crate::layout::Boun
         if matches!(tray.as_str(), "Shell_TrayWnd" | "Shell_SecondaryTrayWnd")
             && send_keys(&[VK_RETURN])
         {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the tray needs a moment after the key press, on a worker"
+            )]
             std::thread::sleep(TRAY_WAIT);
             // SAFETY: a scalar query.
             place_popup(
@@ -1217,7 +1225,7 @@ mod tests {
             windows: vec![
                 record(9, exe.clone(), false),
                 record(3, app.clone(), false),
-                record(5, exe.clone(), true),
+                record(5, exe, true),
                 record(7, Identity::Unavailable(7), false),
             ],
             incomplete: None,
@@ -1294,7 +1302,7 @@ mod tests {
             ids,
             [
                 pinned[0].clone(),
-                missing.clone(),
+                missing,
                 pinned[2].clone(),
                 Identity::Executable("c:\\5.exe".into()),
                 Identity::Unavailable(7)

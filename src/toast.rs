@@ -97,6 +97,10 @@ fn read(handle: usize) {
             if line.is_some() {
                 break;
             }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "a few short retries until the banner text fills in, on a worker"
+            )]
             std::thread::sleep(Duration::from_millis(60));
         }
         if started {
@@ -111,6 +115,10 @@ fn read(handle: usize) {
             *slot = Some(line);
         }
         // SAFETY: a scalar-only message to the host thread.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
+        )]
         let _ = unsafe { PostThreadMessageW(host, SHOWN, WPARAM(0), LPARAM(0)) };
     }
 }

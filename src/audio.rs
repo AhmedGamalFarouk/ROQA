@@ -248,6 +248,10 @@ impl Wake {
     fn raise(&self, bit: u32) {
         if self.dirty.fetch_or(bit, Ordering::Relaxed) == 0 {
             // SAFETY: a scalar thread message with no pointers.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
+            )]
             let _ = unsafe { PostThreadMessageW(self.host, WAKE, WPARAM(0), LPARAM(0)) };
         }
     }

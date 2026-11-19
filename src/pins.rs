@@ -203,7 +203,7 @@ impl Pins {
         } else {
             self.1.push(Folder {
                 name: "Together".into(),
-                members: vec![target.clone(), source.clone()],
+                members: vec![target, source.clone()],
             });
         }
         true

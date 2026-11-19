@@ -500,6 +500,7 @@ impl FilePicker {
                 }
                 let _ = sender.send(paths);
                 // SAFETY: scalar completion message to the still-owned host thread queue.
+                #[expect(clippy::disallowed_methods, reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it")]
                 unsafe {
                     if let Err(error) = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
                         host,

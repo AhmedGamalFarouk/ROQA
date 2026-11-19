@@ -24,11 +24,18 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 - Never commit `cook/refs`, `cook/stills`, `cook/compare` (private screenshots).
 - Workers on Gemini never edit `src/`.
 - Threads: when a thread's work is done and its report is read, the Chief settles it in T3 Code (t3_thread_organize); workers never leave a finished thread unsettled.
+- Bug patterns that came back (lints enforce what they can, see Commands; these cannot be linted):
+  - Shared slots (notice row, backups, hook writes): a later writer never silently replaces an earlier one; queue, merge or keep the first.
+  - Never assume the primary monitor: no `MONITOR_DEFAULTTOPRIMARY` or `SPI_GETWORKAREA`; use the monitor of ROQA's own window.
+  - Never save copied text or notifications to disk; the store holds settings and pins only.
+  - Never block the UI thread or poll on it (no short timers, no waits); wait on a worker or react to an event.
+  - A change that makes this file, the README or a card wrong fixes it in the same commit.
 - Docs: a report, research or scratch .md file that is no longer needed is deleted once its findings are acted on or copied into AGENTS.md, cook/ROUNDS.md or FEATURES_TO_ADD.md; the owner's own notes and AGENTS.md, cook/BRAND/RUBRIC docs are never deleted. Check git status first: delete untracked ones with plain rm, tracked ones with git rm in the same commit.
 
 ## Commands
 - Cargo only through `scripts\cargo.ps1 <args>`.
 - Gate: `scripts\verify.ps1` (fmt, clippy -D warnings, tests, locked release build, size report). A change is not done until it passes.
+- Lints: `clippy.toml` (`disallowed-methods`, each with a `reason` that names the right approach) and `[lints]` in `Cargo.toml`; `verify.ps1` also fails a src file over 2,500 lines. An existing correct use gets `#[expect(clippy::disallowed_methods, reason = "...")]` at the narrowest spot, never a blanket allow.
 - Run: `scripts\run.ps1 start` (builds, then launches) and `scripts\run.ps1 quit`.
 - Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. A full run takes about 6 minutes and returns on its own; run it in the background. If a pass fails with "Settings not found", ROQA crashed: check `Get-WinEvent` Application id 1000 before blaming the tool. Capture stores use fixed sample data (weather shows 3 hours, 29 degrees): that is the fixture, not a bug. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
 - Reuse a round's stills when `git rev-parse HEAD` and the exe SHA256 match its `provenance.json`.
@@ -59,6 +66,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 - History only, never needed for a task: `cook/archive/` (old briefs, Nusa shot notes, old fix lists). If a rule there differs from this file, this file wins.
 
 ## Handoff contract
+Every brief for Rust work names the rust-best-practices skill (`.agents/skills/rust-best-practices`); if it conflicts with this file (new dependencies such as thiserror), this file wins.
 Brief (Chief to worker), at most 15 lines:
 ```
 Read AGENTS.md first. Role: implement | capture | critic | test.

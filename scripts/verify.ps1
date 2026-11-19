@@ -5,6 +5,15 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $evidence = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $EvidenceDirectory))
 New-Item -ItemType Directory -Force -Path $evidence | Out-Null
 $results = @()
+# A src file past 2,500 lines must be split by job into sibling `impl` files (as src/host/ does for Desktop). The four files
+# already over the limit may not grow: a ceiling at today's size; shrink the ceiling when one is split.
+$limit = 2500
+$ceiling = @{ 'host.rs' = 5125; 'graphics.rs' = 4045; 'settings_window.rs' = 3218; 'layout.rs' = 2703 }
+foreach ($file in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src') -Recurse -Filter *.rs) {
+    $max = if ($ceiling.ContainsKey($file.Name)) { $ceiling[$file.Name] } else { $limit }
+    $lines = [System.IO.File]::ReadAllLines($file.FullName).Count
+    if ($lines -gt $max) { throw "$($file.FullName) has $lines lines (limit $max). Split it by job into sibling files, for example impl Desktop blocks in src/host/." }
+}
 foreach ($command in @(@{ Name = 'checks'; Script = 'check.ps1'; Arguments = '' }, @{ Name = 'build'; Script = 'cargo.ps1'; Arguments = ' build --locked --release' })) {
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = 'powershell.exe'

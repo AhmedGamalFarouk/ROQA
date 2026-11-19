@@ -2688,6 +2688,7 @@ Other hooks stay. A copy of the file is kept.",
         // The bar's width stays reserved (content and Close never move between pages); a page that does not
         // scroll hides the bar itself, leaving an empty gutter instead of a greyed track.
         // SAFETY: a plain system-metric query.
+        #[expect(clippy::disallowed_methods, reason = "a scrollbar width")]
         let bar = unsafe { GetSystemMetrics(SM_CXVSCROLL) };
         let beside = |client: RECT, scrolls: bool| RECT {
             right: client.right - if scrolls { 0 } else { bar },

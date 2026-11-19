@@ -148,6 +148,10 @@ pub fn load(path: &Path) -> (Store, Load) {
         }
         None => {
             // Keep one bad copy for the user; a failed rename just means the next save replaces it.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "quarantine of a bad store file, never new data"
+            )]
             let _ = std::fs::rename(path, path.with_extension("roqa.bad"));
             (Store::default(), Load::Quarantined)
         }
@@ -293,6 +297,7 @@ fn write_text(path: &Path, text: &str) -> io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let temporary = path.with_extension(format!("roqa-{}.tmp", std::process::id()));
+    #[expect(clippy::disallowed_methods, reason = "this is the store's atomic save")]
     std::fs::File::create(&temporary)
         .and_then(|mut file| {
             file.write_all(text.as_bytes())?;
@@ -324,6 +329,10 @@ pub fn save_unsaved() {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test writes a temp file, never the store"
+)]
 mod tests {
     use super::*;
     use crate::weather::Hour;

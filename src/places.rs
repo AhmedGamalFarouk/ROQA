@@ -131,6 +131,10 @@ mod tests {
         assert_eq!(drive_text("Data", 'D'), "Data (D:)");
     }
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a test writes a temp file, never the store"
+    )]
     fn a_stack_lists_the_newest_files_only() {
         let dir = std::env::temp_dir().join(format!("roqa-stack-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

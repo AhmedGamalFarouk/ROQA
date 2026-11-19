@@ -143,6 +143,7 @@ pub fn eject_in_background(letter: char) {
             let answer = if eject(letter) { 1 } else { 2 };
             EJECT_RESULT.store(answer, std::sync::atomic::Ordering::Release);
             // SAFETY: a scalar-only wake to the host thread; a failed post is picked up on its next pass.
+            #[expect(clippy::disallowed_methods, reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it")]
             let _ = unsafe {
                 windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
                     host,

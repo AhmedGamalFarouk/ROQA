@@ -90,3 +90,9 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
+# From the rust-best-practices skill (chapter 2): unneeded clones and collects.
+redundant_clone = "deny"
+needless_collect = "deny"
+map_unwrap_or = "deny"
+manual_ok_or = "deny"
+implicit_clone = "deny"

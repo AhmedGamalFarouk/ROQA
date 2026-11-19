@@ -95,6 +95,10 @@ pub struct Counters {
     pub monitors: u64,
 }
 impl Counters {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "SM_CMONITORS counts monitors, not the primary one's size"
+    )]
     pub fn read() -> Self {
         let store = STORE_WRITES.load(Ordering::Relaxed);
         // SAFETY: the pseudo handle needs no close; each out pointer is a live local of the size passed.
@@ -226,6 +230,10 @@ pub fn report(catalog: &CatalogView, c: &Counters, stopped: bool) -> String {
 /// Atomic temp-and-rename write.
 pub fn write(path: &Path, output: String) -> Result<()> {
     let temporary = path.with_extension(format!("roqa-{}.tmp", std::process::id()));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the diagnostics report's own temp-and-rename write, not the store"
+    )]
     std::fs::write(&temporary, output)
         .and_then(|()| std::fs::rename(&temporary, path))
         .map_err(|error| {

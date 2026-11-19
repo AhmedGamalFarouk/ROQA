@@ -716,6 +716,10 @@ pub fn apply(plan: &Plan, stamp: &str) -> Result<(), String> {
         backup.push(format!(".roqa-backup-{stamp}"));
         // A second change in the same second keeps the first copy: it holds the untouched original.
         if !Path::new(&backup).exists() {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "a backup of the agent's own settings before ROQA edits them, not the store"
+            )]
             fs::copy(path, backup).map_err(failed)?;
         }
     }
@@ -734,13 +738,25 @@ pub fn apply(plan: &Plan, stamp: &str) -> Result<(), String> {
             }
             let mut temp = real.as_os_str().to_owned();
             temp.push(".roqa-tmp");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "temp-and-rename write of the agent's settings file, not the store"
+            )]
             fs::write(&temp, text).map_err(failed)?;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "temp-and-rename write of the agent's settings file, not the store"
+            )]
             fs::rename(&temp, &real).map_err(failed)
         }
     }
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test writes a temp file, never the store"
+)]
 mod tests {
     use super::*;
 

@@ -17,6 +17,10 @@ fn wants_log(args: &[String]) -> bool {
         && (args.len() == 1 || args.iter().any(|arg| arg.starts_with("--probe-")))
 }
 /// Call only after single-instance admission, so a second launch never truncates the live log.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the error log rotates to error.prev.log and is append-only; it is not the store's data"
+)]
 pub fn initialize() {
     let args: Vec<String> = std::env::args().collect();
     let file = if !wants_log(&args) {

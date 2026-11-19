@@ -69,6 +69,7 @@ impl Io {
                 let outcome = run(job);
                 if done.send((id, outcome)).is_ok() {
                     // SAFETY: a scalar thread message with no pointers; a lost post only delays the poll.
+                    #[expect(clippy::disallowed_methods, reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it")]
                     let _ = unsafe { PostThreadMessageW(host, WAKE, WPARAM(0), LPARAM(0)) };
                 }
             })

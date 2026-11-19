@@ -57,6 +57,10 @@ impl TextSettings {
             TypedEventHandler::new(move |_, _| {
                 pending.store(true, Ordering::Relaxed);
                 // SAFETY: scalar wake only. A lost wake is recovered by the main loop's finite wait.
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
+                )]
                 let _ = unsafe { PostThreadMessageW(thread, WM_APP + 30, WPARAM(0), LPARAM(0)) };
                 Ok(())
             })

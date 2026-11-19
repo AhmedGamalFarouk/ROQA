@@ -85,6 +85,10 @@ fn work(queue: &Receiver<Job>, done: &Sender<Reading>, host: u32) {
                         return; // the host is gone
                     }
                     // SAFETY: a scalar thread message with no pointers; a lost post only delays the poll.
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
+                    )]
                     let _ = unsafe { PostThreadMessageW(host, WAKE, WPARAM(0), LPARAM(0)) };
                 }
                 Job::Write(target, percent) => {

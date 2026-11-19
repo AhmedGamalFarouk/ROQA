@@ -131,6 +131,10 @@ impl<T> Receiver<T> {
         std::iter::from_fn(|| self.try_recv().ok())
     }
     #[cfg(test)]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a test-only helper that waits a millisecond between tries"
+    )]
     pub fn recv_timeout(&self, wait: std::time::Duration) -> Result<T, ()> {
         let deadline = std::time::Instant::now() + wait;
         loop {

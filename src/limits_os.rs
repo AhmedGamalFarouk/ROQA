@@ -91,6 +91,7 @@ impl Io {
             .spawn(move || {
                 if done.send(run(&job, &active)).is_ok() {
                     // SAFETY: a scalar thread message with no pointers; a lost post only delays the poll.
+                    #[expect(clippy::disallowed_methods, reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it")]
                     let _ = unsafe { PostThreadMessageW(host, WAKE, WPARAM(0), LPARAM(0)) };
                 }
             })
@@ -161,6 +162,10 @@ fn read_capped(path: &Path, cap: u64) -> Option<String> {
 fn parse_twice(path: &Path, parse: fn(&str) -> Option<Snap>) -> Option<Snap> {
     for attempt in 0..2 {
         if attempt > 0 {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "one bounded retry: the writer may have been mid-write, no event to wait on"
+            )]
             std::thread::sleep(Duration::from_millis(60));
         }
         let text = read_capped(path, CLAUDE_CAP)?;
@@ -382,6 +387,10 @@ impl Drop for Child {
         // SAFETY: exclusively owned process; termination also handles a still-suspended setup failure.
         unsafe {
             let _ = TerminateProcess(self.process.0, 1);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "bounded 1 s wait for a killed child in drop, on a worker"
+            )]
             let _ = WaitForSingleObject(self.process.0, 1000);
         }
     }
@@ -526,6 +535,10 @@ fn capped(
         if !open || start.elapsed() >= timeout {
             break;
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "bounded read loop of the opt-in child process, on a worker"
+        )]
         std::thread::sleep(Duration::from_millis(15));
     }
     drop(stdin);

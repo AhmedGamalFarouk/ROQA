@@ -197,6 +197,10 @@ fn append(line: &str) -> std::io::Result<()> {
     let mut path = spool().ok_or(std::io::ErrorKind::NotFound)?;
     fs::create_dir_all(&path)?;
     path.push("agent.txt");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the spool is the agent hook's own append-only file, one line per write; not the store"
+    )]
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -270,6 +274,10 @@ pub fn ask(name: &str) {
     }
     let handles = [events[0].0, events[1].0];
     // SAFETY: both handles stay open until this function returns.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the ask is a bounded wait on a worker for the user's answer"
+    )]
     let woke = unsafe { WaitForMultipleObjects(&handles, false, (ASK_SECS * 1000) as u32) };
     let decision = match woke.0.wrapping_sub(WAIT_OBJECT_0.0) {
         0 => r#"{"behavior":"allow"}"#,

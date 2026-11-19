@@ -22,6 +22,10 @@ fn wait<T: windows::core::RuntimeType + 'static>(operation: &IAsyncOperation<T>)
                 windows::Win32::Foundation::ERROR_TIMEOUT.to_hresult(),
             ));
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "bounded wait on a WinRT call, on a worker"
+        )]
         std::thread::sleep(Duration::from_millis(2));
     }
     operation.GetResults()

@@ -1,0 +1,21 @@
+# Bug patterns that came back more than once. Each reason names the right approach. An existing correct use gets
+# #[expect(clippy::disallowed_methods, reason = "...")] at the narrowest spot. Rules that cannot be linted are in AGENTS.md.
+disallowed-methods = [
+    # 1. Signals lost in modal loops.
+    { path = "windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW", reason = "thread messages are dropped while a menu or drag loop runs; post to a window (PostMessageW) instead" },
+    # 3. Polling or sleeping instead of reacting.
+    { path = "std::thread::sleep", reason = "do not poll; react to an event or use the motion clock (src/motion.rs)" },
+    { path = "windows::Win32::System::Threading::Sleep", reason = "do not poll; react to an event or use the motion clock (src/motion.rs)" },
+    { path = "windows::Win32::System::Threading::WaitForSingleObject", reason = "never block the UI thread; wait on a worker or add the handle to the message loop wait" },
+    { path = "windows::Win32::System::Threading::WaitForMultipleObjects", reason = "never block the UI thread; wait on a worker or add the handles to the message loop wait" },
+    { path = "windows::Win32::UI::WindowsAndMessaging::SetTimer", reason = "no polling timers; react to an event or use the motion clock (src/motion.rs)" },
+    # 4. Assuming the primary monitor.
+    { path = "windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics", reason = "SM_CXSCREEN and SM_CYSCREEN mean the primary monitor; use the monitor of ROQA's window (MonitorFromWindow)" },
+    # 5. Disk writes outside the store's atomic save.
+    { path = "std::fs::write", reason = "write only through the store's atomic save (src/store.rs); never save copied text or notifications" },
+    { path = "std::fs::rename", reason = "write only through the store's atomic save (src/store.rs)" },
+    { path = "std::fs::copy", reason = "write only through the store's atomic save (src/store.rs)" },
+    { path = "std::fs::File::create", reason = "write only through the store's atomic save (src/store.rs)" },
+    { path = "std::fs::File::create_new", reason = "write only through the store's atomic save (src/store.rs)" },
+    { path = "std::fs::OpenOptions::open", reason = "write only through the store's atomic save (src/store.rs)" },
+]

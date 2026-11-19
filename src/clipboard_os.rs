@@ -43,7 +43,13 @@ fn open(hwnd: HWND) -> bool {
             return true;
         }
         // SAFETY: a plain sleep.
-        unsafe { Sleep(8) };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the clipboard may be held by its writer for a moment; three short tries"
+        )]
+        unsafe {
+            Sleep(8)
+        };
     }
     false
 }
