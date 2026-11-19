@@ -223,23 +223,35 @@ fn append_in(dir: &Path, line: &str) -> std::io::Result<()> {
     fs::rename(&tmp, dir.join(format!("{name}.txt")))
 }
 
-/// The resident half: the reports since the last call, oldest first. Anything unreadable is dropped.
+/// The resident half: the reports since the last call, oldest first. Anything unreadable is dropped. A batch is
+/// bounded (`SPOOL_FILES`); when files are left it signals the Agent event again, so the next pass reads them.
 pub fn take() -> Vec<(String, Report)> {
-    spool().map_or_else(Vec::new, |dir| take_in(&dir))
+    let Some(dir) = spool() else {
+        return Vec::new();
+    };
+    let (reports, more) = take_in(&dir);
+    if more {
+        let _ = crate::ipc::Command::Agent.signal();
+    }
+    reports
 }
 
-fn take_in(dir: &Path) -> Vec<(String, Report)> {
+/// The reports of up to `SPOOL_FILES` files, and whether more files are waiting. Only that many names are listed.
+fn take_in(dir: &Path) -> (Vec<(String, Report)>, bool) {
     let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let mut files: Vec<_> = entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+        .take(SPOOL_FILES + 1)
         .collect();
     // The names start with the time, so this is the order they were written in.
+    // shortcut: the listing is the file system's order (NTFS lists by name); sort the whole spool if that changes.
     files.sort();
-    files
+    let more = files.len() > SPOOL_FILES;
+    let reports = files
         .iter()
         .take(SPOOL_FILES)
         .filter_map(|path| {
@@ -251,7 +263,8 @@ fn take_in(dir: &Path) -> Vec<(String, Report)> {
             text
         })
         .flat_map(|text| text.lines().filter_map(parse).collect::<Vec<_>>())
-        .collect()
+        .collect();
+    (reports, more)
 }
 
 fn parse(line: &str) -> Option<(String, Report)> {
@@ -349,22 +362,45 @@ mod tests {
     fn the_spool_keeps_every_report_in_order_and_skips_one_still_being_written() {
         let dir = std::env::temp_dir().join(format!("roqa-spool-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        assert!(take_in(&dir).is_empty(), "no folder yet");
+        assert!(take_in(&dir).0.is_empty(), "no folder yet");
         append_in(&dir, "codex working\n").unwrap();
         append_in(&dir, "ask 7 claude Bash: ls\n").unwrap();
         fs::write(dir.join("0-1-1.tmp"), "codex done\n").unwrap();
         let first = take_in(&dir);
         assert_eq!(
             first,
-            [
-                ("codex".into(), Report::State(State::Working)),
-                ("claude".into(), Report::Ask(7, "Bash: ls".into())),
-            ]
+            (
+                vec![
+                    ("codex".into(), Report::State(State::Working)),
+                    ("claude".into(), Report::Ask(7, "Bash: ls".into())),
+                ],
+                false
+            )
         );
         // A report written after the first drain began is not in it and not lost.
         append_in(&dir, "build 50%\n").unwrap();
-        assert_eq!(take_in(&dir), [("build".into(), Report::Percent(50))]);
-        assert!(take_in(&dir).is_empty());
+        assert_eq!(
+            take_in(&dir),
+            (vec![("build".into(), Report::Percent(50))], false)
+        );
+        assert!(take_in(&dir).0.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_burst_over_one_batch_is_all_read_by_the_following_drains() {
+        let dir = std::env::temp_dir().join(format!("roqa-burst-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for step in 0..=SPOOL_FILES {
+            append_in(&dir, &format!("build {}%\n", step % 100)).unwrap();
+        }
+        let (first, more) = take_in(&dir);
+        assert!(
+            more && first.len() == SPOOL_FILES,
+            "one batch, one file left"
+        );
+        let (rest, more) = take_in(&dir);
+        assert!(!more && rest == [("build".into(), Report::Percent(SPOOL_FILES as u8))]);
         let _ = fs::remove_dir_all(&dir);
     }
 

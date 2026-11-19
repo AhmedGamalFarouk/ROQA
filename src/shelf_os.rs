@@ -371,6 +371,11 @@ pub fn drive_type(path: &str) -> u32 {
     unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) }
 }
 
+/// A UNC path or a mapped drive: nothing may touch it on the host thread (`open` with `network`).
+pub fn is_network(path: &str) -> bool {
+    path.starts_with("\\\\") || drive_type(path) == crate::shelf::DRIVE_REMOTE
+}
+
 pub const PICKED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 60;
 
 // A single on-demand STA owns the dialog and all of its COM results. Completion posts one host wake.
@@ -559,6 +564,11 @@ impl Drop for FilePicker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_share_is_known_without_touching_it() {
+        assert!(is_network(r"\\server\share\docs"));
+        assert!(!is_network("shell:RecycleBinFolder") && !is_network("notepad.exe"));
+    }
     #[test]
     fn network_admission_releases_on_completion_and_unwind() {
         let permit = NetworkPermit::acquire().unwrap();

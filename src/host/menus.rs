@@ -154,9 +154,24 @@ impl Desktop {
             Err(error) => eprintln!("Places: {error}"),
         }
     }
-    /// What the worker found for a click on a pinned path (`places::ask`): a folder opens its stack unless another menu
-    /// opened since, and a path that is not a folder is launched like any other pin.
+    /// A click on a pinned path that may be a folder: a worker reads it (`stack_ready` goes on). One read at a time,
+    /// so a click while one is out says so.
+    pub(super) fn ask_stack(&mut self, hwnd: HWND, slot: usize, path: String) {
+        if !crate::places::ask(hwnd.0 as isize, slot, path) {
+            self.show_notice("Still reading a folder.".into(), Instant::now());
+        }
+    }
+    /// What the worker found for a click on a pinned path (`places::ask`): a folder opens its stack unless the click is
+    /// out of date (a later click, a menu opened since, too slow) or the slot holds another pin now, and a path that is
+    /// not a folder is launched like any other pin.
     pub(super) fn stack_ready(&mut self, answer: crate::places::Answer) {
+        let held = self
+            .dock_items
+            .get(answer.slot)
+            .is_some_and(|item| item.identity == Identity::Executable(answer.folder.clone()));
+        if !answer.current() || !held {
+            return;
+        }
         let hwnd = HWND(answer.dock as *mut _);
         match answer.files {
             Some(_) if self.menu.is_some() => {}

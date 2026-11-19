@@ -76,12 +76,32 @@ pub struct Answer {
     pub slot: usize,
     pub folder: String,
     pub files: Option<Vec<PathBuf>>,
+    request: u64,
+    asked: std::time::Instant,
+}
+
+/// An answer older than this is dropped: a stack that pops up long after the click is not what was asked for.
+const STALE: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl Answer {
+    /// Whether the click that asked is still the latest one, with no menu opened since, and recent.
+    pub fn current(&self) -> bool {
+        self.request == REQUEST.load(std::sync::atomic::Ordering::Acquire)
+            && self.asked.elapsed() <= STALE
+    }
 }
 
 /// Posted to the host when `ask` has an answer; the host reads it with `answer` on every pass.
 pub const READY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 62;
 static ASKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static ANSWER: std::sync::Mutex<Option<Answer>> = std::sync::Mutex::new(None);
+/// The generation of the latest click; opening any menu (`invalidate`) makes an older answer not current.
+static REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A menu opened: a question still out no longer applies.
+pub fn invalidate() {
+    REQUEST.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
 
 /// Asks a short worker whether `folder` is a folder and what its newest files are: a stat on a slow or offline
 /// share must not stop the host. One question at a time; false when one is still out or no worker could start.
@@ -92,6 +112,7 @@ pub fn ask(dock: isize, slot: usize, folder: String) -> bool {
     }
     // SAFETY: a scalar thread id query.
     let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    let (request, asked) = (REQUEST.fetch_add(1, AcqRel) + 1, std::time::Instant::now());
     let spawned = std::thread::Builder::new()
         .name("roqa-stack".into())
         .spawn(move || {
@@ -103,6 +124,8 @@ pub fn ask(dock: isize, slot: usize, folder: String) -> bool {
                     slot,
                     folder,
                     files,
+                    request,
+                    asked,
                 });
             }
             crate::native_window::post_wake(host, READY);
@@ -191,6 +214,24 @@ pub fn list() -> Vec<Place> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_late_or_overtaken_answer_is_not_current() {
+        let answer = |request, asked| Answer {
+            dock: 0,
+            slot: 0,
+            folder: String::new(),
+            files: None,
+            request,
+            asked,
+        };
+        let request = REQUEST.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        let now = std::time::Instant::now();
+        assert!(answer(request, now).current());
+        let old = now.checked_sub(STALE * 2).unwrap_or(now);
+        assert!(!answer(request, old).current(), "too slow");
+        invalidate();
+        assert!(!answer(request, now).current(), "a menu opened since");
+    }
     #[test]
     fn rows_read_plainly() {
         assert_eq!(bin_text(0), "Recycle Bin, empty");

@@ -294,6 +294,7 @@ fn visible_rows(dpi: u32, work: Bounds, count: usize) -> usize {
 impl Menu {
     /// Creates, paints and shows the popup (not yet the foreground: the host asks for that).
     pub fn open(graphics: &Graphics, palette: Palette, spec: Spec) -> Result<Self> {
+        crate::places::invalidate(); // a folder stack still being read is not wanted any more
         Self::create(graphics, palette, spec, false)
     }
     pub fn open_hover(graphics: &Graphics, palette: Palette, spec: Spec) -> Result<Self> {

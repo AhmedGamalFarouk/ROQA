@@ -707,6 +707,12 @@ pub fn restore_foreground(from: HWND, to: Option<WindowKey>) {
 /// Starts a not-running pin through the shell, on the user's click only. No UI on failure (a missing target
 /// would otherwise open a modal error box on the host thread); false means it did not start.
 pub fn launch(target: &str) -> bool {
+    // A UNC path or mapped drive can stall the shell on a dead share: it opens on the Shelf's worker, so
+    // `true` means asked, not started.
+    if crate::shelf_os::is_network(target) {
+        crate::shelf_os::open(target, false, true);
+        return true;
+    }
     launch_with(target, None)
 }
 
