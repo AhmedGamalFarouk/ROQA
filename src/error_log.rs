@@ -25,9 +25,12 @@ pub fn initialize() {
         std::env::var_os("LOCALAPPDATA").and_then(|base| {
             let directory = std::path::PathBuf::from(base).join("ROQA");
             std::fs::create_dir_all(&directory).ok()?;
-            File::create(directory.join("error.log"))
-                .ok()
-                .map(|file| (file, 0))
+            // A panic's only trace: keep the last non-empty log as error.prev.log before this run empties it.
+            let log = directory.join("error.log");
+            if std::fs::metadata(&log).is_ok_and(|log| log.len() > 0) {
+                let _ = std::fs::rename(&log, directory.join("error.prev.log"));
+            }
+            File::create(log).ok().map(|file| (file, 0))
         })
     };
     let _ = LOG.set(Mutex::new(file));

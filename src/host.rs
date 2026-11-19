@@ -1357,6 +1357,8 @@ struct Desktop {
     drops: Drops,
     /// An icon finished this pass (`refresh_dock` collected it).
     icons_arrived: bool,
+    /// The dock icon table kept between the frames of one dock animation; dropped when the dock changes.
+    animation_icons: Option<Vec<Vec<Option<Arc<IconPixels>>>>>,
     store: Store,
     store_path: Option<std::path::PathBuf>,
     pending: Pending,
@@ -1546,6 +1548,7 @@ impl Desktop {
             },
             drops: Drops::default(),
             icons_arrived: false,
+            animation_icons: None,
             store,
             store_path,
             pending: Pending::default(),
@@ -2732,7 +2735,10 @@ impl Desktop {
             .iter()
             .any(|s| s.live && s.kind() == SurfaceKind::Dock);
         let icons = if docks_live {
-            self.dock_icons()
+            match self.animation_icons.take() {
+                Some(icons) => icons,
+                None => self.dock_icons(),
+            }
         } else {
             Vec::new()
         };
@@ -2788,6 +2794,14 @@ impl Desktop {
                 surface.set_visible(false);
             }
             running |= surface.live;
+        }
+        if docks_live
+            && self
+                .surfaces
+                .iter()
+                .any(|s| s.live && s.kind() == SurfaceKind::Dock)
+        {
+            self.animation_icons = Some(icons);
         }
         if settled {
             self.apply_visibility()?;
@@ -3282,6 +3296,7 @@ impl Desktop {
             self.dock_slots(),
         );
         let icons = self.dock_icons();
+        self.animation_icons = None;
         for dock in &mut self.surfaces {
             let Some(monitor) = self.monitors.iter().find(|m| m.device == dock.monitor) else {
                 continue;
@@ -3338,6 +3353,9 @@ impl Desktop {
         let icons_arrived = self.icons.collect();
         self.icons_arrived = icons_arrived;
         if icons_arrived {
+            self.animation_icons = None;
+        }
+        if icons_arrived {
             self.fill_stack_icons();
         }
         if self.dock_generation == Some(model.generation) && !icons_arrived {
@@ -3374,6 +3392,7 @@ impl Desktop {
             }
             let resized = items.len() != self.dock_items.len();
             self.dock_items = items;
+            self.animation_icons = None;
             if resized {
                 return self.relayout_docks();
             }
@@ -4943,8 +4962,17 @@ impl Desktop {
             Command::ShowSettings | Command::Agent => {}
             Command::ShowNotch => self.show(SurfaceKind::Notch)?,
             Command::ShowDock => self.show(SurfaceKind::Dock)?,
-            Command::HideNotch => self.close(SurfaceKind::Notch),
-            Command::HideDock => self.close(SurfaceKind::Dock),
+            Command::HideNotch | Command::HideDock => {
+                let kind = if command == Command::HideNotch {
+                    SurfaceKind::Notch
+                } else {
+                    SurfaceKind::Dock
+                };
+                // The last surface stays: with none shown the host would end.
+                if self.shown.iter().any(|shown| *shown != kind) {
+                    self.close(kind);
+                }
+            }
         }
         if matches!(command, Command::ShowNotch | Command::ShowDock) {
             // Also recovers monitors whose earlier placement ran out of retries.
