@@ -931,6 +931,19 @@ mod tests {
     }
 
     #[test]
+    fn the_dock_shows_on_every_monitor_the_owner_did_not_switch_off() {
+        let (primary, second) = ("\\\\.\\DISPLAY1", "\\\\.\\DISPLAY2");
+        // A store with no off lines (the owner's default): the primary monitor and every other one.
+        let all = Settings::default();
+        assert!(all.wants(SurfaceKind::Dock, primary) && all.wants(SurfaceKind::Dock, second));
+        // An off line removes only that monitor.
+        let mut main_only = Settings::default();
+        assert!(main_only.set("off", second));
+        assert!(main_only.wants(SurfaceKind::Dock, primary));
+        assert!(!main_only.wants(SurfaceKind::Dock, second));
+    }
+
+    #[test]
     fn a_change_maps_to_the_surfaces_to_create_and_destroy() {
         let devices = names(&["D1", "D2"]);
         let base = Settings::default();

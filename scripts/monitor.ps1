@@ -20,7 +20,7 @@ function Get-TestOffLines {
 
 # A private profile folder for a test run: a copy of the owner's store with ROQA switched off on every monitor but
 # the test one, refreshed from the real store each time, so the real store is never changed. Returns the folder; a
-# caller points LOCALAPPDATA at it only while it starts ROQA (run.ps1) or for the whole run (the test scripts).
+# caller points LOCALAPPDATA at it only while it starts ROQA (run.ps1 -Test) or for the whole run (the test scripts).
 function New-TestProfile([string]$ProfileDir) {
     New-Item -ItemType Directory -Force -Path (Join-Path $ProfileDir 'ROQA') | Out-Null
     $real = Join-Path $env:LOCALAPPDATA 'ROQA\store.roqa'

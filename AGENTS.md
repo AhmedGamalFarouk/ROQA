@@ -26,7 +26,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 - Threads: when a thread's work is done and its report is read, the Chief settles it in T3 Code (t3_thread_organize); workers never leave a finished thread unsettled.
 - Bug patterns that came back (lints enforce what they can, see Commands; these cannot be linted):
   - Shared slots (notice row, backups, hook writes): a later writer never silently replaces an earlier one; queue, merge or keep the first.
-  - Never assume the primary monitor: no `MONITOR_DEFAULTTOPRIMARY` or `SPI_GETWORKAREA`; use the monitor of ROQA's own window.
+  - Never assume the primary monitor: no `MONITOR_DEFAULTTOPRIMARY` or `SPI_GETWORKAREA`; use the monitor of ROQA's own window. Which monitors show the dock and notch is the owner's choice (`off=` lines in the store; every monitor by default), never a script's.
   - Never save copied text or notifications to disk; the store holds settings and pins only.
   - Never block the UI thread or poll on it (no short timers, no waits); wait on a worker or react to an event.
   - A change that makes this file, the README or a card wrong fixes it in the same commit.
@@ -36,7 +36,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 - Cargo only through `scripts\cargo.ps1 <args>`.
 - Gate: `scripts\verify.ps1` (fmt, clippy -D warnings, tests, locked release build, size report). A change is not done until it passes.
 - Lints: `clippy.toml` (`disallowed-methods`, each with a `reason` that names the right approach) and `[lints]` in `Cargo.toml`; `verify.ps1` also fails a src file over 2,500 lines. An existing correct use gets `#[expect(clippy::disallowed_methods, reason = "...")]` at the narrowest spot, never a blanket allow.
-- Run: `scripts\run.ps1 start` (builds, then launches) and `scripts\run.ps1 quit`.
+- Run: `scripts\run.ps1 start` (builds, then launches the owner's ROQA on their own settings) and `scripts\run.ps1 quit`. A live test uses `scripts\run.ps1 start -Test` (test monitor only, private copy of the store).
 - Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. A full run takes about 6 minutes and returns on its own; run it in the background. If a pass fails with "Settings not found", ROQA crashed: check `Get-WinEvent` Application id 1000 before blaming the tool. Capture stores use fixed sample data (weather shows 3 hours, 29 degrees): that is the fixture, not a bug. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
 - Reuse a round's stills when `git rev-parse HEAD` and the exe SHA256 match its `provenance.json`.
 

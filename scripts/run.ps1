@@ -1,4 +1,7 @@
-param([ValidateSet('start','quit','show-notch','hide-notch','show-dock','hide-dock','show-settings')][string]$Action = 'start')
+param([ValidateSet('start','quit','show-notch','hide-notch','show-dock','hide-dock','show-settings')][string]$Action = 'start',
+    # A live test: ROQA on the test monitor only, from a private copy of the store. Without it, start is the
+    # owner's own ROQA on the monitors they chose.
+    [switch]$Test)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -11,13 +14,14 @@ if ($Action -eq 'start') {
     # Launched through the shell so ROQA inherits none of the caller's pipes; a caller that
     # captures output would otherwise wait on ROQA forever.
     $command = '/c start "" /b "{0}" 2> "{1}"' -f ($executable -replace '/', '\'), ($log -replace '/', '\')
-    # ROQA runs on the test monitor only (scripts/monitor.ps1): a private copy of the owner's store with the
-    # other monitors switched off, so the real store is never changed. Refreshed from the real store each start.
-    . "$PSScriptRoot/monitor.ps1"
-    $profileDir = New-TestProfile (Join-Path $logDirectory 'profile')
+    # -Test: ROQA runs on the test monitor only (scripts/monitor.ps1): a private copy of the owner's store with
+    # the other monitors switched off, so the real store is never changed. Refreshed from the real store each start.
     $realLocal = $env:LOCALAPPDATA
     try {
-        $env:LOCALAPPDATA = $profileDir
+        if ($Test) {
+            . "$PSScriptRoot/monitor.ps1"
+            $env:LOCALAPPDATA = New-TestProfile (Join-Path $logDirectory 'profile')
+        }
         Start-Process -FilePath $env:ComSpec -ArgumentList $command -WindowStyle Hidden
     } finally { $env:LOCALAPPDATA = $realLocal }
     Start-Sleep -Milliseconds 1000
