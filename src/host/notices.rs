@@ -51,6 +51,43 @@ impl Desktop {
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
     }
+    /// Said once at start when the settings could not be read: this run keeps no change.
+    pub(super) fn startup_notice(&mut self) {
+        if self.store_path.is_none() {
+            self.show_notice(
+                "Couldn't read settings. Changes won't save.".into(),
+                Instant::now(),
+            );
+        }
+    }
+    /// A command's failure that is not a lost graphics device (that one schedules a rebuild) is logged and the host goes on.
+    pub(super) fn recover(&mut self, result: Result<()>, what: &str) {
+        if let Err(error) = self.survive(result, ()) {
+            eprintln!("{what}: {error}");
+        }
+    }
+    /// A drive, camera or speaker connected (`native_window::device_read` bits): a short peek, unlike a prayer alert it
+    /// does not show over a full-screen app; a drive carries Eject.
+    pub(super) fn show_device(&mut self, bits: u32) {
+        let text = if bits & native_window::DRIVE_BIT != 0 {
+            "Drive connected"
+        } else if bits & native_window::CAMERA_BIT != 0 {
+            "Camera connected"
+        } else {
+            "Speaker connected"
+        };
+        let letter = native_window::drive_read().filter(|_| bits & native_window::DRIVE_BIT != 0);
+        let hold = if letter.is_some() {
+            DRIVE_NOTICE
+        } else {
+            DEVICE_NOTICE
+        };
+        let extra = letter.map_or(power::Extra::None, power::Extra::Eject);
+        self.power
+            .announce(text.into(), Instant::now(), hold, extra);
+        self.open_notches();
+        self.request_notches(Repaint::Full, |_| true);
+    }
     /// Reads what coding agents reported since the last time: the latest shows on the pill for the notice's
     /// length. With the switch off they are read and dropped.
     pub(super) fn agent_reports(&mut self) {

@@ -2587,9 +2587,9 @@ impl Desktop {
             self.show_notice(status, now);
         }
     }
-    /// Ends the notice row at once when what it said no longer holds.
+    /// Ends a plain notice at once when what it said no longer holds; a question or button row stays.
     fn clear_notice(&mut self) {
-        if self.power.clear() {
+        if self.power.clear_plain() {
             self.request_notches(Repaint::Full, |_| true);
         }
     }
@@ -2803,7 +2803,7 @@ impl Desktop {
                     && let Identity::Executable(path) = &item.identity
                     && crate::places::may_be_folder(path)
                 {
-                    crate::places::ask(hwnd.0 as isize, slot, path.clone());
+                    self.ask_stack(hwnd, slot, path.clone());
                     return Ok(());
                 }
                 self.run_pin(slot, None);
@@ -3435,9 +3435,12 @@ impl Desktop {
             .map(|s| s.window.0);
         if self.settings.clipboard
             && let Some(hwnd) = hwnd
-            && let Some(text) = clipboard_os::read(hwnd)
         {
-            self.change_clips(|clips| clips.add(&text));
+            match clipboard_os::read(hwnd) {
+                clipboard_os::Read::Text(text) => self.change_clips(|clips| clips.add(&text)),
+                clipboard_os::Read::Nothing => {}
+                clipboard_os::Read::Busy => native_window::clip_again(),
+            }
         }
     }
     /// One edit of the Copied list (memory only, never written to disk): a real change repaints an open panel.
@@ -3876,6 +3879,7 @@ impl Desktop {
             &self.monitors,
         );
         self.fullscreen_due = (waiting && !polled).then_some(now + FULLSCREEN_POLL);
+        keys::grip(); // the Caps grab follows full screen that starts without a focus change
         if before == self.fullscreen {
             return Ok(());
         }
@@ -4099,26 +4103,7 @@ impl Desktop {
         }
         let bits = native_window::device_read();
         if bits != 0 {
-            let text = if bits & native_window::DRIVE_BIT != 0 {
-                "Drive connected"
-            } else if bits & native_window::CAMERA_BIT != 0 {
-                "Camera connected"
-            } else {
-                "Speaker connected"
-            };
-            // A short peek, unlike a prayer alert: it does not show over a full-screen app.
-            let letter =
-                native_window::drive_read().filter(|_| bits & native_window::DRIVE_BIT != 0);
-            let hold = if letter.is_some() {
-                DRIVE_NOTICE
-            } else {
-                DEVICE_NOTICE
-            };
-            let extra = letter.map_or(power::Extra::None, power::Extra::Eject);
-            self.power
-                .announce(text.into(), Instant::now(), hold, extra);
-            self.open_notches();
-            self.request_notches(Repaint::Full, |_| true);
+            self.show_device(bits);
         }
         if native_window::wake_read() {
             let now = Instant::now();
@@ -4150,8 +4135,7 @@ impl Desktop {
             self.stack_ready(answer);
         }
         if native_window::caps_read() {
-            let said = self.keys.caps_pressed();
-            self.key_pill(said);
+            self.key_pill(Some(keys::caps_text()));
         }
         // A Windows notification's line and a finished file picker are read here, not on their wake: a modal loop can
         // swallow the wake, and the line would wait for the next toast.
@@ -4390,6 +4374,7 @@ pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> 
             .map(std::path::PathBuf::from)
     });
     let mut catalog = Catalog::create(report)?;
+    desktop.startup_notice();
     crate::error_log::started();
     let result = event_loop(&controls, &mut desktop, &mut catalog);
     desktop.flush_store(true);
@@ -4550,10 +4535,10 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             }
             if message.message == WM_HOTKEY {
                 if keys::Keys::is_caps(message.wParam.0) {
-                    let said = desktop.keys.caps_pressed();
-                    desktop.key_pill(said);
+                    desktop.key_pill(keys::hand_back().then(keys::caps_text));
                 } else {
-                    desktop.hotkey(message.wParam.0)?;
+                    let shortcut = desktop.hotkey(message.wParam.0);
+                    desktop.recover(shortcut, "Shortcut");
                 }
                 continue;
             }
@@ -4582,7 +4567,8 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                     let hit = desktop
                         .dock_at(message.hwnd)
                         .and_then(|dock| dock.dock_hit(message.lParam, desktop.dock_slots()));
-                    desktop.activate(message.hwnd, hit)?;
+                    let clicked = desktop.activate(message.hwnd, hit);
+                    desktop.recover(clicked, "Dock click");
                 }
                 continue;
             }

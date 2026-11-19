@@ -44,9 +44,16 @@ static LINE: Mutex<Option<String>> = Mutex::new(None);
 /// The longest line kept, in characters; the row trims the rest with an ellipsis.
 const LONGEST: usize = 140;
 
-/// The latest banner's line, once.
+/// The first unread banner line, once.
 pub fn take() -> Option<String> {
     LINE.lock().ok()?.take()
+}
+
+/// The first unread line stays: a later toast must not replace one the host has not taken yet.
+fn keep(line: String) {
+    if let Ok(mut slot) = LINE.lock() {
+        slot.get_or_insert(line);
+    }
 }
 
 unsafe extern "system" fn uncloaked(
@@ -111,9 +118,7 @@ fn read(handle: usize) {
     READING.store(false, Relaxed);
     let host = HOST.load(Relaxed);
     if let (Some(line), true) = (line, host != 0) {
-        if let Ok(mut slot) = LINE.lock() {
-            *slot = Some(line);
-        }
+        keep(line);
         // A window post, so a message box or menu loop does not drop it (`native_window::post_wake`).
         let _ = crate::native_window::post_wake(host, SHOWN);
     }
@@ -199,6 +204,16 @@ impl Drop for Toasts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_toast_before_a_take_does_not_replace_the_first() {
+        keep("Mail: Alice, first".into());
+        keep("Chat: Bob, second".into());
+        assert_eq!(take().as_deref(), Some("Mail: Alice, first"));
+        assert_eq!(take(), None);
+        keep("Chat: Bob, second".into());
+        assert_eq!(take().as_deref(), Some("Chat: Bob, second"));
+    }
 
     #[test]
     fn a_banner_reads_as_one_line_with_what_it_has() {

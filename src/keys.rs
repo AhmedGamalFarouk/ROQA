@@ -53,6 +53,10 @@ pub fn looking() -> bool {
     LOOKING.load(Relaxed)
 }
 
+/// Whether the Caps Lock hotkey is registered now: off while an elevated window or a full-screen app has the focus,
+/// where it could not be handed back. A static, since the window procedure hands the key back in a modal loop too.
+static HELD: AtomicBool = AtomicBool::new(false);
+
 /// The hotkey id of Caps Lock, clear of the shortcut groups' ids (`hotkeys::id` stays below 0x100).
 const CAPS: i32 = 0x1000;
 /// Caps Lock's scan code, so the handed-back key reads like the real one.
@@ -117,14 +121,73 @@ fn caps_on() -> bool {
     unsafe { GetKeyState(i32::from(VK_CAPITAL.0)) & 1 != 0 }
 }
 
+fn register_caps() -> bool {
+    // SAFETY: a hotkey of the wake window with scalar arguments.
+    unsafe {
+        RegisterHotKey(
+            crate::native_window::wake_window(),
+            CAPS,
+            HOT_KEY_MODIFIERS(MOD_NOREPEAT.0),
+            u32::from(VK_CAPITAL.0),
+        )
+        .is_ok()
+    }
+}
+
+/// Holds Caps Lock unless an elevated window or a full-screen app (a game, a call) has the focus, and releases it
+/// there. The host asks at a focus change and on its full-screen pass.
+pub fn grip() {
+    let full_screen = crate::native_window::shell_fullscreen()
+        && crate::native_window::fullscreen_candidate().is_some();
+    // SAFETY: a scalar foreground query.
+    let want = !(full_screen || elevated_above_us(unsafe { GetForegroundWindow() }));
+    if want == HELD.load(Relaxed) {
+        return;
+    }
+    if !want {
+        // SAFETY: a hotkey of the wake window with scalar arguments.
+        let _ = unsafe { UnregisterHotKey(crate::native_window::wake_window(), CAPS) };
+    }
+    HELD.store(want && register_caps(), Relaxed);
+}
+
+/// Caps Lock was pressed and swallowed by the hotkey: lets go of it, hands the key back at once so it toggles, and
+/// takes it again. Every press is handed back as it comes, never counted for later. False when Windows refused the
+/// injected key (nothing toggled, so the hotkey stays released until the focus moves).
+pub fn hand_back() -> bool {
+    // SAFETY: scalar hotkey calls; the two inputs are plain keyboard events.
+    let sent = unsafe {
+        let _ = UnregisterHotKey(crate::native_window::wake_window(), CAPS);
+        let key = |flags: KEYBD_EVENT_FLAGS| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_CAPITAL,
+                    wScan: CAPS_SCAN,
+                    dwFlags: flags,
+                    ..Default::default()
+                },
+            },
+        };
+        SendInput(
+            &[key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)],
+            size_of::<INPUT>() as i32,
+        )
+    };
+    HELD.store(sent == 2 && register_caps(), Relaxed);
+    sent == 2
+}
+
+/// What the pill says about Caps Lock now.
+pub fn caps_text() -> String {
+    format!("Caps Lock {}", if caps_on() { "on" } else { "off" })
+}
+
 /// The Caps Lock key and the foreground layout, watched without seeing any other key.
 pub struct Keys {
     hook: HWINEVENTHOOK,
     /// The foreground layout last reported; the first read only records it.
     layout: Option<isize>,
-    /// Whether the hotkey is registered now: off while an elevated window has the focus, where it could not be
-    /// handed back.
-    caps: bool,
 }
 
 impl Keys {
@@ -145,39 +208,8 @@ impl Keys {
                 WINEVENT_OUTOFCONTEXT,
             )
         };
-        let mut keys = Self {
-            hook,
-            layout: None,
-            caps: false,
-        };
-        keys.grip();
-        keys
-    }
-    /// Holds Caps Lock unless an elevated window or a full-screen app (a game, a call) has the focus, and releases it
-    /// there. A full-screen state that starts without a focus change is seen at the next one.
-    fn grip(&mut self) {
-        let full_screen = crate::native_window::shell_fullscreen()
-            && crate::native_window::fullscreen_candidate().is_some();
-        // SAFETY: a scalar foreground query.
-        let want = !(full_screen || elevated_above_us(unsafe { GetForegroundWindow() }));
-        if want == self.caps {
-            return;
-        }
-        // SAFETY: a hotkey of the wake window with scalar arguments.
-        self.caps = unsafe {
-            if want {
-                RegisterHotKey(
-                    crate::native_window::wake_window(),
-                    CAPS,
-                    HOT_KEY_MODIFIERS(MOD_NOREPEAT.0),
-                    u32::from(VK_CAPITAL.0),
-                )
-                .is_ok()
-            } else {
-                let _ = UnregisterHotKey(crate::native_window::wake_window(), CAPS);
-                false
-            }
-        };
+        grip();
+        Self { hook, layout: None }
     }
 
     /// Whether `WM_HOTKEY`'s id is the Caps Lock key.
@@ -185,46 +217,11 @@ impl Keys {
         id == CAPS as usize
     }
 
-    /// Caps Lock was pressed and swallowed by the hotkey: lets go of it, hands the key back so it toggles, takes it
-    /// again, and returns what to say. `None` when Windows refused the injected key (nothing was toggled, so the
-    /// hotkey is released until the focus moves).
-    pub fn caps_pressed(&mut self) -> Option<String> {
-        // SAFETY: scalar hotkey calls; the two inputs are plain keyboard events.
-        let sent = unsafe {
-            let _ = UnregisterHotKey(crate::native_window::wake_window(), CAPS);
-            let key = |flags: KEYBD_EVENT_FLAGS| INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VK_CAPITAL,
-                        wScan: CAPS_SCAN,
-                        dwFlags: flags,
-                        ..Default::default()
-                    },
-                },
-            };
-            let sent = SendInput(
-                &[key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)],
-                size_of::<INPUT>() as i32,
-            );
-            self.caps = sent == 2
-                && RegisterHotKey(
-                    crate::native_window::wake_window(),
-                    CAPS,
-                    HOT_KEY_MODIFIERS(MOD_NOREPEAT.0),
-                    u32::from(VK_CAPITAL.0),
-                )
-                .is_ok();
-            sent
-        };
-        (sent == 2).then(|| format!("Caps Lock {}", if caps_on() { "on" } else { "off" }))
-    }
-
     /// The foreground window changed: re-grips Caps Lock for the new foreground window, and returns the language's name
     /// when the foreground layout is not the one last reported (the first read only records it).
     pub fn looked(&mut self) -> Option<String> {
         LOOKING.store(false, Relaxed);
-        self.grip();
+        grip();
         // SAFETY: scalar queries of the foreground window's thread and its layout.
         let layout = unsafe {
             let thread = GetWindowThreadProcessId(GetForegroundWindow(), None);
@@ -244,7 +241,7 @@ impl Drop for Keys {
             // SAFETY: the hook this struct registered.
             let _ = unsafe { UnhookWinEvent(self.hook) };
         }
-        if self.caps {
+        if HELD.load(Relaxed) {
             // SAFETY: the hotkey this struct registered.
             let _ = unsafe { UnregisterHotKey(crate::native_window::wake_window(), CAPS) };
         }

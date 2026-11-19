@@ -150,6 +150,15 @@ static CLIP_PENDING: AtomicBool = AtomicBool::new(false);
 pub fn clip_read() -> bool {
     CLIP_PENDING.swap(false, Ordering::AcqRel)
 }
+/// Whether the busy clipboard of the latest change was already tried a second time.
+static CLIP_RETRIED: AtomicBool = AtomicBool::new(false);
+/// The clipboard was busy: the next pass reads it once more, and only once for this change (a writer that holds it
+/// longer loses that copy; a new change gets its own retry).
+pub fn clip_again() {
+    if !CLIP_RETRIED.swap(true, Ordering::AcqRel) {
+        CLIP_PENDING.store(true, Ordering::Release);
+    }
+}
 
 /// The hidden window the workers' wakes and the Caps Lock hotkey go to. A message box or a menu runs its own message
 /// loop that dispatches a window's messages to its procedure but drops a thread's; 0 until the host makes it.
@@ -183,9 +192,9 @@ pub fn post_wake(thread: u32, message: u32) -> bool {
     .is_ok()
 }
 
-/// Caps Lock was pressed while a modal loop (a message box) ran: `dispatch` noted it, the host handles it after.
+/// Caps Lock was pressed while a modal loop (a message box) ran and was handed back there: the host says it after.
 static CAPS_PENDING: AtomicBool = AtomicBool::new(false);
-/// True once per such press, read on every pass.
+/// True once after such presses (the pill says the state now, not each press), read on every pass.
 pub fn caps_read() -> bool {
     CAPS_PENDING.swap(false, Ordering::AcqRel)
 }
@@ -732,7 +741,10 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
         }
         if message == WM_HOTKEY && crate::keys::Keys::is_caps(wparam.0) {
             // Only a modal loop (a message box, a menu) dispatches it here; the host loop takes the hotkey before dispatch.
-            CAPS_PENDING.store(true, Ordering::Release);
+            // The key goes back at once so it toggles now, however many presses; only its pill waits for the host.
+            if crate::keys::hand_back() {
+                CAPS_PENDING.store(true, Ordering::Release);
+            }
             return LRESULT(0);
         }
         if message == WM_ENDSESSION && wparam.0 != 0 {
@@ -741,6 +753,7 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
             return LRESULT(0);
         }
         if message == WM_CLIPBOARDUPDATE {
+            CLIP_RETRIED.store(false, Ordering::Release);
             if claim(&CLIP_PENDING) && PostMessageW(None, CLIPBOARD, WPARAM(0), LPARAM(0)).is_err()
             {
                 CLIP_PENDING.store(false, Ordering::Release);

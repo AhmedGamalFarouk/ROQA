@@ -40,16 +40,25 @@ fn open(hwnd: HWND) -> bool {
     unsafe { OpenClipboard(Some(hwnd)) }.is_ok()
 }
 
-/// The current clipboard text; `None` for no text, a private source, or a clipboard that stayed busy.
-pub fn read(hwnd: HWND) -> Option<String> {
+/// What `read` found.
+pub enum Read {
+    Text(String),
+    /// No text, or a private source.
+    Nothing,
+    /// Its writer held it: the host asks again once (`native_window::clip_again`).
+    Busy,
+}
+
+/// The current clipboard text, if any.
+pub fn read(hwnd: HWND) -> Read {
     if !open(hwnd) {
-        return None;
+        return Read::Busy;
     }
     // SAFETY: the clipboard is open until the close below.
     let text = unsafe { read_open() };
     // SAFETY: balances the successful open above.
     let _ = unsafe { CloseClipboard() };
-    text
+    text.map_or(Read::Nothing, Read::Text)
 }
 
 /// # Safety
