@@ -1742,10 +1742,12 @@ impl SettingsWindow {
             return;
         };
         let add = agent_hooks::status(spec, &home) != agent_hooks::Status::Added;
-        let plan = std::env::current_exe()
-            .map_err(|e| e.to_string())
-            .and_then(|exe| agent_hooks::plan(spec, &home, &exe, add));
-        let plan = match plan {
+        let make = || {
+            std::env::current_exe()
+                .map_err(|e| e.to_string())
+                .and_then(|exe| agent_hooks::plan(spec, &home, &exe, add))
+        };
+        let plan = match make() {
             Ok(plan) => plan,
             Err(message) => return self.notify(&message, MB_ICONINFORMATION),
         };
@@ -1776,7 +1778,12 @@ Other hooks stay. A copy of the file is kept.",
                 now.secs / 60 % 60,
                 now.secs % 60
             );
-            match agent_hooks::apply(&plan, &stamp) {
+            // The file may have changed while the box was open: write only the change the user was shown.
+            let result = match make() {
+                Ok(again) if plan.same_as(&again) => agent_hooks::apply(&plan, &stamp),
+                _ => Err("The file changed. Try again.".to_owned()),
+            };
+            match result {
                 Ok(()) if spec.id == "codex" && add => self.notify(
                     "Added. Trust it once in Codex with /hooks.",
                     MB_ICONINFORMATION,

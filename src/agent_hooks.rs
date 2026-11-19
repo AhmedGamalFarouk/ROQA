@@ -644,6 +644,13 @@ pub struct Plan {
     after: Option<String>,
 }
 
+impl Plan {
+    /// Whether `other` (planned later) would write the same file text: nothing changed while the user decided.
+    pub fn same_as(&self, other: &Plan) -> bool {
+        self.path == other.path && self.after == other.after
+    }
+}
+
 /// The change for adding (`add`) or undoing the hook of `spec`. Nothing is written.
 pub fn plan(spec: &Spec, home: &Path, exe: &Path, add: bool) -> Result<Plan, String> {
     let path = home.join(spec.file);
@@ -707,18 +714,28 @@ pub fn apply(plan: &Plan, stamp: &str) -> Result<(), String> {
     if path.exists() {
         let mut backup = path.as_os_str().to_owned();
         backup.push(format!(".roqa-backup-{stamp}"));
-        fs::copy(path, backup).map_err(failed)?;
+        // A second change in the same second keeps the first copy: it holds the untouched original.
+        if !Path::new(&backup).exists() {
+            fs::copy(path, backup).map_err(failed)?;
+        }
     }
     match &plan.after {
         None => fs::remove_file(path).map_err(failed),
         Some(text) => {
-            if let Some(folder) = path.parent() {
+            // A linked file (a dotfiles repo) is written through: the new file replaces the real one, not the link.
+            let real = if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+            {
+                fs::canonicalize(path).unwrap_or_else(|_| path.clone())
+            } else {
+                path.clone()
+            };
+            if let Some(folder) = real.parent() {
                 fs::create_dir_all(folder).map_err(failed)?;
             }
-            let mut temp = path.as_os_str().to_owned();
+            let mut temp = real.as_os_str().to_owned();
             temp.push(".roqa-tmp");
             fs::write(&temp, text).map_err(failed)?;
-            fs::rename(&temp, path).map_err(failed)
+            fs::rename(&temp, &real).map_err(failed)
         }
     }
 }
@@ -750,6 +767,48 @@ mod tests {
     fn undo(id: &str, home: &Path) {
         let plan = plan(spec(id), home, Path::new(EXE), false).unwrap();
         apply(&plan, "20260101-000001").unwrap();
+    }
+
+    #[test]
+    fn a_change_made_while_the_dialog_was_open_is_seen_and_a_second_backup_in_a_second_keeps_the_first()
+     {
+        let home = home("race", &[(".claude/settings.json", CLAUDE)]);
+        let file = home.join(".claude/settings.json");
+        let (claude, exe) = (spec("claude"), Path::new(EXE));
+        let seen = plan(claude, &home, exe, true).unwrap();
+        assert!(seen.same_as(&plan(claude, &home, exe, true).unwrap()));
+        fs::write(&file, r#"{"model":"other"}"#).unwrap();
+        assert!(!seen.same_as(&plan(claude, &home, exe, true).unwrap()));
+        // Two applies with one stamp: the backup still holds what the first one found.
+        let first = plan(claude, &home, exe, true).unwrap();
+        apply(&first, "20260101-000000").unwrap();
+        undo("claude", &home);
+        let backup = home.join(".claude/settings.json.roqa-backup-20260101-000000");
+        assert_eq!(fs::read_to_string(backup).unwrap(), r#"{"model":"other"}"#);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_linked_settings_file_stays_a_link() {
+        let home = home("link", &[("dotfiles/settings.json", CLAUDE)]);
+        let link = home.join(".claude/settings.json");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        // Creating a link needs a privilege or developer mode: without it there is nothing to check.
+        if std::os::windows::fs::symlink_file(home.join("dotfiles/settings.json"), &link).is_ok() {
+            add("ask", &home);
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(
+                fs::read_to_string(home.join("dotfiles/settings.json"))
+                    .unwrap()
+                    .contains("agent ask claude")
+            );
+        }
+        let _ = fs::remove_dir_all(&home);
     }
 
     const CLAUDE: &str = r#"{"model":"x","hooks":{"Stop":[{"hooks":[{"type":"command","command":"node a.cjs stop","timeout":10}],"_src":"é\u00e9"}],"PostToolUse":[]}}"#;
