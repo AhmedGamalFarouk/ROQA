@@ -152,8 +152,8 @@ impl Power {
         self.announce(text(state, percent), now, NOTICE, Extra::None)
     }
 
-    /// A question, an Eject or a Snooze waits for a click: only a new question may take its row, and a click
-    /// clears it first (`clear`).
+    /// A question, an Eject or a Snooze waits for a click: nothing takes its row, and a click clears it first
+    /// (`clear`).
     fn guarded(&self) -> bool {
         matches!(
             self.extra(),
@@ -164,9 +164,7 @@ impl Power {
     /// Whether `announce` with these would take the row now: a producer that must not lose its notice (a due
     /// reminder) asks first.
     pub fn admits(&self, now: Instant, hold: Duration, extra: Extra) -> bool {
-        if self.guarded()
-            && (matches!(self.extra, Extra::Ask(_)) || !matches!(extra, Extra::Ask(_)))
-        {
+        if self.guarded() {
             return false;
         }
         let firm = self.notice.as_ref().is_some_and(|(_, until)| now < *until)
@@ -226,6 +224,11 @@ impl Power {
     /// Drops the notice at once (a state change that makes it stale); true if one was showing.
     pub fn clear(&mut self) -> bool {
         self.notice.take().is_some()
+    }
+
+    /// Like `clear`, but a question, Eject or Snooze row stays: only a click or its end takes it.
+    pub fn clear_plain(&mut self) -> bool {
+        !self.guarded() && self.clear()
     }
 
     pub fn text(&self) -> Option<&str> {
@@ -347,8 +350,8 @@ mod tests {
         assert!(power.announce("Drive connected".into(), now, hold, Extra::Eject('E')));
         assert!(!power.update(raw(0, 1, 59), now));
         assert!(
-            power.announce("Snooze".into(), now, hold, Extra::Ask(9)),
-            "a question may take Eject's row"
+            !power.announce("Snooze".into(), now, hold, Extra::Ask(9)),
+            "a question never takes Eject's row"
         );
         assert!(power.clear());
         assert!(power.announce("Progress".into(), now, hold, Extra::Progress(40)));
@@ -417,6 +420,25 @@ mod tests {
         assert!(power.clear());
         assert!(power.admits(now, hold, Extra::Snooze));
     }
+    #[test]
+    fn a_question_and_a_timer_click_leave_a_button_row_alone() {
+        let (now, hold) = (Instant::now(), Duration::from_secs(8));
+        let mut power = Power::new(raw(0, 1, 60));
+        // Reminder, then a question: the Snooze row stays and the caller sends the question to the terminal.
+        assert!(power.announce("Stretch".into(), now, hold, Extra::Snooze));
+        assert!(!power.announce("Bash: ls".into(), now, hold, Extra::Ask(1)));
+        assert_eq!(power.extra(), Extra::Snooze);
+        // Question, then a timer preset or Pomodoro start: it stays too.
+        assert!(power.clear());
+        assert!(power.announce("Bash: ls".into(), now, hold, Extra::Ask(1)));
+        assert!(!power.clear_plain());
+        assert_eq!(power.extra(), Extra::Ask(1));
+        // A plain stale notice does clear.
+        assert!(power.clear());
+        power.announce("Pomodoro paused.".into(), now, NOTICE, Extra::None);
+        assert!(power.clear_plain() && power.text().is_none());
+    }
+
     #[test]
     fn a_desktop_never_shows_a_notice() {
         let mut power = Power::new(raw(1, 128, 255));
