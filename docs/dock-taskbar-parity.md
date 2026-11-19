@@ -1,7 +1,7 @@
 # Dock and the Windows 11 taskbar
 
 What the taskbar shows and does, against what ROQA's dock has (`dock.rs`, `dock_menu.rs`, `preview.rs`,
-`window_catalog.rs`, `pins.rs`). Hard rules apply: no keyboard or hotkey features, no new dependencies.
+`window_catalog.rs`, `pins.rs`).
 Byte figures are release-exe estimates; "built" rows show the measured change.
 
 Status: **has** = already in the dock, **built** = added in this pass, **gap** = could be built, **no** = cannot

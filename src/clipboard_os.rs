@@ -12,7 +12,6 @@ use windows::{
                 RemoveClipboardFormatListener, SetClipboardData,
             },
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
-            Threading::Sleep,
         },
     },
     core::w,
@@ -35,23 +34,10 @@ pub fn watch(hwnd: HWND, on: bool) {
     };
 }
 
-/// The clipboard may be held by its writer for a moment: a few short tries, then the copy is skipped.
+/// The clipboard may be held by its writer: one try, never a wait on the host thread; a busy clipboard skips the copy.
 fn open(hwnd: HWND) -> bool {
-    for _ in 0..3 {
-        // SAFETY: our own live window handle.
-        if unsafe { OpenClipboard(Some(hwnd)) }.is_ok() {
-            return true;
-        }
-        // SAFETY: a plain sleep.
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the clipboard may be held by its writer for a moment; three short tries"
-        )]
-        unsafe {
-            Sleep(8)
-        };
-    }
-    false
+    // SAFETY: our own live window handle.
+    unsafe { OpenClipboard(Some(hwnd)) }.is_ok()
 }
 
 /// The current clipboard text; `None` for no text, a private source, or a clipboard that stayed busy.
