@@ -27,10 +27,31 @@ fn wait<T: windows::core::RuntimeType + 'static>(operation: &IAsyncOperation<T>)
     operation.GetResults()
 }
 
-/// The radio of `kind`, when the machine has one.
+thread_local! {
+    /// The radios found so far (UI thread only): reading `State()` of a kept one is instant, while the lookup
+    /// waits on the host thread.
+    static RADIOS: std::cell::RefCell<Vec<Radio>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The radio of `kind`, when the machine has one; looked up again only when the kept one stopped answering.
 fn radio(kind: RadioKind) -> Option<Radio> {
-    let radios = wait(&Radio::GetRadiosAsync().ok()?).ok()?;
-    radios.into_iter().find(|radio| radio.Kind() == Ok(kind))
+    let kept = RADIOS.with_borrow(|radios| {
+        radios
+            .iter()
+            .find(|radio| radio.Kind() == Ok(kind) && radio.State().is_ok())
+            .cloned()
+    });
+    if kept.is_some() {
+        return kept;
+    }
+    let found = wait(&Radio::GetRadiosAsync().ok()?).ok()?;
+    let radios: Vec<Radio> = found.into_iter().collect();
+    let radio = radios
+        .iter()
+        .find(|radio| radio.Kind() == Ok(kind))
+        .cloned();
+    RADIOS.set(radios);
+    radio
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
