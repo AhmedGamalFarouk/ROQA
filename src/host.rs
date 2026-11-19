@@ -5253,55 +5253,14 @@ impl Desktop {
             }
             return Ok(());
         }
-        if message.message == native_window::CLIPBOARD {
-            // One post per burst of changes; cleared before reading so a change during the read posts again.
-            native_window::clip_read();
-            self.capture_clip();
-            return Ok(());
-        }
-        if message.message == native_window::POWER_STATUS {
-            // One thread post however many windows got the broadcast; clear it before reading so a
-            // change during the read posts again.
-            native_window::power_read();
-            if self.power.update(power::Raw::read(), Instant::now()) {
-                self.open_notches();
-                self.request_notches(Repaint::Full, |_| true);
-            } else if self.page() == Tab::Widgets {
-                self.request_notches(Repaint::Full, |s| s.expanded());
-            }
-            return Ok(());
-        }
-        if message.message == native_window::DEVICE {
-            let bits = native_window::device_read();
-            let text = if bits & native_window::DRIVE_BIT != 0 {
-                "Drive connected"
-            } else if bits & native_window::CAMERA_BIT != 0 {
-                "Camera connected"
-            } else {
-                "Speaker connected"
-            };
-            // A short peek, unlike a prayer alert: it does not show over a full-screen app.
-            let letter =
-                native_window::drive_read().filter(|_| bits & native_window::DRIVE_BIT != 0);
-            let hold = if letter.is_some() {
-                DRIVE_NOTICE
-            } else {
-                DEVICE_NOTICE
-            };
-            let extra = letter.map_or(power::Extra::None, power::Extra::Eject);
-            self.power
-                .announce(text.into(), Instant::now(), hold, extra);
-            self.open_notches();
-            self.request_notches(Repaint::Full, |_| true);
-            return Ok(());
-        }
-        if message.message == native_window::WAKE {
-            native_window::wake_read();
-            let now = Instant::now();
-            if let Some(eyes) = &mut self.pages.eyes {
-                eyes.wake(now);
-                self.request_notches(Repaint::Full, |s| !s.live && s.motion.value(now) < 0.1);
-            }
+        // These posts only wake the loop: `read_wakes` reads their flags on every pass.
+        if matches!(
+            message.message,
+            native_window::CLIPBOARD
+                | native_window::POWER_STATUS
+                | native_window::DEVICE
+                | native_window::WAKE
+        ) {
             return Ok(());
         }
         if message.message == native_window::REPOSITION {
@@ -5789,6 +5748,55 @@ impl Desktop {
         }
         Ok(())
     }
+    /// The wake flags of the native windows and the keyboard watcher, read on every pass: Windows drops thread
+    /// posts while a message box or a drag loop runs, and a flag left set would silence its feature for good.
+    fn read_wakes(&mut self) {
+        if native_window::clip_read() {
+            self.capture_clip();
+        }
+        if native_window::power_read() {
+            if self.power.update(power::Raw::read(), Instant::now()) {
+                self.open_notches();
+                self.request_notches(Repaint::Full, |_| true);
+            } else if self.page() == Tab::Widgets {
+                self.request_notches(Repaint::Full, |s| s.expanded());
+            }
+        }
+        let bits = native_window::device_read();
+        if bits != 0 {
+            let text = if bits & native_window::DRIVE_BIT != 0 {
+                "Drive connected"
+            } else if bits & native_window::CAMERA_BIT != 0 {
+                "Camera connected"
+            } else {
+                "Speaker connected"
+            };
+            // A short peek, unlike a prayer alert: it does not show over a full-screen app.
+            let letter =
+                native_window::drive_read().filter(|_| bits & native_window::DRIVE_BIT != 0);
+            let hold = if letter.is_some() {
+                DRIVE_NOTICE
+            } else {
+                DEVICE_NOTICE
+            };
+            let extra = letter.map_or(power::Extra::None, power::Extra::Eject);
+            self.power
+                .announce(text.into(), Instant::now(), hold, extra);
+            self.open_notches();
+            self.request_notches(Repaint::Full, |_| true);
+        }
+        if native_window::wake_read() {
+            let now = Instant::now();
+            if let Some(eyes) = &mut self.pages.eyes {
+                eyes.wake(now);
+                self.request_notches(Repaint::Full, |s| !s.live && s.motion.value(now) < 0.1);
+            }
+        }
+        if keys::looking() {
+            let said = self.keys.looked();
+            self.key_pill(said);
+        }
+    }
     /// Schedules a fresh topology read with a full retry budget.
     fn request_topology(&mut self) {
         self.topology_due = Some(Instant::now());
@@ -5798,6 +5806,7 @@ impl Desktop {
     /// whether animation runs.
     fn update(&mut self, model: &WindowModel) -> Result<(u32, bool)> {
         self.refresh_topology()?;
+        self.read_wakes();
         // The accent changed (the event only flagged it): rebuild like any palette change.
         let accent = self.text.take_colors_changed();
         if std::mem::take(&mut self.palette_dirty) || accent {
@@ -6195,9 +6204,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 continue;
             }
             if message.message == keys::LOOK {
-                let said = desktop.keys.looked();
-                desktop.key_pill(said);
-                continue;
+                continue; // only a wake: `read_wakes` reads the flag
             }
             if desktop.shell_hook != 0 && message.message == desktop.shell_hook {
                 desktop.note_shell_event(message.wParam.0, message.lParam.0 as usize);

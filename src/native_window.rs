@@ -89,9 +89,10 @@ fn claim(flag: &AtomicBool) -> bool {
     !flag.swap(true, Ordering::AcqRel)
 }
 
-/// The host is about to read the power status: the next broadcast posts again.
-pub fn power_read() {
-    POWER_PENDING.store(false, Ordering::Release);
+/// True once per power-status change: the host reads the status on every pass, so a dropped post (a modal
+/// loop eats thread messages) costs nothing; the next broadcast posts again.
+pub fn power_read() -> bool {
+    POWER_PENDING.swap(false, Ordering::AcqRel)
 }
 /// Posted (once until read) when a drive, camera or audio output arrives; `device_read` says which.
 pub const DEVICE: u32 = WM_APP + 10;
@@ -125,9 +126,9 @@ fn device_bit(kind: u32, interface: GUID, not_a_drive: bool) -> u32 {
 /// Posted (once until read) when the session unlocks or the display turns on: the mascot wakes.
 pub const WAKE: u32 = WM_APP + 8;
 static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
-/// The host is about to handle a `WAKE`: the next event posts again.
-pub fn wake_read() {
-    WAKE_PENDING.store(false, Ordering::Release);
+/// True once per wake event, read on every pass; the next event posts again.
+pub fn wake_read() -> bool {
+    WAKE_PENDING.swap(false, Ordering::AcqRel)
 }
 /// `WM_WTSSESSION_CHANGE` unlock, or a console-display-state setting that reads "on" (1).
 fn wakes(message: u32, wparam: usize, display: Option<(windows::core::GUID, u8)>) -> bool {
@@ -145,9 +146,9 @@ pub const CLASS: windows::core::PCWSTR = w!("ROQA.NativeSurface.1");
 /// Posted (once until read) when the clipboard changes; the host reads it if the Copied list is on.
 pub const CLIPBOARD: u32 = WM_APP + 9;
 static CLIP_PENDING: AtomicBool = AtomicBool::new(false);
-/// The host is about to handle a `CLIPBOARD`: the next change posts again.
-pub fn clip_read() {
-    CLIP_PENDING.store(false, Ordering::Release);
+/// True once per burst of clipboard changes, read on every pass; the next change posts again.
+pub fn clip_read() -> bool {
+    CLIP_PENDING.swap(false, Ordering::AcqRel)
 }
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
@@ -808,6 +809,15 @@ mod tests {
         // After the host reads, the next change posts again, once.
         pending.store(false, Ordering::Release);
         assert!(claim(&pending) && !claim(&pending));
+    }
+
+    #[test]
+    fn a_flag_whose_post_was_dropped_is_still_read_once_by_the_pass() {
+        // The post was lost (a modal loop): the flag stays set, no later change posts, and the pass reads it.
+        assert!(claim(&CLIP_PENDING) && !claim(&CLIP_PENDING));
+        assert!(clip_read() && !clip_read(), "read once");
+        assert!(claim(&CLIP_PENDING), "the next change posts again");
+        assert!(clip_read());
     }
 
     #[test]

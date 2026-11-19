@@ -51,6 +51,11 @@ unsafe extern "system" fn foreground(
     }
 }
 
+/// Whether a foreground change waits to be read; the host asks on every pass, so a dropped post costs nothing.
+pub fn looking() -> bool {
+    LOOKING.load(Relaxed)
+}
+
 /// The hotkey id of Caps Lock, clear of the shortcut groups' ids (`hotkeys::id` stays below 0x100).
 const CAPS: i32 = 0x1000;
 /// Caps Lock's scan code, so the handed-back key reads like the real one.

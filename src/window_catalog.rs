@@ -104,6 +104,8 @@ unsafe extern "system" fn moved(
 
 /// Bumps whenever the foreground window's own frame changed; the host adds it to the catalog generation.
 pub fn frames() -> u64 {
+    // Read on every pass: a dropped post must not stop the next frame change from waking the host.
+    FRAME_POSTED.store(false, Ordering::Relaxed);
     FRAMES.load(Ordering::Relaxed)
 }
 
