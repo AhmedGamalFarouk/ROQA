@@ -1076,6 +1076,110 @@ mod tests {
         assert_eq!(s.clamped().shelf_cap, shelf::MAX);
     }
 
+    /// Every field with a value that is not its default and survives `clamped`. No `..Settings::default()`: a new
+    /// field is a compile error here, so it cannot join the struct without joining the round trip below.
+    fn every_field_changed() -> Settings {
+        Settings {
+            dock: false,
+            notch: true,
+            off_monitors: names(&["\\\\.\\DISPLAY3"]),
+            timer_sound: false,
+            shelf_cap: 3,
+            diagnostics: Some("C:\\d\\r.json".into()),
+            theme: Theme::Light,
+            dock_style: DockStyle::Attached,
+            dock_badges: true,
+            dock_buttons: Buttons::of([false, false, true, false, false, true, false]),
+            desktop_only: true,
+            edge_volume: true,
+            edge_brightness: true,
+            tabs: [false, true, false, true, false, true, true],
+            widgets: WidgetConfig {
+                slot_left: WidgetKind::Memory,
+                slot_right: WidgetKind::Cpu,
+                slot_left2: Some(WidgetKind::Water),
+                slot_right2: Some(WidgetKind::Weather),
+                net_bits: true,
+                disk_drive: Some(b'D'),
+                low_at: 35,
+                week_sunday: true,
+                pill_low: false,
+            },
+            eyes: false,
+            agent_status: true,
+            privacy: false,
+            clipboard: false,
+            notifications: false,
+            city: "Cairo".into(),
+            detect: true,
+            units: Units::Fahrenheit,
+            prayer_remind: false,
+            prayer_method: Method::Mwl,
+            prayer_lead: 10,
+            prayer_sound: "D:\\a\\x.mp3".into(),
+            limits_codex: true,
+            limits_agy: true,
+            limits_group: 1,
+            hide_fullscreen: false,
+            dock_hide: false,
+            notch_hide: false,
+            reveal_delay: 2,
+            hide_delay: 1,
+            dock_left: true,
+            open_click: true,
+            notch_size: 130,
+            anim_fast: true,
+            reminder_sounds: false,
+            prayer_pause: true,
+            prayer_shift: [1, -2, 3, -4, 5],
+            water: true,
+            water_cfg: [6, 300, 8, 20, 45],
+            pomo_cfg: [50, 10, 30, 3],
+            match_accent: true,
+            hotkeys: [true, false, true, true],
+            autostart: true,
+            hide_capture: true,
+        }
+    }
+
+    /// The top-level fields of a pretty `Debug` print, each with the lines of its value.
+    fn debug_fields(settings: &Settings) -> Vec<(String, String)> {
+        let mut fields: Vec<(String, String)> = Vec::new();
+        for line in format!("{settings:#?}").lines().skip(1) {
+            let top = line.starts_with("    ") && !line.starts_with("     ");
+            match (top, line.split_once(':')) {
+                (true, Some((name, _))) => fields.push((name.trim().to_owned(), line.to_owned())),
+                _ => {
+                    if let Some(last) = fields.last_mut() {
+                        last.1.push_str(line);
+                    }
+                }
+            }
+        }
+        fields
+    }
+
+    #[test]
+    fn every_field_survives_the_store_and_the_test_really_changed_every_field() {
+        let (custom, defaults) = (every_field_changed(), Settings::default());
+        // Each field differs from its default, so a line missing from `write_lines` shows up below.
+        for ((name, now), (_, before)) in debug_fields(&custom).iter().zip(debug_fields(&defaults))
+        {
+            // Both surfaces cannot be off (`clamped` turns one back on), so `notch` stays at its default.
+            if name != "notch" {
+                assert_ne!(now, &before, "{name} is still its default in the test");
+            }
+        }
+        let mut text = String::new();
+        custom.write_lines(&mut text);
+        let mut read = Settings::default();
+        for line in text.lines() {
+            let (key, value) = line.split_once('=').unwrap();
+            assert!(read.set(key, value), "{line}");
+        }
+        assert_eq!(read.clamped(), custom);
+    }
+
     #[test]
     fn weather_defaults_ask_for_nothing_and_an_empty_city_is_not_written() {
         let defaults = Settings::default();
