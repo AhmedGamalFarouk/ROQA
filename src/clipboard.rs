@@ -1,8 +1,6 @@
 //! The Shelf's Copied list: a small newest-first history of copied text. Pure state, no I/O; the OS side is
 //! `clipboard_os`. Contents are never logged anywhere. Text only: images and files are not kept.
 
-use crate::store::Store;
-
 /// Entries kept; a new one evicts the oldest.
 pub const MAX: usize = 12;
 /// Characters kept per entry (longer text is cut, so the store file stays small).
@@ -19,22 +17,6 @@ pub struct Clips {
 }
 
 impl Clips {
-    pub fn from_store(store: &Store) -> Self {
-        let mut clips = Self::default();
-        for text in store.clips.iter().filter(|t| !t.trim().is_empty()) {
-            let text: String = text.chars().take(MAX_CHARS).collect();
-            if clips.items.len() < MAX && !clips.items.contains(&text) {
-                clips.items.push(text);
-            }
-        }
-        clips
-    }
-    /// True when the store's copy changed, so the caller marks it dirty.
-    pub fn write_to(&self, store: &mut Store) -> bool {
-        let changed = store.clips != self.items;
-        store.clips.clone_from(&self.items);
-        changed
-    }
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }

@@ -31,8 +31,6 @@ pub struct Store {
     pub hidden: Vec<String>,
     /// File-shelf references, in display order.
     pub shelf: Vec<String>,
-    /// Copied text for the Shelf's Copied list, newest first (`clipboard.rs`).
-    pub clips: Vec<String>,
     /// Running countdown timers as absolute wall-clock expiries (Unix seconds), soonest first.
     pub timers: Vec<u64>,
     /// Reminders waiting (`remind.rs`): the Unix-second expiry and the label, soonest first.
@@ -137,12 +135,17 @@ pub fn load(path: &Path) -> (Store, Load) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return (Store::default(), Load::Missing),
         Err(_) => return (Store::default(), Load::Unreadable),
     };
-    let parsed = bytes
+    let text = bytes
         .filter(|bytes| bytes.len() as u64 <= MAX_BYTES)
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .and_then(|text| parse(&text));
-    match parsed {
-        Some(store) => (store, Load::Loaded),
+        .and_then(|bytes| String::from_utf8(bytes).ok());
+    match text.as_deref().and_then(parse) {
+        Some(store) => {
+            // The Copied list is memory only now: copies an older build saved leave the file at once.
+            if text.is_some_and(|text| text.lines().any(|line| line.starts_with("clip="))) {
+                let _ = store.save(path);
+            }
+            (store, Load::Loaded)
+        }
         None => {
             // Keep one bad copy for the user; a failed rename just means the next save replaces it.
             let _ = std::fs::rename(path, path.with_extension("roqa.bad"));
@@ -174,9 +177,6 @@ fn parse(text: &str) -> Option<Store> {
             Some(("folder", value)) if !value.is_empty() => store.folders.push(value.into()),
             Some(("hide", value)) if !value.is_empty() => store.hidden.push(value.into()),
             Some(("shelf", value)) if !value.is_empty() => store.shelf.push(value.into()),
-            Some(("clip", value)) if !value.is_empty() => {
-                store.clips.push(crate::clipboard::decode(value))
-            }
             Some(("timer", value)) => store.timers.extend(value.parse::<u64>()),
             Some(("remind", value)) => {
                 if let Some((expiry, label)) = value.split_once(',')
@@ -240,11 +240,6 @@ impl Store {
                 out.push_str(value);
                 out.push('\n');
             }
-        }
-        for clip in self.clips.iter().filter(|c| !c.is_empty()) {
-            out.push_str("clip=");
-            out.push_str(&crate::clipboard::encode(clip));
-            out.push('\n');
         }
         for expiry in &self.timers {
             out.push_str(&format!("timer={expiry}\n"));
@@ -362,7 +357,6 @@ mod tests {
             ],
             hidden: vec!["app:Hidden.One".into(), r"exe:c:\apps\h.exe".into()],
             shelf: vec![r"C:\Users\me\doc.txt".into()],
-            clips: vec!["two\nlines \\ and = sign".into()],
             timers: vec![1_800_000_000, 1_800_000_060],
             reminders: vec![(1_800_000_300, "call mum, 17:30".into())],
             settings: Settings {
@@ -447,7 +441,6 @@ mod tests {
                 hidden: Vec::new(),
                 pins: vec!["a".into()],
                 shelf: vec!["b".into()],
-                clips: Vec::new(),
                 timers: vec![77], // unparsable timer values are skipped
                 reminders: Vec::new(),
                 settings: Settings::default(),
@@ -616,6 +609,23 @@ mod tests {
         std::fs::create_dir(blocked.file()).unwrap();
         assert!(sample().save(&blocked.file()).is_err());
         assert_eq!(std::fs::read_dir(&blocked.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn copies_an_older_build_saved_leave_the_file_when_it_loads() {
+        let dir = Dir::new("clips");
+        let path = dir.file();
+        std::fs::write(
+            &path,
+            "version=2
+pin=a
+clip=secret token
+end
+",
+        )
+        .unwrap();
+        assert_eq!(load(&path).0.pins, ["a"]);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("secret"));
     }
 
     #[test]

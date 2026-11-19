@@ -1487,7 +1487,7 @@ impl Desktop {
         if shelf.set_cap(settings.shelf_cap) {
             shelf.write_to(&mut store); // the cut list leaves the file with its next write
         }
-        let clips = Clips::from_store(&store);
+        let clips = Clips::default();
         let mut pages = Pages::new(&settings, store.last_tab);
         pages.water = (store.water, settings.water_cfg[0] as u8);
         let weather = Feed::new(store.place.clone(), store.report.clone(), settings.detect);
@@ -4843,12 +4843,9 @@ impl Desktop {
             self.change_clips(|clips| clips.add(&text));
         }
     }
-    /// One edit of the Copied list: a real change marks the store dirty and repaints an open panel.
+    /// One edit of the Copied list (memory only, never written to disk): a real change repaints an open panel.
     fn change_clips(&mut self, edit: impl FnOnce(&mut Clips) -> bool) {
         if edit(&mut self.shelf.clips) {
-            if self.shelf.clips.write_to(&mut self.store) {
-                self.pending.mark(Instant::now());
-            }
             self.request_notches(Repaint::Full, Surface::expanded);
         }
     }
