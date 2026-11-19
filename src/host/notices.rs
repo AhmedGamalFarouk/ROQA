@@ -1,5 +1,5 @@
-//! The notice row: prayer, agent, progress, reminder, key and notification pills, and Snooze.
-//! One `impl Desktop` block moved out of `host.rs` unchanged; the methods are `pub(super)` so the host reaches them.
+//! The notice row: prayer, water, agent, progress, reminder, key and notification pills, and Snooze, with the
+//! `refresh_*` passes that produce them. One `impl Desktop` block; the methods are `pub(super)` so the host reaches them.
 
 use super::*;
 
@@ -194,5 +194,144 @@ impl Desktop {
             power::Extra::None,
         );
         self.request_notches(Repaint::Full, |_| true);
+    }
+    /// Prayer (features P1): builds the page while it shows, then runs the reminders: one pass computes the day's
+    /// events (when the date, offset, place, method or heads-up changed) and returns the wait until the next
+    /// reminder or a second after midnight. A due reminder expands the notch and starts the sound. Also ends a
+    /// finished sound. Off, or without a place, it has no deadline.
+    #[inline(never)]
+    pub(super) fn refresh_prayer(&mut self) -> u32 {
+        let now = Instant::now();
+        if self.prayer.sound_end.is_some_and(|end| now >= end) {
+            self.prayer.sound_end = None;
+            self.prayer.player.stop();
+        }
+        let sound_wait = self
+            .prayer
+            .sound_end
+            .map_or(INFINITE, |end| milliseconds_until(end, now));
+        if !self.pages.tabs.on(Tab::Prayer) {
+            return sound_wait;
+        }
+        let shown = self.page() == Tab::Prayer
+            || (self.page() == Tab::Widgets
+                && self
+                    .pages
+                    .widgets
+                    .uses(crate::widgets::WidgetKind::NextPrayer));
+        let remind = self.settings.prayer_remind;
+        if !shown && !remind {
+            return sound_wait;
+        }
+        let local = prayer_os::local_now();
+        let method = self.settings.prayer_method;
+        let shift = self.settings.shift6();
+        let params = self
+            .weather
+            .place
+            .as_ref()
+            .filter(|_| weather::configured(self.settings.detect, &self.settings.city))
+            .map(|place| crate::prayer::Params {
+                lat: f64::from(place.lat) / 1e4,
+                lon: f64::from(place.lon) / 1e4,
+                utc_offset_min: local.offset_min,
+                method,
+                hanafi: false,
+                shift,
+            });
+        if shown {
+            let key = (self.clock.clone(), self.weather.rev, method, shift);
+            if self.pages.prayer_key.as_ref() != Some(&key) {
+                let configured = weather::configured(self.settings.detect, &self.settings.city);
+                let (message, set_city) = match self.weather.last_fail {
+                    _ if !configured => ("Set a city for prayer times", true),
+                    Some(_) if self.weather.fetching() => ("Retrying location lookup…", false),
+                    Some(weather::Fail::Unlocated) => ("Location not found", true),
+                    Some(_) => ("Couldn't load your location", false),
+                    None => ("Finding your location…", false),
+                };
+                self.pages.prayer = prayer_tab::view(
+                    params.as_ref(),
+                    message,
+                    local,
+                    prayer_os::hijri(local.ymd).unwrap_or_default(),
+                    &prayer_os::time_label,
+                );
+                self.pages.prayer.set_city = params.is_none() && set_city;
+                self.pages.prayer_key = Some(key);
+                self.request_notches(Repaint::Full, |s| motion::reveal(s.motion.value(now)) > 0.0);
+            }
+        }
+        let Some(params) = params.filter(|_| remind) else {
+            self.prayer.key = None;
+            return sound_wait;
+        };
+        let lead = self.settings.prayer_lead;
+        let key = (
+            prayer_tab::Local { secs: 0, ..local },
+            (params.lat * 1e4) as i32,
+            (params.lon * 1e4) as i32,
+            method,
+            lead,
+            shift,
+        );
+        if self.prayer.key != Some(key) {
+            self.prayer.key = Some(key);
+            self.prayer.events = crate::prayer::timeline(&params, local.ymd)
+                .map(|line| prayer_tab::events(&line, lead))
+                .unwrap_or_default();
+        }
+        let (due, wait) = prayer_tab::step(
+            &self.prayer.events,
+            (local.ymd, local.secs),
+            &mut self.prayer.last,
+        );
+        if let Some(event) = due {
+            self.fire_prayer(event, now);
+        }
+        sound_wait.min(wait.saturating_mul(1000))
+    }
+    /// Water reminders (F5): one deadline to the next slot, none while the switch is off. A due slot shows
+    /// the progress notice (silent once the goal is met) and the next deadline is computed from the clock.
+    #[inline(never)]
+    pub(super) fn refresh_water(&mut self) -> u32 {
+        if !self.settings.water {
+            self.water_due = None;
+            return INFINITE;
+        }
+        let now = Instant::now();
+        let cfg = self.settings.water_cfg;
+        if self.water_due.is_some_and(|due| now >= due) {
+            self.water_due = None;
+            let drank = self.water_today();
+            if drank < cfg[0] as u8 {
+                if self.settings.reminder_plays() {
+                    chime();
+                }
+                self.show_notice(
+                    format!("Time for a glass of water. {}", water::text(drank, &cfg)),
+                    now,
+                );
+            }
+        }
+        // One second past the clock, so a wake a hair before the slot cannot fire it twice.
+        let due = *self.water_due.get_or_insert_with(|| {
+            let secs = prayer_os::local_now().secs as u32 + 1;
+            now + Duration::from_secs(water::wait_secs(secs, &cfg).into())
+        });
+        milliseconds_until(due, now)
+    }
+    /// Ends a finished power notice and returns the wait until its deadline; with none showing it does
+    /// nothing and returns `INFINITE`.
+    #[inline(never)]
+    pub(super) fn refresh_power(&mut self) -> u32 {
+        let now = Instant::now();
+        if self.power.over(now) {
+            self.surfaces.iter_mut().for_each(Surface::close_alert);
+            self.request_notches(Repaint::Full, |_| true);
+        }
+        self.power
+            .deadline()
+            .map_or(INFINITE, |due| milliseconds_until(due, now))
     }
 }
