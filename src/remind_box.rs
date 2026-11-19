@@ -2,7 +2,7 @@
 //! dialog like the window picker, because the notch never takes keyboard focus. Enter or Set sets it.
 
 use crate::{
-    native_window,
+    layout::Bounds,
     picker::{ACTION, CLOSE, RELAYOUT, control, dialog_proc, empty_dialog, wide},
     picker_font::PickerFont,
     prayer_os, remind,
@@ -32,13 +32,15 @@ pub struct RemindBox {
     set: HWND,
     close: HWND,
     font: Option<PickerFont>,
+    /// The work area of the monitor it centres on.
+    work: Bounds,
     closed: bool,
     /// The reminder just set: seconds from now and its label; the host takes it once.
     made: Option<(u64, String)>,
 }
 
 impl RemindBox {
-    pub fn create() -> Result<Self> {
+    pub fn create(work: Bounds) -> Result<Self> {
         let window = empty_dialog(300, 120, Some(dialog_proc))?;
         let text =
             |class, title, id, style, extended| control(window, class, title, id, style, extended);
@@ -63,6 +65,7 @@ impl RemindBox {
             set: text(w!("Button"), "Set", SET, BS_DEFPUSHBUTTON as u32, none)?,
             close: text(w!("Button"), "Cancel", CLOSE, 0, none)?,
             font: None,
+            work,
             closed: false,
             made: None,
         };
@@ -134,7 +137,7 @@ impl RemindBox {
     }
 
     fn relayout(&mut self) -> Result<()> {
-        let work = native_window::primary_work_area()?;
+        let work = self.work;
         // SAFETY: the owned dialog is live.
         let dpi = unsafe { GetDpiForWindow(self.window) }.max(96);
         let font = PickerFont::create(dpi, 1.0)?;

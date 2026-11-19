@@ -22,8 +22,35 @@ pub fn parse(text: &str, day_secs: u32) -> Option<(u64, String)> {
         .next_if(|word| word.eq_ignore_ascii_case("at"))
         .is_some()
     {
-        let (hours, minutes) = words.next()?.split_once(':')?;
-        let (hours, minutes): (u32, u32) = (hours.parse().ok()?, minutes.parse().ok()?);
+        let word = words.next()?.to_ascii_lowercase();
+        // "5:30pm" or "5:30 pm" (12-hour, hours 1 to 12), "17:30" (24-hour).
+        let (clock, mut pm) = match (word.strip_suffix("am"), word.strip_suffix("pm")) {
+            (Some(clock), _) => (clock, Some(false)),
+            (_, Some(clock)) => (clock, Some(true)),
+            _ => (word.as_str(), None),
+        };
+        pm = pm.or_else(|| {
+            words
+                .next_if(|word| word.eq_ignore_ascii_case("am"))
+                .map(|_| false)
+                .or_else(|| {
+                    words
+                        .next_if(|word| word.eq_ignore_ascii_case("pm"))
+                        .map(|_| true)
+                })
+        });
+        let (hours, minutes) = match clock.split_once(':') {
+            Some(parts) => parts,
+            None if pm.is_some() => (clock, "0"),
+            None => return None,
+        };
+        let (mut hours, minutes): (u32, u32) = (hours.parse().ok()?, minutes.parse().ok()?);
+        if let Some(pm) = pm {
+            if !(1..=12).contains(&hours) {
+                return None;
+            }
+            hours = hours % 12 + if pm { 12 } else { 0 };
+        }
         if hours > 23 || minutes > 59 {
             return None;
         }
@@ -138,6 +165,12 @@ mod tests {
             ("at 17:30 call mum", 5 * 3600 + 1800, "call mum"),
             ("at 9:05 walk", 21 * 3600 + 300, "walk"),
             ("at 12:00 lunch", 86_400, "lunch"),
+            ("at 5:30 pm call mum", 5 * 3600 + 1800, "call mum"),
+            ("at 5:30PM tea", 5 * 3600 + 1800, "tea"),
+            ("at 5pm tea", 5 * 3600, "tea"),
+            ("at 12:30 pm lunch", 1800, "lunch"),
+            ("at 12:00 am bed", 12 * 3600, "bed"),
+            ("at 9:05 am walk", 21 * 3600 + 300, "walk"),
         ] {
             assert_eq!(
                 parse(text, NOON),
@@ -162,6 +195,9 @@ mod tests {
             "at 25:00 x",
             "at 12:60 x",
             "at noon x",
+            "at 13:00 pm x",
+            "at 0:30 am x",
+            "at 5 x",
             "-5m x",
             "5.5m x",
         ] {

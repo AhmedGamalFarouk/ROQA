@@ -2808,10 +2808,9 @@ impl Desktop {
             .iter()
             .find(|s| s.kind() == SurfaceKind::Dock && s.window.0 == hwnd)
     }
-    /// Opens the settings window (or replaces an open one) on the connected monitors.
-    fn open_settings(&mut self) -> Result<()> {
-        self.settings_window.take();
-        // The monitor under the pointer when ROQA is on it, else the first one ROQA is on, else the main one.
+    /// The work area a dialog opens on: the monitor under the pointer when ROQA is on it, else the first one ROQA
+    /// is on, else the main one.
+    fn dialog_work_area(&self) -> Result<layout::Bounds> {
         let mut at = Default::default();
         // SAFETY: fills a local point.
         let _ = unsafe { GetCursorPos(&mut at) };
@@ -2820,16 +2819,23 @@ impl Desktop {
             (m.rect.x..m.rect.x + m.rect.width).contains(&at.x)
                 && (m.rect.y..m.rect.y + m.rect.height).contains(&at.y)
         };
-        let work = match self
-            .monitors
-            .iter()
-            .filter(shown)
-            .find(under)
-            .or_else(|| self.monitors.iter().find(shown))
-        {
-            Some(monitor) => monitor.work,
-            None => native_window::primary_work_area()?,
-        };
+        Ok(
+            match self
+                .monitors
+                .iter()
+                .filter(shown)
+                .find(under)
+                .or_else(|| self.monitors.iter().find(shown))
+            {
+                Some(monitor) => monitor.work,
+                None => native_window::primary_work_area()?,
+            },
+        )
+    }
+    /// Opens the settings window (or replaces an open one) on the connected monitors.
+    fn open_settings(&mut self) -> Result<()> {
+        self.settings_window.take();
+        let work = self.dialog_work_area()?;
         self.settings_window = Some(SettingsWindow::create(
             &self.settings,
             &self.monitors,
@@ -5096,7 +5102,7 @@ impl Desktop {
             && layout::remind_button_at(width, dpi, progress, live, (x, y))
         {
             self.remind_box.take();
-            match RemindBox::create() {
+            match self.dialog_work_area().and_then(RemindBox::create) {
                 Ok(window) => self.remind_box = Some(window),
                 Err(error) => eprintln!("Reminder box: {error}"),
             }
