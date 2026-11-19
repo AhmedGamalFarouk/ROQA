@@ -5,7 +5,7 @@
 
 use crate::chan::{Receiver, Sender, channel};
 use crate::{
-    picker::wide,
+    dialog::wide,
     weather::{
         FORECAST_HOST, Fail, GEOCODE_HOST, Job, Outcome, Place, Source, forecast_path,
         geocode_path, parse_forecast, parse_place, sources,

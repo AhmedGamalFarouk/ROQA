@@ -8,11 +8,12 @@ Owner: Ahmed (they/them), does not read code. Report in plain language.
 One folder, one branch: work on `main` in this checkout. No branches, no worktrees.
 
 ## Priorities, in order
-1. Performance and tiny footprint: single host (UI) thread (checked 2026-11-16: of ~23 threads at idle, ROQA starts only two parked workers, icons and window source; the rest are the GPU driver and the Windows thread pool), event-driven, no idle timers or threads, one motion clock (`src/motion.rs`), frames only while animating, reduced motion respected.
+1. Performance and tiny footprint: single host (UI) thread (checked 2026-11-16: of ~23 threads at idle, ROQA starts only two parked workers, icons and window source; the rest are the GPU driver and the Windows thread pool), event-driven, no idle timers or threads, one motion clock (`src/motion.rs`), frames only while animating, in-app fast motion respected.
 2. Smallest complete change. Reuse what exists; no new abstraction, option or config nobody asked for.
 3. Brand consistency (below).
 
 ## Hard rules (owner decisions, do not reopen)
+- ROQA ignores Windows' Animation effects switch, and the dock and notch have no Narrator or UI Automation support (owner decision 2026-11-19). Do not add either.
 - No size limit (owner decision 2026-11-16): `verify.ps1` reports the exe size; put the byte delta in every report. Performance rules above still hold.
 - Live tests and screenshots happen on the second (non-primary) monitor only, so the owner's main screen is left alone (owner decision 2026-11-18). Never place ROQA, Settings, a backdrop or the mouse on the primary monitor for a test.
 - Answers to the owner are concise (owner decision 2026-11-18): short plain lines with only what changed, what is left and what they must decide; no recaps, no detail they did not ask for.
@@ -34,7 +35,8 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 
 ## Reading code (token rule)
 - The `graft` command is not installed in agent shells (checked 2026-11-16): do not try it. Read the per-file card `graft/src/<file>.md` for the symbol list, then grep the symbol for its real line. Cards are not regenerated, so their line numbers drift; trust the names, not the numbers.
-- Read a span, not a file. `host.rs` (206 KB), `graphics.rs`, `settings_window.rs`, `layout.rs`, `media.rs` are never read whole.
+- `host.rs` keeps the `Desktop` struct, start-up and the message loop; its methods by job live in `src/host/{notices,settings_bridge,menus,notch_clicks}.rs` (same `impl Desktop`, `pub(super)`).
+- Read a span, not a file. `host.rs` (about 5,100 lines), `graphics.rs`, `settings_window.rs`, `layout.rs`, `media.rs` are never read whole.
 - Read a full file only when it is under ~300 lines or you are rewriting most of it.
 - Docs: read the summary here; open the source doc only for the section you need.
 

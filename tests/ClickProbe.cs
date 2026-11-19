@@ -1,6 +1,6 @@
 ﻿using System;
 using System.Runtime.InteropServices;
-public static class PickerProbe {
+public static class ClickProbe {
     [StructLayout(LayoutKind.Sequential)] struct MouseInput { public int Dx,Dy; public uint Data,Flags,Time; public IntPtr Extra; }
     [StructLayout(LayoutKind.Explicit,Size=32)] struct Union { [FieldOffset(0)] public MouseInput Mouse; }
     [StructLayout(LayoutKind.Sequential)] struct Input { public uint Type; public Union Data; }

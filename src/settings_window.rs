@@ -7,13 +7,13 @@
 
 use crate::{
     agent_hooks,
+    dialog::{
+        ACTION, CLOSE, DIALOG_STYLE, RELAYOUT, SCROLL, control, dialog_proc, empty_dialog, wide,
+    },
     dock::{foreground_key, restore_foreground},
     graphics::{Glyph, draw_settings_glyph, round_gdi},
     hotkeys,
     layout::{Bounds, DockStyle},
-    picker::{
-        ACTION, CLOSE, DIALOG_STYLE, RELAYOUT, SCROLL, control, dialog_proc, empty_dialog, wide,
-    },
     picker_font::PickerFont,
     pomo,
     prayer::Method,

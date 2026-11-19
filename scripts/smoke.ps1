@@ -8,7 +8,7 @@ if (!$SkipBuild) {
     & "$PSScriptRoot/cargo.ps1" build --locked
     if ($LASTEXITCODE -ne 0) { throw 'Debug probe build failed' }
 }
-Add-Type -Path "$projectRoot/tests/PickerProbe.cs"
+Add-Type -Path "$projectRoot/tests/ClickProbe.cs"
 Add-Type -AssemblyName System.Drawing
 Add-Type -Path "$projectRoot/tests/NativeProbe.cs" -ReferencedAssemblies System.Drawing
 [NativeProbe]::EnablePhysicalPixels()
@@ -305,7 +305,7 @@ try {
                     $inBoundsBefore = Test-RegionBoundsContainsPoint $regionBefore ($point.X - $rect.Left) ($point.Y - $rect.Top)
                     Assert-Check ([NativeProbe]::WindowFromPoint($point) -eq $anchor) "$($case.Name) resolves to the underlying fixture"
                     $beforeClicks = [NativeProbe]::AnchorClicks()
-                    [PickerProbe]::Click($point.X, $point.Y)
+                    [ClickProbe]::Click($point.X, $point.Y)
                     $regionAfter = [NativeProbe]::RegionBox($surface.Window)
                     $clickElapsedMs = $phaseClock.ElapsedMilliseconds
                     $inBoundsAfter = Test-RegionBoundsContainsPoint $regionAfter ($point.X - $rect.Left) ($point.Y - $rect.Top)

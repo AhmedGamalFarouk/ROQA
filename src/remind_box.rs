@@ -2,8 +2,8 @@
 //! dialog like the window picker, because the notch never takes keyboard focus. Enter or Set sets it.
 
 use crate::{
+    dialog::{ACTION, CLOSE, RELAYOUT, control, dialog_proc, empty_dialog, wide},
     layout::Bounds,
-    picker::{ACTION, CLOSE, RELAYOUT, control, dialog_proc, empty_dialog, wide},
     picker_font::PickerFont,
     prayer_os, remind,
 };
