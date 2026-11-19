@@ -1351,6 +1351,9 @@ struct Desktop {
     flashing: Vec<usize>,
     /// The registered `SHELLHOOK` message, 0 when the shell would not take the hook window.
     shell_hook: u32,
+    /// The hidden window the workers' wakes and the Caps Lock hotkey go to, so a message box or menu loop dispatches them
+    /// instead of dropping them (`native_window::post_wake`); it also takes the shell hook.
+    wake: NativeWindow,
     /// Pinned apps, their persisted form, and the unwritten-change times. Read once at startup; written on
     /// a host-loop deadline (`store_wait`) after a change and once at quit, never by a timer or thread.
     pins: Pins,
@@ -1479,10 +1482,7 @@ impl Desktop {
             .ok_or_else(|| Error::new(E_FAIL, "No usable display monitor."))?;
         let text = TextSettings::create()?;
         let text_factor = text.factor()?;
-        let store_path = store::default_path();
-        let mut store = store_path
-            .as_deref()
-            .map_or_else(Store::default, |path| store::load(path).0);
+        let (mut store, store_path) = store::open(store::default_path());
         let now = Instant::now();
         let devices: Vec<String> = monitors.iter().map(|m| m.device.clone()).collect();
         let settings = store.settings.clone().keep_one_monitor(&devices);
@@ -1505,6 +1505,16 @@ impl Desktop {
         } else {
             None
         };
+        let wake = NativeWindow::create_hidden(
+            layout::Bounds {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            w!("ROQA Wake"),
+        )?;
+        native_window::set_wake_window(wake.0);
         let mut desktop = Self {
             surfaces: Vec::new(),
             monitors,
@@ -1543,6 +1553,7 @@ impl Desktop {
             dock_generation: None,
             flashing: Vec::new(),
             shell_hook: 0,
+            wake,
             pins: Pins::from_store(&store),
             shelf: ShelfView {
                 removed: None,
@@ -2032,41 +2043,6 @@ impl Desktop {
                 now,
             );
         }
-    }
-    fn water_today(&self) -> u8 {
-        water::today(
-            self.store.water,
-            prayer_tab::day_number(prayer_os::local_now().ymd),
-        )
-    }
-    /// "I drank a glass": today's count goes up and is stored.
-    fn water_drink(&mut self) {
-        let day = prayer_tab::day_number(prayer_os::local_now().ymd);
-        self.store.water = (day, self.water_today().saturating_add(1));
-        self.pages.water.0 = self.store.water;
-        self.pending.mark(Instant::now());
-    }
-    fn sync_water(&self) {
-        if let Some(window) = &self.settings_window {
-            window.set_water(&water::text(self.water_today(), &self.settings.water_cfg));
-        }
-    }
-    /// Plays the chosen sound (none when silent or no default exists); false when nothing played.
-    fn play_prayer_sound(&mut self, now: Instant) -> bool {
-        let found = prayer_os::discover();
-        let Some(mut path) = prayer_tab::resolve(&self.settings.prayer_sound, &found) else {
-            return false;
-        };
-        // A file that is gone plays the default instead; the stored setting is left as it is.
-        if !std::path::Path::new(path).is_file() {
-            let Some(default) = prayer_tab::default_sound(&found) else {
-                return false;
-            };
-            path = default;
-        }
-        let length = self.prayer.player.play(path);
-        self.prayer.sound_end = length.map(|length| now + length);
-        length.is_some()
     }
     /// The mascot: picks the mood from the facts and steps the running show, or starts the idle one whose
     /// deadline passed. With the setting off it returns at once. Returns the wait until the next step or show.
@@ -2819,22 +2795,18 @@ impl Desktop {
                     }
                     return Ok(());
                 }
-                if let Some(item) = self.dock_items.get(slot)
+                // A stack rises from a dock, so a shortcut key (no dock window) opens a folder like any pin. Whether a path is
+                // a folder is a worker's to say (`stack_ready` goes on from there): a slow share must not stop the host.
+                if !hwnd.is_invalid()
+                    && let Some(item) = self.dock_items.get(slot)
                     && item.windows.is_empty()
                     && let Identity::Executable(path) = &item.identity
-                    && std::path::Path::new(path).is_dir()
+                    && crate::places::may_be_folder(path)
                 {
-                    let folder = path.clone();
-                    self.open_stack(hwnd, slot, &folder);
+                    crate::places::ask(hwnd.0 as isize, slot, path.clone());
                     return Ok(());
                 }
-                if let Some(action) = self
-                    .dock_items
-                    .get(slot)
-                    .and_then(|item| dock::action(item, dock::foreground_key()))
-                {
-                    self.run_dock_action(action);
-                }
+                self.run_pin(slot, None);
                 Ok(())
             }
             Some(Hit::Button(button)) => {
@@ -3555,8 +3527,12 @@ impl Desktop {
     /// pending and retries after `store::RETRY`.
     fn flush_store(&mut self, quit: bool) {
         let now = Instant::now();
-        if let Some(path) = &self.store_path {
-            store::keep_unsaved(path, &self.store, self.pending.dirty());
+        // The sign-out copy is built once per change, not on every pass (an animation frame) while the write waits.
+        let dirty = self.pending.dirty();
+        if let Some(path) = &self.store_path
+            && (!dirty || self.pending.take_changed())
+        {
+            store::keep_unsaved(path, &self.store, dirty);
         }
         if !self.pending.should_write(now, quit) {
             return;
@@ -3612,16 +3588,6 @@ impl Desktop {
         Ok(!self.shown.is_empty())
     }
     fn message(&mut self, message: &MSG) -> Result<()> {
-        if message.message == shelf_os::PICKED && message.hwnd.is_invalid() {
-            if let Some(paths) = self.file_picker.take() {
-                if self.file_picker.for_sound {
-                    self.choose_sound(paths);
-                } else {
-                    self.add_shelf_files(&paths);
-                }
-            }
-            return Ok(());
-        }
         // These posts only wake the loop: `read_wakes` reads their flags on every pass.
         if matches!(
             message.message,
@@ -4180,6 +4146,23 @@ impl Desktop {
             let said = self.keys.looked();
             self.key_pill(said);
         }
+        if let Some(answer) = crate::places::answer() {
+            self.stack_ready(answer);
+        }
+        if native_window::caps_read() {
+            let said = self.keys.caps_pressed();
+            self.key_pill(said);
+        }
+        // A Windows notification's line and a finished file picker are read here, not on their wake: a modal loop can
+        // swallow the wake, and the line would wait for the next toast.
+        self.notification_peek();
+        if let Some(paths) = self.file_picker.take() {
+            if self.file_picker.for_sound {
+                self.choose_sound(paths);
+            } else {
+                self.add_shelf_files(&paths);
+            }
+        }
     }
     /// Schedules a fresh topology read with a full retry budget.
     fn request_topology(&mut self) {
@@ -4414,7 +4397,7 @@ pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> 
 }
 
 fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog) -> Result<()> {
-    desktop.shell_hook = watch_flashes();
+    desktop.shell_hook = watch_flashes(desktop.wake.0);
     let mut events = controls.handles();
     let base = events.len();
     loop {
@@ -4462,7 +4445,11 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
             desktop.privacy_signal();
         } else if index < base {
             match Command::ALL[index] {
-                Command::ShowSettings => desktop.open_settings()?,
+                Command::ShowSettings => {
+                    if let Err(error) = desktop.open_settings() {
+                        eprintln!("Settings: {error}");
+                    }
+                }
                 Command::Agent => desktop.agent_reports(),
                 command => {
                     let shown = desktop.command(command);
@@ -4478,29 +4465,16 @@ fn event_loop(controls: &Controls, desktop: &mut Desktop, catalog: &mut Catalog)
     }
 }
 
-/// Asks the shell to post taskbar events (a window flashing, activating, closing) to a hidden window of this
-/// thread; the loop reads them before dispatch. Returns the `SHELLHOOK` message id, or 0 if refused.
-fn watch_flashes() -> u32 {
-    // SAFETY: a hidden window of the system STATIC class, owned by this thread for the whole run.
+/// Asks the shell to post taskbar events (a window flashing, activating, closing) to the wake window; the loop reads
+/// them before dispatch. Returns the `SHELLHOOK` message id, or 0 if refused.
+fn watch_flashes(window: HWND) -> u32 {
+    // SAFETY: the host's own live window, owned by this thread for the whole run.
     unsafe {
         let message = RegisterWindowMessageW(w!("SHELLHOOK"));
-        let window = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            w!("STATIC"),
-            w!(""),
-            WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            None,
-            None,
-            None,
-            None,
-        );
-        match window {
-            Ok(window) if RegisterShellHookWindow(window).as_bool() => message,
-            _ => 0,
+        if RegisterShellHookWindow(window).as_bool() {
+            message
+        } else {
+            0
         }
     }
 }
@@ -4583,12 +4557,8 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 }
                 continue;
             }
-            if message.message == toast::SHOWN {
-                desktop.notification_peek();
-                continue;
-            }
-            if message.message == keys::LOOK {
-                continue; // only a wake: `read_wakes` reads the flag
+            if message.message == toast::SHOWN || message.message == keys::LOOK {
+                continue; // only wakes: `read_wakes` reads the line and the flag
             }
             if desktop.shell_hook != 0 && message.message == desktop.shell_hook {
                 desktop.note_shell_event(message.wParam.0, message.lParam.0 as usize);

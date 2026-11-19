@@ -6,12 +6,11 @@ use windows::{
     Foundation::TypedEventHandler,
     UI::ViewManagement::{UIColorType, UISettings},
     Win32::{
-        Foundation::{LPARAM, WPARAM},
         System::{
             Threading::GetCurrentThreadId,
             WinRT::{RO_INIT_SINGLETHREADED, RoInitialize, RoUninitialize},
         },
-        UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP},
+        UI::WindowsAndMessaging::WM_APP,
     },
     core::Result,
 };
@@ -56,12 +55,8 @@ impl TextSettings {
             let pending = Arc::clone(flag);
             TypedEventHandler::new(move |_, _| {
                 pending.store(true, Ordering::Relaxed);
-                // SAFETY: scalar wake only. A lost wake is recovered by the main loop's finite wait.
-                #[expect(
-                    clippy::disallowed_methods,
-                    reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
-                )]
-                let _ = unsafe { PostThreadMessageW(thread, WM_APP + 30, WPARAM(0), LPARAM(0)) };
+                // A window post, so a message box or menu loop does not drop it (`native_window::post_wake`).
+                let _ = crate::native_window::post_wake(thread, WM_APP + 30);
                 Ok(())
             })
         };

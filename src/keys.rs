@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use windows::Win32::{
-    Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM},
+    Foundation::{CloseHandle, HANDLE, HWND},
     Globalization::GetLocaleInfoW,
     Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
     System::Threading::{
@@ -22,7 +22,7 @@ use windows::Win32::{
         },
         WindowsAndMessaging::{
             EVENT_SYSTEM_FOREGROUND, GetForegroundWindow, GetWindowThreadProcessId,
-            PostThreadMessageW, WINEVENT_OUTOFCONTEXT, WM_APP,
+            WINEVENT_OUTOFCONTEXT, WM_APP,
         },
     },
 };
@@ -43,15 +43,8 @@ unsafe extern "system" fn foreground(
     _: u32,
 ) {
     let host = HOST.load(Relaxed);
-    if host != 0 && !LOOKING.swap(true, Relaxed) {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
-        )]
-        // SAFETY: a scalar-only message to the host thread; no window memory is touched.
-        if unsafe { PostThreadMessageW(host, LOOK, WPARAM(0), LPARAM(0)) }.is_err() {
-            LOOKING.store(false, Relaxed);
-        }
+    if host != 0 && !LOOKING.swap(true, Relaxed) && !crate::native_window::post_wake(host, LOOK) {
+        LOOKING.store(false, Relaxed);
     }
 }
 
@@ -160,25 +153,28 @@ impl Keys {
         keys.grip();
         keys
     }
-    /// Holds Caps Lock unless an elevated window has the focus, and releases it there.
+    /// Holds Caps Lock unless an elevated window or a full-screen app (a game, a call) has the focus, and releases it
+    /// there. A full-screen state that starts without a focus change is seen at the next one.
     fn grip(&mut self) {
+        let full_screen = crate::native_window::shell_fullscreen()
+            && crate::native_window::fullscreen_candidate().is_some();
         // SAFETY: a scalar foreground query.
-        let want = !elevated_above_us(unsafe { GetForegroundWindow() });
+        let want = !(full_screen || elevated_above_us(unsafe { GetForegroundWindow() }));
         if want == self.caps {
             return;
         }
-        // SAFETY: a thread-bound hotkey (no window) with scalar arguments.
+        // SAFETY: a hotkey of the wake window with scalar arguments.
         self.caps = unsafe {
             if want {
                 RegisterHotKey(
-                    None,
+                    crate::native_window::wake_window(),
                     CAPS,
                     HOT_KEY_MODIFIERS(MOD_NOREPEAT.0),
                     u32::from(VK_CAPITAL.0),
                 )
                 .is_ok()
             } else {
-                let _ = UnregisterHotKey(None, CAPS);
+                let _ = UnregisterHotKey(crate::native_window::wake_window(), CAPS);
                 false
             }
         };
@@ -195,7 +191,7 @@ impl Keys {
     pub fn caps_pressed(&mut self) -> Option<String> {
         // SAFETY: scalar hotkey calls; the two inputs are plain keyboard events.
         let sent = unsafe {
-            let _ = UnregisterHotKey(None, CAPS);
+            let _ = UnregisterHotKey(crate::native_window::wake_window(), CAPS);
             let key = |flags: KEYBD_EVENT_FLAGS| INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: INPUT_0 {
@@ -213,7 +209,7 @@ impl Keys {
             );
             self.caps = sent == 2
                 && RegisterHotKey(
-                    None,
+                    crate::native_window::wake_window(),
                     CAPS,
                     HOT_KEY_MODIFIERS(MOD_NOREPEAT.0),
                     u32::from(VK_CAPITAL.0),
@@ -250,7 +246,7 @@ impl Drop for Keys {
         }
         if self.caps {
             // SAFETY: the hotkey this struct registered.
-            let _ = unsafe { UnregisterHotKey(None, CAPS) };
+            let _ = unsafe { UnregisterHotKey(crate::native_window::wake_window(), CAPS) };
         }
     }
 }

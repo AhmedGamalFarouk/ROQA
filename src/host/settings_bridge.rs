@@ -208,8 +208,15 @@ impl Desktop {
         if old.hide_fullscreen != self.settings.hide_fullscreen {
             self.fullscreen_generation = None; // the next pass hides or shows again
         }
-        if old.autostart != self.settings.autostart {
-            crate::system_os::set_autostart(self.settings.autostart);
+        if old.autostart != self.settings.autostart
+            && !crate::system_os::set_autostart(self.settings.autostart)
+        {
+            // The registry refused: keep what is really set, and the switch goes back and says so.
+            self.settings.autostart = old.autostart;
+            if let Some(window) = &mut self.settings_window {
+                window.set_autostart(old.autostart);
+                let _ = window.say("Couldn't change start at sign-in.");
+            }
         }
         if (
             old.dock_hide,

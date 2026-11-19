@@ -499,17 +499,8 @@ impl FilePicker {
                     state.hwnd = 0;
                 }
                 let _ = sender.send(paths);
-                // SAFETY: scalar completion message to the still-owned host thread queue.
-                #[expect(clippy::disallowed_methods, reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it")]
-                unsafe {
-                    if let Err(error) = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
-                        host,
-                        PICKED,
-                        windows::Win32::Foundation::WPARAM(0),
-                        windows::Win32::Foundation::LPARAM(0),
-                    ) {
-                        eprintln!("Shelf picker completion wake: {error}");
-                    }
+                if !crate::native_window::post_wake(host, PICKED) {
+                    eprintln!("Shelf picker completion wake failed");
                 }
             }) {
             Ok(worker) => {

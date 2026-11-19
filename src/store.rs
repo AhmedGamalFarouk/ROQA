@@ -91,12 +91,14 @@ pub fn flush_decision_capped(first_change: Instant, last_change: Instant, now: I
     }
 }
 
-/// Unwritten changes: when the first and the latest happened. Clean is `None`, which has no deadline.
+/// Unwritten changes: when the first and the latest happened (clean is `None`, which has no deadline), and whether
+/// one came since `take_changed` last asked.
 #[derive(Debug, Default)]
-pub struct Pending(Option<(Instant, Instant)>);
+pub struct Pending(Option<(Instant, Instant)>, bool);
 
 impl Pending {
     pub fn mark(&mut self, now: Instant) {
+        self.1 = true;
         self.0 = Some((self.0.map_or(now, |(first, _)| first), now));
     }
     pub fn decision(&self, now: Instant) -> Flush {
@@ -113,6 +115,10 @@ impl Pending {
     }
     pub fn dirty(&self) -> bool {
         self.0.is_some()
+    }
+    /// True once per change: the host rebuilds the sign-out copy (`keep_unsaved`) only then, not on every pass of a burst.
+    pub fn take_changed(&mut self) -> bool {
+        std::mem::take(&mut self.1)
     }
     /// A failed write stays pending and is next due `RETRY` after `now`.
     pub fn retry(&mut self, now: Instant) {
@@ -156,6 +162,20 @@ pub fn load(path: &Path) -> (Store, Load) {
             (Store::default(), Load::Quarantined)
         }
     }
+}
+
+/// The store to start with and where to save it. A file that exists but cannot be read (locked for a moment by a
+/// scanner or a backup) gives defaults and no save path, so this run never writes them over the real file.
+pub fn open(path: Option<PathBuf>) -> (Store, Option<PathBuf>) {
+    let Some(path) = path else {
+        return (Store::default(), None);
+    };
+    let (store, load) = load(&path);
+    if load == Load::Unreadable {
+        eprintln!("Store: could not be read; changes are not saved in this run.");
+        return (store, None);
+    }
+    (store, Some(path))
 }
 
 fn parse(text: &str) -> Option<Store> {
@@ -581,6 +601,40 @@ mod tests {
         std::fs::write(dir.file(), body).unwrap();
         assert_eq!(load(&dir.file()), (Store::default(), Load::Quarantined));
         assert!(dir.0.join("store.roqa.bad").exists());
+    }
+
+    #[test]
+    fn a_change_is_reported_once_for_the_unsaved_copy() {
+        let (mut pending, now) = (Pending::default(), Instant::now());
+        assert!(!pending.take_changed());
+        pending.mark(now);
+        assert!(pending.dirty() && pending.take_changed());
+        assert!(
+            pending.dirty() && !pending.take_changed(),
+            "still unwritten, nothing new"
+        );
+        pending.retry(now);
+        assert!(
+            !pending.take_changed(),
+            "a failed write is not a new change"
+        );
+        pending.mark(now);
+        pending.written();
+        pending.mark(now);
+        assert!(pending.take_changed());
+    }
+
+    #[test]
+    fn an_unreadable_store_is_never_saved_over() {
+        let dir = Dir::new("unreadable");
+        // A folder where the file should be cannot be read: defaults, and nowhere to save them.
+        assert_eq!(load(&dir.0).1, Load::Unreadable);
+        assert_eq!(open(Some(dir.0.clone())), (Store::default(), None));
+        // A missing file starts fresh and saves there; a readable one loads and saves back.
+        assert_eq!(open(Some(dir.file())), (Store::default(), Some(dir.file())));
+        sample().save(&dir.file()).unwrap();
+        assert_eq!(open(Some(dir.file())), (sample(), Some(dir.file())));
+        assert_eq!(open(None), (Store::default(), None));
     }
 
     #[test]

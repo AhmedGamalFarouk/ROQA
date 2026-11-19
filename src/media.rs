@@ -26,9 +26,8 @@ use windows::{
         IRandomAccessStream, IRandomAccessStreamReference, IRandomAccessStreamWithContentType,
     },
     Win32::{
-        Foundation::{E_ACCESSDENIED, LPARAM, WPARAM},
-        System::Threading::GetCurrentThreadId,
-        UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP},
+        Foundation::E_ACCESSDENIED, System::Threading::GetCurrentThreadId,
+        UI::WindowsAndMessaging::WM_APP,
     },
     core::{AgileReference, Error, HRESULT, HSTRING, IUnknown, Interface, Result, RuntimeType},
 };
@@ -444,12 +443,8 @@ impl Wake {
             .store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
         // Release: a completion's slot write is visible to the host once it sees this bit.
         if self.dirty.fetch_or(bit, Ordering::Release) == 0 {
-            // SAFETY: a scalar thread message with no pointers.
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
-            )]
-            let _ = unsafe { PostThreadMessageW(self.host, WAKE, WPARAM(0), LPARAM(0)) };
+            // A window post, so a message box or menu loop does not drop it (`native_window::post_wake`).
+            let _ = crate::native_window::post_wake(self.host, WAKE);
         }
     }
 }

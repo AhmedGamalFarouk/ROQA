@@ -10,7 +10,7 @@ use std::{
 use windows::{
     Storage::Streams::IRandomAccessStream,
     Win32::{
-        Foundation::{E_FAIL, LPARAM, SIZE, WPARAM},
+        Foundation::{E_FAIL, SIZE},
         Graphics::{
             Gdi::{
                 BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC,
@@ -32,7 +32,7 @@ use windows::{
         },
         UI::{
             Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY},
-            WindowsAndMessaging::{PostThreadMessageW, WM_APP},
+            WindowsAndMessaging::WM_APP,
         },
     },
     core::{AgileReference, Error, HSTRING, Result},
@@ -132,9 +132,8 @@ impl IconService {
                     {
                         break;
                     }
-                    // SAFETY: scalar wake only; the UI loop also polls results on every pass.
-                    #[expect(clippy::disallowed_methods, reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it")]
-                    let _ = unsafe { PostThreadMessageW(target, ICON_READY, WPARAM(0), LPARAM(0)) };
+                    // A window post, so a message box or menu loop does not drop it (`native_window::post_wake`).
+                    let _ = crate::native_window::post_wake(target, ICON_READY);
                 }
                 // Jobs still queued after an early exit hold agile references: release them before COM.
                 drop(request_rx);

@@ -12,7 +12,7 @@ use std::sync::{
 };
 use windows::{
     Win32::{
-        Foundation::{LPARAM, PROPERTYKEY, WPARAM},
+        Foundation::PROPERTYKEY,
         Media::Audio::{
             AUDIO_VOLUME_NOTIFICATION_DATA, AudioSessionStateActive, DEVICE_STATE,
             DEVICE_STATE_ACTIVE, EDataFlow, ERole,
@@ -31,7 +31,7 @@ use windows::{
             },
             Threading::GetCurrentThreadId,
         },
-        UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP},
+        UI::WindowsAndMessaging::WM_APP,
     },
     core::{GUID, Interface, PCWSTR, Result, implement},
 };
@@ -247,12 +247,8 @@ impl Wake {
     /// for the loop's next finite deadline (the clock's, at most a minute).
     fn raise(&self, bit: u32) {
         if self.dirty.fetch_or(bit, Ordering::Relaxed) == 0 {
-            // SAFETY: a scalar thread message with no pointers.
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
-            )]
-            let _ = unsafe { PostThreadMessageW(self.host, WAKE, WPARAM(0), LPARAM(0)) };
+            // A window post, so a message box or menu loop does not drop it (`native_window::post_wake`).
+            let _ = crate::native_window::post_wake(self.host, WAKE);
         }
     }
 }

@@ -16,7 +16,7 @@ use windows::{
     Devices::Geolocation::{GeolocationAccessStatus, Geolocator, PositionAccuracy},
     Foundation::TimeSpan,
     Win32::{
-        Foundation::{LPARAM, SYSTEMTIME, WPARAM},
+        Foundation::SYSTEMTIME,
         Globalization::{GetTimeFormatEx, GetUserDefaultLocaleName, TIME_NOMINUTESORSECONDS},
         Networking::WinHttp::*,
         System::{
@@ -26,7 +26,7 @@ use windows::{
         },
         UI::{
             Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
-            WindowsAndMessaging::{PostThreadMessageW, WM_APP},
+            WindowsAndMessaging::WM_APP,
         },
     },
     core::{PCWSTR, w},
@@ -68,9 +68,8 @@ impl Io {
                 let id = job.id;
                 let outcome = run(job);
                 if done.send((id, outcome)).is_ok() {
-                    // SAFETY: a scalar thread message with no pointers; a lost post only delays the poll.
-                    #[expect(clippy::disallowed_methods, reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it")]
-                    let _ = unsafe { PostThreadMessageW(host, WAKE, WPARAM(0), LPARAM(0)) };
+                    // A window post, so a message box or menu loop does not drop it (`native_window::post_wake`).
+                    let _ = crate::native_window::post_wake(host, WAKE);
                 }
             })
             .is_ok()

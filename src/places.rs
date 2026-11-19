@@ -1,6 +1,6 @@
 //! The dock's Places button: the Recycle Bin and each fixed or removable drive, read when the popup opens.
 //! Network drives are left out (a stat on one can hang the host thread) and nothing is kept or polled.
-//! A pinned folder's stack (its newest files) is read here too, once per click.
+//! A pinned folder's stack (its newest files) is read here too, once per click, on a short worker (`ask`).
 use std::path::{Path, PathBuf};
 use windows::{
     Win32::{
@@ -28,29 +28,98 @@ pub fn downloads() -> Option<String> {
     }
 }
 
-/// The newest `count` files of `dir` (folders, hidden files and `desktop.ini` left out), newest first.
+/// The newest `count` files of `dir` (folders, hidden files and `desktop.ini` left out), newest first. Only the best
+/// `count` are kept while the folder is read, so a huge folder costs one pass and no sorted copy.
 pub fn newest_files(dir: &Path, count: usize) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut files: Vec<_> = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let meta = entry.metadata().ok()?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if !meta.is_file() || name.starts_with('.') || name == "desktop.ini" {
-                return None;
+    let mut best = Vec::with_capacity(count + 1);
+    for entry in entries.filter_map(Result::ok) {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !meta.is_file() || name.starts_with('.') || name == "desktop.ini" {
+            continue;
+        }
+        if let Ok(modified) = meta.modified() {
+            keep_newest(&mut best, (modified, entry.path()), count);
+        }
+    }
+    best.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Puts `item` into `best` (newest first, at most `count`) unless `count` newer ones are already there; among equals
+/// the earlier one stays ahead.
+fn keep_newest<T: Ord, P>(best: &mut Vec<(T, P)>, item: (T, P), count: usize) {
+    let at = best.partition_point(|(time, _)| *time >= item.0);
+    if at < count {
+        best.insert(at, item);
+        best.truncate(count);
+    }
+}
+
+/// Whether a pinned path may be a folder: a program or a shortcut is not, and needs no look at the disk to say so.
+pub fn may_be_folder(path: &str) -> bool {
+    const PROGRAMS: [&str; 7] = ["exe", "lnk", "bat", "cmd", "com", "msi", "url"];
+    !Path::new(path)
+        .extension()
+        .is_some_and(|ext| PROGRAMS.iter().any(|known| ext.eq_ignore_ascii_case(known)))
+}
+
+/// What a click on a pinned path found: its newest files when it is a folder, `None` when it is not.
+pub struct Answer {
+    /// The dock window the click came from (a handle value), and the slot.
+    pub dock: isize,
+    pub slot: usize,
+    pub folder: String,
+    pub files: Option<Vec<PathBuf>>,
+}
+
+/// Posted to the host when `ask` has an answer; the host reads it with `answer` on every pass.
+pub const READY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 62;
+static ASKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ANSWER: std::sync::Mutex<Option<Answer>> = std::sync::Mutex::new(None);
+
+/// Asks a short worker whether `folder` is a folder and what its newest files are: a stat on a slow or offline
+/// share must not stop the host. One question at a time; false when one is still out or no worker could start.
+pub fn ask(dock: isize, slot: usize, folder: String) -> bool {
+    use std::sync::atomic::Ordering::{AcqRel, Release};
+    if ASKING.swap(true, AcqRel) {
+        return false;
+    }
+    // SAFETY: a scalar thread id query.
+    let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    let spawned = std::thread::Builder::new()
+        .name("roqa-stack".into())
+        .spawn(move || {
+            let path = Path::new(&folder);
+            let files = path.is_dir().then(|| newest_files(path, STACK));
+            if let Ok(mut slot_answer) = ANSWER.lock() {
+                *slot_answer = Some(Answer {
+                    dock,
+                    slot,
+                    folder,
+                    files,
+                });
             }
-            Some((meta.modified().ok()?, entry.path()))
-        })
-        .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
-    files
-        .into_iter()
-        .take(count)
-        .map(|(_, path)| path)
-        .collect()
+            crate::native_window::post_wake(host, READY);
+        });
+    if spawned.is_err() {
+        ASKING.store(false, Release);
+    }
+    spawned.is_ok()
+}
+
+/// The finished question's answer, once; the next question may start after it.
+pub fn answer() -> Option<Answer> {
+    let answer = ANSWER.lock().ok()?.take();
+    if answer.is_some() {
+        ASKING.store(false, std::sync::atomic::Ordering::Release);
+    }
+    answer
 }
 
 /// `GetDriveTypeW` answers for a removable and a fixed drive.
@@ -158,6 +227,27 @@ mod tests {
         assert_eq!(names(2), ["new.txt", "mid.txt"]);
         assert!(newest_files(&dir.join("missing"), 8).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn only_the_newest_few_are_kept_while_reading() {
+        let mut best = Vec::new();
+        for (time, name) in [(5, "e"), (9, "i"), (1, "a"), (9, "j"), (7, "g"), (3, "c")] {
+            keep_newest(&mut best, (time, name), 3);
+            assert!(best.len() <= 3);
+        }
+        // Newest first; of two equal times the earlier read stays ahead.
+        assert_eq!(best, [(9, "i"), (9, "j"), (7, "g")]);
+        keep_newest(&mut best, (1, "z"), 3);
+        assert_eq!(best.len(), 3);
+    }
+    #[test]
+    fn a_program_or_shortcut_is_not_asked_about_as_a_folder() {
+        for program in ["a.EXE", r"C:\x\b.lnk", "run.cmd"] {
+            assert!(!may_be_folder(program), "{program}");
+        }
+        for folder in [r"C:\Users\me\Downloads", r"\nas\share", r"D:\v2.1"] {
+            assert!(may_be_folder(folder), "{folder}");
+        }
     }
     #[test]
     fn the_bin_comes_first() {

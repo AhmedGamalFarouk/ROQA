@@ -13,7 +13,7 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::{HWND, LPARAM, WPARAM},
+        Foundation::HWND,
         System::{
             Com::{
                 CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
@@ -28,7 +28,7 @@ use windows::{
             },
             WindowsAndMessaging::{
                 EVENT_OBJECT_UNCLOAKED, GetClassNameW, GetWindowThreadProcessId,
-                PostThreadMessageW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
+                WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
             },
         },
     },
@@ -114,12 +114,8 @@ fn read(handle: usize) {
         if let Ok(mut slot) = LINE.lock() {
             *slot = Some(line);
         }
-        // SAFETY: a scalar-only message to the host thread.
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
-        )]
-        let _ = unsafe { PostThreadMessageW(host, SHOWN, WPARAM(0), LPARAM(0)) };
+        // A window post, so a message box or menu loop does not drop it (`native_window::post_wake`).
+        let _ = crate::native_window::post_wake(host, SHOWN);
     }
 }
 

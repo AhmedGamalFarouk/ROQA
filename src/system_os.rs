@@ -3,7 +3,9 @@
 
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE},
+        Foundation::{
+            CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE,
+        },
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         },
@@ -22,10 +24,11 @@ use windows::{
 };
 
 /// Writes (on) or removes (off) ROQA's value under the user's Run key. Off by default and never touched
-/// unless the switch changes, so a user who never turns it on gets no registry entry.
-pub fn set_autostart(on: bool) {
+/// unless the switch changes, so a user who never turns it on gets no registry entry. False when the registry
+/// refused, so the switch can say so and go back instead of promising a start that will not happen.
+pub fn set_autostart(on: bool) -> bool {
     let Ok(exe) = std::env::current_exe() else {
-        return;
+        return false;
     };
     let command = format!("\"{}\"", exe.display());
     let data: Vec<u8> = command
@@ -45,14 +48,19 @@ pub fn set_autostart(on: bool) {
             &mut key,
         );
         if opened != ERROR_SUCCESS {
-            return;
+            return false;
         }
-        if on {
-            let _ = RegSetValueExW(key, w!("ROQA"), None, REG_SZ, Some(&data));
+        let done = if on {
+            RegSetValueExW(key, w!("ROQA"), None, REG_SZ, Some(&data)) == ERROR_SUCCESS
         } else {
-            let _ = RegDeleteValueW(key, w!("ROQA"));
-        }
+            // Nothing to remove is as good as removed.
+            matches!(
+                RegDeleteValueW(key, w!("ROQA")),
+                ERROR_SUCCESS | ERROR_FILE_NOT_FOUND
+            )
+        };
         let _ = RegCloseKey(key);
+        done
     }
 }
 
@@ -142,16 +150,8 @@ pub fn eject_in_background(letter: char) {
         .spawn(move || {
             let answer = if eject(letter) { 1 } else { 2 };
             EJECT_RESULT.store(answer, std::sync::atomic::Ordering::Release);
-            // SAFETY: a scalar-only wake to the host thread; a failed post is picked up on its next pass.
-            #[expect(clippy::disallowed_methods, reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it")]
-            let _ = unsafe {
-                windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
-                    host,
-                    EJECTED,
-                    windows::Win32::Foundation::WPARAM(0),
-                    windows::Win32::Foundation::LPARAM(0),
-                )
-            };
+            // A failed post is picked up on the host's next pass.
+            let _ = crate::native_window::post_wake(host, EJECTED);
         });
     if spawned.is_err() {
         EJECT_RESULT.store(2, std::sync::atomic::Ordering::Release);

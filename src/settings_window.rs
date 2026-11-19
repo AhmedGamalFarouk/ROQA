@@ -1,9 +1,7 @@
-//! The settings window: a sidebar of pages and a card pane, built from the `PAGES` table (one loop creates the
-//! controls, one lays them out, `commit`/`show` read and write them by id). Standard child controls give
-//! mouse use and text scaling (keyboard navigation and screen readers are deliberately not supported); only the background, cards and sidebar are drawn here, in GDI
-//! with stock objects. It owns no timer or thread: it exists only while open and does work only in the message
-//! loop turns its own controls cause. A change goes to the host (`take_change`) which applies it live; a timer
-//! request likewise (`take_start`).
+//! The settings window: a sidebar of pages and a card pane, built from the `PAGES` table (one loop creates the controls, one lays them out, `commit`/`show` read and write them by id).
+//! Standard child controls give mouse use and text scaling (keyboard navigation and screen readers are deliberately not supported); only the background, cards and sidebar are drawn here, in GDI with stock objects.
+//! It owns no timer or thread: it exists only while open and does work only in the message loop turns its own controls cause.
+//! A change goes to the host (`take_change`) which applies it live; a timer request likewise (`take_start`).
 
 use crate::{
     agent_hooks,
@@ -2395,6 +2393,11 @@ Other hooks stay. A copy of the file is kept.",
 
     pub fn say(&self, status: &str) -> Result<()> {
         set_text(self.status, status)
+    }
+    /// Start at sign-in could not be changed: the switch goes back.
+    pub fn set_autostart(&mut self, on: bool) {
+        self.current.autostart = on;
+        self.show(&self.current);
     }
 
     /// The newest settings the user chose since the host last asked.

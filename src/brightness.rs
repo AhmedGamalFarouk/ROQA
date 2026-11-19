@@ -10,9 +10,9 @@ use windows::Win32::{
         DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR,
         GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR, SetMonitorBrightness,
     },
-    Foundation::{LPARAM, POINT, WPARAM},
+    Foundation::POINT,
     Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromPoint},
-    UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP},
+    UI::WindowsAndMessaging::WM_APP,
 };
 
 /// Thread message that only wakes the host loop; results wait in the channel.
@@ -84,12 +84,8 @@ fn work(queue: &Receiver<Job>, done: &Sender<Reading>, host: u32) {
                     if done.send(Reading { target, percent }).is_err() {
                         return; // the host is gone
                     }
-                    // SAFETY: a scalar thread message with no pointers; a lost post only delays the poll.
-                    #[expect(
-                        clippy::disallowed_methods,
-                        reason = "worker wake of the host thread; scalar message, moves to a window post if a modal loop can drop it"
-                    )]
-                    let _ = unsafe { PostThreadMessageW(host, WAKE, WPARAM(0), LPARAM(0)) };
+                    // A window post, so a message box or menu loop does not drop it (`native_window::post_wake`).
+                    let _ = crate::native_window::post_wake(host, WAKE);
                 }
                 Job::Write(target, percent) => {
                     let range = ranges

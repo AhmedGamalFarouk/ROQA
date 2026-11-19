@@ -13,6 +13,13 @@ pub const NOTICE: Duration = Duration::from_secs(4);
 /// A question ignores clicks for this long after it shows, so a click meant for something under it is not an answer.
 const SETTLE: Duration = Duration::from_millis(500);
 
+/// A plain notice that holds for less does not cut a longer one short in its first moments.
+const FIRM: Duration = Duration::from_secs(2);
+
+/// A plain notice the row refuses waits for it only when it would show at least this long; a pill of a second
+/// or two is stale by then.
+const QUEUE_MIN: Duration = Duration::from_secs(3);
+
 /// The notice-worthy power states; a change between them (never a percentage tick) starts a notice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -117,8 +124,11 @@ pub struct Power {
     last: Option<State>,
     notice: Option<(String, Instant)>,
     extra: Extra,
-    /// When the notice on the row started.
+    /// When the notice on the row started, and how long it was to hold.
     since: Option<Instant>,
+    hold: Duration,
+    /// One plain notice the row refused, shown when the row frees (`promote`); the first one refused stays.
+    next: Option<(String, Duration)>,
 }
 
 impl Power {
@@ -126,9 +136,7 @@ impl Power {
     pub fn new(raw: Option<Raw>) -> Self {
         Self {
             last: raw.and_then(Raw::state).map(|(state, _)| state),
-            notice: None,
-            extra: Extra::None,
-            since: None,
+            ..Self::default()
         }
     }
 
@@ -153,18 +161,47 @@ impl Power {
         )
     }
 
-    /// Shows `text` and its `extra` for `hold` in place of any notice (the prayer reminder reuses the row);
-    /// false, and nothing changes, when a guarded notice keeps the row.
-    pub fn announce(&mut self, text: String, now: Instant, hold: Duration, extra: Extra) -> bool {
+    /// Whether `announce` with these would take the row now: a producer that must not lose its notice (a due
+    /// reminder) asks first.
+    pub fn admits(&self, now: Instant, hold: Duration, extra: Extra) -> bool {
         if self.guarded()
             && (matches!(self.extra, Extra::Ask(_)) || !matches!(extra, Extra::Ask(_)))
         {
             return false;
         }
+        let firm = self.notice.as_ref().is_some_and(|(_, until)| now < *until)
+            && self
+                .since
+                .is_some_and(|since| now.saturating_duration_since(since) < FIRM);
+        !(firm && extra == Extra::None && hold < self.hold)
+    }
+
+    /// Shows `text` and its `extra` for `hold` in place of any notice (the prayer reminder reuses the row);
+    /// false, and nothing changes, when a guarded or longer notice keeps the row. A plain notice of `QUEUE_MIN`
+    /// or more that is refused waits in the one queue place.
+    pub fn announce(&mut self, text: String, now: Instant, hold: Duration, extra: Extra) -> bool {
+        if !self.admits(now, hold, extra) {
+            if extra == Extra::None && hold >= QUEUE_MIN && self.next.is_none() {
+                self.next = Some((text, hold));
+            }
+            return false;
+        }
         self.notice = Some((text, now + hold));
         self.extra = extra;
         self.since = Some(now);
+        self.hold = hold;
         true
+    }
+
+    /// Shows the queued notice once the row is free; true when it did.
+    pub fn promote(&mut self, now: Instant) -> bool {
+        if self.notice.is_some() {
+            return false;
+        }
+        let Some((text, hold)) = self.next.take() else {
+            return false;
+        };
+        self.announce(text, now, hold, Extra::None)
     }
 
     /// Whether a question has shown long enough (`SETTLE`) for a click to mean it.
@@ -322,6 +359,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_longer_notice_is_not_cut_short_and_a_refused_one_waits_its_turn() {
+        let (now, second) = (Instant::now(), Duration::from_secs(1));
+        let (long, pill) = (Duration::from_secs(8), Duration::from_secs(2));
+        let mut power = Power::new(raw(0, 1, 60));
+        assert!(power.announce("Prayer".into(), now, long, Extra::None));
+        // A short pill in the first 2 s does not replace it and is not worth keeping.
+        assert!(!power.announce("Volume 40%".into(), now + second, pill, Extra::None));
+        assert!(!power.over(now + second) && !power.promote(now + second));
+        assert_eq!(power.text(), Some("Prayer"));
+        // A 4 s notice is kept in the one place, and the first one refused stays.
+        assert!(!power.announce("Drive connected".into(), now + second, NOTICE, Extra::None));
+        assert!(!power.announce("Camera connected".into(), now + second, NOTICE, Extra::None));
+        // After 2 s a short pill may replace it as before.
+        assert!(power.announce("Volume 41%".into(), now + 2 * second, pill, Extra::None));
+        assert!(power.over(now + 4 * second));
+        assert!(power.promote(now + 4 * second));
+        assert_eq!(power.text(), Some("Drive connected"));
+        assert_eq!(power.deadline(), Some(now + 4 * second + NOTICE));
+        assert!(!power.promote(now + 4 * second), "the queue is empty now");
+    }
+
+    #[test]
+    fn a_question_keeps_a_waiting_notice_for_when_it_is_answered() {
+        let (now, hold) = (Instant::now(), Duration::from_secs(8));
+        let mut power = Power::new(raw(0, 1, 60));
+        assert!(power.announce("Bash: git push".into(), now, hold, Extra::Ask(7)));
+        assert!(!power.announce("Asr in 5 min".into(), now, hold, Extra::None));
+        assert!(!power.announce("Fajr".into(), now, hold, Extra::None));
+        // A second question is not queued: the caller tells its hook to ask in the terminal.
+        assert!(!power.announce("Rm".into(), now, hold, Extra::Ask(8)));
+        assert!(!power.promote(now), "the question still shows");
+        assert!(power.clear());
+        assert!(power.promote(now));
+        assert_eq!(
+            (power.text(), power.extra()),
+            (Some("Asr in 5 min"), Extra::None)
+        );
+        assert!(power.clear() && !power.promote(now), "only one was kept");
+    }
+
+    #[test]
+    fn a_due_reminder_is_admitted_only_when_its_snooze_can_show() {
+        let (now, hold) = (Instant::now(), Duration::from_secs(8));
+        let mut power = Power::new(raw(0, 1, 60));
+        assert!(power.admits(now, hold, Extra::Snooze));
+        // Over a plain notice, even a longer one in its first moments, it shows.
+        power.announce("Prayer".into(), now, hold, Extra::None);
+        assert!(power.admits(now, hold, Extra::Snooze));
+        // Over another Snooze, an Eject or a question it does not: the caller keeps it waiting.
+        for held in [Extra::Snooze, Extra::Eject('E'), Extra::Ask(3)] {
+            assert!(power.clear());
+            power.announce("Held".into(), now, hold, held);
+            assert!(!power.admits(now, hold, Extra::Snooze), "{held:?}");
+        }
+        assert!(power.clear());
+        assert!(power.admits(now, hold, Extra::Snooze));
+    }
     #[test]
     fn a_desktop_never_shows_a_notice() {
         let mut power = Power::new(raw(1, 128, 255));

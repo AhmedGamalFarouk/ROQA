@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{
     mem::size_of,
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
 };
 use windows::Win32::{
     Foundation::{COLORREF, E_FAIL, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
@@ -149,6 +149,45 @@ static CLIP_PENDING: AtomicBool = AtomicBool::new(false);
 /// True once per burst of clipboard changes, read on every pass; the next change posts again.
 pub fn clip_read() -> bool {
     CLIP_PENDING.swap(false, Ordering::AcqRel)
+}
+
+/// The hidden window the workers' wakes and the Caps Lock hotkey go to. A message box or a menu runs its own message
+/// loop that dispatches a window's messages to its procedure but drops a thread's; 0 until the host makes it.
+static WAKE_WINDOW: AtomicIsize = AtomicIsize::new(0);
+
+/// Records the window `post_wake` posts to and the Caps Lock hotkey belongs to.
+pub fn set_wake_window(window: HWND) {
+    WAKE_WINDOW.store(window.0 as isize, Ordering::Release);
+}
+
+/// The wake window, once the host made it.
+pub fn wake_window() -> Option<HWND> {
+    let raw = WAKE_WINDOW.load(Ordering::Acquire);
+    (raw != 0).then_some(HWND(raw as *mut _))
+}
+
+/// Wakes the host loop with `message`, from any thread: a post to the wake window, or to the host `thread` before
+/// that window exists. The host reads every result on its next pass, so the message carries nothing.
+pub fn post_wake(thread: u32, message: u32) -> bool {
+    // SAFETY: scalar messages; the window handle is the host's own, and a closed one just fails the post.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the fallback for the moments before the wake window exists; every later wake is a window post"
+    )]
+    unsafe {
+        match wake_window() {
+            Some(window) => PostMessageW(Some(window), message, WPARAM(0), LPARAM(0)),
+            None => PostThreadMessageW(thread, message, WPARAM(0), LPARAM(0)),
+        }
+    }
+    .is_ok()
+}
+
+/// Caps Lock was pressed while a modal loop (a message box) ran: `dispatch` noted it, the host handles it after.
+static CAPS_PENDING: AtomicBool = AtomicBool::new(false);
+/// True once per such press, read on every pass.
+pub fn caps_read() -> bool {
+    CAPS_PENDING.swap(false, Ordering::AcqRel)
 }
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
@@ -690,6 +729,11 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
                 DEVICE_BITS.store(0, Ordering::Release);
             }
             return LRESULT(1);
+        }
+        if message == WM_HOTKEY && crate::keys::Keys::is_caps(wparam.0) {
+            // Only a modal loop (a message box, a menu) dispatches it here; the host loop takes the hotkey before dispatch.
+            CAPS_PENDING.store(true, Ordering::Release);
+            return LRESULT(0);
         }
         if message == WM_ENDSESSION && wparam.0 != 0 {
             // Signing out or shutting down: the process may end as soon as this returns.

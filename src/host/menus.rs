@@ -154,9 +154,38 @@ impl Desktop {
             Err(error) => eprintln!("Places: {error}"),
         }
     }
-    /// A pinned folder's stack above its dock slot: its newest files as rows, read now; a click opens that file
-    /// and an empty folder opens in Explorer instead.
-    pub(super) fn open_stack(&mut self, hwnd: HWND, slot: usize, folder: &str) {
+    /// What the worker found for a click on a pinned path (`places::ask`): a folder opens its stack unless another menu
+    /// opened since, and a path that is not a folder is launched like any other pin.
+    pub(super) fn stack_ready(&mut self, answer: crate::places::Answer) {
+        let hwnd = HWND(answer.dock as *mut _);
+        match answer.files {
+            Some(_) if self.menu.is_some() => {}
+            Some(files) => self.open_stack(hwnd, answer.slot, &answer.folder, files),
+            None => self.run_pin(answer.slot, Some(&answer.folder)),
+        }
+    }
+    /// Runs the dock action of pinned slot `slot` (launch, focus or cycle); with `folder`, only while the slot still
+    /// holds that path, since the click that asked may be a moment old.
+    pub(super) fn run_pin(&mut self, slot: usize, folder: Option<&str>) {
+        let Some(item) = self.dock_items.get(slot) else {
+            return;
+        };
+        if folder.is_some_and(|folder| item.identity != Identity::Executable(folder.to_owned())) {
+            return;
+        }
+        if let Some(action) = dock::action(item, dock::foreground_key()) {
+            self.run_dock_action(action);
+        }
+    }
+    /// A pinned folder's stack above its dock slot: its newest files as rows; a click opens that file and an empty
+    /// folder opens in Explorer instead.
+    fn open_stack(
+        &mut self,
+        hwnd: HWND,
+        slot: usize,
+        folder: &str,
+        files: Vec<std::path::PathBuf>,
+    ) {
         self.dismiss_preview();
         self.close_menu();
         let Some(dock) = self.dock_at(hwnd).filter(|dock| dock.visible) else {
@@ -176,7 +205,6 @@ impl Desktop {
         else {
             return;
         };
-        let files = crate::places::newest_files(std::path::Path::new(folder), crate::places::STACK);
         if files.is_empty() {
             dock::launch(folder);
             return;

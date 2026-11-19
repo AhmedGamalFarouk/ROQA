@@ -69,15 +69,27 @@ impl Desktop {
         }
     }
     /// A permission question from a hook shows on the notice row with Allow and Deny, a short peek that stays under
-    /// a full-screen app (the agent's own prompt is still there). It waits as long as the hook does.
+    /// a full-screen app (the agent's own prompt is still there). It waits as long as the hook does. When the row is
+    /// busy or no notch can show, the hook is told at once (`ipc::pass`) so its agent asks in the terminal.
     pub(super) fn show_ask(&mut self, id: u32, text: String, now: Instant) {
-        self.power.announce(
+        if !self.power.announce(
             text,
             now,
             Duration::from_secs(agent::ASK_SECS),
             power::Extra::Ask(id),
-        );
+        ) {
+            crate::ipc::pass(id);
+            return;
+        }
         self.open_notches();
+        if !self
+            .surfaces
+            .iter()
+            .any(|s| s.kind() == SurfaceKind::Notch && s.visible)
+        {
+            self.power.clear();
+            crate::ipc::pass(id);
+        }
         self.request_notches(Repaint::Full, |_| true);
     }
     /// A script's progress shows on the notice row with an accent bar; like a device alert it is a short peek
@@ -97,13 +109,17 @@ impl Desktop {
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
     }
-    /// Reminders: the wait is the soonest one's time, none with nothing set. A due one chimes (unless reminder
-    /// sounds are off) and shows with a Snooze button; one that came due while ROQA was off shows at the start.
+    /// Reminders: the wait is the soonest one's time, none with nothing set. A due one is taken only when the row can
+    /// show it (it chimes unless reminder sounds are off, and shows with a Snooze button); otherwise it stays in the
+    /// list until the row frees, and one that came due while ROQA was off shows at the start.
     #[inline(never)]
     pub(super) fn refresh_reminders(&mut self) -> u32 {
         let wall = timer::wall_now();
-        if let Some(label) = self.pages.reminders.take_due(wall) {
-            let now = Instant::now();
+        let now = Instant::now();
+        if self.pages.reminders.wait_secs(wall) == Some(0)
+            && self.power.admits(now, PRAYER_NOTICE, power::Extra::Snooze)
+            && let Some(label) = self.pages.reminders.take_due(wall)
+        {
             self.pages
                 .reminders
                 .write_to(&mut self.store, &mut self.pending, now);
@@ -113,9 +129,11 @@ impl Desktop {
             self.show_notice_with(remind::shown(&label), now, power::Extra::Snooze);
             self.last_reminder = label;
         }
+        // A zero wait is a reminder the row cannot show yet: the row's own deadline and the click wake the host.
         self.pages
             .reminders
             .wait_secs(wall)
+            .filter(|secs| *secs > 0)
             .map_or(INFINITE, |secs| {
                 u32::try_from(secs.saturating_mul(1000))
                     .map_or(INFINITE - 1, |ms| ms.min(INFINITE - 1))
@@ -176,23 +194,33 @@ impl Desktop {
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
     }
-    /// The Snooze button on a due reminder: the same words again in ten minutes.
+    /// The Snooze button on a due reminder: the same words again in ten minutes, or, with the list full, the
+    /// reminder and its button stay and the row says why.
     pub(super) fn snooze(&mut self) {
         let now = Instant::now();
-        let label = std::mem::take(&mut self.last_reminder);
-        self.pages
-            .reminders
-            .add(timer::wall_now(), remind::SNOOZE, label);
-        self.pages
-            .reminders
-            .write_to(&mut self.store, &mut self.pending, now);
         self.power.clear();
-        self.power.announce(
-            "Snoozed for 10 min".into(),
-            now,
-            DEVICE_NOTICE,
-            power::Extra::None,
-        );
+        if self.pages.reminders.waiting().len() >= remind::MAX {
+            self.power.announce(
+                format!("{} reminders are already waiting.", remind::MAX),
+                now,
+                DEVICE_NOTICE,
+                power::Extra::Snooze,
+            );
+        } else {
+            let label = std::mem::take(&mut self.last_reminder);
+            self.pages
+                .reminders
+                .add(timer::wall_now(), remind::SNOOZE, label);
+            self.pages
+                .reminders
+                .write_to(&mut self.store, &mut self.pending, now);
+            self.power.announce(
+                "Snoozed for 10 min".into(),
+                now,
+                DEVICE_NOTICE,
+                power::Extra::None,
+            );
+        }
         self.request_notches(Repaint::Full, |_| true);
     }
     /// Prayer (features P1): builds the page while it shows, then runs the reminders: one pass computes the day's
@@ -330,8 +358,48 @@ impl Desktop {
             self.surfaces.iter_mut().for_each(Surface::close_alert);
             self.request_notches(Repaint::Full, |_| true);
         }
+        // The notice that waited for the row shows now.
+        if self.power.promote(now) {
+            self.open_notches();
+            self.request_notches(Repaint::Full, |_| true);
+        }
         self.power
             .deadline()
             .map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+    pub(super) fn water_today(&self) -> u8 {
+        water::today(
+            self.store.water,
+            prayer_tab::day_number(prayer_os::local_now().ymd),
+        )
+    }
+    /// "I drank a glass": today's count goes up and is stored.
+    pub(super) fn water_drink(&mut self) {
+        let day = prayer_tab::day_number(prayer_os::local_now().ymd);
+        self.store.water = (day, self.water_today().saturating_add(1));
+        self.pages.water.0 = self.store.water;
+        self.pending.mark(Instant::now());
+    }
+    pub(super) fn sync_water(&self) {
+        if let Some(window) = &self.settings_window {
+            window.set_water(&water::text(self.water_today(), &self.settings.water_cfg));
+        }
+    }
+    /// Plays the chosen sound (none when silent or no default exists); false when nothing played.
+    pub(super) fn play_prayer_sound(&mut self, now: Instant) -> bool {
+        let found = prayer_os::discover();
+        let Some(mut path) = prayer_tab::resolve(&self.settings.prayer_sound, &found) else {
+            return false;
+        };
+        // A file that is gone plays the default instead; the stored setting is left as it is.
+        if !std::path::Path::new(path).is_file() {
+            let Some(default) = prayer_tab::default_sound(&found) else {
+                return false;
+            };
+            path = default;
+        }
+        let length = self.prayer.player.play(path);
+        self.prayer.sound_end = length.map(|length| now + length);
+        length.is_some()
     }
 }
