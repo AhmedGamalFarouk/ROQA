@@ -2150,8 +2150,7 @@ impl Desktop {
     }
     /// `show_notice`, with a button or bar on its row.
     fn show_notice_with(&mut self, text: String, now: Instant, extra: power::Extra) {
-        self.power.announce(text, now, PRAYER_NOTICE);
-        self.power.offer(extra);
+        self.power.announce(text, now, PRAYER_NOTICE, extra);
         for surface in &mut self.surfaces {
             if surface.kind() == SurfaceKind::Notch && !surface.visible {
                 // Painted before it shows, as when a full-screen app ends.
@@ -2193,9 +2192,12 @@ impl Desktop {
     /// A permission question from a hook shows on the notice row with Allow and Deny, a short peek that stays under
     /// a full-screen app (the agent's own prompt is still there). It waits as long as the hook does.
     fn show_ask(&mut self, id: u32, text: String, now: Instant) {
-        self.power
-            .announce(text, now, Duration::from_secs(agent::ASK_SECS));
-        self.power.offer(power::Extra::Ask(id));
+        self.power.announce(
+            text,
+            now,
+            Duration::from_secs(agent::ASK_SECS),
+            power::Extra::Ask(id),
+        );
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
     }
@@ -2207,9 +2209,12 @@ impl Desktop {
         } else {
             PROGRESS_HOLD
         };
-        self.power
-            .announce(agent::progress_text(name, percent), now, hold);
-        self.power.offer(power::Extra::Progress(percent));
+        self.power.announce(
+            agent::progress_text(name, percent),
+            now,
+            hold,
+            power::Extra::Progress(percent),
+        );
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
     }
@@ -2269,7 +2274,8 @@ impl Desktop {
         } else {
             format!("{} reminders are already waiting.", remind::MAX)
         };
-        self.power.announce(text, now, DEVICE_NOTICE);
+        self.power
+            .announce(text, now, DEVICE_NOTICE, power::Extra::None);
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
     }
@@ -2286,11 +2292,8 @@ impl Desktop {
         let Some(text) = text else {
             return;
         };
-        if self.power.extra() != power::Extra::None {
-            return;
-        }
         let now = Instant::now();
-        self.power.announce(text, now, hold);
+        self.power.announce(text, now, hold, power::Extra::None);
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
     }
@@ -2304,8 +2307,13 @@ impl Desktop {
         self.pages
             .reminders
             .write_to(&mut self.store, &mut self.pending, now);
-        self.power
-            .announce("Snoozed for 10 min".into(), now, DEVICE_NOTICE);
+        self.power.clear();
+        self.power.announce(
+            "Snoozed for 10 min".into(),
+            now,
+            DEVICE_NOTICE,
+            power::Extra::None,
+        );
         self.request_notches(Repaint::Full, |_| true);
     }
     /// Water reminders (F5): one deadline to the next slot, none while the switch is off. A due slot shows
@@ -5003,8 +5011,13 @@ impl Desktop {
             } else {
                 "Still in use"
             };
-            self.power
-                .announce(text.into(), Instant::now(), DEVICE_NOTICE);
+            self.power.clear();
+            self.power.announce(
+                text.into(),
+                Instant::now(),
+                DEVICE_NOTICE,
+                power::Extra::None,
+            );
             self.request_notches(Repaint::Full, |_| true);
             return true;
         }
@@ -5020,8 +5033,13 @@ impl Desktop {
         {
             crate::ipc::answer(hook, allow);
             let text = if allow { "Allowed" } else { "Denied" };
-            self.power
-                .announce(text.into(), Instant::now(), DEVICE_NOTICE);
+            self.power.clear();
+            self.power.announce(
+                text.into(),
+                Instant::now(),
+                DEVICE_NOTICE,
+                power::Extra::None,
+            );
             self.request_notches(Repaint::Full, |_| true);
             return true;
         }
@@ -5264,10 +5282,9 @@ impl Desktop {
             } else {
                 DEVICE_NOTICE
             };
-            self.power.announce(text.into(), Instant::now(), hold);
-            if let Some(letter) = letter {
-                self.power.offer(power::Extra::Eject(letter));
-            }
+            let extra = letter.map_or(power::Extra::None, power::Extra::Eject);
+            self.power
+                .announce(text.into(), Instant::now(), hold, extra);
             self.open_notches();
             self.request_notches(Repaint::Full, |_| true);
             return Ok(());
@@ -5836,7 +5853,8 @@ impl Desktop {
             } else {
                 format!("Volume {}%", level.percent)
             };
-            self.power.announce(text, Instant::now(), VOLUME_NOTICE);
+            self.power
+                .announce(text, Instant::now(), VOLUME_NOTICE, power::Extra::None);
             self.open_notches();
             self.request_notches(Repaint::Full, |_| true);
         } else if redraw {

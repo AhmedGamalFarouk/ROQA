@@ -135,19 +135,29 @@ impl Power {
             return false;
         }
         self.last = Some(state);
-        self.notice = Some((text(state, percent), now + NOTICE));
-        true
+        self.announce(text(state, percent), now, NOTICE, Extra::None)
     }
 
-    /// Shows `text` for `hold` in place of any power notice: the prayer reminder reuses the notice row.
-    pub fn announce(&mut self, text: String, now: Instant, hold: Duration) {
+    /// A question, an Eject or a Snooze waits for a click: only a new question may take its row, and a click
+    /// clears it first (`clear`).
+    fn guarded(&self) -> bool {
+        matches!(
+            self.extra(),
+            Extra::Ask(_) | Extra::Eject(_) | Extra::Snooze
+        )
+    }
+
+    /// Shows `text` and its `extra` for `hold` in place of any notice (the prayer reminder reuses the row);
+    /// false, and nothing changes, when a guarded notice keeps the row.
+    pub fn announce(&mut self, text: String, now: Instant, hold: Duration, extra: Extra) -> bool {
+        if self.guarded()
+            && (matches!(self.extra, Extra::Ask(_)) || !matches!(extra, Extra::Ask(_)))
+        {
+            return false;
+        }
         self.notice = Some((text, now + hold));
-        self.extra = Extra::None;
-    }
-
-    /// The notice just announced carries `extra`.
-    pub fn offer(&mut self, extra: Extra) {
         self.extra = extra;
+        true
     }
 
     /// The extra of the notice that shows now.
@@ -262,10 +272,40 @@ mod tests {
         let now = Instant::now();
         let mut power = Power::new(raw(0, 1, 60));
         assert!(!power.clear(), "nothing to clear");
-        power.announce("Pomodoro paused.".to_owned(), now, NOTICE);
+        power.announce("Pomodoro paused.".to_owned(), now, NOTICE, Extra::None);
         assert!(power.clear());
         assert_eq!((power.text(), power.deadline()), (None, None));
         assert!(!power.clear());
+    }
+
+    #[test]
+    fn a_waiting_button_notice_is_not_replaced_by_a_plain_one() {
+        let (now, hold) = (Instant::now(), NOTICE);
+        let mut power = Power::new(raw(0, 1, 60));
+        assert!(power.announce("Bash: git push".into(), now, hold, Extra::Ask(7)));
+        // A plain notice, a battery change and a second question leave the first question as it was.
+        assert!(!power.announce("Done".into(), now, hold, Extra::None));
+        assert!(!power.update(raw(1, 9, 59), now));
+        assert!(!power.announce("Rm".into(), now, hold, Extra::Ask(8)));
+        assert_eq!(
+            (power.text(), power.extra()),
+            (Some("Bash: git push"), Extra::Ask(7))
+        );
+        // After a click, the next notice shows, and a battery notice carries no old buttons.
+        assert!(power.clear());
+        assert!(power.announce("Drive connected".into(), now, hold, Extra::Eject('E')));
+        assert!(!power.update(raw(0, 1, 59), now));
+        assert!(
+            power.announce("Snooze".into(), now, hold, Extra::Ask(9)),
+            "a question may take Eject's row"
+        );
+        assert!(power.clear());
+        assert!(power.announce("Progress".into(), now, hold, Extra::Progress(40)));
+        assert!(power.update(raw(1, 9, 59), now));
+        assert_eq!(
+            (power.text(), power.extra()),
+            (Some("Charging 59%"), Extra::None)
+        );
     }
 
     #[test]
