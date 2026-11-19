@@ -1316,7 +1316,8 @@ fn notice_text(
     let labels: &[&str] = match scene.extra {
         Extra::Eject(_) => &["Eject"],
         Extra::Snooze => &["Snooze"],
-        Extra::Ask(_) => &["Allow", "Deny"],
+        // Deny is the primary (accent) button, rightmost; Allow is quiet.
+        Extra::Ask(_) => &["Deny", "Allow"],
         _ => &[],
     };
     let button = (!labels.is_empty())

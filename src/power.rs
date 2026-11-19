@@ -10,6 +10,9 @@ use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 /// How long a notice keeps the notch open.
 pub const NOTICE: Duration = Duration::from_secs(4);
 
+/// A question ignores clicks for this long after it shows, so a click meant for something under it is not an answer.
+const SETTLE: Duration = Duration::from_millis(500);
+
 /// The notice-worthy power states; a change between them (never a percentage tick) starts a notice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -114,6 +117,8 @@ pub struct Power {
     last: Option<State>,
     notice: Option<(String, Instant)>,
     extra: Extra,
+    /// When the notice on the row started.
+    since: Option<Instant>,
 }
 
 impl Power {
@@ -123,6 +128,7 @@ impl Power {
             last: raw.and_then(Raw::state).map(|(state, _)| state),
             notice: None,
             extra: Extra::None,
+            since: None,
         }
     }
 
@@ -157,7 +163,14 @@ impl Power {
         }
         self.notice = Some((text, now + hold));
         self.extra = extra;
+        self.since = Some(now);
         true
+    }
+
+    /// Whether a question has shown long enough (`SETTLE`) for a click to mean it.
+    pub fn settled(&self, now: Instant) -> bool {
+        self.since
+            .is_none_or(|since| now.duration_since(since) >= SETTLE)
     }
 
     /// The extra of the notice that shows now.
@@ -291,6 +304,7 @@ mod tests {
             (power.text(), power.extra()),
             (Some("Bash: git push"), Extra::Ask(7))
         );
+        assert!(!power.settled(now) && power.settled(now + SETTLE));
         // After a click, the next notice shows, and a battery notice carries no old buttons.
         assert!(power.clear());
         assert!(power.announce("Drive connected".into(), now, hold, Extra::Eject('E')));

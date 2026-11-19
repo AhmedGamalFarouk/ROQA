@@ -5023,7 +5023,7 @@ impl Desktop {
         }
         if let power::Extra::Ask(hook) = self.power.extra()
             && let Some(allow) =
-                [true, false]
+                [false, true]
                     .into_iter()
                     .enumerate()
                     .find_map(|(from_right, allow)| {
@@ -5031,8 +5031,14 @@ impl Desktop {
                             .then_some(allow)
                     })
         {
-            crate::ipc::answer(hook, allow);
-            let text = if allow { "Allowed" } else { "Denied" };
+            if !self.power.settled(Instant::now()) {
+                return true;
+            }
+            let text = match (crate::ipc::answer(hook, allow), allow) {
+                (false, _) => "Too late. Answer in the terminal.",
+                (true, true) => "Allowed",
+                (true, false) => "Denied",
+            };
             self.power.clear();
             self.power.announce(
                 text.into(),

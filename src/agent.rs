@@ -44,6 +44,15 @@ pub enum Report {
     Ask(u32, String),
 }
 
+/// The longest question line ROQA offers Allow for: the notch's two lines hold about this many characters, and a
+/// longer command would be cut, so it is never approved half-read.
+const ASK_WHOLE: usize = 60;
+
+/// Whether the notch can show the whole question line.
+fn shown_whole(line: &str) -> bool {
+    line.chars().count() <= ASK_WHOLE
+}
+
 /// How long a permission question waits for a click, in seconds, before the agent's own prompt takes over.
 pub const ASK_SECS: u64 = 30;
 
@@ -242,6 +251,13 @@ pub fn ask(name: &str) {
     else {
         return;
     };
+    if !shown_whole(&line) {
+        // Answer in the terminal: say so on the pill, and print nothing so the agent asks at once.
+        let _ = crate::ipc::Command::Agent.signal_after(|| {
+            let _ = write(name, Report::State(State::Needs));
+        });
+        return;
+    }
     let id = std::process::id();
     let Ok(events) = crate::ipc::answer_events(id) else {
         return;
@@ -285,6 +301,12 @@ mod tests {
         assert_eq!(parse("codex done"), done);
         assert_eq!(parse("codex done\r"), done);
         assert!(parse("codex later").is_none() && parse("codex").is_none());
+    }
+
+    #[test]
+    fn only_a_question_the_notch_shows_whole_gets_an_allow() {
+        assert!(shown_whole("Bash: git push origin main"));
+        assert!(!shown_whole(&format!("Bash: {}", "x".repeat(ASK_WHOLE))));
     }
 
     #[test]

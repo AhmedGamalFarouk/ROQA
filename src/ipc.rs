@@ -102,20 +102,20 @@ pub fn answer_events(id: u32) -> Result<[OwnedHandle; 2]> {
     Ok([make("allow")?, make("deny")?])
 }
 
-/// ROQA's side of the click: sets the answer event of hook process `id`; nothing happens if it already gave up.
-pub fn answer(id: u32, allow: bool) {
+/// ROQA's side of the click: sets the answer event of hook process `id`; false if it already gave up.
+pub fn answer(id: u32, allow: bool) -> bool {
     let Ok(name) = object_name(&format!(
         "ask.{id}.{}",
         if allow { "allow" } else { "deny" }
     )) else {
-        return;
+        return false;
     };
     // SAFETY: the name is NUL-terminated; OpenEvent requests only signaling rights.
     unsafe {
-        if let Ok(event) = OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(name.as_ptr())) {
+        OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(name.as_ptr())).is_ok_and(|event| {
             let event = OwnedHandle(event);
-            let _ = SetEvent(event.0);
-        }
+            SetEvent(event.0).is_ok()
+        })
     }
 }
 
