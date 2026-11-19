@@ -595,12 +595,19 @@ pub fn permission_line(input: &str) -> Option<(String, bool)> {
     });
     let line = detail.map_or_else(|| tool.clone(), |detail| format!("{tool}: {detail}"));
     let disguised = line.chars().any(|c| {
-        (c.is_control() && !c.is_whitespace())
-            || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+        c.is_control()
+            || matches!(c, '\u{ad}' | '\u{61c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{fe00}'..='\u{fe0f}' | '\u{feff}' | '\u{e0000}'..='\u{e007f}')
     });
-    let whole = !disguised && (detail.is_some() || input.is_none_or(Json::is_empty));
-    let line: Vec<_> = line.split_whitespace().collect();
-    let line: Vec<char> = line.join(" ").chars().collect();
+    // A newline, tab or run of spaces would show as one space: not the command Allow approves.
+    let squeezed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let known_shape = if tool.starts_with("mcp__") {
+        input.is_none_or(Json::is_empty)
+    } else {
+        detail.is_some() || input.is_none_or(Json::is_empty)
+    };
+    let whole =
+        !disguised && known_shape && squeezed == line && squeezed.chars().count() <= LONGEST;
+    let line: Vec<char> = squeezed.chars().collect();
     let line = if line.len() > LONGEST {
         let half = LONGEST / 2;
         line[..half]
@@ -909,7 +916,30 @@ mod tests {
         assert!(!whole(
             r#"{"tool_name":"Task","tool_input":{"prompt":"rm"}}"#
         ));
-        for hidden in [r"\u202e", r"\u200b", r"\u0007", r"\u2066"] {
+        // A newline, a tab or squeezed spaces change what the line shows; an MCP tool is never known by one key.
+        for command in [r"echo safe\nrm x", r"echo\tx", r#"echo \"a  b\""#, r"ls "] {
+            let text = format!(r#"{{"tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#);
+            assert!(!whole(&text), "{command}");
+        }
+        assert!(!whole(
+            r#"{"tool_name":"mcp__x__run","tool_input":{"path":"a","action":"delete"}}"#
+        ));
+        let long = format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#,
+            "a".repeat(LONGEST)
+        );
+        assert!(!whole(&long), "a cut line is not the whole command");
+        for hidden in [
+            r"\u202e",
+            r"\u200b",
+            r"\u0007",
+            r"\u2066",
+            r"\u061c",
+            r"\u00ad",
+            r"\u2063",
+            r"\ufe0f",
+            "\u{e0041}",
+        ] {
             let text =
                 format!(r#"{{"tool_name":"Bash","tool_input":{{"command":"ls{hidden}x"}}}}"#);
             assert!(!whole(&text), "{hidden}");
