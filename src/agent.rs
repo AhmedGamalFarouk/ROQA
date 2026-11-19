@@ -1,14 +1,14 @@
 //! AI agent status: what a coding agent reported with `roqa.exe agent <name> <state>` (working, needs you, done),
 //! and the progress any script reports with `roqa.exe progress <name> <0-100|done>`.
-//! The client appends one line to a spool file and signals the resident process, which reads and removes it
-//! (a name cannot travel in a named event). The tracker is pure: the host asks it for the pill text, the eyes'
-//! state and the one deadline it must wake for.
+//! The client drops one small file per report in a spool folder and signals the resident process, which reads and
+//! removes each (a name cannot travel in a named event). The tracker is pure: the host asks it for the pill text, the
+//! eyes' state and the one deadline it must wake for.
 
 use std::{
     fs,
-    io::Write,
-    path::PathBuf,
-    time::{Duration, Instant},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU32, Ordering},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,8 +82,10 @@ const STALE: Duration = Duration::from_secs(10 * 60);
 const MAX: usize = 8;
 /// The longest agent name kept.
 const NAME: usize = 24;
-/// The spool is a few short lines; more than this is not read.
+/// A spool file is one short line; a bigger one is not read.
 const SPOOL_CAP: u64 = 4096;
+/// Spool files read at once; the rest wait for the next call.
+const SPOOL_FILES: usize = 64;
 
 /// A name as typed: letters, digits, `-`, `_` and `.`, at most `NAME` characters.
 pub fn clean(name: &str) -> Option<&str> {
@@ -172,6 +174,7 @@ impl Agents {
 fn spool() -> Option<PathBuf> {
     let mut path = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
     path.push("ROQA");
+    path.push("agent");
     Some(path)
 }
 
@@ -194,35 +197,60 @@ pub fn write(name: &str, report: Report) -> std::io::Result<()> {
 }
 
 fn append(line: &str) -> std::io::Result<()> {
-    let mut path = spool().ok_or(std::io::ErrorKind::NotFound)?;
-    fs::create_dir_all(&path)?;
-    path.push("agent.txt");
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the spool is the agent hook's own append-only file, one line per write; not the store"
-    )]
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    // One write, so two clients cannot interleave a line.
-    file.write_all(line.as_bytes())
+    append_in(&spool().ok_or(std::io::ErrorKind::NotFound)?, line)
+}
+
+/// One file per report, written under a `.tmp` name and then renamed, so the resident never reads half a report and
+/// never deletes one that arrived while it was reading: a file it has listed is complete and is its alone.
+// shortcut: a `.tmp` left by a hook killed mid-write stays (a few bytes); sweep old ones if that ever shows up.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the spool is the agent hook's own one-file-per-report drop box, not the store"
+)]
+fn append_in(dir: &Path, line: &str) -> std::io::Result<()> {
+    static COUNT: AtomicU32 = AtomicU32::new(0);
+    fs::create_dir_all(dir)?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let name = format!(
+        "{stamp:020}-{}-{}",
+        std::process::id(),
+        COUNT.fetch_add(1, Ordering::Relaxed)
+    );
+    let tmp = dir.join(format!("{name}.tmp"));
+    fs::write(&tmp, line)?;
+    fs::rename(&tmp, dir.join(format!("{name}.txt")))
 }
 
 /// The resident half: the reports since the last call, oldest first. Anything unreadable is dropped.
 pub fn take() -> Vec<(String, Report)> {
-    let Some(path) = spool().map(|p| p.join("agent.txt")) else {
+    spool().map_or_else(Vec::new, |dir| take_in(&dir))
+}
+
+fn take_in(dir: &Path) -> Vec<(String, Report)> {
+    let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
-    let text = fs::metadata(&path)
-        .ok()
-        .filter(|m| m.len() <= SPOOL_CAP)
-        .and_then(|_| fs::read_to_string(&path).ok());
-    // shortcut: a line appended between the read and the removal is lost; reports are seconds apart.
-    let _ = fs::remove_file(&path);
-    text.iter()
-        .flat_map(|t| t.lines())
-        .filter_map(parse)
+    let mut files: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+        .collect();
+    // The names start with the time, so this is the order they were written in.
+    files.sort();
+    files
+        .iter()
+        .take(SPOOL_FILES)
+        .filter_map(|path| {
+            let text = fs::metadata(path)
+                .ok()
+                .filter(|meta| meta.len() <= SPOOL_CAP)
+                .and_then(|_| fs::read_to_string(path).ok());
+            let _ = fs::remove_file(path);
+            text
+        })
+        .flat_map(|text| text.lines().filter_map(parse).collect::<Vec<_>>())
         .collect()
 }
 
@@ -251,11 +279,12 @@ pub fn ask(name: &str) {
     use windows::Win32::{Foundation::WAIT_OBJECT_0, System::Threading::WaitForMultipleObjects};
     let mut input = String::new();
     let _ = std::io::stdin().take(64 * 1024).read_to_string(&mut input);
-    let (Some(name), Some(line)) = (clean(name), crate::agent_hooks::permission_line(&input))
+    let (Some(name), Some((line, whole))) =
+        (clean(name), crate::agent_hooks::permission_line(&input))
     else {
         return;
     };
-    if !shown_whole(&line) {
+    if !whole || !shown_whole(&line) {
         // Answer in the terminal: say so on the pill, and print nothing so the agent asks at once.
         let _ = crate::ipc::Command::Agent.signal_after(|| {
             let _ = write(name, Report::State(State::Needs));
@@ -272,8 +301,8 @@ pub fn ask(name: &str) {
     if shown.is_err() {
         return;
     }
-    let handles = [events[0].0, events[1].0];
-    // SAFETY: both handles stay open until this function returns.
+    let handles = [events[0].0, events[1].0, events[2].0];
+    // SAFETY: the handles stay open until this function returns.
     #[expect(
         clippy::disallowed_methods,
         reason = "the ask is a bounded wait on a worker for the user's answer"
@@ -282,6 +311,7 @@ pub fn ask(name: &str) {
     let decision = match woke.0.wrapping_sub(WAIT_OBJECT_0.0) {
         0 => r#"{"behavior":"allow"}"#,
         1 => r#"{"behavior":"deny","message":"Denied from ROQA"}"#,
+        // 2 is ROQA saying it cannot show the question; anything else is the wait running out.
         _ => return,
     };
     println!(
@@ -309,6 +339,33 @@ mod tests {
         assert_eq!(parse("codex done"), done);
         assert_eq!(parse("codex done\r"), done);
         assert!(parse("codex later").is_none() && parse("codex").is_none());
+    }
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test plants a half-written spool file"
+    )]
+    fn the_spool_keeps_every_report_in_order_and_skips_one_still_being_written() {
+        let dir = std::env::temp_dir().join(format!("roqa-spool-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(take_in(&dir).is_empty(), "no folder yet");
+        append_in(&dir, "codex working\n").unwrap();
+        append_in(&dir, "ask 7 claude Bash: ls\n").unwrap();
+        fs::write(dir.join("0-1-1.tmp"), "codex done\n").unwrap();
+        let first = take_in(&dir);
+        assert_eq!(
+            first,
+            [
+                ("codex".into(), Report::State(State::Working)),
+                ("claude".into(), Report::Ask(7, "Bash: ls".into())),
+            ]
+        );
+        // A report written after the first drain began is not in it and not lost.
+        append_in(&dir, "build 50%\n").unwrap();
+        assert_eq!(take_in(&dir), [("build".into(), Report::Percent(50))]);
+        assert!(take_in(&dir).is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -85,8 +85,8 @@ impl Command {
 }
 
 /// The events a permission question is answered on, made by the hook before it asks and named for its process:
-/// ROQA sets `allow` or `deny` when the click comes. Returned in that order.
-pub fn answer_events(id: u32) -> Result<[OwnedHandle; 2]> {
+/// ROQA sets `allow` or `deny` when the click comes, or `pass` when it cannot show the question. Returned in that order.
+pub fn answer_events(id: u32) -> Result<[OwnedHandle; 3]> {
     let make = |word: &str| -> Result<OwnedHandle> {
         let name = object_name(&format!("ask.{id}.{word}"))?;
         // SAFETY: valid terminated name; auto-reset event, no inheritance, default user DACL.
@@ -99,15 +99,21 @@ pub fn answer_events(id: u32) -> Result<[OwnedHandle; 2]> {
             )?))
         }
     };
-    Ok([make("allow")?, make("deny")?])
+    Ok([make("allow")?, make("deny")?, make("pass")?])
 }
 
 /// ROQA's side of the click: sets the answer event of hook process `id`; false if it already gave up.
 pub fn answer(id: u32, allow: bool) -> bool {
-    let Ok(name) = object_name(&format!(
-        "ask.{id}.{}",
-        if allow { "allow" } else { "deny" }
-    )) else {
+    signal_answer(id, if allow { "allow" } else { "deny" })
+}
+
+/// ROQA cannot show the question of hook process `id`: it asks in the terminal at once instead of after its wait.
+pub fn pass(id: u32) -> bool {
+    signal_answer(id, "pass")
+}
+
+fn signal_answer(id: u32, word: &str) -> bool {
+    let Ok(name) = object_name(&format!("ask.{id}.{word}")) else {
         return false;
     };
     // SAFETY: the name is NUL-terminated; OpenEvent requests only signaling rights.

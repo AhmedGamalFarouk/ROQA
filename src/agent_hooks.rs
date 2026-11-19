@@ -576,13 +576,16 @@ fn mine(spec: &Spec, exe: &Path) -> Result<Json, String> {
 const LONGEST: usize = 400;
 
 /// The words the notch shows for a permission question, from the hook's JSON on stdin: the tool and its
-/// command, path or address, with its spaces squeezed. `None` when it is not a tool question.
-pub fn permission_line(input: &str) -> Option<String> {
+/// command, path or address, with its spaces squeezed. `None` when it is not a tool question. The flag is false
+/// when the line is not the whole of what Allow would approve: the input has none of the parts it shows (an MCP
+/// tool, a task's prompt), or the text has characters that can make it read differently (hidden or bidirectional).
+pub fn permission_line(input: &str) -> Option<(String, bool)> {
     let json = Json::parse(input)?;
     let Some(Json::Str(tool)) = json.get("tool_name") else {
         return None;
     };
-    let detail = json.get("tool_input").and_then(|input| {
+    let input = json.get("tool_input");
+    let detail = input.and_then(|input| {
         ["command", "file_path", "url", "pattern", "path", "query"]
             .into_iter()
             .find_map(|key| match input.get(key) {
@@ -591,9 +594,14 @@ pub fn permission_line(input: &str) -> Option<String> {
             })
     });
     let line = detail.map_or_else(|| tool.clone(), |detail| format!("{tool}: {detail}"));
+    let disguised = line.chars().any(|c| {
+        (c.is_control() && !c.is_whitespace())
+            || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+    });
+    let whole = !disguised && (detail.is_some() || input.is_none_or(Json::is_empty));
     let line: Vec<_> = line.split_whitespace().collect();
     let line: Vec<char> = line.join(" ").chars().collect();
-    Some(if line.len() > LONGEST {
+    let line = if line.len() > LONGEST {
         let half = LONGEST / 2;
         line[..half]
             .iter()
@@ -602,7 +610,8 @@ pub fn permission_line(input: &str) -> Option<String> {
             .collect()
     } else {
         line.into_iter().collect()
-    })
+    };
+    Some((line, whole))
 }
 
 /// opencode's plugin: it names the program once and reports busy, idle and permission events.
@@ -863,7 +872,8 @@ mod tests {
 
     #[test]
     fn the_question_line_names_the_tool_and_what_it_touches() {
-        let line = |text: &str| permission_line(text);
+        let line = |text: &str| permission_line(text).map(|(line, _)| line);
+        let whole = |text: &str| permission_line(text).is_some_and(|(_, whole)| whole);
         assert_eq!(
             line(r#"{"tool_name":"Bash","tool_input":{"command":"git  push\n--force"}}"#)
                 .as_deref(),
@@ -888,6 +898,22 @@ mod tests {
             LONGEST + 1,
             "the ellipsis joins the halves"
         );
+        // Allow is only for a line that shows what it approves: not an input with no shown part, not hidden text.
+        assert!(whole(
+            r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#
+        ));
+        assert!(whole(r#"{"tool_name":"Task","tool_input":{}}"#));
+        assert!(!whole(
+            r#"{"tool_name":"mcp__x__run","tool_input":{"args":"rm -rf"}}"#
+        ));
+        assert!(!whole(
+            r#"{"tool_name":"Task","tool_input":{"prompt":"rm"}}"#
+        ));
+        for hidden in [r"\u202e", r"\u200b", r"\u0007", r"\u2066"] {
+            let text =
+                format!(r#"{{"tool_name":"Bash","tool_input":{{"command":"ls{hidden}x"}}}}"#);
+            assert!(!whole(&text), "{hidden}");
+        }
         assert_eq!(line("not json"), None);
         assert_eq!(line(r#"{"hook_event_name":"Stop"}"#), None);
     }
