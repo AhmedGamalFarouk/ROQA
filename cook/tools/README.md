@@ -18,6 +18,8 @@ The available passes are `matrix`, `dock`, `eyes`, and `extra`. The matrix pass 
 
 All captures run on the second (non-primary) monitor (owner decision 2026-11-18); `scripts\monitor.ps1` picks it. With one monitor the tools warn and use the primary; `ROQA_TEST_MONITOR=primary` forces the primary. Pass and tool coordinates are local to that monitor (1920x1080 at its origin), the backdrop covers only it, Settings is centred on it, and ROQA is kept off the other monitors with `off=` lines in the capture store.
 
+A still that is only the gray backdrop (ROQA was not on screen) fails the pass at once.
+
 Each capture starts ROQA from its own private store, which sets `notchauto=0` and `dockauto=0` (notch and dock never tuck, or the notch cannot be found). It is thrown away with the run; the owner's real store is never changed, so nothing needs restoring.
 
 ## Compare

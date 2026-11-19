@@ -23,7 +23,21 @@ $summary = [ordered]@{
     TasksAudit     = 'CLEAN (zero tasks)'
     ServicesAudit  = 'CLEAN (zero services)'
     TaskbarAudit   = 'CLEAN (native taskbar preserved)'
+    AgentHooks     = 'NONE'
     Result         = 'PASS'
+}
+
+# 0. Agent hooks written by Settings (Agents) still call roqa.exe once it is gone: list the files that name it.
+$agentFiles = '.claude\settings.json', '.codex\hooks.json', '.gemini\settings.json', '.gemini\config\hooks.json',
+    '.cursor\hooks.json', '.copilot\hooks\roqa-agent-status.json', '.config\opencode\plugins\roqa-agent-status.js'
+$hookFiles = @($agentFiles | ForEach-Object { Join-Path $env:USERPROFILE $_ } | Where-Object {
+    (Test-Path -LiteralPath $_) -and ((Get-Content -LiteralPath $_ -Raw -ErrorAction SilentlyContinue) -match '(?i)roqa(\.exe)?\\?"?\s+(agent|progress)|roqa-agent-status')
+})
+if ($hookFiles.Count -gt 0) {
+    Write-Warning "Agent hooks still name roqa in:`n  $($hookFiles -join "`n  ")`nPress Undo for each agent in ROQA's Settings (Agents) first, while ROQA runs; otherwise every agent session shows hook errors."
+    $summary.AgentHooks = "LEFT BEHIND in $($hookFiles.Count) file(s)"
+} else {
+    $summary.AgentHooks = 'CLEAN (no agent file names roqa)'
 }
 
 # 1. Graceful Process Shutdown

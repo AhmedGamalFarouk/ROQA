@@ -14,6 +14,11 @@ Add-Type -Path "$projectRoot/tests/NativeProbe.cs" -ReferencedAssemblies System.
 [NativeProbe]::EnablePhysicalPixels()
 $evidence = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $EvidenceDirectory))
 New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+# Second monitor only, on a private copy of the store (owner decision 2026-11-18); LOCALAPPDATA is restored at the end.
+. "$PSScriptRoot/monitor.ps1"
+[NativeProbe]::UseMonitor((Get-TestScreen).DeviceName)
+$realLocalAppData = $env:LOCALAPPDATA
+$env:LOCALAPPDATA = New-TestProfile (Join-Path $evidence 'profile')
 $executable = Join-Path $projectRoot 'target/release/roqa.exe'
 $observations = [ordered]@{ Label = 'M1 observation only; not a product-budget or competitor result';
     BinarySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $executable).Hash;
@@ -431,6 +436,7 @@ finally {
         $script:hostProcess.Dispose()
     }
     if ($anchor -ne [IntPtr]::Zero) { [NativeProbe]::StopAnchor($anchor) }
+    $env:LOCALAPPDATA = $realLocalAppData
     [void][NativeProbe]::SetCursorPos($originalCursor.X, $originalCursor.Y)
     [void][NativeProbe]::SetForegroundWindow($originalForeground)
     $observations | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $evidence 'smoke.json')

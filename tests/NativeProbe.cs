@@ -16,6 +16,26 @@ public static class NativeProbe {
     [StructLayout(LayoutKind.Sequential)] struct MonitorInfo {
         public int Size; public Rect Monitor, Work; public uint Flags;
     }
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct MonitorInfoEx {
+        public int Size; public Rect Monitor, Work; public uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string Device;
+    }
+    delegate bool MonitorVisitor(IntPtr monitor, IntPtr hdc, IntPtr rect, IntPtr data);
+    [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorVisitor visit, IntPtr data);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfoEx info);
+    // The monitor the suites test on (owner decision 2026-11-18: the second one); its top-left corner stands in for
+    // the old "primary monitor" everywhere below. Without UseMonitor it is the primary monitor, as before.
+    public static int TestX, TestY;
+    public static void UseMonitor(string device) {
+        bool found = false;
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (monitor, hdc, rect, data) => {
+            MonitorInfoEx info = new MonitorInfoEx(); info.Size = Marshal.SizeOf(typeof(MonitorInfoEx));
+            if (GetMonitorInfo(monitor, ref info) && info.Device == device) { TestX = info.Monitor.Left; TestY = info.Monitor.Top; found = true; }
+            return !found;
+        }, IntPtr.Zero);
+        if (!found) throw new InvalidOperationException("Test monitor not found: " + device);
+    }
+    static IntPtr TestMonitor(uint flags) { Point at = new Point(); at.X = TestX + 1; at.Y = TestY + 1; return MonitorFromPoint(at, flags); }
     [StructLayout(LayoutKind.Sequential)] struct Message {
         public IntPtr Window; public uint Id; public UIntPtr WParam; public IntPtr LParam;
         public uint Time; public Point Position; public uint Private;
@@ -80,11 +100,10 @@ public static class NativeProbe {
         }, IntPtr.Zero);
         return found;
     }
-    // Suites written before M3 assert primary-monitor geometry, so they follow the primary surface.
+    // Suites written before M3 assert primary-monitor geometry, so they follow the surface on the test monitor.
     public static IntPtr PrimarySurface(string title) {
         foreach (IntPtr window in Surfaces(title)) {
-            MonitorInfo monitor = new MonitorInfo(); monitor.Size = Marshal.SizeOf(typeof(MonitorInfo));
-            if (GetMonitorInfo(MonitorFromWindow(window, 2), ref monitor) && (monitor.Flags & 1) != 0) return window;
+            if (MonitorFromWindow(window, 2) == TestMonitor(2)) return window;
         }
         return IntPtr.Zero;
     }
@@ -94,8 +113,8 @@ public static class NativeProbe {
     }
     public static Rect WorkArea() {
         MonitorInfo monitor = new MonitorInfo(); monitor.Size = Marshal.SizeOf(typeof(MonitorInfo));
-        if (!GetMonitorInfo(MonitorFromPoint(new Point(), 1), ref monitor))
-            throw new InvalidOperationException("Cannot inspect primary monitor.");
+        if (!GetMonitorInfo(TestMonitor(1), ref monitor))
+            throw new InvalidOperationException("Cannot inspect the test monitor.");
         return monitor.Work;
     }
     public static void DpiChange(IntPtr window, uint dpi) {
@@ -118,7 +137,7 @@ public static class NativeProbe {
                 descriptor.Background = new IntPtr(6);
                 if (RegisterClass(ref descriptor) == 0) throw new InvalidOperationException("Cannot register smoke anchor.");
                 anchor = CreateWindowEx(0, descriptor.Name, "ROQA smoke test", 0x00CF0000,
-                    40, 180, 300, 120, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                    TestX + 40, TestY + 180, 300, 120, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
                 if (anchor == IntPtr.Zero) throw new InvalidOperationException("Cannot create smoke anchor.");
                 ShowWindow(anchor, 1); UpdateWindow(anchor); SetForegroundWindow(anchor);
                 AnchorReady.Set();

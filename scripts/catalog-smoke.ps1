@@ -8,6 +8,11 @@ Add-Type -Path "$projectRoot/tests/NativeProbe.cs" -ReferencedAssemblies System.
 [NativeProbe]::EnablePhysicalPixels()
 $evidence = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $EvidenceDirectory))
 New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+# Second monitor only, on a private copy of the store (owner decision 2026-11-18); LOCALAPPDATA is restored at the end.
+. "$PSScriptRoot/monitor.ps1"
+[NativeProbe]::UseMonitor((Get-TestScreen).DeviceName)
+$realLocalAppData = $env:LOCALAPPDATA
+$env:LOCALAPPDATA = New-TestProfile (Join-Path $evidence 'profile')
 $diagnostics = Join-Path $evidence 'catalog.json'
 $executable = Join-Path $projectRoot 'target/release/roqa.exe'
 $observations = [ordered]@{ BinarySha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash; Utc = [DateTime]::UtcNow.ToString('o'); Checks = @(); Samples = @() }
@@ -151,6 +156,7 @@ try {
     if ($null -ne $queueTraffic -and !$queueTraffic.Worker.Join(40000)) { Write-Warning 'Queue producer did not stop.' }
     if ($null -ne $stormThread -and !$stormThread.Join(5000)) { Write-Warning 'Fixture storm thread did not stop.' }
     if ($fixture -ne [IntPtr]::Zero) { [NativeProbe]::StopAnchor($fixture) }
+    $env:LOCALAPPDATA = $realLocalAppData
     [void][NativeProbe]::SetForegroundWindow($originalForeground)
     $observations | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidence 'catalog-smoke.json') -Encoding UTF8
 }

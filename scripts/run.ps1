@@ -14,11 +14,7 @@ if ($Action -eq 'start') {
     # ROQA runs on the test monitor only (scripts/monitor.ps1): a private copy of the owner's store with the
     # other monitors switched off, so the real store is never changed. Refreshed from the real store each start.
     . "$PSScriptRoot/monitor.ps1"
-    $profileDir = Join-Path $logDirectory 'profile'
-    New-Item -ItemType Directory -Force -Path (Join-Path $profileDir 'ROQA') | Out-Null
-    $real = Join-Path $env:LOCALAPPDATA 'ROQA\store.roqa'
-    $lines = @(Get-Content -LiteralPath $real -ErrorAction SilentlyContinue | Where-Object { $_ -ne 'end' -and $_ -notmatch '^off=' }) + @(Get-TestOffLines) + 'end'
-    [IO.File]::WriteAllLines((Join-Path $profileDir 'ROQA\store.roqa'), $lines, (New-Object Text.UTF8Encoding $false))
+    $profileDir = New-TestProfile (Join-Path $logDirectory 'profile')
     $realLocal = $env:LOCALAPPDATA
     try {
         $env:LOCALAPPDATA = $profileDir

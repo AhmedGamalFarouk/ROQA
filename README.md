@@ -13,7 +13,7 @@
 
 - **Ultra-lightweight:** Self-contained single-binary executable (~1.5 MB) compiled with full LTO and stripped debug info.
 - **Hardware-Accelerated DirectComposition:** Sub-pixel Direct2D and DirectWrite rendering with smooth 60fps springs and transitions.
-- **Pure Event-Driven Win32:** Zero polling loops or invasive system hooks; sleeps quietly when idle.
+- **Event-Driven Win32:** No keyboard hook and no polling while idle: it sleeps until Windows reports something, with a few timed waits (the clock each minute, a window-list recheck every 30 s) and short ones only while something moves.
 - **Non-Invasive:** Leaves the native Windows taskbar intact, registers no background services, and makes zero unsolicited startup or registry modifications.
 - **Multi-Monitor & DPI-Native:** Full Per-Monitor V2 (PMv2) DPI awareness and automatic fullscreen suppression (auto-hides during gaming and fullscreen video).
 
@@ -58,7 +58,7 @@
 | **Media Integration** | WinRT GSMTC (`Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager`) |
 | **Audio Endpoints** | Windows Core Audio APIs (`IMMDeviceEnumerator`, `IAudioEndpointVolume`) |
 | **Weather & Networking** | Windows WinHTTP (`winhttp.dll`) with OS-managed TLS stack |
-| **Storage & Settings** | Atomic JSON persistence under `%APPDATA%\ROQA\` |
+| **Storage & Settings** | One `key=value` text file, written atomically: `%LOCALAPPDATA%\ROQA\store.roqa` |
 
 ---
 
@@ -108,7 +108,7 @@ roqa --hide-dock         # Hide the dock
 roqa --show-settings     # Open the settings panel
 
 # Diagnostics & Shutdown
-roqa --diagnostics <out> # Output atomic catalog snapshot
+roqa --diagnostics <out> # Start ROQA with counters written to <out> (only when none runs)
 roqa --quit              # Gracefully shut down ROQA and persist settings
 ```
 
@@ -142,11 +142,11 @@ ROQA is entirely portable. To remove it cleanly:
 # Preview what would be removed
 ./scripts/uninstall.ps1 -DryRun
 
-# Gracefully terminate process and purge application data (%APPDATA%\ROQA)
+# Gracefully terminate process and purge application data (%LOCALAPPDATA%\ROQA)
 ./scripts/uninstall.ps1 -PurgeData
 
 # Or terminate process while preserving settings
 ./scripts/uninstall.ps1 -KeepData
 ```
 
-ROQA leaves zero background services, zero scheduled tasks, and zero orphaned registry keys.
+ROQA leaves zero background services, zero scheduled tasks, and zero orphaned registry keys. Agent hooks added in Settings stay in the agents' own files: press Undo there first (the script lists any that remain).

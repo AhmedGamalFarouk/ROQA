@@ -39,8 +39,19 @@ public static class Cap {
 
         using (Bitmap bmp = Image.FromHbitmap(hBitmap)) {
             bmp.Save(path, ImageFormat.Png);
+            // A still that is only the gray backdrop (#696969) means ROQA was not on screen: fail, never keep it as evidence (r17).
+            if (OnlyBackdrop(bmp)) throw new InvalidOperationException("Still is only the backdrop: " + path);
         }
         DeleteObject(hBitmap);
+    }
+
+    static bool OnlyBackdrop(Bitmap bmp) {
+        for (int y = 0; y < bmp.Height; y++)
+            for (int x = 0; x < bmp.Width; x++) {
+                Color c = bmp.GetPixel(x, y);
+                if (c.R != 105 || c.G != 105 || c.B != 105) return false;
+            }
+        return true;
     }
 }
 

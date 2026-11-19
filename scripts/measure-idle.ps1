@@ -184,7 +184,14 @@ $launchTimestamp = [System.Diagnostics.Stopwatch]::GetTimestamp()
 # Hidden is ROQA's own launch mode; a competitor starts with its default window state, whose effect is unverified.
 $launchArguments = @{ FilePath = $executable; PassThru = $true; WindowStyle = 'Hidden' }
 if ($diagnosticsPath) { Remove-Item -LiteralPath $diagnosticsPath -ErrorAction SilentlyContinue; $launchArguments.ArgumentList = @('--diagnostics', ('"' + $diagnosticsPath + '"')) }
-$measuredHost = if ($Competitor) { Start-Process -FilePath $executable -PassThru } else { Start-Process @launchArguments }
+# ROQA runs on the second monitor only, on a private copy of the store (owner decision 2026-11-18); a competitor is not ours to configure.
+if (!$Competitor) {
+    . "$PSScriptRoot/monitor.ps1"
+    $realLocalAppData = $env:LOCALAPPDATA
+    $env:LOCALAPPDATA = New-TestProfile (Join-Path $evidence 'profile')
+}
+try { $measuredHost = if ($Competitor) { Start-Process -FilePath $executable -PassThru } else { Start-Process @launchArguments } }
+finally { if (!$Competitor) { $env:LOCALAPPDATA = $realLocalAppData } }
 $sampleClock = $null
 $diagnosticsStart = $null
 try {
