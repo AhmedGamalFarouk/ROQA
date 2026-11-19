@@ -691,6 +691,11 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
             }
             return LRESULT(1);
         }
+        if message == WM_ENDSESSION && wparam.0 != 0 {
+            // Signing out or shutting down: the process may end as soon as this returns.
+            crate::store::save_unsaved();
+            return LRESULT(0);
+        }
         if message == WM_CLIPBOARDUPDATE {
             if claim(&CLIP_PENDING) && PostMessageW(None, CLIPBOARD, WPARAM(0), LPARAM(0)).is_err()
             {

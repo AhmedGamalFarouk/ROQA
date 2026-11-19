@@ -2,8 +2,8 @@
 //!
 //! Format is a hand-rolled `key=value` text file (no new crate): `version=N`, repeated `pin=`/`shelf=` lines,
 //! the settings lines (`settings.rs`, version 2), and a closing `end` line that makes truncation detectable.
-//! Unknown keys are skipped, so a newer build's extra fields survive an older reader; a *newer version* is set
-//! aside instead, so a downgrade never rewrites it.
+//! Unknown keys are skipped when reading and are dropped at the next save (only known fields are written); a
+//! *newer version* is set aside instead, so a downgrade never rewrites it.
 
 use crate::settings::Settings;
 use crate::tabs::Tab;
@@ -112,6 +112,9 @@ impl Pending {
     }
     pub fn written(&mut self) {
         self.0 = None;
+    }
+    pub fn dirty(&self) -> bool {
+        self.0.is_some()
     }
     /// A failed write stays pending and is next due `RETRY` after `now`.
     pub fn retry(&mut self, now: Instant) {
@@ -277,22 +280,51 @@ impl Store {
     /// Atomic temp-and-rename write, same pattern as the opt-in diagnostics. A stale temp file from a crashed
     /// process (a different pid) is ignored by `load` and left in place: at most one tiny file per crash.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let text = self.serialize();
-        if text.len() as u64 > MAX_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "store exceeds its size cap",
-            ));
-        }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let temporary = path.with_extension(format!("roqa-{}.tmp", std::process::id()));
-        std::fs::write(&temporary, text)
-            .and_then(|()| std::fs::rename(&temporary, path))
-            .inspect_err(|_| {
-                let _ = std::fs::remove_file(&temporary);
-            })
+        write_text(path, &self.serialize())
+    }
+}
+
+/// The atomic write of `save`; the file is flushed to disk before the rename, so a power cut cannot leave an
+/// empty store in place of the old one.
+fn write_text(path: &Path, text: &str) -> io::Result<()> {
+    use std::io::Write;
+    if text.len() as u64 > MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "store exceeds its size cap",
+        ));
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let temporary = path.with_extension(format!("roqa-{}.tmp", std::process::id()));
+    std::fs::File::create(&temporary)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&temporary, path))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temporary);
+        })
+}
+
+/// The unwritten store as text, for a sign-out that comes before the debounced write: the window procedure
+/// cannot reach the host's store, so the host keeps this current while changes wait.
+static UNSAVED: std::sync::Mutex<Option<(PathBuf, String)>> = std::sync::Mutex::new(None);
+
+/// Keeps `store` for `save_unsaved` while `dirty`, and forgets it once written.
+pub fn keep_unsaved(path: &Path, store: &Store, dirty: bool) {
+    if let Ok(mut unsaved) = UNSAVED.lock() {
+        *unsaved = dirty.then(|| (path.to_owned(), store.serialize()));
+    }
+}
+
+/// `WM_ENDSESSION`: writes what `keep_unsaved` holds, at once.
+pub fn save_unsaved() {
+    let held = UNSAVED.lock().ok().and_then(|mut unsaved| unsaved.take());
+    if let Some((path, text)) = held {
+        let _ = write_text(&path, &text);
     }
 }
 
@@ -592,6 +624,19 @@ mod tests {
         let nested = dir.0.join("ROQA").join("store.roqa");
         sample().save(&nested).unwrap();
         assert_eq!(load(&nested).0, sample());
+    }
+
+    #[test]
+    fn a_sign_out_writes_what_the_host_kept_and_a_written_store_keeps_nothing() {
+        let dir = Dir::new("signout");
+        let path = dir.file();
+        keep_unsaved(&path, &sample(), true);
+        save_unsaved();
+        assert_eq!(load(&path).0, sample());
+        let _ = std::fs::remove_file(&path);
+        keep_unsaved(&path, &sample(), false);
+        save_unsaved();
+        assert!(!path.exists(), "clean: nothing to write");
     }
 
     #[test]

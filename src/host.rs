@@ -4914,6 +4914,9 @@ impl Desktop {
     /// pending and retries after `store::RETRY`.
     fn flush_store(&mut self, quit: bool) {
         let now = Instant::now();
+        if let Some(path) = &self.store_path {
+            store::keep_unsaved(path, &self.store, self.pending.dirty());
+        }
         if !self.pending.should_write(now, quit) {
             return;
         }
@@ -4926,7 +4929,12 @@ impl Desktop {
                 eprintln!("Store: write failed: {error}");
                 self.pending.retry(now);
             }
-            _ => self.pending.written(),
+            _ => {
+                self.pending.written();
+                if let Some(path) = &self.store_path {
+                    store::keep_unsaved(path, &self.store, false);
+                }
+            }
         }
     }
     fn command(&mut self, command: Command) -> Result<bool> {
