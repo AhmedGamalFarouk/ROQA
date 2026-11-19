@@ -2897,12 +2897,14 @@ fn draw_slot(
             }
         }
         if slot.active || slot.running {
-            // Focus is a full Lamp capsule; other running groups a softer Lamp dot.
+            // Focus is a full Lamp capsule (the selected indicator); other running groups a softer ink dot.
             let (half, bottom) = (px(if slot.active { 6 } else { 2 }), cell.bottom - px(4));
-            let brush = context.CreateSolidColorBrush(
-                &tint(p.accent_dim(false, if slot.active { 1.0 } else { 0.7 })),
-                None,
-            )?;
+            let colour = if slot.active {
+                p.accent_dim(false, 1.0)
+            } else {
+                p.ink_dim(false, 0.7)
+            };
+            let brush = context.CreateSolidColorBrush(&tint(colour), None)?;
             let dots = if slot.active {
                 1
             } else {
