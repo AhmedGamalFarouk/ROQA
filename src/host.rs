@@ -5048,16 +5048,12 @@ impl Desktop {
         if let Some(letter) = self.power.eject()
             && layout::notice_button_at(width, dpi, progress, live, 0, (x, y))
         {
-            let text = if crate::system_os::eject(letter) {
-                "Safe to remove"
-            } else {
-                "Still in use"
-            };
+            crate::system_os::eject_in_background(letter);
             self.power.clear();
             self.power.announce(
-                text.into(),
+                "Ejecting".into(),
                 Instant::now(),
-                DEVICE_NOTICE,
+                DRIVE_NOTICE,
                 power::Extra::None,
             );
             self.request_notches(Repaint::Full, |_| true);
@@ -5833,6 +5829,21 @@ impl Desktop {
                 eyes.wake(now);
                 self.request_notches(Repaint::Full, |s| !s.live && s.motion.value(now) < 0.1);
             }
+        }
+        if let Some(safe) = crate::system_os::ejected() {
+            let text = if safe {
+                "Safe to remove"
+            } else {
+                "Still in use"
+            };
+            self.power.announce(
+                text.into(),
+                Instant::now(),
+                DEVICE_NOTICE,
+                power::Extra::None,
+            );
+            self.open_notches();
+            self.request_notches(Repaint::Full, |_| true);
         }
         if keys::looking() {
             let said = self.keys.looked();

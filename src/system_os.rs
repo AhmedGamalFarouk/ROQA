@@ -127,6 +127,44 @@ pub fn eject(letter: char) -> bool {
     }
 }
 
+/// What the last `eject_in_background` found: 0 none yet, 1 safe to remove, 2 refused. Read once by `ejected`.
+static EJECT_RESULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// Posted to the host thread when an eject finished; it only wakes the loop, `ejected` carries the answer.
+const EJECTED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 61;
+
+/// `eject` on a short worker: locking and dismounting flush the drive, which can take seconds on a slow stick and
+/// must not stop the dock and notch. The answer comes back through `ejected`.
+pub fn eject_in_background(letter: char) {
+    // SAFETY: a scalar thread id query.
+    let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    let spawned = std::thread::Builder::new()
+        .name("roqa-eject".into())
+        .spawn(move || {
+            let answer = if eject(letter) { 1 } else { 2 };
+            EJECT_RESULT.store(answer, std::sync::atomic::Ordering::Release);
+            // SAFETY: a scalar-only wake to the host thread; a failed post is picked up on its next pass.
+            let _ = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
+                    host,
+                    EJECTED,
+                    windows::Win32::Foundation::WPARAM(0),
+                    windows::Win32::Foundation::LPARAM(0),
+                )
+            };
+        });
+    if spawned.is_err() {
+        EJECT_RESULT.store(2, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// The finished eject's answer, once: `Some(true)` when the drive is safe to remove.
+pub fn ejected() -> Option<bool> {
+    match EJECT_RESULT.swap(0, std::sync::atomic::Ordering::AcqRel) {
+        0 => None,
+        answer => Some(answer == 1),
+    }
+}
+
 #[link(name = "user32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn LockWorkStation() -> i32;

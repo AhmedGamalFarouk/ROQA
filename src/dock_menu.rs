@@ -234,7 +234,7 @@ pub struct Spec {
     pub work: Bounds,
     pub dpi: u32,
     pub app: String,
-    /// Row text and icon per item when the labels are not fixed (the minimized list); empty otherwise.
+    /// Row text and icon per item when the labels are not fixed (quick settings, Places, folder rows); empty otherwise.
     pub titles: Vec<String>,
     pub icons: Vec<Option<Arc<IconPixels>>>,
     /// The screen column the menu centres on (a slot's centre, or the pointer), and `Some(bottom)` to open it
