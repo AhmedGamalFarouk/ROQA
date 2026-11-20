@@ -135,35 +135,55 @@ pub fn eject(letter: char) -> bool {
     }
 }
 
-/// What the last `eject_in_background` found: 0 none yet, 1 safe to remove, 2 refused. Read once by `ejected`.
-static EJECT_RESULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// The one eject slot: 0 free, `BUSY` while a worker runs, otherwise a finished answer waiting to be read
+/// (`letter << 8 | 2` refused, `| 3` safe to remove). A new eject starts only from 0, so an unread answer is never
+/// replaced and each answer names its drive.
+static EJECT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const BUSY: u32 = 1;
 /// Posted to the host thread when an eject finished; it only wakes the loop, `ejected` carries the answer.
 const EJECTED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 61;
 
+fn eject_begin() -> bool {
+    use std::sync::atomic::Ordering::{AcqRel, Acquire};
+    EJECT.compare_exchange(0, BUSY, AcqRel, Acquire).is_ok()
+}
+
+fn eject_finish(letter: char, safe: bool) {
+    EJECT.store(
+        (letter as u32) << 8 | if safe { 3 } else { 2 },
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
 /// `eject` on a short worker: locking and dismounting flush the drive, which can take seconds on a slow stick and
-/// must not stop the dock and notch. The answer comes back through `ejected`.
-pub fn eject_in_background(letter: char) {
+/// must not stop the dock and notch. The answer comes back through `ejected`. False, and nothing starts, while an
+/// earlier eject is out or its answer is unread.
+pub fn eject_in_background(letter: char) -> bool {
+    if !eject_begin() {
+        return false;
+    }
     // SAFETY: a scalar thread id query.
     let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
     let spawned = std::thread::Builder::new()
         .name("roqa-eject".into())
         .spawn(move || {
-            let answer = if eject(letter) { 1 } else { 2 };
-            EJECT_RESULT.store(answer, std::sync::atomic::Ordering::Release);
+            eject_finish(letter, eject(letter));
             // A failed post is picked up on the host's next pass.
             let _ = crate::native_window::post_wake(host, EJECTED);
         });
     if spawned.is_err() {
-        EJECT_RESULT.store(2, std::sync::atomic::Ordering::Release);
+        eject_finish(letter, false);
     }
+    true
 }
 
-/// The finished eject's answer, once: `Some(true)` when the drive is safe to remove.
-pub fn ejected() -> Option<bool> {
-    match EJECT_RESULT.swap(0, std::sync::atomic::Ordering::AcqRel) {
-        0 => None,
-        answer => Some(answer == 1),
-    }
+/// The finished eject's drive and answer, once: `true` when the drive is safe to remove.
+pub fn ejected() -> Option<(char, bool)> {
+    use std::sync::atomic::Ordering::{AcqRel, Acquire};
+    let done = EJECT
+        .fetch_update(AcqRel, Acquire, |state| (state > BUSY).then_some(0))
+        .ok()?;
+    Some((char::from_u32(done >> 8)?, done & 0xFF == 3))
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
@@ -184,5 +204,25 @@ pub fn sleep() {
     // SAFETY: scalar flags only.
     unsafe {
         let _ = SetSuspendState(false, false, false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_eject_at_a_time_keeps_the_first_unread_answer_and_names_its_drive() {
+        assert_eq!(ejected(), None);
+        assert!(eject_begin());
+        assert!(!eject_begin(), "busy while the worker runs");
+        assert_eq!(ejected(), None, "nothing to read yet");
+        eject_finish('E', true);
+        assert!(!eject_begin(), "an unread answer is never replaced");
+        assert_eq!(ejected(), Some(('E', true)));
+        assert_eq!(ejected(), None, "read once");
+        assert!(eject_begin());
+        eject_finish('F', false);
+        assert_eq!(ejected(), Some(('F', false)));
     }
 }

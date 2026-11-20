@@ -2784,6 +2784,10 @@ impl Desktop {
     }
     /// A slot acts on its real window group, a button does its job.
     fn activate(&mut self, hwnd: HWND, hit: Option<Hit>) -> Result<()> {
+        // A newer click supersedes a Places or stack answer still out, even when this one is refused or opens nothing.
+        if hit.is_some() {
+            crate::places::invalidate();
+        }
         match hit {
             Some(Hit::Slot(slot)) => {
                 if let Some(item) = self.dock_items.get(slot)
@@ -3482,46 +3486,6 @@ impl Desktop {
         }
     }
 
-    /// Milliseconds until the debounced store write is due; `INFINITE` with no unwritten change.
-    fn store_wait(&self) -> u32 {
-        let now = Instant::now();
-        match self.pending.decision(now) {
-            Flush::Idle => INFINITE,
-            Flush::Wait(due) => milliseconds_until(due, now),
-            Flush::Now => 0,
-        }
-    }
-    /// Writes the store if its deadline passed, or at quit if anything is unwritten. A failure stays
-    /// pending and retries after `store::RETRY`.
-    fn flush_store(&mut self, quit: bool) {
-        let now = Instant::now();
-        // The sign-out copy is built once per change, not on every pass (an animation frame) while the write waits.
-        let dirty = self.pending.dirty();
-        if let Some(path) = &self.store_path
-            && (!dirty || self.pending.take_changed())
-        {
-            store::keep_unsaved(path, &self.store, dirty);
-        }
-        if !self.pending.should_write(now, quit) {
-            return;
-        }
-        match self
-            .store_path
-            .as_deref()
-            .map(|path| self.store.flush(path))
-        {
-            Some(Err(error)) => {
-                eprintln!("Store: write failed: {error}");
-                self.pending.retry(now);
-            }
-            _ => {
-                self.pending.written();
-                if let Some(path) = &self.store_path {
-                    store::keep_unsaved(path, &self.store, false);
-                }
-            }
-        }
-    }
     fn command(&mut self, command: Command) -> Result<bool> {
         match command {
             Command::Quit => return Ok(false),
@@ -4077,18 +4041,14 @@ impl Desktop {
                 self.request_notches(Repaint::Full, |s| !s.live && s.motion.value(now) < 0.1);
             }
         }
-        if let Some(safe) = crate::system_os::ejected() {
+        if let Some((letter, safe)) = crate::system_os::ejected() {
             let text = if safe {
-                "Safe to remove"
+                format!("{letter}: safe to remove")
             } else {
-                "Still in use"
+                format!("{letter}: still in use")
             };
-            self.power.announce(
-                text.into(),
-                Instant::now(),
-                DEVICE_NOTICE,
-                power::Extra::None,
-            );
+            self.power
+                .announce(text, Instant::now(), DEVICE_NOTICE, power::Extra::None);
             self.open_notches();
             self.request_notches(Repaint::Full, |_| true);
         }
@@ -4338,6 +4298,8 @@ pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> 
     });
     let mut catalog = Catalog::create(report)?;
     desktop.startup_notice();
+    // One short worker reads the radios now, so the first Quick settings popup already has their rows.
+    quick::refresh(None);
     crate::error_log::started();
     let result = event_loop(&controls, &mut desktop, &mut catalog);
     desktop.flush_store(true);

@@ -4,6 +4,45 @@
 use super::*;
 
 impl Desktop {
+    /// Milliseconds until the debounced store write is due; `INFINITE` with no unwritten change.
+    pub(super) fn store_wait(&self) -> u32 {
+        let now = Instant::now();
+        match self.pending.decision(now) {
+            Flush::Idle => INFINITE,
+            Flush::Wait(due) => milliseconds_until(due, now),
+            Flush::Now => 0,
+        }
+    }
+    /// Saves the store once its deadline passed, on a short worker so a slow disk never stops the host; at quit,
+    /// anything unwritten is saved here and now. A failure stays pending and retries after `store::RETRY`.
+    pub(super) fn flush_store(&mut self, quit: bool) {
+        let now = Instant::now();
+        if self.pending.flying()
+            && let Some((rev, ok)) = store::take_done()
+        {
+            self.pending.landed(rev, ok, now);
+        }
+        // The copy the write takes is built once per change, not on every pass (an animation frame) while it waits.
+        let dirty = self.pending.dirty();
+        let Some(path) = &self.store_path else {
+            self.pending.written();
+            return;
+        };
+        if !dirty || self.pending.take_changed() {
+            store::keep_unsaved(path, &self.store, dirty, self.pending.rev());
+        }
+        if !self.pending.should_write(now, quit) {
+            return;
+        }
+        if quit {
+            store::save_unsaved();
+            self.pending.written();
+        } else if store::save_in_background() {
+            self.pending.fly();
+        } else {
+            self.pending.retry(now);
+        }
+    }
     /// The work area a dialog opens on: the monitor under the pointer when ROQA is on it, else the first one ROQA
     /// is on, else the main one.
     pub(super) fn dialog_work_area(&self) -> Result<layout::Bounds> {
@@ -92,7 +131,7 @@ impl Desktop {
             }
             Some(SoundAction::Test) => {
                 let missing = prayer_tab::resolve(&self.settings.prayer_sound, &[])
-                    .is_some_and(Self::sound_missing);
+                    .is_some_and(prayer_tab::missing);
                 let status = if !self.play_prayer_sound(Instant::now()) {
                     "No sound to play. Pick another file."
                 } else if missing {

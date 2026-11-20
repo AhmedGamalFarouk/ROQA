@@ -434,11 +434,6 @@ impl Desktop {
             window.set_water(&water::text(self.water_today(), &self.settings.water_cfg));
         }
     }
-    /// Whether a chosen sound is not used: its file is gone, or it is on a network share (a stat or a play there can
-    /// stall the host with no time bound, so it is never touched).
-    pub(super) fn sound_missing(path: &str) -> bool {
-        shelf_os::is_network(path) || !std::path::Path::new(path).is_file()
-    }
     /// Plays the chosen sound (none when silent or no default exists); false when nothing played.
     pub(super) fn play_prayer_sound(&mut self, now: Instant) -> bool {
         let found = prayer_os::discover();
@@ -446,7 +441,7 @@ impl Desktop {
             return false;
         };
         // A file that is gone or on a share plays the default instead; the stored setting is left as it is.
-        if Self::sound_missing(path) {
+        if prayer_tab::missing(path) {
             let Some(default) = prayer_tab::default_sound(&found) else {
                 return false;
             };

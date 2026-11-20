@@ -114,7 +114,7 @@ impl Desktop {
         self.dismiss_preview();
         self.close_menu();
         if !crate::places::ask_places(hwnd.0 as isize) {
-            self.show_notice("Still reading a folder.".into(), Instant::now());
+            self.show_notice("Still reading. Try again.".into(), Instant::now());
         }
     }
     /// Opens the Places popup with the rows a worker read (`places::ask_places`).
@@ -167,7 +167,7 @@ impl Desktop {
     /// so a click while one is out says so.
     pub(super) fn ask_stack(&mut self, hwnd: HWND, slot: usize, path: String) {
         if !crate::places::ask(hwnd.0 as isize, slot, path) {
-            self.show_notice("Still reading a folder.".into(), Instant::now());
+            self.show_notice("Still reading. Try again.".into(), Instant::now());
         }
     }
     /// What the worker found for a click on a pinned path (`places::ask`): a folder opens its stack unless the click is
@@ -378,11 +378,16 @@ impl Desktop {
                     self.audio.set(volume);
                 }
             }
-            Quick::WiFi => {
-                quick::refresh(Some(quick::Kind::WiFi));
-            }
-            Quick::Bluetooth => {
-                quick::refresh(Some(quick::Kind::Bluetooth));
+            Quick::WiFi | Quick::Bluetooth => {
+                let kind = if row == Quick::WiFi {
+                    quick::Kind::WiFi
+                } else {
+                    quick::Kind::Bluetooth
+                };
+                // A flip waits for a run in flight; only a second one, or no worker, is refused.
+                if !quick::refresh(Some(kind)) {
+                    self.show_notice("Still busy. Try again.".into(), Instant::now());
+                }
             }
             Quick::Power => quick::next_mode(),
             Quick::KeepAwake => {

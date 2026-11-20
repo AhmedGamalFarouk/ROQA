@@ -274,6 +274,12 @@ pub fn label(path: &str) -> &str {
     file_name(path)
 }
 
+/// Whether a chosen sound is not used: its file is gone, or it is on a network share (a stat or a play there can
+/// stall the host with no time bound, so it is never touched).
+pub fn missing(path: &str) -> bool {
+    crate::shelf_os::is_network(path) || !Path::new(path).is_file()
+}
+
 /// The first file named `takbeer*`, in list order.
 pub fn default_sound(found: &[String]) -> Option<&str> {
     found
@@ -297,6 +303,15 @@ mod tests {
     use crate::prayer::Method;
 
     const DAY: Ymd = (2026, 11, 12);
+
+    #[test]
+    fn a_network_or_absent_sound_is_missing_without_a_look_at_the_share() {
+        assert!(missing(r"\server\share	akbeer.wav"));
+        assert!(missing(
+            r"C:
+o\sucholder	akbeer.wav"
+        ));
+    }
     /// A day's times as the timeline `events` reads (today only).
     fn line(times: &prayer::Times) -> Vec<(i32, Prayer)> {
         Prayer::ALL

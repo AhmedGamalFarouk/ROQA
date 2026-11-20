@@ -63,10 +63,14 @@ impl Desktop {
         if let Some(letter) = self.power.eject()
             && layout::notice_button_at(width, dpi, progress, live, 0, (x, y))
         {
-            crate::system_os::eject_in_background(letter);
+            let started = crate::system_os::eject_in_background(letter);
             self.power.clear();
             self.power.announce(
-                "Ejecting".into(),
+                if started {
+                    format!("Ejecting {letter}:")
+                } else {
+                    "Still ejecting another drive".into()
+                },
                 Instant::now(),
                 DRIVE_NOTICE,
                 power::Extra::None,

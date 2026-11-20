@@ -3,6 +3,7 @@
 //! Network drives are left out (a stat on one can hang the host thread) and nothing is kept or polled.
 //! A pinned folder's stack (its newest files) is read here too, once per click, on the same worker (`ask`).
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
 use windows::{
     Win32::{
         Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW},
@@ -102,7 +103,9 @@ impl Answer {
 
 /// Posted to the host when `ask` has an answer; the host reads it with `answer` on every pass.
 pub const READY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 62;
-static ASKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The question out: its request number and when it was asked. A newer question may start once this one is older
+/// than `STALE` (a stuck share must not block the popup for ever); only the latest question's answer is kept.
+static ASKING: std::sync::Mutex<Option<(u64, std::time::Instant)>> = std::sync::Mutex::new(None);
 static ANSWER: std::sync::Mutex<Option<Answer>> = std::sync::Mutex::new(None);
 /// The generation of the latest click; opening any menu (`invalidate`) makes an older answer not current.
 static REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -123,21 +126,33 @@ pub fn ask_places(dock: isize) -> bool {
     start(dock, 0, String::new(), true)
 }
 
+/// Whether a question asked at `asked` (if any) still holds the worker at `now`.
+fn holds(asked: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    asked.is_some_and(|asked| now.saturating_duration_since(asked) <= STALE)
+}
+
 fn start(dock: isize, slot: usize, folder: String, listing: bool) -> bool {
-    use std::sync::atomic::Ordering::{AcqRel, Release};
-    if ASKING.swap(true, AcqRel) {
+    use std::sync::atomic::Ordering::AcqRel;
+    let now = std::time::Instant::now();
+    let mut asking = ASKING.lock().unwrap_or_else(PoisonError::into_inner);
+    if holds(asking.map(|(_, asked)| asked), now) {
         return false;
     }
     // SAFETY: a scalar thread id query.
     let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
-    let (request, asked) = (REQUEST.fetch_add(1, AcqRel) + 1, std::time::Instant::now());
+    let (request, asked) = (REQUEST.fetch_add(1, AcqRel) + 1, now);
+    *asking = Some((request, asked));
     let spawned = std::thread::Builder::new()
         .name("roqa-stack".into())
         .spawn(move || {
             let path = Path::new(&folder);
             let files = (!listing && path.is_dir()).then(|| newest_files(path, STACK));
             let places = listing.then(list);
-            if let Ok(mut slot_answer) = ANSWER.lock() {
+            // A question that was passed over while it ran (a newer one started) never replaces the newer's answer.
+            let asking = ASKING.lock().unwrap_or_else(PoisonError::into_inner);
+            if asking.is_some_and(|(latest, _)| latest == request)
+                && let Ok(mut slot_answer) = ANSWER.lock()
+            {
                 *slot_answer = Some(Answer {
                     dock,
                     slot,
@@ -147,11 +162,12 @@ fn start(dock: isize, slot: usize, folder: String, listing: bool) -> bool {
                     request,
                     asked,
                 });
+                drop(asking);
+                crate::native_window::post_wake(host, READY);
             }
-            crate::native_window::post_wake(host, READY);
         });
     if spawned.is_err() {
-        ASKING.store(false, Release);
+        *asking = None;
     }
     spawned.is_ok()
 }
@@ -160,7 +176,7 @@ fn start(dock: isize, slot: usize, folder: String, listing: bool) -> bool {
 pub fn answer() -> Option<Answer> {
     let answer = ANSWER.lock().ok()?.take();
     if answer.is_some() {
-        ASKING.store(false, std::sync::atomic::Ordering::Release);
+        *ASKING.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
     answer
 }
@@ -257,6 +273,17 @@ mod tests {
             !answer(request, old).slow(),
             "a later click owns the answer"
         );
+    }
+    #[test]
+    fn a_question_holds_the_worker_only_until_it_is_stale() {
+        let now = std::time::Instant::now();
+        assert!(!holds(None, now));
+        assert!(holds(Some(now), now));
+        assert!(holds(Some(now), now + STALE));
+        assert!(!holds(
+            Some(now),
+            now + STALE + std::time::Duration::from_millis(1)
+        ));
     }
     #[test]
     fn rows_read_plainly() {

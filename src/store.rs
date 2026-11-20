@@ -10,10 +10,11 @@ use crate::tabs::Tab;
 use crate::weather::{Place, Report};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 
 pub const VERSION: u32 = 2;
-/// Bigger files are not read at all; saves refuse to exceed it.
+/// Bigger files are never parsed (a newer build's head is still checked); saves refuse to exceed it.
 pub const MAX_BYTES: u64 = 64 * 1024;
 /// A burst of changes becomes one write this long after the last change (UNVERIFIED value; tune in S9).
 pub const COALESCE: Duration = Duration::from_millis(1500);
@@ -91,84 +92,122 @@ pub fn flush_decision_capped(first_change: Instant, last_change: Instant, now: I
     }
 }
 
-/// Unwritten changes: when the first and the latest happened (clean is `None`, which has no deadline), and whether
-/// one came since `take_changed` last asked.
+/// Unwritten changes: when the first and the latest happened (clean is `None`, which has no deadline), whether one
+/// came since `take_changed` last asked, the revision of the latest change, and the revision a background write is
+/// saving now.
 #[derive(Debug, Default)]
-pub struct Pending(Option<(Instant, Instant)>, bool);
+pub struct Pending {
+    span: Option<(Instant, Instant)>,
+    changed: bool,
+    rev: u64,
+    flying: Option<u64>,
+}
 
 impl Pending {
     pub fn mark(&mut self, now: Instant) {
-        self.1 = true;
-        self.0 = Some((self.0.map_or(now, |(first, _)| first), now));
+        self.changed = true;
+        self.rev += 1;
+        self.span = Some((self.span.map_or(now, |(first, _)| first), now));
     }
+    /// Idle while a write is out: its completion wakes the host, which then decides again.
     pub fn decision(&self, now: Instant) -> Flush {
-        self.0.map_or(Flush::Idle, |(first, last)| {
+        if self.flying.is_some() {
+            return Flush::Idle;
+        }
+        self.span.map_or(Flush::Idle, |(first, last)| {
             flush_decision_capped(first, last, now)
         })
     }
     /// Write now? Quit writes anything unwritten at once; otherwise only a due flush does.
     pub fn should_write(&self, now: Instant, quit: bool) -> bool {
-        (quit && self.0.is_some()) || self.decision(now) == Flush::Now
+        (quit && self.span.is_some()) || self.decision(now) == Flush::Now
     }
+    /// Everything is on disk (a quit write, or no place to save).
     pub fn written(&mut self) {
-        self.0 = None;
+        self.span = None;
+        self.flying = None;
     }
     pub fn dirty(&self) -> bool {
-        self.0.is_some()
+        self.span.is_some()
+    }
+    /// The revision the next write saves.
+    pub fn rev(&self) -> u64 {
+        self.rev
+    }
+    /// A background write of the current revision started.
+    pub fn fly(&mut self) {
+        self.flying = Some(self.rev);
+    }
+    /// A background write of `rev` finished. Only the revision that landed is clean: a change made while it ran
+    /// stays pending, and a failed write is retried later.
+    pub fn landed(&mut self, rev: u64, ok: bool, now: Instant) {
+        self.flying = None;
+        if !ok {
+            self.retry(now);
+        } else if rev == self.rev {
+            self.span = None;
+        } else if let Some((_, last)) = self.span {
+            self.span = Some((last, last));
+        }
+    }
+    pub fn flying(&self) -> bool {
+        self.flying.is_some()
     }
     /// True once per change: the host rebuilds the sign-out copy (`keep_unsaved`) only then, not on every pass of a burst.
     pub fn take_changed(&mut self) -> bool {
-        std::mem::take(&mut self.1)
+        std::mem::take(&mut self.changed)
     }
     /// A failed write stays pending and is next due `RETRY` after `now`.
     pub fn retry(&mut self, now: Instant) {
         let at = now + RETRY - COALESCE;
-        self.0 = Some((at, at));
+        self.span = Some((at, at));
     }
 }
 
 /// Reads the file once and closes it. Never fails: any problem yields defaults.
 pub fn load(path: &Path) -> (Store, Load) {
-    let bytes = match std::fs::metadata(path) {
-        Ok(meta) if meta.len() > MAX_BYTES => None,
-        Ok(_) => match std::fs::read(path) {
-            Ok(bytes) => Some(bytes),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return (Store::default(), Load::Missing);
-            }
-            Err(_) => return (Store::default(), Load::Unreadable),
-        },
+    use std::io::Read;
+    // At most `MAX_BYTES` + 1 are read: a bigger file is never held, but its head still names its version.
+    let mut bytes = Vec::new();
+    match std::fs::File::open(path)
+        .and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes))
+    {
+        Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => return (Store::default(), Load::Missing),
         Err(_) => return (Store::default(), Load::Unreadable),
+    }
+    let oversized = bytes.len() as u64 > MAX_BYTES;
+    // Oversized text is only for the version check; it is never parsed.
+    let text = if oversized {
+        String::from_utf8_lossy(&bytes[..64.min(bytes.len())]).into_owned()
+    } else {
+        String::from_utf8(bytes).unwrap_or_default()
     };
-    let text = bytes
-        .filter(|bytes| bytes.len() as u64 <= MAX_BYTES)
-        .and_then(|bytes| String::from_utf8(bytes).ok());
-    match text.as_deref().and_then(parse) {
+    match (!oversized).then(|| parse(&text)).flatten() {
         Some(store) => {
             // The Copied list is memory only now: copies an older build saved leave the file at once.
-            if text.is_some_and(|text| text.lines().any(|line| line.starts_with("clip="))) {
+            if text.lines().any(|line| line.starts_with("clip=")) {
                 let _ = store.save(path);
             }
             (store, Load::Loaded)
         }
-        // A store from a newer build is left alone, so going back to that build finds it whole.
-        None if text
-            .as_deref()
-            .and_then(version)
-            .is_some_and(|v| v > VERSION) =>
-        {
-            (Store::default(), Load::Unreadable)
-        }
+        // A store from a newer build, of any size, is left alone, so going back to that build finds it whole.
+        None if version(&text).is_some_and(|v| v > VERSION) => (Store::default(), Load::Unreadable),
         None => {
-            // Keep one bad copy for the user, never replacing an earlier one; when it cannot be kept the file is
-            // left alone, as if unreadable.
-            let bad = path.with_extension("roqa.bad");
+            // Keep the first bad copy for the user and set this one aside under the next free name (`.bad`,
+            // `.1.bad`, ...), never replacing an earlier copy; when no name is free the file is left alone, as if
+            // unreadable.
+            let free = (0..9)
+                .map(|n| match n {
+                    0 => path.with_extension("roqa.bad"),
+                    n => path.with_extension(format!("roqa.{n}.bad")),
+                })
+                .find(|bad| !bad.exists());
             #[expect(
                 clippy::disallowed_methods,
                 reason = "quarantine of a bad store file, never new data"
             )]
-            let kept = !bad.exists() && std::fs::rename(path, bad).is_ok();
+            let kept = free.is_some_and(|bad| std::fs::rename(path, bad).is_ok());
             let load = if kept {
                 Load::Quarantined
             } else {
@@ -310,12 +349,6 @@ impl Store {
         out
     }
 
-    /// `save` plus the diagnostics write counter; the host's flush path, so unit-test saves are not counted.
-    pub fn flush(&self, path: &Path) -> io::Result<()> {
-        self.save(path)
-            .inspect(|()| crate::diagnostics::note_store_write())
-    }
-
     /// Atomic temp-and-rename write, same pattern as the opt-in diagnostics. A stale temp file from a crashed
     /// process (a different pid) is ignored by `load` and left in place: at most one tiny file per crash.
     pub fn save(&self, path: &Path) -> io::Result<()> {
@@ -349,23 +382,73 @@ fn write_text(path: &Path, text: &str) -> io::Result<()> {
         })
 }
 
-/// The unwritten store as text, for a sign-out that comes before the debounced write: the window procedure
-/// cannot reach the host's store, so the host keeps this current while changes wait.
-static UNSAVED: std::sync::Mutex<Option<(PathBuf, String)>> = std::sync::Mutex::new(None);
+/// The unwritten store as text and its revision: what a debounced write saves (on a worker, so the host never waits
+/// on the disk) and what a sign-out writes before the debounce, since the window procedure cannot reach the host's
+/// store. The host keeps it current while changes wait.
+static UNSAVED: std::sync::Mutex<Option<(PathBuf, String, u64)>> = std::sync::Mutex::new(None);
+/// The newest revision on disk. Every write holds this lock, so writes never overlap and an older snapshot that
+/// arrives late never replaces a newer one.
+static NEWEST: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+/// The finished background write: its revision and whether it worked. Read once by `take_done`.
+static DONE: std::sync::Mutex<Option<(u64, bool)>> = std::sync::Mutex::new(None);
+/// Posted to the host when a background write finished; it only wakes the loop, `take_done` carries the answer.
+const SAVED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 66;
 
-/// Keeps `store` for `save_unsaved` while `dirty`, and forgets it once written.
-pub fn keep_unsaved(path: &Path, store: &Store, dirty: bool) {
+/// Keeps `store` for the next write while `dirty`, and forgets it once written.
+pub fn keep_unsaved(path: &Path, store: &Store, dirty: bool, rev: u64) {
     if let Ok(mut unsaved) = UNSAVED.lock() {
-        *unsaved = dirty.then(|| (path.to_owned(), store.serialize()));
+        *unsaved = dirty.then(|| (path.to_owned(), store.serialize(), rev));
     }
 }
 
-/// `WM_ENDSESSION`: writes what `keep_unsaved` holds, at once.
+/// Writes `text` unless a revision at least as new already landed; `newest` is held for the whole write.
+fn write_rev(newest: &std::sync::Mutex<u64>, path: &Path, text: &str, rev: u64) -> io::Result<()> {
+    let mut newest = newest.lock().unwrap_or_else(PoisonError::into_inner);
+    if rev <= *newest {
+        return Ok(());
+    }
+    write_text(path, text)?;
+    *newest = rev;
+    crate::diagnostics::note_store_write();
+    Ok(())
+}
+
+/// Writes what `keep_unsaved` holds, at once and durably, on this thread: a sign-out (`WM_ENDSESSION`) or quit.
+/// It waits for a background write still out, then skips what that already saved.
 pub fn save_unsaved() {
     let held = UNSAVED.lock().ok().and_then(|mut unsaved| unsaved.take());
-    if let Some((path, text)) = held {
-        let _ = write_text(&path, &text);
+    if let Some((path, text, rev)) = held
+        && let Err(error) = write_rev(&NEWEST, &path, &text, rev)
+    {
+        eprintln!("Store: write failed: {error}");
     }
+}
+
+/// Starts the debounced write of what `keep_unsaved` holds on one short-lived worker; false when nothing is held
+/// or no worker could start. The held copy stays until the host sees the write land.
+pub fn save_in_background() -> bool {
+    let Some((path, text, rev)) = UNSAVED.lock().ok().and_then(|unsaved| unsaved.clone()) else {
+        return false;
+    };
+    // SAFETY: a scalar thread id query.
+    let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    std::thread::Builder::new()
+        .name("roqa-store".into())
+        .spawn(move || {
+            let result = write_rev(&NEWEST, &path, &text, rev);
+            if let Err(error) = &result {
+                eprintln!("Store: write failed: {error}");
+            }
+            *DONE.lock().unwrap_or_else(PoisonError::into_inner) = Some((rev, result.is_ok()));
+            // A failed post is picked up on the host's next pass.
+            let _ = crate::native_window::post_wake(host, SAVED);
+        })
+        .is_ok()
+}
+
+/// The finished background write's revision and success, once.
+pub fn take_done() -> Option<(u64, bool)> {
+    DONE.lock().unwrap_or_else(PoisonError::into_inner).take()
 }
 
 #[cfg(test)]
@@ -628,6 +711,23 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_store_is_left_alone_even_when_over_the_cap() {
+        let dir = Dir::new("bignewer");
+        let body = format!(
+            "version={}
+pin={}
+end
+",
+            VERSION + 1,
+            "x".repeat(MAX_BYTES as usize)
+        );
+        std::fs::write(dir.file(), &body).unwrap();
+        assert_eq!(open(Some(dir.file())), (Store::default(), None));
+        assert_eq!(std::fs::read_to_string(dir.file()).unwrap(), body);
+        assert!(!dir.0.join("store.roqa.bad").exists());
+    }
+
+    #[test]
     fn a_change_is_reported_once_for_the_unsaved_copy() {
         let (mut pending, now) = (Pending::default(), Instant::now());
         assert!(!pending.take_changed());
@@ -652,14 +752,17 @@ mod tests {
     fn a_store_that_cannot_be_set_aside_is_never_saved_over() {
         let dir = Dir::new("stuck");
         std::fs::write(dir.file(), "garbage").unwrap();
-        // A folder where the bad copy goes makes the rename fail.
+        // A folder on every name the bad copy could take leaves no place for it.
         std::fs::create_dir(dir.0.join("store.roqa.bad")).unwrap();
+        for n in 1..9 {
+            std::fs::create_dir(dir.0.join(format!("store.roqa.{n}.bad"))).unwrap();
+        }
         assert_eq!(open(Some(dir.file())), (Store::default(), None));
         assert_eq!(std::fs::read_to_string(dir.file()).unwrap(), "garbage");
     }
 
     #[test]
-    fn an_earlier_bad_copy_is_never_replaced() {
+    fn an_earlier_bad_copy_is_never_replaced_and_the_next_one_still_moves_aside() {
         let dir = Dir::new("keepfirst");
         let bad = dir.0.join("store.roqa.bad");
         std::fs::write(
@@ -670,11 +773,13 @@ end
 ",
         )
         .unwrap();
-        for _ in 0..2 {
-            std::fs::write(dir.file(), "garbage").unwrap();
-            assert_eq!(open(Some(dir.file())), (Store::default(), None));
-            assert_eq!(std::fs::read_to_string(dir.file()).unwrap(), "garbage");
+        for (n, text) in ["garbage", "more garbage"].into_iter().enumerate() {
+            std::fs::write(dir.file(), text).unwrap();
+            assert_eq!(open(Some(dir.file())), (Store::default(), Some(dir.file())));
+            assert!(!dir.file().exists());
             assert!(std::fs::read_to_string(&bad).unwrap().contains("original"));
+            let kept = dir.0.join(format!("store.roqa.{}.bad", n + 1));
+            assert_eq!(std::fs::read_to_string(kept).unwrap(), text);
         }
     }
 
@@ -757,11 +862,11 @@ end
     fn a_sign_out_writes_what_the_host_kept_and_a_written_store_keeps_nothing() {
         let dir = Dir::new("signout");
         let path = dir.file();
-        keep_unsaved(&path, &sample(), true);
+        keep_unsaved(&path, &sample(), true, 1);
         save_unsaved();
         assert_eq!(load(&path).0, sample());
         let _ = std::fs::remove_file(&path);
-        keep_unsaved(&path, &sample(), false);
+        keep_unsaved(&path, &sample(), false, 2);
         save_unsaved();
         assert!(!path.exists(), "clean: nothing to write");
     }
@@ -832,5 +937,66 @@ end
         assert!(pending.should_write(failed + RETRY, false));
         pending.written();
         assert_eq!(pending.decision(failed + RETRY * 9), Flush::Idle);
+    }
+
+    #[test]
+    fn a_change_made_during_a_background_write_stays_pending_and_an_older_snapshot_never_wins() {
+        let t0 = Instant::now();
+        let mut pending = Pending::default();
+        pending.mark(t0);
+        let first = pending.rev();
+        pending.fly();
+        assert_eq!(
+            pending.decision(t0 + MAX_WAIT * 9),
+            Flush::Idle,
+            "one write at a time"
+        );
+        pending.mark(t0 + Duration::from_secs(1));
+        pending.landed(first, true, t0 + Duration::from_secs(2));
+        assert!(
+            pending.dirty() && !pending.flying(),
+            "the newer change is still unwritten"
+        );
+        assert!(pending.should_write(t0 + Duration::from_secs(5), false));
+        let second = pending.rev();
+        pending.fly();
+        pending.landed(second, true, t0 + Duration::from_secs(6));
+        assert!(!pending.dirty());
+        pending.mark(t0 + Duration::from_secs(7));
+        pending.fly();
+        pending.landed(pending.rev(), false, t0 + Duration::from_secs(8));
+        assert!(pending.dirty(), "a failed write stays pending");
+
+        // The disk side: the newer revision lands first, the older arrives late and is skipped.
+        let dir = Dir::new("revision");
+        let gate = std::sync::Mutex::new(0);
+        write_rev(
+            &gate,
+            &dir.file(),
+            "version=2
+newer
+",
+            2,
+        )
+        .unwrap();
+        write_rev(
+            &gate,
+            &dir.file(),
+            "version=2
+older
+",
+            1,
+        )
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(dir.file())
+                .unwrap()
+                .contains("newer")
+        );
+        // A failed write does not advance the revision, so the same one can be retried.
+        let blocked = Dir::new("revision-blocked");
+        std::fs::create_dir(blocked.file()).unwrap();
+        assert!(write_rev(&gate, &blocked.file(), "x", 3).is_err());
+        assert_eq!(*gate.lock().unwrap(), 2);
     }
 }
