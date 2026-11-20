@@ -1095,6 +1095,7 @@ impl Surface {
             layout: self.dock_buttons,
             buttons: Button::ALL
                 .into_iter()
+                .chain([Button::Battery])
                 .filter(|button| self.dock_buttons.on(*button))
                 .map(|button| (button, hover(Hit::Button(button))))
                 .collect(),
@@ -1641,6 +1642,7 @@ impl Desktop {
     fn dock_buttons(&self) -> Buttons {
         Buttons {
             rtl: self.rtl,
+            battery: true,
             centre: if self.settings.dock_left {
                 0
             } else {
@@ -4158,6 +4160,7 @@ pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> 
     desktop.startup_notice();
     // One short worker reads the radios now, so the first Quick settings popup already has their rows.
     quick::refresh(None);
+    crate::device_battery::start();
     crate::error_log::started();
     let result = event_loop(&controls, &mut desktop, &mut catalog);
     desktop.flush_store(true);

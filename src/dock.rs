@@ -238,8 +238,11 @@ pub enum Button {
     Places,
     /// Windows' own hidden-icons flyout, opened with Win+B and Enter and set beside the button.
     Tray,
+    /// Connected wireless-device battery reports. Always present; no stored setting.
+    Battery,
 }
 impl Button {
+    /// Configurable buttons; Battery is fixed and never stored.
     pub const ALL: [Button; 7] = [
         Button::Start,
         Button::Search,
@@ -266,7 +269,7 @@ impl Button {
             Button::Search => Some(&[VK_LWIN, VK_S]),
             Button::TaskView => Some(&[VK_LWIN, VK_TAB]),
             Button::Desktop => Some(&[VK_LWIN, VK_D]),
-            Button::Quick | Button::Places | Button::Tray => None,
+            Button::Quick | Button::Places | Button::Tray | Button::Battery => None,
         }
     }
 }
@@ -275,6 +278,7 @@ impl Button {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Buttons {
     pub shown: [bool; 7],
+    pub battery: bool,
     /// Mirrored for a right-to-left UI language: the dock runs from the right edge, as the taskbar does.
     /// The host sets it from the system; it is not a stored setting.
     pub rtl: bool,
@@ -288,12 +292,17 @@ impl Buttons {
     pub const fn of(shown: [bool; 7]) -> Self {
         Self {
             shown,
+            battery: false,
             rtl: false,
             centre: 0,
         }
     }
     pub fn on(self, button: Button) -> bool {
-        self.shown[button.index()]
+        if button == Button::Battery {
+            self.battery
+        } else {
+            self.shown[button.index()]
+        }
     }
     /// Start, Search, Task View and Places, in that order.
     fn lead(self) -> impl Iterator<Item = Button> {
@@ -309,11 +318,16 @@ impl Buttons {
     fn has_tail(self) -> bool {
         self.tail().next().is_some()
     }
-    /// The hidden-icons chevron, quick settings, then the pill.
+    /// The hidden-icons chevron, device batteries, quick settings, then the pill.
     fn tail(self) -> impl Iterator<Item = Button> {
-        [Button::Tray, Button::Quick, Button::Desktop]
-            .into_iter()
-            .filter(move |b| self.on(*b))
+        [
+            Button::Tray,
+            Button::Battery,
+            Button::Quick,
+            Button::Desktop,
+        ]
+        .into_iter()
+        .filter(move |b| self.on(*b))
     }
 }
 impl Default for Buttons {
@@ -480,7 +494,7 @@ fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
             px(SLOT_DIPS, dpi),
         ),
         Hit::Button(Button::Desktop) => (width_px - strip, strip),
-        Hit::Button(button @ (Button::Quick | Button::Tray)) => {
+        Hit::Button(button @ (Button::Quick | Button::Tray | Button::Battery)) => {
             let end = if buttons.on(Button::Desktop) {
                 STRIP_DIPS
             } else {
@@ -521,6 +535,7 @@ pub fn hit_at(buttons: Buttons, x_px: i32, width_px: i32, dpi: u32, slots: usize
     let x_px = ltr_x(buttons, x_px, width_px);
     let on_button = Button::ALL
         .into_iter()
+        .chain([Button::Battery])
         .filter(|b| buttons.on(*b))
         .find(|b| {
             let (left, width) = ltr_span(buttons, width_px, dpi, Hit::Button(*b));
@@ -846,6 +861,33 @@ pub fn perform(action: Action) -> bool {
 mod tests {
     use crate::motion::{SETTLE, Tween};
     use std::time::Instant;
+
+    #[test]
+    fn battery_is_beside_tray_and_hits_its_own_cell_at_all_scales() {
+        for dpi in [96, 120, 144, 192] {
+            for rtl in [false, true] {
+                let buttons = Buttons {
+                    battery: true,
+                    rtl,
+                    ..Buttons::default()
+                };
+                let width = width_px(buttons, 3, dpi);
+                let (left, size) = span(buttons, width, dpi, Hit::Button(Button::Battery));
+                assert_eq!(
+                    hit_at(buttons, left + size / 2, width, dpi, 3),
+                    Some(Hit::Button(Button::Battery))
+                );
+                let tray = cell_index(buttons, 3, Hit::Button(Button::Tray)).unwrap();
+                let battery = cell_index(buttons, 3, Hit::Button(Button::Battery)).unwrap();
+                assert_eq!(battery, tray + 1);
+                assert_eq!(
+                    cell(buttons, 3, battery),
+                    Some(Hit::Button(Button::Battery))
+                );
+                assert_eq!(size, px(BTN_DIPS, dpi));
+            }
+        }
+    }
 
     #[test]
     fn slide_offset_runs_from_the_full_height_to_zero_and_stays_inside_the_window() {

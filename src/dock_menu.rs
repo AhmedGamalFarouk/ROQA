@@ -45,6 +45,7 @@ pub enum Item {
     Member(usize),
     MemberMenu(usize),
     Label,
+    Battery,
     NewInstance,
     Close(WindowKey),
     CloseAll,
@@ -94,7 +95,7 @@ impl Item {
             Item::Dissolve => "Ungroup apps",
             Item::RemoveMember => "Remove from folder",
             Item::Member(_) | Item::MemberMenu(_) => "App",
-            Item::Label => "",
+            Item::Label | Item::Battery => "",
             Item::NewInstance => "New instance",
             Item::Close(_) => "Close window",
             Item::CloseAll => "Close all windows",
@@ -573,7 +574,8 @@ impl Menu {
         };
         match message.message {
             WM_MOUSEMOVE => {
-                self.selected = at(message).filter(|&row| self.items[row] != Item::Label);
+                self.selected = at(message)
+                    .filter(|&row| !matches!(self.items[row], Item::Label | Item::Battery));
                 if self.hover_popup {
                     use windows::Win32::UI::Input::KeyboardAndMouse::{
                         TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -591,7 +593,13 @@ impl Menu {
             }
             windows::Win32::UI::Controls::WM_MOUSELEAVE => self.selected = None,
             WM_LBUTTONUP => {
-                return at(message).map_or(Event::Consumed, |row| Event::Choose(self.items[row]));
+                return at(message).map_or(Event::Consumed, |row| {
+                    if self.items[row] == Item::Battery {
+                        Event::Consumed
+                    } else {
+                        Event::Choose(self.items[row])
+                    }
+                });
             }
             WM_RBUTTONUP if self.hover_popup => {
                 return at(message).map_or(Event::Consumed, |row| match self.items[row] {

@@ -17,6 +17,7 @@ mod chan;
 mod clipboard;
 mod clipboard_os;
 mod clock;
+mod device_battery;
 mod diagnostics;
 mod dialog;
 mod dock;

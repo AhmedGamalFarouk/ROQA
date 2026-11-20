@@ -2609,12 +2609,12 @@ fn draw_button(
         dock::Button::Quick => Glyph::Gear,
         dock::Button::Places => Glyph::Drive,
         dock::Button::Tray => Glyph::Chevron,
+        dock::Button::Battery => Glyph::Battery,
     };
     glyphs::draw(context, square, shape, with_alpha(p.glyph, 1.0))
 }
 
-/// The show-desktop control: a slim vertical capsule hugging the dock's far end. It rests dim and brightens
-/// (alpha and a little width) with `hover`; the whole cell, out to the edge, is the click target.
+/// The show-desktop capsule brightens with `hover`; the whole cell is the click target.
 fn desktop_pill(
     context: &ID2D1DeviceContext,
     cell: &D2D_RECT_F,

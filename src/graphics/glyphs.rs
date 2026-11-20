@@ -47,6 +47,7 @@ pub enum Glyph {
     Chevron,
     Expand,
     Charging,
+    Battery,
     Add,
     More,
     /// A shelf entry whose system icon did not load.
@@ -72,7 +73,7 @@ pub enum Glyph {
     Repeat,
     RepeatOne,
 }
-const ALL: [Glyph; 42] = [
+const ALL: [Glyph; 43] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -100,6 +101,7 @@ const ALL: [Glyph; 42] = [
     Glyph::Chevron,
     Glyph::Expand,
     Glyph::Charging,
+    Glyph::Battery,
     Glyph::Add,
     Glyph::More,
     Glyph::File,
@@ -230,6 +232,9 @@ impl Glyph {
             }
             Glyph::RepeatOne => {
                 "M17 3l3 3l-3 3M20 6H8a4 4 0 0 0-4 4v1M7 21l-3-3l3-3M4 18h12a4 4 0 0 0 4-4v-1M11 10.5l1.5-1.2V15"
+            }
+            Glyph::Battery => {
+                "M5 6h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2zM21 10v4"
             }
             Glyph::Charging => "M13 2L5 13h6l-1 9 9-12h-6z",
             Glyph::Add => "M12 4v16M4 12h16",

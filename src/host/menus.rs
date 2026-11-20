@@ -56,9 +56,29 @@ impl Desktop {
             .map(|(row, text)| (Item::Quick(row), text))
             .unzip()
     }
-    /// The sliders button's popup above it. It stays open while settings change; each press updates the
-    /// row texts in place.
+    fn refresh_battery_menu(&mut self) {
+        let Some(mut menu) = self.menu.take() else {
+            return;
+        };
+        if menu.items().first() != Some(&Item::Battery) {
+            self.menu = Some(menu);
+            return;
+        }
+        let titles = crate::device_battery::titles();
+        if menu
+            .relist(vec![Item::Battery; titles.len()], titles, Vec::new())
+            .is_ok()
+        {
+            self.menu = Some(menu);
+        } else {
+            dock::restore_foreground(menu.hwnd(), menu.return_to);
+        }
+    }
+    /// The sliders button's popup, refreshed in place as worker results arrive.
     pub(super) fn open_quick_menu(&mut self, hwnd: HWND) {
+        self.open_status_menu(hwnd, Button::Quick);
+    }
+    fn open_status_menu(&mut self, hwnd: HWND, button: Button) {
         self.dismiss_preview();
         self.close_menu();
         let Some(dock) = self.dock_at(hwnd).filter(|dock| dock.visible) else {
@@ -80,12 +100,19 @@ impl Desktop {
             return;
         };
         // The radios are read on a worker; their rows join the open popup when it answers (`refresh_quick_menu`).
-        quick::refresh(None);
-        let (items, titles) = self.quick_rows();
+        if button == Button::Quick {
+            quick::refresh(None);
+        }
+        let (items, titles) = if button == Button::Battery {
+            let titles = crate::device_battery::titles();
+            (vec![Item::Battery; titles.len()], titles)
+        } else {
+            self.quick_rows()
+        };
         if items.is_empty() {
             return;
         }
-        let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Button(Button::Quick));
+        let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Button(button));
         let spec = dock_menu::Spec {
             dock: hwnd,
             slot: dock_menu::APP,
@@ -95,7 +122,12 @@ impl Desktop {
             dock_bounds: bounds,
             work,
             dpi,
-            app: "Quick settings".into(),
+            app: if button == Button::Battery {
+                "Device batteries"
+            } else {
+                "Quick settings"
+            }
+            .into(),
             titles,
             icons: Vec::new(),
             x: bounds.x + left + width / 2,
@@ -104,8 +136,8 @@ impl Desktop {
         };
         match dock_menu::Menu::open(&self.graphics, self.palette, spec) {
             Ok(menu) if take_foreground(menu.hwnd()) => self.menu = Some(menu),
-            Ok(_) => eprintln!("Quick settings: Windows kept another app in front; not opened"),
-            Err(error) => eprintln!("Quick settings: {error}"),
+            Ok(_) => eprintln!("Dock status: Windows kept another app in front; not opened"),
+            Err(error) => eprintln!("Dock status: {error}"),
         }
     }
     /// The Places button's popup above it: the Recycle Bin and each drive as the shell reports them now, read on a
@@ -460,6 +492,9 @@ impl Desktop {
     /// What the short workers left for the host (read on every pass): a folder or the Places rows (`places`), new radio
     /// states for an open quick settings popup in place (`quick::refresh`), and a failed network launch.
     pub(super) fn worker_answers(&mut self) {
+        if crate::device_battery::changed() {
+            self.refresh_battery_menu();
+        }
         if let Some(answer) = crate::places::answer() {
             self.stack_ready(answer);
         }
@@ -478,6 +513,7 @@ impl Desktop {
             self.pending_popup = None;
         }
         match (button, button.keys()) {
+            (Button::Battery, _) => self.open_status_menu(hwnd, button),
             (Button::Quick, _) => self.open_quick_menu(hwnd),
             (Button::Places, _) => self.ask_places(hwnd),
             (Button::Tray, _) => self.open_flyout(hwnd, crate::anchored::Kind::Tray),
@@ -898,7 +934,8 @@ impl Desktop {
             | Item::SaveName
             | Item::Member(_)
             | Item::MemberMenu(_)
-            | Item::Label => {}
+            | Item::Label
+            | Item::Battery => {}
         }
     }
     /// Ends the open menu once it no longer describes the dock (its slot changed, or a full-screen app hid

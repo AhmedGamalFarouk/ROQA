@@ -18,6 +18,7 @@ windows = { version = "=0.62.2", features = [
     "Devices_Geolocation",
     # Radio: the Wi-Fi and Bluetooth switches of the dock's quick settings.
     "Devices_Radios",
+    "Devices_Enumeration",
     "Storage_Streams",
     # Core Audio: IMMDeviceEnumerator, IMMNotificationClient and AUDIO_VOLUME_NOTIFICATION_DATA (slice 6).
     # IAudioEndpointVolume and its callback (slice 6).
