@@ -37,6 +37,7 @@
 - **Shell Icons:** Asynchronous background icon extraction with bounded memory caching.
 - **Pin Management:** Pinned applications with drag-and-drop reordering, middle-click/context-menu launch.
 - **Window Switching & Minimizing:** Single-click activation, window cycling within groups, and minimizing.
+- **Live App Previews:** Hover a running app to preview its latest window; click the thumbnail to switch, or its close button to request a normal close with unsaved-work prompts preserved.
 - **Dock Context Menu:** Clean right-click menu with options to launch new instances, pin/unpin apps, and close windows.
 - **Notification Badges:** Real-time unread counter and status indicator dots on application icons.
 - **Desktop Strip:** Quick show-desktop strip.

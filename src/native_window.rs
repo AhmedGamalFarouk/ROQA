@@ -323,7 +323,7 @@ impl NativeWindow {
         }
     }
     /// A hidden topmost popup that never takes focus, for a DWM thumbnail.
-    pub fn create_preview(title: &str) -> Result<Self> {
+    pub fn create_preview(title: &str, owner: Option<HWND>) -> Result<Self> {
         let title = HSTRING::from(title);
         // SAFETY: registered class; no retained user pointers; the title outlives the call.
         unsafe {
@@ -336,7 +336,7 @@ impl NativeWindow {
                 0,
                 1,
                 1,
-                None,
+                owner,
                 None,
                 Some(HINSTANCE(GetModuleHandleW(None)?.0)),
                 None,

@@ -2,7 +2,12 @@
 //! group's most recent window floats above it. The DWM renders it (no capture, no copy); the popup exists
 //! only while shown, and the wait is one host deadline.
 
-use crate::{dock, layout::Bounds, native_window::NativeWindow, window_model::WindowKey};
+mod close_button;
+
+use crate::{
+    dock, layout::Bounds, native_window::NativeWindow, theme::Palette, window_model::WindowKey,
+};
+use close_button::CloseButton;
 use std::time::{Duration, Instant};
 use windows::{
     Win32::{
@@ -170,16 +175,24 @@ pub struct Popup {
     thumbnail: isize,
     /// The previewed window; the host ends the preview when the dock no longer holds it.
     pub target: WindowKey,
+    close: CloseButton,
     window: NativeWindow,
 }
 impl Popup {
     pub fn under_pointer(&self) -> bool {
         let mut point = POINT::default();
         // SAFETY: scalar cursor coordinates and the identity of our live HWND.
-        unsafe { GetCursorPos(&mut point).is_ok() && WindowFromPoint(point) == self.window.0 }
+        unsafe {
+            GetCursorPos(&mut point).is_ok()
+                && [self.window.0, self.close.hwnd()].contains(&WindowFromPoint(point))
+        }
     }
-    /// Registers leave notification and activates the target when its thumbnail is clicked.
-    pub fn message(&self, message: &MSG) -> bool {
+    /// Routes normal close requests separately from thumbnail activation.
+    pub fn message(&mut self, message: &MSG) -> bool {
+        if self.close.message(message) {
+            dock::close(&[self.target]);
+            return true;
+        }
         if message.hwnd != self.window.0 {
             return false;
         }
@@ -200,11 +213,10 @@ impl Popup {
         }
         false
     }
-    /// Shows the preview of the most recent window of `windows` above the screen column `slot_x`. The popup is
-    /// named "Preview, <app>" for UI Automation, and is never activated.
+    /// Shows the most recent window above `slot_x`, with a close control. Neither popup takes focus.
     pub fn show(
         windows: &[WindowKey],
-        app: &str,
+        palette: Palette,
         slot_x: i32,
         dock: Bounds,
         work: Bounds,
@@ -213,19 +225,22 @@ impl Popup {
         let target = most_recent(windows, dock::foreground_key(), z_order())
             .filter(|&key| dock::valid_target(key))
             .ok_or_else(|| Error::new(E_FAIL, "No window to preview."))?;
-        let window = NativeWindow::create_preview(&format!("Preview, {app}"))?;
+        let window = NativeWindow::create_preview("ROQA App Preview", None)?;
+        let close = CloseButton::create(window.0, dpi, palette)?;
         // SAFETY: both HWNDs are live (ours, and the revalidated target); the DWM owns the thumbnail
         // until `Drop`.
         let thumbnail = unsafe { DwmRegisterThumbnail(window.0, HWND(target.handle as *mut _)) }?;
         let popup = Self {
             thumbnail,
             target,
+            close,
             window,
         };
         // SAFETY: the id was just registered and is released only by `Drop`.
         let size = unsafe { DwmQueryThumbnailSourceSize(thumbnail) }?;
         let bounds = popup_bounds((size.cx, size.cy), slot_x, dock, work, dpi)
             .ok_or_else(|| Error::new(E_FAIL, "No room for a preview."))?;
+        popup.close.place(bounds, work)?;
         popup.window.resize(bounds)?;
         let properties = DWM_THUMBNAIL_PROPERTIES {
             dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE,
@@ -241,6 +256,7 @@ impl Popup {
         // SAFETY: `properties` outlives the call; the id is ours.
         unsafe { DwmUpdateThumbnailProperties(thumbnail, &properties) }?;
         popup.window.show();
+        popup.close.show();
         Ok(popup)
     }
 }

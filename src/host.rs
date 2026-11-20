@@ -2297,7 +2297,7 @@ impl Desktop {
                     .iter()
                     .find(|m| m.device == dock.monitor)?
                     .work;
-                let app = crate::pins::display_name(&item.identity);
+                let theme = self.palette;
                 let slot_x = dock::slot_center_x(
                     dock.bounds.x,
                     dock.dock_buttons,
@@ -2305,7 +2305,7 @@ impl Desktop {
                     slot,
                     dock.dpi,
                 );
-                preview::Popup::show(&item.windows, &app, slot_x, dock.bounds, work, dock.dpi).ok()
+                preview::Popup::show(&item.windows, theme, slot_x, dock.bounds, work, dock.dpi).ok()
             });
             match shown {
                 Some(popup) => self.popup = Some(popup),
@@ -4471,7 +4471,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             }
             if desktop
                 .popup
-                .as_ref()
+                .as_mut()
                 .is_some_and(|popup| popup.message(&message))
             {
                 desktop.dismiss_preview();
