@@ -14,7 +14,7 @@
 - **Ultra-lightweight:** Self-contained single-binary executable (~1.5 MB) compiled with full LTO and stripped debug info.
 - **Hardware-Accelerated DirectComposition:** Sub-pixel Direct2D and DirectWrite rendering with smooth 60fps springs and transitions.
 - **Event-Driven Win32:** No keyboard hook and no polling while idle: it sleeps until Windows reports something, with a few timed waits (the clock each minute, a window-list recheck every 30 s) and short ones only while something moves.
-- **Non-Invasive:** Leaves the native Windows taskbar intact, registers no background services, and makes zero unsolicited startup or registry modifications.
+- **Non-Invasive:** Hides the Windows taskbar only while it runs (a Settings switch) and puts it back exactly as it was, even after a crash; registers no background services, and makes zero unsolicited startup or registry modifications.
 - **Multi-Monitor & DPI-Native:** Full Per-Monitor V2 (PMv2) DPI awareness and automatic fullscreen suppression (auto-hides during gaming and fullscreen video).
 
 ---

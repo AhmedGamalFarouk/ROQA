@@ -1335,6 +1335,8 @@ struct Desktop {
     keys: keys::Keys,
     /// The Windows notifications peek (`toast.rs`); none while its switch is off.
     toasts: Option<toast::Toasts>,
+    /// The Windows taskbar hidden while its switch is on (`taskbar.rs`).
+    taskbar: Option<crate::taskbar::Taskbar>,
     /// Open only while the user has it up; created on demand, destroyed on close, so it costs nothing closed.
     palette: Palette,
     palette_dirty: bool,
@@ -1541,6 +1543,7 @@ impl Desktop {
             last_reminder: String::new(),
             keys: keys::Keys::new(),
             toasts: settings.notifications.then(toast::Toasts::new),
+            taskbar: settings.hide_taskbar.then(crate::taskbar::Taskbar::hide),
             palette: crate::theme::system_palette(settings.theme, effective_accent),
             palette_dirty: false,
             settings_window: None,
@@ -3516,6 +3519,7 @@ impl Desktop {
             // Every surface forwards display/DPI/settings/time changes, resume and taskbar recreation;
             // one coalesced read serves them all.
             self.request_topology();
+            crate::taskbar::hide_again(); // a restarted Explorer or a new monitor shows a new taskbar
             // A clock, time-zone or locale change, or a resume, can alter the text before the deadline.
             self.clock_due = Instant::now();
             self.prayer.key = None; // the day's times are computed again

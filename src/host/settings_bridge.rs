@@ -238,6 +238,12 @@ impl Desktop {
         if old.notifications != self.settings.notifications {
             self.toasts = self.settings.notifications.then(toast::Toasts::new);
         }
+        if old.hide_taskbar != self.settings.hide_taskbar {
+            self.taskbar = self
+                .settings
+                .hide_taskbar
+                .then(crate::taskbar::Taskbar::hide);
+        }
         // A new theme, pill size or accent mode is fixed when a surface is created, so they rebuild the surfaces.
         let restyle = old.theme != self.settings.theme
             || old.notch_size != self.settings.notch_size

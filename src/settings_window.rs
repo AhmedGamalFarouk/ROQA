@@ -92,8 +92,7 @@ const LIMCODEX: usize = 166;
 const LIMAGY: usize = 167;
 const LIMGROUP: usize = 168;
 const LIMSNIP: usize = 169;
-/// The five prayer fine-tune edits (Fajr, Dhuhr, Asr, Maghrib, Isha), then the notch size, open and animation
-/// lists, and the full-screen, reminder-sound and prayer-pause switches.
+/// Five prayer fine-tune edits, the notch size, open and animation lists, then the full-screen, sound, pause switches.
 const PSHIFT: usize = 170;
 const NSIZE: usize = 175;
 const NOPEN: usize = 176;
@@ -141,6 +140,7 @@ const ASK_BTN: usize = 236;
 /// The Windows notifications peek.
 const NOTIFS: usize = 237;
 const CAPS_PILL: usize = 238;
+const HIDE_TASKBAR: usize = 239;
 /// The four shortcut switches (`hotkeys::KEYS` order).
 const HOTKEY: usize = 222;
 /// The hidden-apps list and its "Show in dock" button.
@@ -226,6 +226,7 @@ const PAGES: &[Page] = &[
                         "Open ROQA when you sign in",
                     ),
                     r(DESKTOP, C, "Show only windows on this desktop", ""),
+                    r(HIDE_TASKBAR, C, "Hide Windows taskbar", ""),
                     r(
                         HIDE_CAPTURE,
                         C,
@@ -1526,6 +1527,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         AUTOSTART => &mut s.autostart,
         HIDE_CAPTURE => &mut s.hide_capture,
         CAPS_PILL => &mut s.caps_pill,
+        HIDE_TASKBAR => &mut s.hide_taskbar,
         RSOUNDS => &mut s.reminder_sounds,
         PPAUSE => &mut s.prayer_pause,
         WATER => &mut s.water,

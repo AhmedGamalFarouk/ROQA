@@ -119,6 +119,8 @@ pub struct Settings {
     pub hide_capture: bool,
     /// The Caps Lock pill; off releases the key (`keys.rs`).
     pub caps_pill: bool,
+    /// Hide the Windows taskbar while ROQA runs (`taskbar.rs`).
+    pub hide_taskbar: bool,
 }
 
 impl Default for Settings {
@@ -175,6 +177,7 @@ impl Default for Settings {
             autostart: false,
             hide_capture: false,
             caps_pill: true,
+            hide_taskbar: true,
         }
     }
 }
@@ -314,6 +317,7 @@ impl Settings {
             "autostart" => flag(value).map(|v| self.autostart = v).is_some(),
             "hidecapture" => flag(value).map(|v| self.hide_capture = v).is_some(),
             "capspill" => flag(value).map(|v| self.caps_pill = v).is_some(),
+            "hidetaskbar" => flag(value).map(|v| self.hide_taskbar = v).is_some(),
             "rsounds" => flag(value).map(|v| self.reminder_sounds = v).is_some(),
             "ppause" => flag(value).map(|v| self.prayer_pause = v).is_some(),
             "notchopen" => matches!(value, "hover" | "click")
@@ -448,11 +452,12 @@ impl Settings {
             out.push_str(&format!("diskdrive={}\n", letter as char));
         }
         out.push_str(&format!(
-            "matchaccent={}\nautostart={}\nhidecapture={}\ncapspill={}\n",
+            "matchaccent={}\nautostart={}\nhidecapture={}\ncapspill={}\nhidetaskbar={}\n",
             u8::from(self.match_accent),
             u8::from(self.autostart),
             u8::from(self.hide_capture),
-            u8::from(self.caps_pill)
+            u8::from(self.caps_pill),
+            u8::from(self.hide_taskbar)
         ));
         out.push_str(&format!(
             "dockbadge={}\nclipcopy={}\nnotifs={}\n",
@@ -810,7 +815,7 @@ mod tests {
     fn the_new_settings_default_to_todays_behaviour_and_round_trip() {
         let d = Settings::default();
         assert!(d.hide_fullscreen && d.reminder_sounds && !d.open_click && !d.anim_fast);
-        assert!(d.caps_pill, "the Caps Lock pill starts on");
+        assert!(d.caps_pill && d.hide_taskbar, "both switches start on");
         assert_eq!((d.reveal_delay, d.hide_delay), (0, 0));
         let mut delays = Settings::default();
         assert!(delays.set("revealdelay", "2") && delays.set("hidedelay", "9"));
@@ -850,6 +855,7 @@ mod tests {
             autostart: true,
             hide_capture: true,
             caps_pill: false,
+            hide_taskbar: false,
             ..Settings::default()
         };
         let mut text = String::new();
@@ -858,6 +864,7 @@ mod tests {
             "autostart=1",
             "hidecapture=1",
             "capspill=0",
+            "hidetaskbar=0",
             "fshide=0",
             "notchopen=click",
             "notchsize=130",
@@ -1162,6 +1169,7 @@ mod tests {
             autostart: true,
             hide_capture: true,
             caps_pill: false,
+            hide_taskbar: false,
         }
     }
 

@@ -525,7 +525,9 @@ fn taskbar_hides_at_bottom() -> bool {
     };
     // SAFETY: `data` is a live, sized APPBARDATA for both queries; the shell fills it in place.
     unsafe {
-        if SHAppBarMessage(ABM_GETSTATE, &mut data) as u32 & ABS_AUTOHIDE == 0 {
+        if crate::taskbar::hidden()
+            || SHAppBarMessage(ABM_GETSTATE, &mut data) as u32 & ABS_AUTOHIDE == 0
+        {
             return false;
         }
         SHAppBarMessage(ABM_GETTASKBARPOS, &mut data);
@@ -750,6 +752,7 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
         if message == WM_ENDSESSION && wparam.0 != 0 {
             // Signing out or shutting down: the process may end as soon as this returns.
             crate::store::save_unsaved();
+            crate::taskbar::restore();
             return LRESULT(0);
         }
         if message == WM_CLIPBOARDUPDATE {

@@ -59,6 +59,7 @@ mod stopwatch;
 mod store;
 mod system_os;
 mod tabs;
+mod taskbar;
 mod text_settings;
 mod theme;
 mod timer;
@@ -115,6 +116,7 @@ fn run() -> Result<()> {
             });
             Ok(())
         }
+        [command, pid, state] if command == "--taskbar" => taskbar::watch(pid, state),
         [command, name, value] if command == "progress" => {
             let (Some(name), Some(percent)) = (agent::clean(name), agent::percent(value)) else {
                 return Err(Error::new(
