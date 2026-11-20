@@ -2246,10 +2246,7 @@ impl Desktop {
             }
         }
     }
-    /// Follows the pointer on the dock: after `preview::DELAY` on one slot with windows, shows a DWM
-    /// thumbnail of the group's most recent window above it. It ends on leave, a slot change, a click, a
-    /// hidden dock (full screen) or the window closing. The only wait is the delay's deadline, returned
-    /// here (`INFINITE` otherwise); no thread or timer, and with nothing hovered the pass is a short scan.
+    /// Shows a delayed DWM thumbnail, held through pointer transfer and popup interaction.
     #[inline(never)]
     fn refresh_preview(&mut self) -> u32 {
         let now = Instant::now();
@@ -2277,9 +2274,14 @@ impl Desktop {
         // A thumbnail would float over the open menu.
         let hovered = hovered.filter(|_| self.menu.is_none());
         let spot = hovered.map(|(index, slot, _)| (self.surfaces[index].window.0.0 as usize, slot));
-        let ended = self.preview.point(spot, now);
+        let over = self.popup.as_ref().is_some_and(|p| p.under_pointer());
+        let ended = self.preview.point_preview(spot, over, now);
         let stale = self.popup.as_ref().is_some_and(|popup| {
-            !hovered.is_some_and(|(_, _, item)| item.windows.contains(&popup.target))
+            let owner = self.preview.spot().and_then(|(hwnd, slot)| {
+                self.dock_at(HWND(hwnd as *mut _)).filter(|s| s.visible)?;
+                self.dock_items.get(slot)
+            });
+            self.menu.is_some() || !owner.is_some_and(|item| item.windows.contains(&popup.target))
         });
         if ended || stale {
             self.popup = None;
@@ -3906,6 +3908,7 @@ impl Desktop {
                 .into_iter()
                 .flatten()
                 .any(|menu| menu.dock() == s.window.0)
+                || (self.popup.is_some() && self.preview.owns(s.window.0))
         };
         changed |= self.tuck_notch.tick(now, |device| {
             surfaces.iter().any(|s| {
@@ -4148,6 +4151,7 @@ impl Desktop {
         // The foreground window's own move or resize counts as a change too.
         let stamp = model.generation.wrapping_add(window_catalog::frames());
         self.refresh_fullscreen(stamp)?;
+        let preview_wait = self.refresh_preview();
         self.refresh_tuck(stamp)?;
         let wait = self
             .refresh_clock()?
@@ -4155,7 +4159,7 @@ impl Desktop {
             .min(self.refresh_meter()?)
             .min(self.refresh_timers())
             .min(self.refresh_power())
-            .min(self.refresh_preview())
+            .min(preview_wait)
             .min(self.refresh_raise())
             .min(self.refresh_hover_popup())
             .min(self.refresh_edges())
@@ -4463,6 +4467,14 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 continue;
             }
             if catalog.message(&message)? {
+                continue;
+            }
+            if desktop
+                .popup
+                .as_ref()
+                .is_some_and(|popup| popup.message(&message))
+            {
+                desktop.dismiss_preview();
                 continue;
             }
             if desktop.hover_popup_message(&message) || desktop.menu_message(&message, catalog) {

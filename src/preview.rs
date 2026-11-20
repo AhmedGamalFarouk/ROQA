@@ -6,13 +6,19 @@ use crate::{dock, layout::Bounds, native_window::NativeWindow, window_model::Win
 use std::time::{Duration, Instant};
 use windows::{
     Win32::{
-        Foundation::{E_FAIL, HWND, RECT},
+        Foundation::{E_FAIL, HWND, POINT, RECT},
         Graphics::Dwm::{
             DWM_THUMBNAIL_PROPERTIES, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE,
             DwmQueryThumbnailSourceSize, DwmRegisterThumbnail, DwmUnregisterThumbnail,
             DwmUpdateThumbnailProperties,
         },
-        UI::WindowsAndMessaging::{GW_HWNDNEXT, GetTopWindow, GetWindow},
+        UI::{
+            Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent},
+            WindowsAndMessaging::{
+                GW_HWNDNEXT, GetCursorPos, GetTopWindow, GetWindow, MSG, WM_LBUTTONUP,
+                WM_MOUSEMOVE, WindowFromPoint,
+            },
+        },
     },
     core::{Error, Result},
 };
@@ -34,6 +40,7 @@ pub struct Intent {
     spot: Option<Spot>,
     due: Option<Instant>,
     shown: bool,
+    leave_at: Option<Instant>,
 }
 impl Intent {
     /// Follows the pointer (`None` is off the dock's slots). A new spot restarts the delay; returns true
@@ -51,8 +58,33 @@ impl Intent {
             spot,
             due: spot.map(|_| now + delay),
             shown: false,
+            leave_at: None,
         };
         ended
+    }
+    /// Keeps a shown preview through the gap, then waits for actual popup leave events.
+    pub fn point_preview(&mut self, spot: Option<Spot>, over_popup: bool, now: Instant) -> bool {
+        if self.shown && spot.is_none() {
+            if over_popup {
+                self.leave_at = None;
+                return false;
+            }
+            let due = *self
+                .leave_at
+                .get_or_insert(now + Duration::from_millis(250));
+            if now < due {
+                return false;
+            }
+        } else {
+            self.leave_at = None;
+        }
+        self.point(spot, now)
+    }
+    pub fn owns(&self, window: HWND) -> bool {
+        self.spot.is_some_and(|(hwnd, _)| hwnd == window.0 as usize)
+    }
+    pub fn spot(&self) -> Option<Spot> {
+        self.spot
     }
     /// The spot whose preview is due, once. Ask `dismiss` if showing it fails.
     pub fn take_due(&mut self, now: Instant) -> Option<Spot> {
@@ -65,10 +97,11 @@ impl Intent {
     /// moves to another spot. Returns whether a preview was shown.
     pub fn dismiss(&mut self) -> bool {
         self.due = None;
+        self.leave_at = None;
         std::mem::take(&mut self.shown)
     }
     pub fn deadline(&self) -> Option<Instant> {
-        self.due
+        self.due.into_iter().chain(self.leave_at).min()
     }
 }
 
@@ -140,6 +173,33 @@ pub struct Popup {
     window: NativeWindow,
 }
 impl Popup {
+    pub fn under_pointer(&self) -> bool {
+        let mut point = POINT::default();
+        // SAFETY: scalar cursor coordinates and the identity of our live HWND.
+        unsafe { GetCursorPos(&mut point).is_ok() && WindowFromPoint(point) == self.window.0 }
+    }
+    /// Registers leave notification and activates the target when its thumbnail is clicked.
+    pub fn message(&self, message: &MSG) -> bool {
+        if message.hwnd != self.window.0 {
+            return false;
+        }
+        if message.message == WM_MOUSEMOVE {
+            // SAFETY: a single leave notification for our live popup; no timer or polling.
+            let _ = unsafe {
+                TrackMouseEvent(&mut TRACKMOUSEEVENT {
+                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: self.window.0,
+                    dwHoverTime: 0,
+                })
+            };
+        }
+        if message.message == WM_LBUTTONUP {
+            let _ = dock::perform(dock::Action::Activate(self.target));
+            return true;
+        }
+        false
+    }
     /// Shows the preview of the most recent window of `windows` above the screen column `slot_x`. The popup is
     /// named "Preview, <app>" for UI Automation, and is never activated.
     pub fn show(
@@ -202,6 +262,58 @@ mod tests {
             handle,
             process: handle as u32,
         }
+    }
+
+    #[test]
+    fn transfer_holds_through_gap_and_popup_then_expires_once() {
+        let t0 = Instant::now();
+        let mut intent = Intent::default();
+        intent.point(Some((1, 2)), t0);
+        intent.take_due(t0 + DELAY);
+        let leave = t0 + DELAY;
+        assert!(!intent.point_preview(None, false, leave));
+        assert_eq!(intent.deadline(), Some(leave + Duration::from_millis(250)));
+        assert!(!intent.point_preview(None, true, leave + Duration::from_millis(249)));
+        assert_eq!(intent.deadline(), None);
+        assert!(!intent.point_preview(None, true, leave + Duration::from_secs(10)));
+        let leave = leave + Duration::from_secs(11);
+        assert!(!intent.point_preview(None, false, leave));
+        assert!(intent.point_preview(None, false, leave + Duration::from_millis(250)));
+        assert_eq!((intent.spot(), intent.deadline()), (None, None));
+        assert!(!intent.point_preview(None, false, leave + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn returning_to_icon_or_clicking_cancels_transfer_deadline() {
+        let t0 = Instant::now();
+        let mut intent = Intent::default();
+        intent.point(Some((1, 2)), t0);
+        intent.take_due(t0 + DELAY);
+        intent.point_preview(None, false, t0 + DELAY);
+        assert!(!intent.point_preview(Some((1, 2)), false, t0 + DELAY));
+        assert_eq!(intent.deadline(), None);
+        intent.point_preview(None, false, t0 + DELAY);
+        assert!(intent.dismiss());
+        assert_eq!(intent.deadline(), None);
+        assert!(!intent.point_preview(Some((1, 2)), false, t0 + DELAY));
+        assert_eq!(intent.take_due(t0 + DELAY * 10), None);
+    }
+
+    #[test]
+    fn transfer_cancels_on_other_slot_and_does_not_delay_unshown_intent() {
+        let t0 = Instant::now();
+        let mut intent = Intent::default();
+        intent.point(Some((1, 2)), t0);
+        intent.point_preview(None, false, t0);
+        assert_eq!(intent.deadline(), None);
+        intent.point(Some((1, 2)), t0);
+        intent.take_due(t0 + DELAY);
+        intent.point_preview(None, false, t0 + DELAY);
+        assert!(intent.point_preview(Some((2, 3)), false, t0 + DELAY));
+        assert_eq!(intent.spot(), Some((2, 3)));
+        assert_eq!(intent.deadline(), Some(t0 + DELAY * 2));
+        assert!(!intent.owns(HWND::default()));
+        assert!(intent.owns(HWND(2_usize as *mut _)));
     }
 
     #[test]
