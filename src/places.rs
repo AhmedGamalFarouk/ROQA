@@ -110,6 +110,31 @@ static ANSWER: std::sync::Mutex<Option<Answer>> = std::sync::Mutex::new(None);
 /// The generation of the latest click; opening any menu (`invalidate`) makes an older answer not current.
 static REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Workers still inside a blocking OS call, expired ones included (`ASKING` only forgets them). A stalled share must not
+/// pile up threads on retries, so `start` refuses past `MAX_LIVE`.
+static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_LIVE: usize = 3;
+
+/// One admitted worker; dropping it (the worker ends, or never started) frees its place.
+struct Live(&'static std::sync::atomic::AtomicUsize);
+
+impl Live {
+    fn admit(count: &'static std::sync::atomic::AtomicUsize, max: usize) -> Option<Self> {
+        use std::sync::atomic::Ordering::AcqRel;
+        if count.fetch_add(1, AcqRel) >= max {
+            count.fetch_sub(1, AcqRel);
+            return None;
+        }
+        Some(Self(count))
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 /// A menu opened: a question still out no longer applies.
 pub fn invalidate() {
     REQUEST.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -138,6 +163,9 @@ fn start(dock: isize, slot: usize, folder: String, listing: bool) -> bool {
     if holds(asking.map(|(_, asked)| asked), now) {
         return false;
     }
+    let Some(live) = Live::admit(&LIVE, MAX_LIVE) else {
+        return false;
+    };
     // SAFETY: a scalar thread id query.
     let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
     let (request, asked) = (REQUEST.fetch_add(1, AcqRel) + 1, now);
@@ -145,6 +173,7 @@ fn start(dock: isize, slot: usize, folder: String, listing: bool) -> bool {
     let spawned = std::thread::Builder::new()
         .name("roqa-stack".into())
         .spawn(move || {
+            let _live = live;
             let path = Path::new(&folder);
             let files = (!listing && path.is_dir()).then(|| newest_files(path, STACK));
             let places = listing.then(list);
@@ -174,11 +203,13 @@ fn start(dock: isize, slot: usize, folder: String, listing: bool) -> bool {
 
 /// The finished question's answer, once; the next question may start after it.
 pub fn answer() -> Option<Answer> {
-    let answer = ANSWER.lock().ok()?.take();
-    if answer.is_some() {
-        *ASKING.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    let answer = ANSWER.lock().ok()?.take()?;
+    // A newer question may have started since this answer was published: it keeps its place.
+    let mut asking = ASKING.lock().unwrap_or_else(PoisonError::into_inner);
+    if asking.is_some_and(|(latest, _)| latest == answer.request) {
+        *asking = None;
     }
-    answer
+    Some(answer)
 }
 
 /// `GetDriveTypeW` answers for a removable and a fixed drive.
@@ -284,6 +315,36 @@ mod tests {
             Some(now),
             now + STALE + std::time::Duration::from_millis(1)
         ));
+    }
+    #[test]
+    fn consuming_an_old_answer_keeps_the_newer_question() {
+        let now = std::time::Instant::now();
+        let old = Answer {
+            dock: 0,
+            slot: 0,
+            folder: String::new(),
+            files: None,
+            places: None,
+            request: 4,
+            asked: now,
+        };
+        *ASKING.lock().unwrap() = Some((5, now));
+        *ANSWER.lock().unwrap() = Some(old);
+        assert!(answer().is_some());
+        assert_eq!(ASKING.lock().unwrap().map(|(request, _)| request), Some(5));
+        *ASKING.lock().unwrap() = None;
+    }
+    #[test]
+    fn stalled_workers_are_bounded_and_free_their_place() {
+        static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let mut held: Vec<_> = (0..2).filter_map(|_| Live::admit(&COUNT, 2)).collect();
+        assert_eq!(held.len(), 2);
+        assert!(Live::admit(&COUNT, 2).is_none(), "a third would pile up");
+        held.pop();
+        assert!(
+            Live::admit(&COUNT, 2).is_some(),
+            "a finished one frees its place"
+        );
     }
     #[test]
     fn rows_read_plainly() {

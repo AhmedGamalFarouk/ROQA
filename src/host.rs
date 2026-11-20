@@ -2784,15 +2784,14 @@ impl Desktop {
     }
     /// A slot acts on its real window group, a button does its job.
     fn activate(&mut self, hwnd: HWND, hit: Option<Hit>) -> Result<()> {
-        // A newer click supersedes a Places or stack answer still out, even when this one is refused or opens nothing.
-        if hit.is_some() {
-            crate::places::invalidate();
-        }
+        // A newer click supersedes a Places or stack answer still out. The clicks that ask do not invalidate: a refused
+        // one (still reading) must leave the first answer standing, and an accepted one supersedes it in `places::start`.
         match hit {
             Some(Hit::Slot(slot)) => {
                 if let Some(item) = self.dock_items.get(slot)
                     && !item.members.is_empty()
                 {
+                    crate::places::invalidate();
                     let members = item.members.clone();
                     for member in &members {
                         self.open_member(member);
@@ -2810,6 +2809,7 @@ impl Desktop {
                     self.ask_stack(hwnd, slot, path.clone());
                     return Ok(());
                 }
+                crate::places::invalidate();
                 self.run_pin(slot, None);
                 Ok(())
             }
@@ -3028,20 +3028,6 @@ impl Desktop {
                 self.hover_popup = None;
                 true
             }
-        }
-    }
-    /// A taskbar button: the shell shortcut it stands for (sent on this click only), or its own popup.
-    fn press_button(&mut self, hwnd: HWND, button: Button) {
-        match (button, button.keys()) {
-            (Button::Quick, _) => self.open_quick_menu(hwnd),
-            (Button::Places, _) => self.ask_places(hwnd),
-            (Button::Tray, _) => self.open_flyout(hwnd, Button::Tray),
-            (_, Some(keys)) => {
-                if !dock::send_keys(keys) {
-                    eprintln!("Dock button: Windows refused the key input");
-                }
-            }
-            (_, None) => {}
         }
     }
     /// The hidden-icons or Start button: Windows' own flyout or menu, set above the button.

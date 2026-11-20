@@ -70,7 +70,7 @@ pub fn changed() -> bool {
 }
 
 /// A flip asked while a run was out, waiting for it: 0 none, else the `Kind` plus one. The first waits; a second is
-/// refused rather than replacing it.
+/// refused rather than replacing it. The host runs it when the run in flight reports (`run_waiting`).
 static PENDING: AtomicU8 = AtomicU8::new(0);
 
 fn take_pending() -> Option<Kind> {
@@ -81,18 +81,18 @@ fn take_pending() -> Option<Kind> {
     }
 }
 
-/// Reads every radio and, with `flip`, switches that one first, all on a short worker. One run at a time: a flip
-/// asked meanwhile waits and runs right after (`PENDING`); false when a flip is already waiting or no worker could
-/// start. The result comes with `READY` and `changed`.
-pub fn refresh(flip: Option<Kind>) -> bool {
-    // SAFETY: a scalar thread id query.
-    request(flip, unsafe {
-        windows::Win32::System::Threading::GetCurrentThreadId()
-    })
+/// Starts the flip that waited for the run which just reported (the host calls it when `changed`). The worker frees
+/// its slot before it reports, and only the host thread asks, so the slot is free and no flip is lost between them.
+pub fn run_waiting() {
+    if let Some(kind) = take_pending() {
+        refresh(Some(kind));
+    }
 }
 
-/// `refresh` for the host thread `host` (a worker that starts the next run passes the host's, not its own).
-fn request(flip: Option<Kind>, host: u32) -> bool {
+/// Reads every radio and, with `flip`, switches that one first, all on a short worker. One run at a time: a flip
+/// asked meanwhile waits for `run_waiting` (`PENDING`); false when a flip is already waiting or no worker could
+/// start. The result comes with `READY` and `changed`.
+pub fn refresh(flip: Option<Kind>) -> bool {
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
     /// Frees the slot and balances the worker's COM, also when the worker unwinds.
     struct Done(bool);
@@ -107,40 +107,25 @@ fn request(flip: Option<Kind>, host: u32) -> bool {
     }
     if BUSY.swap(true, Ordering::SeqCst) {
         let Some(kind) = flip else { return false };
-        if PENDING
+        return PENDING
             .compare_exchange(0, kind as u8 + 1, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return false;
-        }
-        // The worker may have finished before it could see the flip: then this call runs it.
-        return BUSY.load(Ordering::SeqCst)
-            || take_pending().is_none_or(|kind| request(Some(kind), host));
+            .is_ok();
     }
+    // SAFETY: a scalar thread id query.
+    let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
     let spawned = std::thread::Builder::new()
         .name("roqa-radio".into())
         .spawn(move || {
             // SAFETY: a new worker; the guard below balances it on this thread.
             let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
             let done = Done(com);
-            let mut next = flip;
-            loop {
-                match read(next) {
-                    Ok(states) => *LAST.lock().unwrap_or_else(PoisonError::into_inner) = states,
-                    Err(error) => eprintln!("Quick settings: radio: {error}"),
-                }
-                CHANGED.store(true, Ordering::Release);
-                let _ = crate::native_window::post_wake(host, READY);
-                match take_pending() {
-                    Some(kind) => next = Some(kind),
-                    None => break,
-                }
+            match read(flip) {
+                Ok(states) => *LAST.lock().unwrap_or_else(PoisonError::into_inner) = states,
+                Err(error) => eprintln!("Quick settings: radio: {error}"),
             }
             drop(done);
-            // A flip that arrived after the last look starts the next run (or waits again for whoever holds the slot).
-            if let Some(kind) = take_pending() {
-                request(Some(kind), host);
-            }
+            CHANGED.store(true, Ordering::Release);
+            let _ = crate::native_window::post_wake(host, READY);
         });
     if spawned.is_err() {
         BUSY.store(false, Ordering::SeqCst);
@@ -246,10 +231,10 @@ mod tests {
     #[test]
     fn a_flip_asked_during_a_run_waits_and_a_second_is_refused() {
         BUSY.store(true, Ordering::SeqCst); // a run is out; no worker starts below
-        assert!(!request(None, 0), "a plain read just yields");
-        assert!(request(Some(Kind::WiFi), 0), "the first flip waits");
+        assert!(!refresh(None), "a plain read just yields");
+        assert!(refresh(Some(Kind::WiFi)), "the first flip waits");
         assert!(
-            !request(Some(Kind::Bluetooth), 0),
+            !refresh(Some(Kind::Bluetooth)),
             "the first is kept, not replaced"
         );
         assert_eq!(take_pending(), Some(Kind::WiFi));

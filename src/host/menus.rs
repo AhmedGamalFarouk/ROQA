@@ -445,9 +445,27 @@ impl Desktop {
         }
         if quick::changed() {
             self.refresh_quick_menu();
+            quick::run_waiting();
         }
         if shelf_os::network_failed() {
             self.show_open_failed();
+        }
+    }
+    /// A taskbar button: the shell shortcut it stands for (sent on this click only), or its own popup.
+    pub(super) fn press_button(&mut self, hwnd: HWND, button: Button) {
+        if button != Button::Places {
+            crate::places::invalidate(); // Places asks, and an accepted ask supersedes the older answer itself
+        }
+        match (button, button.keys()) {
+            (Button::Quick, _) => self.open_quick_menu(hwnd),
+            (Button::Places, _) => self.ask_places(hwnd),
+            (Button::Tray, _) => self.open_flyout(hwnd, Button::Tray),
+            (_, Some(keys)) => {
+                if !dock::send_keys(keys) {
+                    eprintln!("Dock button: Windows refused the key input");
+                }
+            }
+            (_, None) => {}
         }
     }
     fn refresh_quick_menu(&mut self) {
