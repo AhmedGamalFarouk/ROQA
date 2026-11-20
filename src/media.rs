@@ -362,8 +362,9 @@ impl State {
 }
 
 /// Brings `order` (player ids, oldest first) up to date with the `present` ones and returns the id to
-/// show: a newly opened player (the one Windows calls current goes last among several at once, so it
-/// wins at start-up) replaces any pick; else the pick, while it is open; else the newest.
+/// show. Windows' `current` player is the one that started most recently (its media flyout follows
+/// it), so it is kept newest and shown; a change of current ends any pick. Else the pick, while it is
+/// open; else the newest.
 fn order_players(
     order: &mut Vec<String>,
     picked: &mut Option<String>,
@@ -371,16 +372,19 @@ fn order_players(
     current: Option<&str>,
 ) -> Option<String> {
     order.retain(|id| present.contains(&id.as_str()));
-    let mut fresh: Vec<&str> = present
-        .iter()
-        .copied()
-        .filter(|id| !order.iter().any(|known| known == id))
-        .collect();
-    fresh.sort_by_key(|id| Some(*id) == current);
-    if !fresh.is_empty() {
+    let current = current.filter(|id| present.contains(id));
+    if current.is_some() && order.last().map(String::as_str) != current {
         *picked = None;
     }
-    order.extend(fresh.into_iter().map(str::to_owned));
+    for id in present {
+        if Some(*id) != current && !order.iter().any(|known| known == id) {
+            order.push((*id).to_owned());
+        }
+    }
+    if let Some(current) = current {
+        order.retain(|id| id != current);
+        order.push(current.to_owned());
+    }
     if picked.as_ref().is_some_and(|id| !order.contains(id)) {
         *picked = None;
     }
@@ -702,9 +706,9 @@ pub struct Media {
     // Teardown is field order after `drop` cancels pending reads: the session's tokens are removed
     // and it is released before the manager's.
     session: Option<Subscribed<Session>>,
-    /// The ids of the open players, in the order they appeared; the newest is shown unless one was picked.
+    /// The ids of the open players, oldest first, Windows' current one last; the last is shown unless one was picked.
     players: Vec<String>,
-    /// The player the user chose with a chip, until a newer one appears or it closes.
+    /// The player the user chose with a chip, until Windows' current player changes or it closes.
     picked: Option<String>,
     manager: Option<Subscribed<Manager>>,
     request: Option<Request<Manager>>,
@@ -1115,7 +1119,7 @@ impl Media {
             self.wake.raise(SESSION);
         }
     }
-    /// Re-reads the open players and shows the chosen one (the newest unless picked); on a change,
+    /// Re-reads the open players and shows the chosen one (Windows' current unless picked); on a change,
     /// ends the old session, starts a new generation and returns the reads the new session needs.
     fn replace_session(&mut self) -> u32 {
         let Some(manager) = &self.manager else {
@@ -1139,9 +1143,10 @@ impl Media {
                 .map(|id| id.to_string_lossy())
                 .unwrap_or_default()
         };
-        // One entry per app: an app's second session is the same player.
+        // One entry per app: an app's second session is the same player. The current session comes
+        // first, so a browser's newly playing tab replaces its older one.
         let mut open: Vec<(String, Session)> = Vec::new();
-        for session in sessions {
+        for session in current.iter().cloned().chain(sessions) {
             let id = id(&session);
             if !open.iter().any(|(known, _)| *known == id) {
                 open.push((id, session));
@@ -1685,7 +1690,7 @@ mod tests {
     }
 
     #[test]
-    fn the_newest_player_is_shown_a_pick_holds_and_a_gone_one_falls_back() {
+    fn the_current_player_is_shown_a_pick_holds_and_a_gone_one_falls_back() {
         let (mut order, mut picked) = (Vec::new(), None);
         let mut show = |present: &[&str], current: Option<&str>, order: &mut Vec<String>| {
             order_players(order, &mut picked, present, current)
@@ -1694,24 +1699,47 @@ mod tests {
         assert_eq!(show(&[], None, &mut order), None);
         assert_eq!(show(&["a"], Some("a"), &mut order).as_deref(), Some("a"));
         assert_eq!(chips(&order, Some("a")), (Vec::new(), 0));
-        // Two at once: the one Windows calls current wins; a later one wins over it.
+        // Two at once: the one Windows calls current wins; a new one that is not playing does not.
         let mut start = Vec::new();
+        let mut at = |present: &[&str], current: &str| show(present, Some(current), &mut start);
+        assert_eq!(at(&["a", "b"], "a").as_deref(), Some("a"));
+        assert_eq!(at(&["a", "b", "c"], "a").as_deref(), Some("a"));
+        // An open player that starts becomes current and is shown; when it ends, Windows' next one is.
+        assert_eq!(at(&["a", "b", "c"], "c").as_deref(), Some("c"));
+        assert_eq!(at(&["a", "b", "c"], "b").as_deref(), Some("b"));
+        assert_eq!(at(&["a", "c"], "c").as_deref(), Some("c"));
         assert_eq!(
-            show(&["a", "b"], Some("a"), &mut start).as_deref(),
+            order_players(&mut start, &mut picked, &["a"], None).as_deref(),
+            Some("a")
+        );
+        // A pick holds until Windows' current changes or it closes; a new paused player keeps it.
+        let mut order = Vec::new();
+        let mut show = |present: &[&str], current: &str, picked: &mut Option<String>| {
+            order_players(&mut order, picked, present, Some(current))
+        };
+        let mut picked = None;
+        assert_eq!(
+            show(&["a", "b", "c"], "c", &mut picked).as_deref(),
+            Some("c")
+        );
+        picked = Some("a".into());
+        assert_eq!(
+            show(&["a", "b", "c"], "c", &mut picked).as_deref(),
             Some("a")
         );
         assert_eq!(
-            show(&["a", "b", "c"], Some("a"), &mut start).as_deref(),
-            Some("c")
+            show(&["a", "b", "c", "d"], "c", &mut picked).as_deref(),
+            Some("a")
         );
-        // A pick holds across passes until a newer player opens or it closes.
-        picked = Some("a".into());
-        let mut show = |present: &[&str], order: &mut Vec<String>| {
-            order_players(order, &mut picked, present, None)
-        };
-        assert_eq!(show(&["a", "b", "c"], &mut start).as_deref(), Some("a"));
-        assert_eq!(show(&["b", "c"], &mut start).as_deref(), Some("c"));
-        assert_eq!(show(&["b", "c", "d"], &mut start).as_deref(), Some("d"));
+        assert_eq!(
+            show(&["a", "b", "c", "d"], "d", &mut picked).as_deref(),
+            Some("d")
+        );
+        picked = Some("b".into());
+        assert_eq!(
+            show(&["a", "c", "d"], "d", &mut picked).as_deref(),
+            Some("d")
+        );
         // The chips are the newest three, with the shown one marked.
         let long: Vec<String> = ["a.exe", "b.exe", "c.exe", "d.exe"]
             .map(String::from)
