@@ -52,7 +52,7 @@ pub enum Load {
     Loaded,
     /// Corrupt, truncated, oversized or newer-version: defaults used, the file renamed to `*.bad`.
     Quarantined,
-    /// Present but unreadable (e.g. locked): defaults used, the file left alone.
+    /// Present but unreadable (e.g. locked) or not quarantinable: defaults used, the file left alone.
     Unreadable,
 }
 
@@ -153,13 +153,18 @@ pub fn load(path: &Path) -> (Store, Load) {
             (store, Load::Loaded)
         }
         None => {
-            // Keep one bad copy for the user; a failed rename just means the next save replaces it.
+            // Keep one bad copy for the user; when it cannot be kept the file is left alone, as if unreadable.
             #[expect(
                 clippy::disallowed_methods,
                 reason = "quarantine of a bad store file, never new data"
             )]
-            let _ = std::fs::rename(path, path.with_extension("roqa.bad"));
-            (Store::default(), Load::Quarantined)
+            let kept = std::fs::rename(path, path.with_extension("roqa.bad")).is_ok();
+            let load = if kept {
+                Load::Quarantined
+            } else {
+                Load::Unreadable
+            };
+            (Store::default(), load)
         }
     }
 }
@@ -622,6 +627,17 @@ mod tests {
         pending.written();
         pending.mark(now);
         assert!(pending.take_changed());
+    }
+
+    #[test]
+    fn a_store_that_cannot_be_set_aside_is_never_saved_over() {
+        let dir = Dir::new("stuck");
+        let bad = format!("version={}\npin=keep\nend\n", VERSION + 1);
+        std::fs::write(dir.file(), &bad).unwrap();
+        // A folder where the bad copy goes makes the rename fail.
+        std::fs::create_dir(dir.0.join("store.roqa.bad")).unwrap();
+        assert_eq!(open(Some(dir.file())), (Store::default(), None));
+        assert_eq!(std::fs::read_to_string(dir.file()).unwrap(), bad);
     }
 
     #[test]
