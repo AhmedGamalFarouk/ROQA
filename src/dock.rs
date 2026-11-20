@@ -15,15 +15,15 @@ use windows::Win32::{
         },
         Shell::{SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW},
         WindowsAndMessaging::{
-            EnumWindows, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW,
-            GetWindowRect, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic,
-            IsWindow, IsWindowVisible, PostMessageW, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
-            SetWindowPos, ShowWindowAsync, WM_CLOSE, WS_EX_TOPMOST,
+            GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
+            GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindow,
+            IsWindowVisible, PostMessageW, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE,
+            SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
+            ShowWindowAsync, WM_CLOSE, WS_EX_TOPMOST,
         },
     },
 };
-use windows::core::{BOOL, HSTRING, PCWSTR};
+use windows::core::{HSTRING, PCWSTR};
 
 /// Dock geometry in DIPs. Slots are the app groups, in `items` order.
 pub const SLOT_DIPS: i32 = 56;
@@ -766,33 +766,14 @@ fn send_events(events: &[INPUT]) -> bool {
     unsafe { SendInput(events, std::mem::size_of::<INPUT>() as i32) as usize == events.len() }
 }
 
-/// The visible top-level window of `class`. `FindWindow` cannot see the shell's popups, so the windows are enumerated.
-fn find_popup(class: &str) -> Option<HWND> {
-    unsafe extern "system" fn visit(hwnd: HWND, parameter: LPARAM) -> BOOL {
-        // SAFETY: `parameter` is the tuple below, alive for the whole synchronous EnumWindows call.
-        let (class, found) = unsafe { &mut *(parameter.0 as *mut (&str, Option<HWND>)) };
-        let mut name = [0u16; 64];
-        // SAFETY: scalar window queries on a handle EnumWindows just gave and a local buffer.
-        let (len, shown) = unsafe { (GetClassNameW(hwnd, &mut name), IsWindowVisible(hwnd)) };
-        let hit =
-            shown.as_bool() && String::from_utf16_lossy(&name[..len.max(0) as usize]) == *class;
-        if hit {
-            *found = Some(hwnd);
-        }
-        BOOL(i32::from(!hit))
-    }
-    let mut search = (class, None);
-    // SAFETY: the callback does not keep the pointer and cannot panic.
-    let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut search as *mut _ as isize)) };
-    search.1
-}
-
-/// How long the shell is given to move focus to the tray (after Win+B) and to draw the flyout or menu (after Enter, Win+X).
+/// How long the shell is given to move focus to the tray after Win+B.
 const TRAY_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
-/// How long after the click the Start menu is put back where it belongs, as Windows places it again while it opens.
-const START_WATCH: std::time::Duration = std::time::Duration::from_millis(2500);
+/// How long after the click the popup is put back where it belongs, as Windows places it again while it opens.
+const WATCH: std::time::Duration = std::time::Duration::from_millis(2500);
 /// The class of the menu Win+X opens.
 const START_POPUP: &str = "Xaml_WindowedPopupClass";
+/// The class of the hidden-icons flyout.
+const TRAY_POPUP: &str = "TopLevelWindowForOverflowXamlIsland";
 
 /// The window class of `window`.
 fn class_of(window: HWND) -> String {
@@ -802,15 +783,18 @@ fn class_of(window: HWND) -> String {
     String::from_utf16_lossy(&class[..len])
 }
 
-/// Where the Start menu goes: its left edge on `anchor.0`, its bottom on `anchor.1`, inside `work`.
+/// Where the popup of class `popup` goes: its bottom on `anchor.1`, inside `work`; its left edge on `anchor.0`
+/// (`start`) or its centre.
 #[derive(Clone, Copy)]
 struct Aim {
+    popup: &'static str,
+    start: bool,
     anchor: (i32, i32),
     work: crate::layout::Bounds,
 }
 
 thread_local! {
-    /// The Start menu's target, read by the WinEvent callback on the thread that placed the hook.
+    /// The popup's target, read by the WinEvent callback on the thread that placed the hook.
     static AIM: std::cell::Cell<Option<Aim>> = const { std::cell::Cell::new(None) };
 }
 
@@ -851,9 +835,9 @@ fn place_popup(
     }
 }
 
-/// A window of any process appeared or moved: the Start menu is set back at its place (a move by `place_popup`
+/// A window of any process appeared or moved: the popup is set back at its place (a move by `place_popup`
 /// reports here once more and is found in place).
-unsafe extern "system" fn start_moved(
+unsafe extern "system" fn popup_moved(
     _: HWINEVENTHOOK,
     _: u32,
     window: HWND,
@@ -865,22 +849,27 @@ unsafe extern "system" fn start_moved(
     if object == 0
         && let Some(aim) = AIM.get()
     {
-        place_popup(window, START_POPUP, true, aim.anchor, aim.work);
+        place_popup(window, aim.popup, aim.start, aim.anchor, aim.work);
     }
 }
 
 /// Opens Windows' own popup for a dock button on the user's click (hidden icons: Win+B, then Enter; Start: the
 /// Win+X power-user menu; Windows draws it and handles every click in it) and sets it above `anchor` (the button's
 /// screen x, the dock's top y), inside `work`: centred on the hidden-icons button, left edges level on Start.
-/// A thread that lives about half a second (the Start menu: two and a half, listening for window events only) waits
-/// out the shell's focus moves; nothing runs between clicks. The popup is only moved when its class is the expected one.
+/// A thread that lives about three seconds, listening for window events only, waits out the shell's focus moves and
+/// sets the popup in place the moment it shows (the hidden-icons flyout always opens over the main taskbar first);
+/// nothing runs between clicks. The popup is only moved when its class is the expected one.
 pub fn open_flyout(button: Button, anchor: (i32, i32), work: crate::layout::Bounds) {
     let start = button == Button::Start;
+    let aim = Aim {
+        popup: if start { START_POPUP } else { TRAY_POPUP },
+        start,
+        anchor,
+        work,
+    };
     let _ = std::thread::Builder::new().spawn(move || {
         if start {
-            if send_keys(&[VK_LWIN, VK_X]) {
-                watch_start(Aim { anchor, work });
-            }
+            watch(aim, &[VK_LWIN, VK_X]);
             return;
         }
         if !send_keys(&[VK_LWIN, VK_B]) {
@@ -894,30 +883,16 @@ pub fn open_flyout(button: Button, anchor: (i32, i32), work: crate::layout::Boun
         // Enter must reach the taskbar: when the shell was slow to take the focus it would land in the user's app.
         // SAFETY: a scalar query.
         let tray = class_of(unsafe { GetForegroundWindow() });
-        if matches!(tray.as_str(), "Shell_TrayWnd" | "Shell_SecondaryTrayWnd")
-            && send_keys(&[VK_RETURN])
-        {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "the tray needs a moment after the key press, on a worker"
-            )]
-            std::thread::sleep(TRAY_WAIT);
-            // SAFETY: a scalar query.
-            place_popup(
-                unsafe { GetForegroundWindow() },
-                "TopLevelWindowForOverflowXamlIsland",
-                false,
-                anchor,
-                work,
-            );
+        if matches!(tray.as_str(), "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+            watch(aim, &[VK_RETURN]);
         }
     });
 }
 
-/// Puts the Start menu at `aim` as soon as it shows and each time Windows moves it, for `START_WATCH`: the thread
-/// sleeps in its message wait and wakes only for the window events that reach it (no polling).
-fn watch_start(aim: Aim) {
-    use std::time::Instant;
+/// Taps `keys`, then puts the popup they open at `aim` as soon as it shows and each time Windows moves it, for
+/// `WATCH`: the thread sleeps in its message wait and wakes only for the window events that reach it (no polling).
+fn watch(aim: Aim, keys: &[VIRTUAL_KEY]) {
+    use std::time::{Duration, Instant};
     use windows::Win32::UI::{
         Accessibility::{SetWinEventHook, UnhookWinEvent},
         WindowsAndMessaging::{
@@ -934,16 +909,19 @@ fn watch_start(aim: Aim) {
             EVENT_OBJECT_SHOW,
             EVENT_OBJECT_LOCATIONCHANGE,
             None,
-            Some(start_moved),
+            Some(popup_moved),
             0,
             0,
             WINEVENT_OUTOFCONTEXT,
         )
     };
-    if let Some(menu) = find_popup(START_POPUP) {
-        place_popup(menu, START_POPUP, true, aim.anchor, aim.work);
-    }
-    let end = Instant::now() + START_WATCH;
+    // Hooked first, so the popup is caught on its first show.
+    let wait = if send_keys(keys) {
+        WATCH
+    } else {
+        Duration::ZERO
+    };
+    let end = Instant::now() + wait;
     while let Some(left) = end.checked_duration_since(Instant::now()) {
         let mut message = Default::default();
         // SAFETY: waits for this thread's own input (the hook's events); the messages drained are dispatched.
