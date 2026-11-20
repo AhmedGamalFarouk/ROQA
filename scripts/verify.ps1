@@ -6,11 +6,13 @@ $evidence = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $EvidenceDirec
 New-Item -ItemType Directory -Force -Path $evidence | Out-Null
 $results = @()
 # A src file past 2,500 lines must be split by job into sibling `impl` files (as src/host/ does for Desktop). The four files
-# already over the limit may not grow: a ceiling at today's size; shrink the ceiling when one is split.
+# already over the limit may not grow: a ceiling at today's size (keyed by path under src); shrink the ceiling when one is split.
 $limit = 2500
-$ceiling = @{ 'host.rs' = 4907; 'graphics.rs' = 3971; 'settings_window.rs' = 3218; 'layout.rs' = 2703 }
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src') -Recurse -Filter *.rs) {
-    $max = if ($ceiling.ContainsKey($file.Name)) { $ceiling[$file.Name] } else { $limit }
+$ceiling = @{ 'host.rs' = 4902; 'graphics.rs' = 3971; 'settings_window.rs' = 3218; 'layout.rs' = 2703 }
+$srcRoot = Join-Path $projectRoot 'src'
+foreach ($file in Get-ChildItem -LiteralPath $srcRoot -Recurse -Filter *.rs) {
+    $name = $file.FullName.Substring($srcRoot.Length + 1).Replace('\', '/')
+    $max = if ($ceiling.ContainsKey($name)) { $ceiling[$name] } else { $limit }
     $lines = [System.IO.File]::ReadAllLines($file.FullName).Count
     if ($lines -gt $max) { throw "$($file.FullName) has $lines lines (limit $max). Split it by job into sibling files, for example impl Desktop blocks in src/host/." }
 }

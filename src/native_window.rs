@@ -95,7 +95,7 @@ pub fn power_read() -> bool {
     POWER_PENDING.swap(false, Ordering::AcqRel)
 }
 /// Posted (once until read) when a drive, camera or audio output arrives; `device_read` says which.
-pub const DEVICE: u32 = WM_APP + 10;
+pub const DEVICE: u32 = WM_APP + 13;
 pub const DRIVE_BIT: u32 = 1;
 pub const CAMERA_BIT: u32 = 2;
 pub const SPEAKER_BIT: u32 = 4;

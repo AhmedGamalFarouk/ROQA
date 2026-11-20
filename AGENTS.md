@@ -34,7 +34,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 ## Commands
 - Cargo only through `scripts\cargo.ps1 <args>`.
 - Gate: `scripts\verify.ps1` (fmt, clippy -D warnings, tests, locked release build, size report). A change is not done until it passes.
-- Lints: `clippy.toml` (`disallowed-methods`, each with a `reason` that names the right approach) and `[lints]` in `Cargo.toml`; `verify.ps1` also fails a src file over 2,500 lines. An existing correct use gets `#[expect(clippy::disallowed_methods, reason = "...")]` at the narrowest spot, never a blanket allow.
+- Lints: `clippy.toml` (`disallowed-methods`, each with a `reason` that names the right approach) and `[lints]` in `Cargo.toml`; `verify.ps1` also fails a src file over 2,500 lines (four files have a no-growth ceiling there, keyed by path under `src`). An existing correct use gets `#[expect(clippy::disallowed_methods, reason = "...")]` at the narrowest spot, never a blanket allow.
 - Run: `scripts\run.ps1 start` (builds, then launches the owner's ROQA on their own settings) and `scripts\run.ps1 quit`. A live test uses `scripts\run.ps1 start -Test` (test monitor only, private copy of the store).
 - Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. A full run takes about 6 minutes and returns on its own; run it in the background. If a pass fails with "Settings not found", ROQA crashed: check `Get-WinEvent` Application id 1000 before blaming the tool. Capture stores use fixed sample data (weather shows 3 hours, 29 degrees): that is the fixture, not a bug. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
 - Reuse a round's stills when `git rev-parse HEAD` and the exe SHA256 match its `provenance.json`.
@@ -42,7 +42,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 ## Reading code (token rule)
 - The `graft` command is not installed in agent shells (checked 2026-11-16): do not try it. Read the per-file card `graft/src/<file>.md` for the symbol list, then grep the symbol for its real line. Cards are not regenerated, so their line numbers drift; trust the names, not the numbers.
 - `host.rs` keeps the `Desktop` struct, start-up and the message loop; its methods by job live in `src/host/{notices,settings_bridge,menus,notch_clicks}.rs` (same `impl Desktop`, `pub(super)`).
-- Read a span, not a file. `host.rs` (about 5,100 lines), `graphics.rs`, `settings_window.rs`, `layout.rs`, `media.rs` are never read whole.
+- Read a span, not a file. `host.rs` (about 4,900 lines), `graphics.rs`, `settings_window.rs`, `layout.rs`, `media.rs` are never read whole.
 - Read a full file only when it is under ~300 lines or you are rewriting most of it.
 - Docs: read the summary here; open the source doc only for the section you need.
 

@@ -38,7 +38,7 @@ use windows::{
     core::{AgileReference, Error, HSTRING, Result},
 };
 
-const ICON_READY: u32 = WM_APP + 12;
+const ICON_READY: u32 = WM_APP + 14;
 const QUEUE: usize = 64;
 // Bound retained pixels and admitted work together; closed apps are evicted on catalog changes.
 pub const CACHE_LIMIT: usize = 256;
