@@ -391,14 +391,27 @@ fn order_players(
     picked.clone().or_else(|| order.last().cloned())
 }
 
-/// The chips for `order`: the newest `MAX_PLAYERS` short names and the shown one's index among them;
-/// none with a single player.
+/// The players the chips show: the newest `MAX_PLAYERS`, with the oldest of them giving way to `chosen` when a
+/// retained pick is older than those.
+fn displayed<'a>(order: &'a [String], chosen: Option<&'a str>) -> Vec<&'a str> {
+    let mut ids: Vec<&str> = order[order.len().saturating_sub(MAX_PLAYERS)..]
+        .iter()
+        .map(String::as_str)
+        .collect();
+    if let (Some(chosen), false) = (chosen, chosen.is_none_or(|id| ids.contains(&id))) {
+        ids[0] = chosen;
+    }
+    ids
+}
+
+/// The chips for `order`: the `displayed` short names and the shown one's index among them; none with a single
+/// player.
 fn chips(order: &[String], chosen: Option<&str>) -> (Vec<String>, usize) {
     if order.len() < 2 {
         return (Vec::new(), 0);
     }
-    let shown = &order[order.len().saturating_sub(MAX_PLAYERS)..];
-    let at = shown.iter().position(|id| Some(id.as_str()) == chosen);
+    let shown = displayed(order, chosen);
+    let at = shown.iter().position(|id| Some(*id) == chosen);
     (
         shown.iter().map(|id| short_name(id)).collect(),
         at.unwrap_or(0),
@@ -1113,9 +1126,16 @@ impl Media {
     }
     /// Shows the player behind chip `index` (an index into `Track::players`) from now on.
     pub fn choose(&mut self, index: usize) {
-        let from = self.players.len().saturating_sub(MAX_PLAYERS);
-        if let Some(id) = self.players.get(from + index) {
-            self.picked = Some(id.clone());
+        // The shown player is the pick, else the newest (`order_players`): the same `displayed` order the chips drew.
+        let chosen = self
+            .picked
+            .as_deref()
+            .or(self.players.last().map(String::as_str));
+        if let Some(id) = displayed(&self.players, chosen)
+            .get(index)
+            .map(|id| (*id).to_owned())
+        {
+            self.picked = Some(id);
             self.wake.raise(SESSION);
         }
     }
@@ -1748,6 +1768,15 @@ mod tests {
             chips(&long, Some("c.exe")),
             (vec!["B".into(), "C".into(), "D".into()], 1)
         );
+        // A retained pick older than those stays on a chip, selected, and that chip selects it.
+        let kept: Vec<String> = ["a.exe", "b.exe", "d.exe", "c.exe"]
+            .map(String::from)
+            .into();
+        assert_eq!(
+            chips(&kept, Some("a.exe")),
+            (vec!["A".into(), "D".into(), "C".into()], 0)
+        );
+        assert_eq!(displayed(&kept, Some("a.exe")), ["a.exe", "d.exe", "c.exe"]);
     }
 
     #[test]
