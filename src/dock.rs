@@ -13,7 +13,7 @@ use windows::Win32::{
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
             VK_B, VK_D, VK_LWIN, VK_RETURN, VK_S, VK_TAB, VK_X,
         },
-        Shell::{SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, ShellExecuteExW},
+        Shell::{SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW},
         WindowsAndMessaging::{
             EnumWindows, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW,
             GetWindowRect, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic,
@@ -707,22 +707,27 @@ pub fn restore_foreground(from: HWND, to: Option<WindowKey>) {
 /// Starts a not-running pin through the shell, on the user's click only. No UI on failure (a missing target
 /// would otherwise open a modal error box on the host thread); false means it did not start.
 pub fn launch(target: &str) -> bool {
-    // A UNC path or mapped drive can stall the shell on a dead share: it opens on the Shelf's worker, so
-    // `true` means asked, not started.
-    if crate::shelf_os::is_network(target) {
-        crate::shelf_os::open(target, false, true);
-        return true;
-    }
     launch_with(target, None)
 }
 
-/// `launch` with command-line `parameters`, for the file shelf's reveal.
+/// `launch` with command-line `parameters`, for the file shelf's reveal and files dropped on a pin. A UNC path or
+/// mapped drive can stall the shell on a dead share: it starts on the Shelf's worker, so `true` means asked, not
+/// started, and `false` that the worker is busy or could not start.
 pub fn launch_with(target: &str, parameters: Option<&str>) -> bool {
+    if crate::shelf_os::is_network(target) {
+        return crate::shelf_os::open_network(target, parameters);
+    }
+    shell(target, parameters, false)
+}
+
+/// The shell call itself. `wait` is for a short-lived thread with no message loop (the network worker), where the
+/// call must finish its launch before the thread ends (`SEE_MASK_NOASYNC`).
+pub fn shell(target: &str, parameters: Option<&str>, wait: bool) -> bool {
     let file = HSTRING::from(target);
     let parameters = parameters.map(HSTRING::from);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_FLAG_NO_UI,
+        fMask: SEE_MASK_FLAG_NO_UI | if wait { SEE_MASK_NOASYNC } else { 0 },
         lpFile: PCWSTR(file.as_ptr()),
         lpParameters: parameters
             .as_ref()

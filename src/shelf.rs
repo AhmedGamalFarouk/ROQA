@@ -67,11 +67,6 @@ const RESERVED: [&str; 22] = [
 /// `GetDriveType` value of a mapped network drive (`DRIVE_REMOTE`).
 pub const DRIVE_REMOTE: u32 = 4;
 
-/// Activation must keep off the host thread for a UNC path and for a drive letter that maps to a share.
-pub fn is_network(check: Check, drive_type: u32) -> bool {
-    check == Check::NotChecked || drive_type == DRIVE_REMOTE
-}
-
 /// Case-insensitive key two spellings of one path share (no file system access, so no canonicalisation).
 fn key(path: &str) -> String {
     path.to_lowercase()
@@ -489,12 +484,5 @@ mod tests {
         );
         assert!(shelf.set_cap(0), "0 clamps to 1");
         assert_eq!(shelf.entries().len(), 1);
-        // UNC (not checked) or DRIVE_REMOTE stays off the host thread; fixed, removable and unknown do not.
-        assert!(is_network(Check::NotChecked, 3));
-        assert!(is_network(Check::Unknown, DRIVE_REMOTE));
-        assert!(is_network(Check::Missing, DRIVE_REMOTE));
-        for drive_type in [0, 1, 2, 3, 5, 6] {
-            assert!(!is_network(Check::Unknown, drive_type), "{drive_type}");
-        }
     }
 }

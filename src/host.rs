@@ -3255,41 +3255,6 @@ impl Desktop {
             .deadline()
             .map_or(INFINITE, |due| milliseconds_until(due, now))
     }
-    /// Files dropped on a dock slot open with that app: its program is started with the paths. A group of apps,
-    /// a folder and an app with no program path (a packaged one) are told so instead.
-    fn drop_on_dock(&mut self, hwnd: HWND, x: i32, paths: &[String]) {
-        let Some(dock) = self.dock_at(hwnd) else {
-            return;
-        };
-        let hit = dock::hit_at(
-            dock.dock_buttons,
-            x - dock.bounds.x,
-            dock.bounds.width,
-            dock.dpi,
-            self.dock_slots(),
-        );
-        let Some(Hit::Slot(slot)) = hit else {
-            return;
-        };
-        let Some(item) = self.dock_items.get(slot) else {
-            return;
-        };
-        let program = match &item.identity {
-            Identity::Executable(path) => Some(path.as_str()),
-            _ => item.executable.as_deref(),
-        }
-        .filter(|path| {
-            item.members.is_empty()
-                && path.ends_with(".exe")
-                && std::path::Path::new(path).is_file()
-        });
-        let quoted: Vec<_> = paths.iter().map(|path| format!("\"{path}\"")).collect();
-        let opened =
-            program.is_some_and(|program| dock::launch_with(program, Some(&quoted.join(" "))));
-        if !opened {
-            self.show_notice("That app can't open files".into(), Instant::now());
-        }
-    }
     /// Opens the picker; a finished one whose completion wake was lost is collected instead of stranding it.
     fn start_file_picker(&mut self) {
         if let Some(paths) = self.file_picker.start() {
@@ -3369,7 +3334,7 @@ impl Desktop {
         };
         let path = entry.path.clone();
         // A UNC path or a mapped drive could stall the host on a dead share, so neither is stat'ed here.
-        let network = shelf::is_network(entry.check, shelf_os::drive_type(&path));
+        let network = shelf_os::is_network(&path);
         let found = network || std::path::Path::new(&path).exists();
         if self.shelf.shelf.set_missing(index, !found) {
             self.request_notches(Repaint::Full, |_| true);
@@ -4133,6 +4098,9 @@ impl Desktop {
         }
         if let Some(answer) = crate::places::answer() {
             self.stack_ready(answer);
+        }
+        if shelf_os::network_failed() {
+            self.show_notice("Windows couldn't open this app.".into(), Instant::now());
         }
         if native_window::caps_read() {
             self.key_pill(Some(keys::caps_text()));

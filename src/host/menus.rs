@@ -170,6 +170,9 @@ impl Desktop {
             .get(answer.slot)
             .is_some_and(|item| item.identity == Identity::Executable(answer.folder.clone()));
         if !answer.current() || !held {
+            if held && answer.slow() {
+                self.show_notice("That folder was slow. Try again.".into(), Instant::now());
+            }
             return;
         }
         let hwnd = HWND(answer.dock as *mut _);
@@ -177,6 +180,42 @@ impl Desktop {
             Some(_) if self.menu.is_some() => {}
             Some(files) => self.open_stack(hwnd, answer.slot, &answer.folder, files),
             None => self.run_pin(answer.slot, Some(&answer.folder)),
+        }
+    }
+    /// Files dropped on a dock slot open with that app: its program is started with the paths. A group of apps,
+    /// a folder and an app with no program path (a packaged one) are told so instead. A program on a network share is
+    /// not looked at here: `dock::launch_with` starts it on the network worker.
+    pub(super) fn drop_on_dock(&mut self, hwnd: HWND, x: i32, paths: &[String]) {
+        let Some(dock) = self.dock_at(hwnd) else {
+            return;
+        };
+        let hit = dock::hit_at(
+            dock.dock_buttons,
+            x - dock.bounds.x,
+            dock.bounds.width,
+            dock.dpi,
+            self.dock_slots(),
+        );
+        let Some(Hit::Slot(slot)) = hit else {
+            return;
+        };
+        let Some(item) = self.dock_items.get(slot) else {
+            return;
+        };
+        let program = match &item.identity {
+            Identity::Executable(path) => Some(path.as_str()),
+            _ => item.executable.as_deref(),
+        }
+        .filter(|path| {
+            item.members.is_empty()
+                && path.ends_with(".exe")
+                && (shelf_os::is_network(path) || std::path::Path::new(path).is_file())
+        });
+        let quoted: Vec<_> = paths.iter().map(|path| format!("\"{path}\"")).collect();
+        let opened =
+            program.is_some_and(|program| dock::launch_with(program, Some(&quoted.join(" "))));
+        if !opened {
+            self.show_notice("That app can't open files".into(), Instant::now());
         }
     }
     /// Runs the dock action of pinned slot `slot` (launch, focus or cycle); with `folder`, only while the slot still

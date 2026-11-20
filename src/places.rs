@@ -84,10 +84,16 @@ pub struct Answer {
 const STALE: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Answer {
+    fn latest(&self) -> bool {
+        self.request == REQUEST.load(std::sync::atomic::Ordering::Acquire)
+    }
     /// Whether the click that asked is still the latest one, with no menu opened since, and recent.
     pub fn current(&self) -> bool {
-        self.request == REQUEST.load(std::sync::atomic::Ordering::Acquire)
-            && self.asked.elapsed() <= STALE
+        self.latest() && self.asked.elapsed() <= STALE
+    }
+    /// Whether the click that asked is still the latest but the read took too long to use.
+    pub fn slow(&self) -> bool {
+        self.latest() && self.asked.elapsed() > STALE
     }
 }
 
@@ -229,8 +235,13 @@ mod tests {
         assert!(answer(request, now).current());
         let old = now.checked_sub(STALE * 2).unwrap_or(now);
         assert!(!answer(request, old).current(), "too slow");
+        assert!(answer(request, old).slow() && !answer(request, now).slow());
         invalidate();
         assert!(!answer(request, now).current(), "a menu opened since");
+        assert!(
+            !answer(request, old).slow(),
+            "a later click owns the answer"
+        );
     }
     #[test]
     fn rows_read_plainly() {

@@ -334,29 +334,53 @@ pub fn open(path: &str, reveal: bool, network: bool) {
     } else {
         (path.to_owned(), None)
     };
-    if !network {
-        dock::launch_with(&file, parameters.as_deref());
-        return;
+    if network {
+        open_network(&file, parameters.as_deref());
+    } else {
+        dock::shell(&file, parameters.as_deref(), false);
     }
+}
+
+/// Set when a network launch failed on its worker; `network_failed` reads it once.
+static NETWORK_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Posted to the host when that happens; it only wakes the loop.
+const FAILED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 63;
+
+/// Whether a network launch failed since the last call.
+pub fn network_failed() -> bool {
+    NETWORK_FAILED.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
+/// Starts `file` through the shell on the one network worker, never on the host thread. False when one is still
+/// running or no worker could start; a failure on the worker is read with `network_failed`.
+pub fn open_network(file: &str, parameters: Option<&str>) -> bool {
     let Some(permit) = NetworkPermit::acquire() else {
-        return;
+        return false;
     };
+    // SAFETY: a scalar thread id query.
+    let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    let (file, parameters) = (file.to_owned(), parameters.map(str::to_owned));
     let spawned = std::thread::Builder::new()
         .name("roqa-shelf-open".into())
         .spawn(move || {
             let _permit = permit; // released on completion or unwind; failed spawn drops the closure.
-            match Sta::enter() {
-                Ok(_sta) => {
-                    if !dock::launch_with(&file, parameters.as_deref()) {
-                        eprintln!("Shelf network shell launch failed");
-                    }
+            let opened = match Sta::enter() {
+                Ok(_sta) => dock::shell(&file, parameters.as_deref(), true),
+                Err(error) => {
+                    eprintln!("Shelf network COM initialization: {error}");
+                    false
                 }
-                Err(error) => eprintln!("Shelf network COM initialization: {error}"),
+            };
+            if !opened {
+                eprintln!("Shelf network shell launch failed");
+                NETWORK_FAILED.store(true, std::sync::atomic::Ordering::Release);
+                let _ = crate::native_window::post_wake(host, FAILED);
             }
         });
     if spawned.is_err() {
         eprintln!("Shelf network launch worker unavailable");
     }
+    spawned.is_ok()
 }
 
 /// `GetDriveType` of the path's drive letter, 0 (unknown) for anything else. It asks the mount manager, not
@@ -568,6 +592,7 @@ mod tests {
     fn a_share_is_known_without_touching_it() {
         assert!(is_network(r"\\server\share\docs"));
         assert!(!is_network("shell:RecycleBinFolder") && !is_network("notepad.exe"));
+        assert!(!is_network(r"C:\Windows"), "a fixed drive is local");
     }
     #[test]
     fn network_admission_releases_on_completion_and_unwind() {
