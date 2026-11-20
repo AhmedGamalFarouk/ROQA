@@ -42,10 +42,17 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 
 ## Reading code (token rule)
 - The `graft` command is not installed in agent shells (checked 2026-11-16): do not try it. Read the per-file card `graft/src/<file>.md` for the symbol list, then grep the symbol for its real line. Cards are not regenerated, so their line numbers drift; trust the names, not the numbers.
-- `host.rs` keeps the `Desktop` struct, start-up and the message loop; its methods by job live in `src/host/{notices,settings_bridge,menus,notch_clicks}.rs` (same `impl Desktop`, `pub(super)`).
+- `host.rs` keeps the `Desktop` struct, start-up and the message loop; its methods by job live in `src/host/{notices,settings_bridge,menus,notch_clicks,interactions}.rs` (same `impl Desktop`, `pub(super)`).
 - Read a span, not a file. `host.rs` (about 4,900 lines), `graphics.rs`, `settings_window.rs`, `layout.rs`, `media.rs` are never read whole.
 - Read a full file only when it is under ~300 lines or you are rewriting most of it.
 - Docs: read the summary here; open the source doc only for the section you need.
+
+## Anchored interactions (audit 2026-11-20)
+- Every anchored popup requires its originating surface HWND. Native opens require `anchored::Owner`; local `dock_menu::Spec` requires `dock`; previews keep their origin in `Intent`. Do not add an ownerless opening path.
+- `host/interactions.rs::interaction_owners` is the shared source for dock/notch tuck, visibility and notch leave/alert dismissal. Establish ownership before asynchronous opening, preserve it until dismissal, and process popup changes before tuck/deadline decisions. A held deadline is absent; a release event starts the normal delay. Full-screen and explicit user visibility still win.
+- Native Start (left/right), Search and hidden tray use the existing catalog WinEvent stream. Correlate the expected source process and class, then the exact HWND; show clears only the pending-open deadline, hide/destroy/cloak/menu-end releases it. Reject stale events/concurrent replacement. No visible-popup expiry or class-wide reposition worker. Windows owns Win+X placement; moving only its XAML HWND does not establish where Windows accepts input. Tray placement is restricted to its identified Explorer HWND and origin work area; a source-thread location hook exists only while it is visible, and foreign moves are asynchronous.
+- Audited/fixed: native opens, pending Places/folder reads, notch menu linger and alert expiry, and repeating held edge/tuck deadlines. Audited/preserved: dock/notch/Shelf/quick/Places/folder menus, group/folder hover panels, app preview transfer/close controls. Task View/show-desktop are whole-desktop actions; Settings, file picker and reminder editor are independent windows, not anchored popups. Their lifetime is unchanged.
+- Regression tests exercise pending/visible/exact dismissal, source rejection, late/concurrent opens, second-monitor geometry and ownership, and held/release deadlines without live input. Native Win+X item clicks, independent positioning/auto-hide comparisons and hidden-taskbar tray input still require a second-monitor live check; unit tests do not establish shell click behavior. No lint can reliably infer a popup's origin or native lifecycle; keep the required owner APIs and shared behavioral tests.
 
 ## Brand (approved; full spec `cook/brand/BRAND.md`, board `cook/brand/board.png`)
 - Companion-like and playful: calm, caring, springy when it greets you.

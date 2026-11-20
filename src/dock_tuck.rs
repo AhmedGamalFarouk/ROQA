@@ -167,13 +167,18 @@ impl Tuck {
                 strip.rest = None;
                 strip.window.show();
             }
-            match strip.hover.tick(now, held(&strip.monitor)) {
+            match strip
+                .hover
+                .tick_after(now, held(&strip.monitor), LEAVE[self.leave])
+            {
                 Some(true) => {
                     self.peek = Some(strip.monitor.clone());
                     changed = true;
                 }
-                Some(false) if self.peek.as_deref() == Some(strip.monitor.as_str()) => {
-                    self.peek = None;
+                Some(false) => {
+                    if self.peek.as_deref() == Some(strip.monitor.as_str()) {
+                        self.peek = None;
+                    }
                     changed = true;
                 }
                 _ => {}
@@ -417,15 +422,15 @@ mod tests {
         let now = Instant::now();
         assert!(tuck.alert("A", now, Duration::ZERO) && tuck.shown("A"));
         tuck.release("A", now);
-        let (hovered, mut popup) = (false, true);
-        let mut later = now;
-        for _ in 0..3 {
-            later = tuck.deadline().unwrap();
-            assert!(!tuck.tick(later, |_| hovered || popup) && tuck.shown("A"));
-        }
-        popup = false;
+        assert!(!tuck.tick(now, |_| true) && tuck.shown("A"));
+        assert_eq!(tuck.deadline(), None);
+        let later = now + Duration::from_secs(60);
+        assert!(!tuck.tick(later, |_| true) && tuck.shown("A"));
+        assert_eq!(tuck.deadline(), None);
+        assert!(!tuck.tick(later, |_| false));
         let due = tuck.deadline().unwrap();
-        assert!(due > later && tuck.tick(due, |_| hovered || popup) && !tuck.shown("A"));
+        assert_eq!(due, later + LEAVE[0]);
+        assert!(tuck.tick(due, |_| false) && !tuck.shown("A"));
     }
     #[test]
     fn off_forgets_everything() {

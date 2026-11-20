@@ -9,6 +9,7 @@ macro_rules! eprintln {
 }
 mod agent;
 mod agent_hooks;
+mod anchored;
 mod audio;
 mod brightness;
 mod catalog_timing;

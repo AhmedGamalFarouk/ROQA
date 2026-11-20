@@ -56,8 +56,11 @@ unsafe extern "system" fn changed(
     object: i32,
     child: i32,
     _: u32,
-    _: u32,
+    time: u32,
 ) {
+    if event < EVENT_OBJECT_CREATE || (object == 0 && child == 0) {
+        crate::anchored::event(event, hwnd, time);
+    }
     if event >= EVENT_OBJECT_CREATE && (object != 0 || child != 0) {
         return;
     }
@@ -117,7 +120,7 @@ pub fn frames() -> u64 {
     FRAMES.load(Ordering::Relaxed)
 }
 
-struct Hook(HWINEVENTHOOK);
+pub(crate) struct Hook(HWINEVENTHOOK);
 impl Hook {
     fn release(&mut self) -> Result<()> {
         if !self.0.0.is_null() {
@@ -136,6 +139,33 @@ impl Drop for Hook {
             eprintln!("Window event cleanup: {error}");
         }
     }
+}
+
+/// A native tray may be placed again by Windows; hear its source thread only while it is open.
+pub fn popup_locations(key: crate::window_model::WindowKey) -> Result<Hook> {
+    let mut process = 0;
+    // SAFETY: scalar identity query, followed by an out-of-context hook on this UI thread.
+    let thread =
+        unsafe { GetWindowThreadProcessId(HWND(key.handle as *mut _), Some(&mut process)) };
+    if thread == 0 || process != key.process {
+        return Err(Error::new(E_FAIL, "Tray popup identity changed"));
+    }
+    // SAFETY: out-of-context events stay on this UI thread; the returned Hook owns unregistration.
+    let hook = unsafe {
+        SetWinEventHook(
+            EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_LOCATIONCHANGE,
+            None,
+            Some(changed),
+            process,
+            thread,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        )
+    };
+    if hook.0.is_null() {
+        return Err(Error::from_thread());
+    }
+    Ok(Hook(hook))
 }
 
 pub struct Catalog {
@@ -236,6 +266,7 @@ impl Catalog {
         catalog.results = Some(result_rx);
         for (first, last) in [
             (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
+            (EVENT_SYSTEM_MENUSTART, EVENT_SYSTEM_MENUPOPUPEND),
             // A window dropped onto or off the dock: auto-hide re-reads at once (`dock_tuck`).
             (EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZEEND),
             (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),

@@ -85,7 +85,7 @@ pub struct Answer {
 }
 
 /// An answer older than this is dropped: a stack that pops up long after the click is not what was asked for.
-const STALE: std::time::Duration = std::time::Duration::from_secs(2);
+pub const STALE: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Answer {
     fn latest(&self) -> bool {

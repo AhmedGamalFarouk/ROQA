@@ -1,3 +1,4 @@
+mod interactions;
 mod menus;
 mod notch_clicks;
 mod notices;
@@ -439,7 +440,7 @@ enum Role {
         engaged: bool,
         intent: Option<Instant>,
         /// When an open notch the pointer left closes (`LINGER_TIME`); re-entry cancels it.
-        linger: Option<Instant>,
+        linger: interactions::Linger,
         area: Vec<Bounds>,
     },
     /// Hovered cell and per-cell hover progress.
@@ -489,7 +490,7 @@ impl Surface {
                 shadow,
                 engaged: false,
                 intent: None,
-                linger: None,
+                linger: Default::default(),
                 area: Vec::new(),
             },
         };
@@ -601,7 +602,10 @@ impl Surface {
                     intent,
                     linger,
                     ..
-                } => (*engaged, *intent, *linger) = (false, None, None),
+                } => {
+                    (*engaged, *intent) = (false, None);
+                    *linger = Default::default();
+                }
                 Role::Dock { hover, slots, .. } => {
                     *hover = None;
                     slots.fill(Tween::rest(0.0));
@@ -939,11 +943,11 @@ impl Surface {
             return;
         }
         *engaged = over;
-        *linger = None;
+        linger.clear();
         if !over {
             if intent.take().is_none() && self.motion.target() >= 1.0 {
                 // Open: a slip past the edge gets a short grace (`Desktop::refresh_close`), no frames meanwhile.
-                *linger = Some(Instant::now() + motion::time(motion::LINGER_TIME));
+                linger.leave(Instant::now());
                 return;
             }
             self.motion.retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
@@ -1407,6 +1411,8 @@ struct Desktop {
     menu: Option<dock_menu::Menu>,
     hover_popup: Option<dock_menu::Menu>,
     hover_spot: Option<(usize, Hit, Instant)>,
+    native_popup: crate::anchored::Native,
+    pending_popup: Option<(crate::anchored::Owner, Instant)>,
     /// Wheel movement left over after the last whole notch on the volume bar or the open notch.
     volume_wheel: i32,
     /// Sideways wheel movement kept toward a track skip, and when the next skip is allowed (one skip per swipe).
@@ -1589,6 +1595,8 @@ impl Desktop {
             menu: None,
             hover_popup: None,
             hover_spot: None,
+            native_popup: Default::default(),
+            pending_popup: None,
             volume_wheel: 0,
             swipe: 0,
             swipe_until: Instant::now(),
@@ -2142,34 +2150,6 @@ impl Desktop {
             self.request_notches(Repaint::Full, |_| true);
         }
     }
-    /// Closes the notches whose leave grace ran out and, when a peek ends, the ones nobody points at;
-    /// returns the wait until the next of those (`INFINITE` with none, the common case).
-    #[inline(never)]
-    fn refresh_close(&mut self) -> u32 {
-        let now = Instant::now();
-        if self.peek.is_some_and(|due| now >= due) {
-            self.peek = None;
-            self.surfaces.iter_mut().for_each(Surface::close_alert);
-        }
-        let mut next = self.peek;
-        for surface in &mut self.surfaces {
-            let Role::Notch { linger, .. } = &mut surface.role else {
-                continue;
-            };
-            match *linger {
-                Some(due) if now >= due => {
-                    *linger = None;
-                    surface
-                        .motion
-                        .retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
-                    surface.live = true;
-                }
-                Some(due) => next = Some(next.map_or(due, |soonest: Instant| soonest.min(due))),
-                None => {}
-            }
-        }
-        next.map_or(INFINITE, |due| milliseconds_until(due, now))
-    }
     /// The memory, disk, processor and network tiles: while an open notch shows the Widgets page with one of
     /// them, read and repainted every `STATS_STEP`; otherwise no wait, and the readings are dropped.
     #[inline(never)]
@@ -2240,7 +2220,7 @@ impl Desktop {
             if surface.visible
                 && let Role::Notch { intent, linger, .. } = &mut surface.role
             {
-                *linger = None;
+                linger.clear();
                 open_notch(intent, &mut surface.motion);
                 surface.live = true;
             }
@@ -2796,6 +2776,7 @@ impl Desktop {
                     && !item.members.is_empty()
                 {
                     crate::places::invalidate();
+                    self.pending_popup = None;
                     let members = item.members.clone();
                     for member in &members {
                         self.open_member(member);
@@ -2814,6 +2795,7 @@ impl Desktop {
                     return Ok(());
                 }
                 crate::places::invalidate();
+                self.pending_popup = None;
                 self.run_pin(slot, None);
                 Ok(())
             }
@@ -3025,33 +3007,6 @@ impl Desktop {
             }
         }
     }
-    /// The hidden-icons or Start button: Windows' own flyout or menu, set above the button.
-    fn open_flyout(&mut self, hwnd: HWND, button: Button) {
-        let Some(dock) = self.dock_at(hwnd) else {
-            return;
-        };
-        let (left, width) = dock::span(
-            dock.dock_buttons,
-            dock.bounds.width,
-            dock.dpi,
-            Hit::Button(button),
-        );
-        if let Some(work) = self
-            .monitors
-            .iter()
-            .find(|m| m.device == dock.monitor)
-            .map(|m| m.work)
-        {
-            let top = dock.bounds.y - dock::px(8, dock.dpi);
-            let inset = if button == Button::Start {
-                0
-            } else {
-                width / 2
-            };
-            let x = dock.bounds.x + left + inset;
-            dock::open_flyout(button, (x, top), work);
-        }
-    }
     /// A global shortcut (`hotkeys.rs`) fired; a message queued just before its switch went off is ignored.
     fn hotkey(&mut self, id: usize) -> Result<()> {
         let Some((group, index)) =
@@ -3075,7 +3030,7 @@ impl Desktop {
                 if let Some(hwnd) = dock {
                     // The keys are still down: lift Ctrl and Alt so the flyout's Win+B is not Ctrl+Alt+Win+B.
                     dock::release_keys(&[VK_CONTROL, VK_MENU]);
-                    self.open_flyout(hwnd, Button::Tray);
+                    self.open_flyout(hwnd, crate::anchored::Kind::Tray);
                 } else {
                     self.show_notice("Turn on the hidden icons button.".into(), Instant::now());
                 }
@@ -3094,7 +3049,8 @@ impl Desktop {
         }
         for surface in &mut self.surfaces {
             if let Role::Notch { intent, linger, .. } = &mut surface.role {
-                (*intent, *linger) = (None, None);
+                *intent = None;
+                linger.clear();
                 surface
                     .motion
                     .retarget(0.0, motion::CLOSE_TIME, motion::CLOSE);
@@ -3802,16 +3758,22 @@ impl Desktop {
     /// it appears.
     fn apply_visibility(&mut self) -> Result<()> {
         let icons = self.dock_icons();
+        let owners = self.interaction_owners();
         for surface in &mut self.surfaces {
+            let held = owners.contains(&Some(surface.window.0));
             let visible = !self
                 .fullscreen
                 .iter()
                 .any(|(_, device)| device == &surface.monitor)
                 && match surface.kind() {
-                    SurfaceKind::Dock => self.tuck.shown(&surface.monitor) && !self.dock_away,
+                    SurfaceKind::Dock => {
+                        (self.tuck.shown(&surface.monitor) || held) && !self.dock_away
+                    }
                     // An open notch stays up while a window slides under it.
                     SurfaceKind::Notch => {
-                        self.tuck_notch.shown(&surface.monitor) || surface.motion.target() > 0.0
+                        self.tuck_notch.shown(&surface.monitor)
+                            || surface.motion.target() > 0.0
+                            || held
                     }
                 };
             if visible && !surface.visible {
@@ -3834,106 +3796,6 @@ impl Desktop {
             surface.set_visible(visible);
         }
         Ok(())
-    }
-    /// Dock auto-hide: re-reads which window covers a dock when the catalog or the foreground window's frame
-    /// changed, and applies the strips' hover deadlines.
-    fn refresh_tuck(&mut self, generation: u64) -> Result<()> {
-        let now = Instant::now();
-        let mut changed = false;
-        if self.tuck_generation != Some(generation) {
-            self.tuck_generation = Some(generation);
-            let frame = dock::foreground_key()
-                .filter(|key| dock::valid_target(*key))
-                .and_then(|key| {
-                    native_window::window_frame(key).map(|(device, frame)| (key, device, frame))
-                });
-            // No strip on a monitor a full-screen app owns: it would sit over the player's controls.
-            let monitors: Vec<_> = self
-                .monitors
-                .iter()
-                .filter(|m| {
-                    !self
-                        .fullscreen
-                        .iter()
-                        .any(|(_, device)| device == &m.device)
-                })
-                .cloned()
-                .collect();
-            let docks: Vec<_> = self
-                .surfaces
-                .iter()
-                .filter(|s| s.kind() == SurfaceKind::Dock)
-                .map(|s| (s.monitor.clone(), s.bounds))
-                .collect();
-            self.tuck
-                .set_delays(self.settings.reveal_delay, self.settings.hide_delay);
-            self.tuck_notch
-                .set_delays(self.settings.reveal_delay, self.settings.hide_delay);
-            changed |= self.tuck.sync(
-                self.settings.dock_hide,
-                frame.clone(),
-                &docks,
-                &monitors,
-                native_window::window_frame,
-            );
-            // The notch's footprint is its closed pill at the top centre, not the whole transparent window.
-            let notches: Vec<_> = self
-                .surfaces
-                .iter()
-                .filter(|s| s.kind() == SurfaceKind::Notch)
-                .map(|s| {
-                    let width = dock::px(layout::NOTCH.width as i32, s.dpi).min(s.bounds.width);
-                    let pill = Bounds {
-                        x: s.bounds.x + (s.bounds.width - width) / 2,
-                        width,
-                        height: dock::px(layout::NOTCH.height as i32, s.dpi),
-                        ..s.bounds
-                    };
-                    (s.monitor.clone(), pill)
-                })
-                .collect();
-            changed |= self.tuck_notch.sync(
-                self.settings.notch_hide,
-                frame,
-                &notches,
-                &monitors,
-                native_window::window_frame,
-            );
-        }
-        let surfaces = &self.surfaces;
-        // A popup opened from a surface (app menu, folder stack, Places, quick settings) holds it up like the
-        // pointer does: the pointer left the surface for the popup, which is not leaving.
-        let popup = |s: &Surface| {
-            [&self.menu, &self.hover_popup]
-                .into_iter()
-                .flatten()
-                .any(|menu| menu.dock() == s.window.0)
-                || (self.popup.is_some() && self.preview.owns(s.window.0))
-        };
-        changed |= self.tuck_notch.tick(now, |device| {
-            surfaces.iter().any(|s| {
-                s.kind() == SurfaceKind::Notch
-                    && s.monitor == device
-                    && (s.hovered || s.motion.target() > 0.0 || popup(s))
-            })
-        });
-        changed |= self.tuck.tick(now, |device| {
-            surfaces.iter().any(|s| {
-                s.kind() == SurfaceKind::Dock && s.monitor == device && (s.hovered || popup(s))
-            })
-        });
-        if changed {
-            self.apply_visibility()?;
-        }
-        Ok(())
-    }
-    fn tuck_wait(&self) -> u32 {
-        self.tuck
-            .deadline()
-            .into_iter()
-            .chain(self.tuck_notch.deadline())
-            .min()
-            .map_or(INFINITE, |due| milliseconds_until(due, Instant::now()))
     }
     fn fullscreen_wait(&self) -> u32 {
         self.fullscreen_due
@@ -4151,7 +4013,11 @@ impl Desktop {
         // The foreground window's own move or resize counts as a change too.
         let stamp = model.generation.wrapping_add(window_catalog::frames());
         self.refresh_fullscreen(stamp)?;
+        let native_wait = self.refresh_interactions();
         let preview_wait = self.refresh_preview();
+        let hover_wait = self.refresh_hover_popup();
+        self.refresh_menu();
+        let close_wait = self.refresh_close();
         self.refresh_tuck(stamp)?;
         let wait = self
             .refresh_clock()?
@@ -4160,8 +4026,9 @@ impl Desktop {
             .min(self.refresh_timers())
             .min(self.refresh_power())
             .min(preview_wait)
+            .min(native_wait)
             .min(self.refresh_raise())
-            .min(self.refresh_hover_popup())
+            .min(hover_wait)
             .min(self.refresh_edges())
             .min(self.refresh_eyes())
             .min(self.refresh_ring())
@@ -4169,9 +4036,8 @@ impl Desktop {
             .min(self.refresh_prayer())
             .min(self.refresh_water())
             .min(self.refresh_reminders())
-            .min(self.refresh_close())
+            .min(close_wait)
             .min(self.refresh_stats());
-        self.refresh_menu();
         self.paint_requested()?;
         if self
             .settings_window
@@ -4518,7 +4384,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                     // The "Start" hover label would sit over the menu: drop it and restart its delay.
                     desktop.hover_popup = None;
                     desktop.hover_spot = None;
-                    desktop.open_flyout(message.hwnd, Button::Start);
+                    desktop.open_flyout(message.hwnd, crate::anchored::Kind::WinX);
                     continue;
                 }
                 desktop.open_menu(message.hwnd, hit.and_then(Hit::slot), message.lParam);

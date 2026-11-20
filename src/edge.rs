@@ -288,6 +288,7 @@ pub fn step_level(level: u8, steps: i32, fine: bool) -> u8 {
 pub struct Hover {
     over: bool,
     shown: bool,
+    held: bool,
     due: Option<Instant>,
 }
 impl Hover {
@@ -313,15 +314,23 @@ impl Hover {
     }
     /// `Some(true)` when the pill is due to show, `Some(false)` when it is due to hide.
     pub fn tick(&mut self, now: Instant, held: bool) -> Option<bool> {
+        self.tick_after(now, held, HIDE_DELAY)
+    }
+    /// A hold has no deadline; its release event starts the user's normal hide delay.
+    pub fn tick_after(&mut self, now: Instant, held: bool, delay: Duration) -> Option<bool> {
+        if held {
+            self.held = true;
+            self.due = None;
+            return (!std::mem::replace(&mut self.shown, true)).then_some(true);
+        }
+        if std::mem::replace(&mut self.held, false) && !self.over {
+            self.due = Some(now + delay);
+        }
         self.due.filter(|&due| now >= due)?;
         if !self.shown {
             self.due = None;
             self.shown = true;
             return Some(true);
-        }
-        if held {
-            self.due = Some(now + HIDE_DELAY);
-            return None;
         }
         self.due = None;
         self.shown = false;
@@ -332,7 +341,7 @@ impl Hover {
     }
     /// Shown by something other than the pointer (an alert): it hides `delay` from now unless held.
     pub fn show_until(&mut self, now: Instant, delay: Duration) {
-        (self.over, self.shown, self.due) = (false, true, Some(now + delay));
+        (self.over, self.shown, self.held, self.due) = (false, true, false, Some(now + delay));
     }
     pub fn reset(&mut self) {
         *self = Self::default();
@@ -341,6 +350,7 @@ impl Hover {
     pub fn request(&mut self, now: Instant) {
         self.over = true;
         self.shown = false;
+        self.held = false;
         self.due = Some(now);
     }
 }
@@ -1336,10 +1346,11 @@ mod tests {
         hover.enter(at(0));
         assert_eq!(hover.tick(at(250), false), Some(true));
         hover.leave(at(300));
-        // Due while the button is still down: re-armed, not hidden.
         assert_eq!(hover.tick(at(1100), true), None);
-        assert_eq!(hover.deadline(), Some(at(1900)));
-        assert_eq!(hover.tick(at(1900), false), Some(false));
+        assert_eq!(hover.deadline(), None);
+        assert_eq!(hover.tick(at(1900), false), None);
+        assert_eq!(hover.deadline(), Some(at(2700)));
+        assert_eq!(hover.tick(at(2700), false), Some(false));
         // A full-screen app resets everything.
         hover.enter(at(2000));
         hover.reset();

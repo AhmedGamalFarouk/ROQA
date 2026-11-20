@@ -111,9 +111,21 @@ impl Desktop {
     /// The Places button's popup above it: the Recycle Bin and each drive as the shell reports them now, read on a
     /// worker (`stack_ready` opens it); a click opens that place in Explorer.
     pub(super) fn ask_places(&mut self, hwnd: HWND) {
+        if self
+            .pending_popup
+            .is_some_and(|(_, due)| Instant::now() < due)
+        {
+            self.show_notice("Still reading. Try again.".into(), Instant::now());
+            return;
+        }
         self.dismiss_preview();
         self.close_menu();
-        if !crate::places::ask_places(hwnd.0 as isize) {
+        if crate::places::ask_places(hwnd.0 as isize) {
+            self.pending_popup = Some((
+                crate::anchored::Owner(hwnd),
+                Instant::now() + crate::places::STALE,
+            ));
+        } else {
             self.show_notice("Still reading. Try again.".into(), Instant::now());
         }
     }
@@ -166,7 +178,12 @@ impl Desktop {
     /// A click on a pinned path that may be a folder: a worker reads it (`stack_ready` goes on). One read at a time,
     /// so a click while one is out says so.
     pub(super) fn ask_stack(&mut self, hwnd: HWND, slot: usize, path: String) {
-        if !crate::places::ask(hwnd.0 as isize, slot, path) {
+        if crate::places::ask(hwnd.0 as isize, slot, path) {
+            self.pending_popup = Some((
+                crate::anchored::Owner(hwnd),
+                Instant::now() + crate::places::STALE,
+            ));
+        } else {
             self.show_notice("Still reading. Try again.".into(), Instant::now());
         }
     }
@@ -175,6 +192,9 @@ impl Desktop {
     /// not a folder is launched like any other pin.
     pub(super) fn stack_ready(&mut self, answer: crate::places::Answer) {
         let (current, slow) = (answer.current(), answer.slow());
+        if current {
+            self.pending_popup = None;
+        }
         if let Some(places) = answer.places {
             if current {
                 self.open_places_menu(HWND(answer.dock as *mut _), places);
@@ -455,11 +475,14 @@ impl Desktop {
     pub(super) fn press_button(&mut self, hwnd: HWND, button: Button) {
         if button != Button::Places {
             crate::places::invalidate(); // Places asks, and an accepted ask supersedes the older answer itself
+            self.pending_popup = None;
         }
         match (button, button.keys()) {
             (Button::Quick, _) => self.open_quick_menu(hwnd),
             (Button::Places, _) => self.ask_places(hwnd),
-            (Button::Tray, _) => self.open_flyout(hwnd, Button::Tray),
+            (Button::Tray, _) => self.open_flyout(hwnd, crate::anchored::Kind::Tray),
+            (Button::Start, _) => self.open_flyout(hwnd, crate::anchored::Kind::Start),
+            (Button::Search, _) => self.open_flyout(hwnd, crate::anchored::Kind::Search),
             (_, Some(keys)) => {
                 if !dock::send_keys(keys) {
                     eprintln!("Dock button: Windows refused the key input");
@@ -638,6 +661,9 @@ impl Desktop {
     }
     /// Ends the open menu, giving the foreground back to the window it came from if the menu still holds it.
     pub(super) fn close_menu(&mut self) {
+        if self.pending_popup.take().is_some() {
+            crate::places::invalidate();
+        }
         if let Some(menu) = self.menu.take() {
             dock::restore_foreground(menu.hwnd(), menu.return_to);
         }
