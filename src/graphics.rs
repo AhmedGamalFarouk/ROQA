@@ -68,7 +68,10 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 mod glyphs;
 pub use glyphs::{draw_gdi as draw_settings_glyph, round_gdi};
+mod ask;
 mod tab_art;
+pub use ask::ask_fits;
+use ask::two_lines;
 pub use glyphs::Glyph;
 
 #[derive(Clone)]
@@ -2395,62 +2398,6 @@ fn text_width(text: &str, font: &Font) -> Result<f32> {
     Ok(metrics.width)
 }
 
-/// `text` on at most two lines, `fits` telling whether a string is one line wide: the first line breaks after a space
-/// when it has one, and a text too long for two keeps its start and its end around an ellipsis in the middle.
-fn two_lines(text: &str, fits: impl Fn(&str) -> bool) -> [String; 2] {
-    let chars: Vec<char> = text.chars().collect();
-    let wrap = |chars: &[char]| {
-        let (mut low, mut high) = (0, chars.len());
-        while low < high {
-            let mid = (low + high).div_ceil(2);
-            if fits(&chars[..mid].iter().collect::<String>()) {
-                low = mid;
-            } else {
-                high = mid - 1;
-            }
-        }
-        let cut = if low == chars.len() {
-            low
-        } else {
-            let space = chars[..low].iter().rposition(|&c| c == ' ');
-            space.map_or(low.max(1), |at| at + 1)
-        };
-        let rest: String = chars[cut..].iter().collect();
-        fits(&rest).then(|| {
-            [
-                chars[..cut]
-                    .iter()
-                    .collect::<String>()
-                    .trim_end()
-                    .to_owned(),
-                rest,
-            ]
-        })
-    };
-    if let Some(lines) = wrap(&chars) {
-        return lines;
-    }
-    let around = |k: usize| -> Vec<char> {
-        let end = chars.len() - k;
-        chars[..k]
-            .iter()
-            .chain(&['\u{2026}'])
-            .chain(&chars[end..])
-            .copied()
-            .collect()
-    };
-    let (mut low, mut high) = (1, (chars.len() / 2).max(1));
-    while low < high {
-        let mid = (low + high).div_ceil(2);
-        if wrap(&around(mid)).is_some() {
-            low = mid;
-        } else {
-            high = mid - 1;
-        }
-    }
-    wrap(&around(low)).unwrap_or_else(|| [around(low).into_iter().collect(), String::new()])
-}
-
 /// One vertically centred line that ends in an ellipsis when it does not fit.
 fn text_layout(text: &str, font: &Font, width: f32, height: f32) -> Result<IDWriteTextLayout> {
     let mut locale = [0u16; 85];
@@ -3963,30 +3910,9 @@ mod media_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{designator_ranges, is_loss, two_lines};
+    use super::{designator_ranges, is_loss};
     use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, E_FAIL, E_OUTOFMEMORY};
     use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET};
-
-    #[test]
-    fn a_question_shows_in_full_on_two_lines_then_cuts_its_middle() {
-        let wide = |line: &str| line.chars().count() <= 12;
-        assert_eq!(two_lines("git status", wide), ["git status", ""]);
-        // Two lines break after a space, and nothing is lost while it fits.
-        assert_eq!(
-            two_lines("Bash: git push origin", wide),
-            ["Bash: git", "push origin"]
-        );
-        // Too long: the start and the end stay around one ellipsis, and both lines fit.
-        let long = "Bash: rm -rf build target && cargo build --release 2>&1 | tail -n 5";
-        let [first, second] = two_lines(long, wide);
-        let joined = format!("{first} {second}");
-        assert!(wide(&first) && wide(&second), "{first}|{second}");
-        assert!(joined.starts_with("Bash:") && joined.ends_with("-n 5"));
-        assert_eq!(joined.matches('\u{2026}').count(), 1);
-        // One unbroken word has no space to break at.
-        let [first, second] = two_lines("abcdefghijklmnopqrstuvwxyz", wide);
-        assert!(wide(&first) && wide(&second) && first.starts_with("abc"));
-    }
 
     #[test]
     fn only_device_loss_results_trigger_a_rebuild() {

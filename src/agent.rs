@@ -44,15 +44,6 @@ pub enum Report {
     Ask(u32, String),
 }
 
-/// The longest question line ROQA offers Allow for: the notch's two lines hold about this many characters, and a
-/// longer command would be cut, so it is never approved half-read.
-const ASK_WHOLE: usize = 60;
-
-/// Whether the notch can show the whole question line.
-fn shown_whole(line: &str) -> bool {
-    line.chars().count() <= ASK_WHOLE
-}
-
 /// How long a permission question waits for a click, in seconds, before the agent's own prompt takes over.
 pub const ASK_SECS: u64 = 30;
 
@@ -250,7 +241,8 @@ fn take_in(dir: &Path) -> (Vec<(String, Report)>, bool) {
     // The names start with the time, so this is the order they were written in.
     // shortcut: the listing is the file system's order (NTFS lists by name); sort the whole spool if that changes.
     files.sort();
-    let more = files.len() > SPOOL_FILES;
+    let over = files.len() > SPOOL_FILES;
+    let mut removed = false;
     let reports = files
         .iter()
         .take(SPOOL_FILES)
@@ -259,12 +251,13 @@ fn take_in(dir: &Path) -> (Vec<(String, Report)>, bool) {
                 .ok()
                 .filter(|meta| meta.len() <= SPOOL_CAP)
                 .and_then(|_| fs::read_to_string(path).ok());
-            let _ = fs::remove_file(path);
+            removed |= fs::remove_file(path).is_ok();
             text
         })
         .flat_map(|text| text.lines().filter_map(parse).collect::<Vec<_>>())
         .collect();
-    (reports, more)
+    // A file that cannot be removed must not make the host read the spool again at once, for ever.
+    (reports, over && removed)
 }
 
 fn parse(line: &str) -> Option<(String, Report)> {
@@ -297,7 +290,7 @@ pub fn ask(name: &str) {
     else {
         return;
     };
-    if !whole || !shown_whole(&line) {
+    if !whole || !crate::graphics::ask_fits(&line) {
         // Answer in the terminal: say so on the pill, and print nothing so the agent asks at once.
         let _ = crate::ipc::Command::Agent.signal_after(|| {
             let _ = write(name, Report::State(State::Needs));
@@ -308,10 +301,10 @@ pub fn ask(name: &str) {
     let Ok(events) = crate::ipc::answer_events(id) else {
         return;
     };
-    let shown = crate::ipc::Command::Agent.signal_after(|| {
-        let _ = write_ask(name, id, &line);
-    });
-    if shown.is_err() {
+    let mut written = Ok(());
+    let shown = crate::ipc::Command::Agent.signal_after(|| written = write_ask(name, id, &line));
+    // A question that never reached the spool cannot be answered: back to the terminal at once.
+    if shown.is_err() || written.is_err() {
         return;
     }
     let handles = [events[0].0, events[1].0, events[2].0];
@@ -405,9 +398,15 @@ mod tests {
     }
 
     #[test]
-    fn only_a_question_the_notch_shows_whole_gets_an_allow() {
-        assert!(shown_whole("Bash: git push origin main"));
-        assert!(!shown_whole(&format!("Bash: {}", "x".repeat(ASK_WHOLE))));
+    fn files_that_cannot_be_removed_do_not_ask_for_another_pass() {
+        let dir = std::env::temp_dir().join(format!("roqa-stuck-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // A directory with a spool name is listed, read as nothing and cannot be removed as a file.
+        for n in 0..=SPOOL_FILES {
+            fs::create_dir_all(dir.join(format!("{n:020}-1-1.txt"))).unwrap();
+        }
+        assert_eq!(take_in(&dir), (Vec::new(), false));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
