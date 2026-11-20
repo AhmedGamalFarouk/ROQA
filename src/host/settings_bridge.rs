@@ -263,6 +263,10 @@ impl Desktop {
                 let _ = window.say("Couldn't change start at sign-in.");
             }
         }
+        // Saved before the fallible redraws below: a graphics failure that is recovered later has rebuilt from these
+        // settings, so quit must not save the old ones.
+        self.store.settings = self.settings.clone();
+        self.pending.mark(Instant::now());
         if (
             old.dock_hide,
             old.notch_hide,
@@ -373,8 +377,6 @@ impl Desktop {
                     .map(std::path::PathBuf::from),
             );
         }
-        self.store.settings = self.settings.clone();
-        self.pending.mark(Instant::now());
         Ok(())
     }
 }
