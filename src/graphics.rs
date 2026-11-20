@@ -70,8 +70,8 @@ mod glyphs;
 pub use glyphs::{draw_gdi as draw_settings_glyph, round_gdi};
 mod ask;
 mod tab_art;
-pub use ask::ask_fits;
-use ask::two_lines;
+use ask::wrapped;
+pub use ask::{ask_fits, ask_fits_at};
 pub use glyphs::Glyph;
 
 #[derive(Clone)]
@@ -1355,7 +1355,7 @@ fn notice_text(
     let colour = with_alpha(p.ink, p.ink_alpha(0.85 * alpha));
     let width = rect.right - rect.left;
     let lines = if ask {
-        two_lines(text, |line| {
+        wrapped(text, width, |line| {
             text_width(line, &font).is_ok_and(|w| w <= width)
         })
     } else {

@@ -5,9 +5,13 @@
 //! eyes' state and the one deadline it must wake for.
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU32, Ordering},
+    sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicU32, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -220,7 +224,9 @@ pub fn take() -> Vec<(String, Report)> {
     let Some(dir) = spool() else {
         return Vec::new();
     };
-    let (reports, more) = take_in(&dir);
+    static STUCK: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+    let mut stuck = STUCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let (reports, more) = take_in(&dir, &mut stuck);
     if more {
         let _ = crate::ipc::Command::Agent.signal();
     }
@@ -228,36 +234,40 @@ pub fn take() -> Vec<(String, Report)> {
 }
 
 /// The reports of up to `SPOOL_FILES` files, and whether more files are waiting. Only that many names are listed.
-fn take_in(dir: &Path) -> (Vec<(String, Report)>, bool) {
+/// A file that cannot be removed is read once and remembered in `stuck`: later drains skip it, so it neither
+/// blocks the files behind it nor reports twice.
+// shortcut: `stuck` grows with undeletable files until ROQA restarts; retry their removal if that ever matters.
+fn take_in(dir: &Path, stuck: &mut BTreeSet<PathBuf>) -> (Vec<(String, Report)>, bool) {
     let Ok(entries) = fs::read_dir(dir) else {
         return (Vec::new(), false);
     };
     let mut files: Vec<_> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "txt") && !stuck.contains(path))
         .take(SPOOL_FILES + 1)
         .collect();
     // The names start with the time, so this is the order they were written in.
     // shortcut: the listing is the file system's order (NTFS lists by name); sort the whole spool if that changes.
     files.sort();
+    // Every file taken now leaves the listing (removed or stuck), so each drain makes progress.
     let over = files.len() > SPOOL_FILES;
-    let mut removed = false;
     let reports = files
-        .iter()
+        .into_iter()
         .take(SPOOL_FILES)
         .filter_map(|path| {
-            let text = fs::metadata(path)
+            let text = fs::metadata(&path)
                 .ok()
                 .filter(|meta| meta.len() <= SPOOL_CAP)
-                .and_then(|_| fs::read_to_string(path).ok());
-            removed |= fs::remove_file(path).is_ok();
+                .and_then(|_| fs::read_to_string(&path).ok());
+            if fs::remove_file(&path).is_err() {
+                stuck.insert(path);
+            }
             text
         })
         .flat_map(|text| text.lines().filter_map(parse).collect::<Vec<_>>())
         .collect();
-    // A file that cannot be removed must not make the host read the spool again at once, for ever.
-    (reports, over && removed)
+    (reports, over)
 }
 
 fn parse(line: &str) -> Option<(String, Report)> {
@@ -355,11 +365,12 @@ mod tests {
     fn the_spool_keeps_every_report_in_order_and_skips_one_still_being_written() {
         let dir = std::env::temp_dir().join(format!("roqa-spool-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        assert!(take_in(&dir).0.is_empty(), "no folder yet");
+        let mut stuck = BTreeSet::new();
+        assert!(take_in(&dir, &mut stuck).0.is_empty(), "no folder yet");
         append_in(&dir, "codex working\n").unwrap();
         append_in(&dir, "ask 7 claude Bash: ls\n").unwrap();
         fs::write(dir.join("0-1-1.tmp"), "codex done\n").unwrap();
-        let first = take_in(&dir);
+        let first = take_in(&dir, &mut stuck);
         assert_eq!(
             first,
             (
@@ -373,10 +384,10 @@ mod tests {
         // A report written after the first drain began is not in it and not lost.
         append_in(&dir, "build 50%\n").unwrap();
         assert_eq!(
-            take_in(&dir),
+            take_in(&dir, &mut stuck),
             (vec![("build".into(), Report::Percent(50))], false)
         );
-        assert!(take_in(&dir).0.is_empty());
+        assert!(take_in(&dir, &mut stuck).0.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -384,28 +395,63 @@ mod tests {
     fn a_burst_over_one_batch_is_all_read_by_the_following_drains() {
         let dir = std::env::temp_dir().join(format!("roqa-burst-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
+        let mut stuck = BTreeSet::new();
         for step in 0..=SPOOL_FILES {
             append_in(&dir, &format!("build {}%\n", step % 100)).unwrap();
         }
-        let (first, more) = take_in(&dir);
+        let (first, more) = take_in(&dir, &mut stuck);
         assert!(
             more && first.len() == SPOOL_FILES,
             "one batch, one file left"
         );
-        let (rest, more) = take_in(&dir);
+        let (rest, more) = take_in(&dir, &mut stuck);
         assert!(!more && rest == [("build".into(), Report::Percent(SPOOL_FILES as u8))]);
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn files_that_cannot_be_removed_do_not_ask_for_another_pass() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test holds a spool file open so it cannot be removed"
+    )]
+    fn files_that_cannot_be_removed_neither_block_nor_repeat() {
+        use std::os::windows::fs::OpenOptionsExt;
         let dir = std::env::temp_dir().join(format!("roqa-stuck-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
+        let mut stuck = BTreeSet::new();
         // A directory with a spool name is listed, read as nothing and cannot be removed as a file.
-        for n in 0..=SPOOL_FILES {
+        for n in 0..SPOOL_FILES - 1 {
             fs::create_dir_all(dir.join(format!("{n:020}-1-1.txt"))).unwrap();
         }
-        assert_eq!(take_in(&dir), (Vec::new(), false));
+        // A readable file whose removal is refused (opened without share-delete), then a valid report behind them.
+        let held = dir.join(format!("{:020}-1-2.txt", SPOOL_FILES));
+        fs::write(
+            &held,
+            "codex done
+",
+        )
+        .unwrap();
+        let _open = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&held)
+            .unwrap();
+        append_in(
+            &dir,
+            "build 50%
+",
+        )
+        .unwrap();
+        let (first, more) = take_in(&dir, &mut stuck);
+        assert!(more, "the report behind a full batch is still waiting");
+        assert_eq!(first, [("codex".into(), Report::State(State::Done))]);
+        // The next drain skips the stuck names, reaches the new report and reads nothing twice.
+        assert_eq!(
+            take_in(&dir, &mut stuck),
+            (vec![("build".into(), Report::Percent(50))], false)
+        );
+        assert_eq!(take_in(&dir, &mut stuck), (Vec::new(), false));
+        drop(_open);
         let _ = fs::remove_dir_all(&dir);
     }
 

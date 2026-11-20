@@ -577,33 +577,45 @@ const LONGEST: usize = 400;
 
 /// The words the notch shows for a permission question, from the hook's JSON on stdin: the tool and its
 /// command, path or address, with its spaces squeezed. `None` when it is not a tool question. The flag is false
-/// when the line is not the whole of what Allow would approve: the input has none of the parts it shows (an MCP
-/// tool, a task's prompt), or the text has characters that can make it read differently (hidden or bidirectional).
+/// when the line is not the whole of what Allow would approve: the input has arguments it does not show (an MCP
+/// tool, an edit's contents, a task's prompt), or the text has characters that can make it read differently (hidden
+/// or bidirectional).
 pub fn permission_line(input: &str) -> Option<(String, bool)> {
     let json = Json::parse(input)?;
     let Some(Json::Str(tool)) = json.get("tool_name") else {
         return None;
     };
     let input = json.get("tool_input");
-    let detail = input.and_then(|input| {
+    let shown = input.and_then(|input| {
         ["command", "file_path", "url", "pattern", "path", "query"]
             .into_iter()
             .find_map(|key| match input.get(key) {
-                Some(Json::Str(text)) => Some(text.as_str()),
+                Some(Json::Str(text)) => Some((key, text.as_str())),
                 _ => None,
             })
     });
-    let line = detail.map_or_else(|| tool.clone(), |detail| format!("{tool}: {detail}"));
+    let line = shown.map_or_else(|| tool.clone(), |(_, detail)| format!("{tool}: {detail}"));
     let disguised = line.chars().any(|c| {
         c.is_control()
             || matches!(c, '\u{ad}' | '\u{61c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{fe00}'..='\u{fe0f}' | '\u{feff}' | '\u{e0000}'..='\u{e007f}')
     });
     // A newline, tab or run of spaces would show as one space: not the command Allow approves.
     let squeezed = line.split_whitespace().collect::<Vec<_>>().join(" ");
-    let known_shape = if tool.starts_with("mcp__") {
-        input.is_none_or(Json::is_empty)
-    } else {
-        detail.is_some() || input.is_none_or(Json::is_empty)
+    // Fails closed: every argument must be the shown one (Bash's description and timeout change nothing it runs),
+    // so an Edit or Write, whose contents are not shown, and any unknown shape go to the terminal.
+    let known_shape = match input {
+        None => true,
+        Some(input) if input.is_empty() => true,
+        Some(Json::Obj(fields)) => {
+            !tool.starts_with("mcp__")
+                && shown.is_some_and(|(shown, _)| {
+                    fields.iter().all(|(key, _)| {
+                        key == shown
+                            || (tool == "Bash" && matches!(key.as_str(), "description" | "timeout"))
+                    })
+                })
+        }
+        Some(_) => false,
     };
     let whole =
         !disguised && known_shape && squeezed == line && squeezed.chars().count() <= LONGEST;
@@ -915,6 +927,27 @@ mod tests {
         ));
         assert!(!whole(
             r#"{"tool_name":"Task","tool_input":{"prompt":"rm"}}"#
+        ));
+        // Same file name, different contents: the card cannot tell them apart, so neither gets Allow.
+        for input in [
+            r#"{"file_path":"C:\\a.txt","old_string":"safe","new_string":"changed"}"#,
+            r#"{"file_path":"C:\\a.txt","content":"anything"}"#,
+            r#"{"command":"ls","env":"x"}"#,
+            r#"{"description":"x"}"#,
+        ] {
+            let tool = if input.contains("content") {
+                "Write"
+            } else {
+                "Edit"
+            };
+            let text = format!(r#"{{"tool_name":"{tool}","tool_input":{input}}}"#);
+            assert!(!whole(&text), "{input}");
+        }
+        assert!(whole(
+            r#"{"tool_name":"Bash","tool_input":{"command":"ls","description":"List","timeout":5000}}"#
+        ));
+        assert!(!whole(
+            r#"{"tool_name":"Bash","tool_input":{"command":"ls","env":"x"}}"#
         ));
         // A newline, a tab or squeezed spaces change what the line shows; an MCP tool is never known by one key.
         for command in [r"echo safe\nrm x", r"echo\tx", r#"echo \"a  b\""#, r"ls "] {

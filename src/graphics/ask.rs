@@ -2,14 +2,21 @@
 
 use super::*;
 
-/// Whether a permission question shows whole in the notice's two lines, measured as `notice_text` draws it, at the
-/// narrowest text column (both buttons). A measure that fails counts as not whole.
+/// Whether a permission question shows whole in the notice's two lines at the narrowest text column (both buttons),
+/// as the hook sees it: 96 DPI, with 2 pixels to spare for the rounding of the real pixel sizes.
 pub fn ask_fits(text: &str) -> bool {
-    let slot = layout::power_notice(false, 96);
-    let width = (layout::notice_button(false, 96, 1).x - slot.x) as f32 - 6.0;
+    ask_fits_at(text, 96, 2.0)
+}
+
+/// Whether the question shows whole on a notch of `dpi`, measured as `notice_text` draws it, with `spare` pixels left
+/// over. A measure that fails counts as not whole.
+pub fn ask_fits_at(text: &str, dpi: u32, spare: f32) -> bool {
+    let scale = dpi as f32 / 96.0;
+    let slot = layout::power_notice(false, dpi);
+    let width = (layout::notice_button(false, dpi, 1).x - slot.x) as f32 - 6.0 * scale - spare;
     let font = Font {
         family: TEXT_FONT,
-        size: 11.0,
+        size: 11.0 * scale,
         weight: DWRITE_FONT_WEIGHT_NORMAL,
         designator: 1.0,
         align: DWRITE_TEXT_ALIGNMENT_CENTER,
@@ -18,6 +25,28 @@ pub fn ask_fits(text: &str) -> bool {
         text_width(line, &font).is_ok_and(|w| w <= width)
     });
     !lines.iter().any(|line| line.contains('\u{2026}'))
+}
+
+thread_local! {
+    /// The wraps worked out for the question on show, by column width: it and the column stay the same for every
+    /// frame it animates, and a new question drops the old ones.
+    static WRAPPED: RefCell<Vec<(String, u32, [String; 2])>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `two_lines`, worked out once per question and column width instead of on every frame.
+pub(super) fn wrapped(text: &str, width: f32, fits: impl Fn(&str) -> bool) -> [String; 2] {
+    WRAPPED.with_borrow_mut(|cache| {
+        let key = width.to_bits();
+        if let Some((.., lines)) = cache.iter().find(|(seen, w, _)| seen == text && *w == key) {
+            return lines.clone();
+        }
+        if cache.first().is_some_and(|(seen, ..)| seen != text) {
+            cache.clear();
+        }
+        let lines = two_lines(text, fits);
+        cache.push((text.to_owned(), key, lines.clone()));
+        lines
+    })
 }
 
 /// `text` on at most two lines, `fits` telling whether a string is one line wide: the first line breaks after a space
@@ -99,6 +128,22 @@ mod tests {
         // One unbroken word has no space to break at.
         let [first, second] = two_lines("abcdefghijklmnopqrstuvwxyz", wide);
         assert!(wide(&first) && wide(&second) && first.starts_with("abc"));
+    }
+
+    #[test]
+    fn a_wrap_is_worked_out_once_per_question_and_width() {
+        let probes = std::cell::Cell::new(0);
+        let fits = |line: &str| {
+            probes.set(probes.get() + 1);
+            line.chars().count() <= 12
+        };
+        let first = wrapped("Bash: git push origin", 100.0, fits);
+        let used = probes.get();
+        assert!(used > 0);
+        assert_eq!(wrapped("Bash: git push origin", 100.0, fits), first);
+        assert_eq!(probes.get(), used, "the second frame measures nothing");
+        wrapped("Bash: git push origin", 120.0, fits);
+        assert!(probes.get() > used, "another width is another wrap");
     }
 
     #[test]

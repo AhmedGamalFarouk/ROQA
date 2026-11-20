@@ -3,7 +3,7 @@
 //! Format is a hand-rolled `key=value` text file (no new crate): `version=N`, repeated `pin=`/`shelf=` lines,
 //! the settings lines (`settings.rs`, version 2), and a closing `end` line that makes truncation detectable.
 //! Unknown keys are skipped when reading and are dropped at the next save (only known fields are written); a
-//! *newer version* is set aside instead, so a downgrade never rewrites it.
+//! *newer version* is left alone and not saved over, so a downgrade never rewrites it.
 
 use crate::settings::Settings;
 use crate::tabs::Tab;
@@ -50,9 +50,9 @@ pub struct Store {
 pub enum Load {
     Missing,
     Loaded,
-    /// Corrupt, truncated, oversized or newer-version: defaults used, the file renamed to `*.bad`.
+    /// Corrupt, truncated or oversized: defaults used, the file renamed to `*.bad` (never over an earlier one).
     Quarantined,
-    /// Present but unreadable (e.g. locked) or not quarantinable: defaults used, the file left alone.
+    /// Present but unreadable (e.g. locked), from a newer version or not quarantinable: defaults used, the file left alone.
     Unreadable,
 }
 
@@ -152,13 +152,23 @@ pub fn load(path: &Path) -> (Store, Load) {
             }
             (store, Load::Loaded)
         }
+        // A store from a newer build is left alone, so going back to that build finds it whole.
+        None if text
+            .as_deref()
+            .and_then(version)
+            .is_some_and(|v| v > VERSION) =>
+        {
+            (Store::default(), Load::Unreadable)
+        }
         None => {
-            // Keep one bad copy for the user; when it cannot be kept the file is left alone, as if unreadable.
+            // Keep one bad copy for the user, never replacing an earlier one; when it cannot be kept the file is
+            // left alone, as if unreadable.
+            let bad = path.with_extension("roqa.bad");
             #[expect(
                 clippy::disallowed_methods,
                 reason = "quarantine of a bad store file, never new data"
             )]
-            let kept = std::fs::rename(path, path.with_extension("roqa.bad")).is_ok();
+            let kept = !bad.exists() && std::fs::rename(path, bad).is_ok();
             let load = if kept {
                 Load::Quarantined
             } else {
@@ -183,17 +193,22 @@ pub fn open(path: Option<PathBuf>) -> (Store, Option<PathBuf>) {
     (store, Some(path))
 }
 
-fn parse(text: &str) -> Option<Store> {
-    let mut lines = text.lines();
-    let version: u32 = lines
+fn version(text: &str) -> Option<u32> {
+    text.lines()
         .next()?
         .strip_prefix("version=")?
         .trim()
         .parse()
-        .ok()?;
+        .ok()
+}
+
+fn parse(text: &str) -> Option<Store> {
+    let version = version(text)?;
     if version == 0 || version > VERSION {
         return None;
     }
+    let mut lines = text.lines();
+    lines.next();
     let mut store = Store::default();
     let mut ended = false;
     for line in lines {
@@ -503,10 +518,14 @@ mod tests {
             format!("version={}\npin=keep\nend\n", VERSION + 1),
         )
         .unwrap();
-        assert_eq!(load(&dir.file()), (Store::default(), Load::Quarantined));
-        // The newer file is preserved aside, never overwritten.
-        let kept = std::fs::read_to_string(dir.0.join("store.roqa.bad")).unwrap();
-        assert!(kept.contains("pin=keep"));
+        // The newer file stays where it is and this run does not save over it.
+        assert_eq!(load(&dir.file()), (Store::default(), Load::Unreadable));
+        assert!(
+            std::fs::read_to_string(dir.file())
+                .unwrap()
+                .contains("pin=keep")
+        );
+        assert!(!dir.0.join("store.roqa.bad").exists());
         let mut store = sample();
         migrate(1, &mut store);
         // Only the settings differ: version 1 had none, so they reset to the defaults.
@@ -593,7 +612,7 @@ mod tests {
                 !dir.file().exists() && dir.0.join("store.roqa.bad").exists(),
                 "case {index}"
             );
-            // The next save works normally and a second quarantine replaces the old .bad file.
+            // The next save works normally.
             sample().save(&dir.file()).unwrap();
             assert_eq!(load(&dir.file()).1, Load::Loaded);
         }
@@ -632,12 +651,31 @@ mod tests {
     #[test]
     fn a_store_that_cannot_be_set_aside_is_never_saved_over() {
         let dir = Dir::new("stuck");
-        let bad = format!("version={}\npin=keep\nend\n", VERSION + 1);
-        std::fs::write(dir.file(), &bad).unwrap();
+        std::fs::write(dir.file(), "garbage").unwrap();
         // A folder where the bad copy goes makes the rename fail.
         std::fs::create_dir(dir.0.join("store.roqa.bad")).unwrap();
         assert_eq!(open(Some(dir.file())), (Store::default(), None));
-        assert_eq!(std::fs::read_to_string(dir.file()).unwrap(), bad);
+        assert_eq!(std::fs::read_to_string(dir.file()).unwrap(), "garbage");
+    }
+
+    #[test]
+    fn an_earlier_bad_copy_is_never_replaced() {
+        let dir = Dir::new("keepfirst");
+        let bad = dir.0.join("store.roqa.bad");
+        std::fs::write(
+            &bad,
+            "version=1
+pin=original
+end
+",
+        )
+        .unwrap();
+        for _ in 0..2 {
+            std::fs::write(dir.file(), "garbage").unwrap();
+            assert_eq!(open(Some(dir.file())), (Store::default(), None));
+            assert_eq!(std::fs::read_to_string(dir.file()).unwrap(), "garbage");
+            assert!(std::fs::read_to_string(&bad).unwrap().contains("original"));
+        }
     }
 
     #[test]
