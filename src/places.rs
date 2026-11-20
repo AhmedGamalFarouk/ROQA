@@ -1,6 +1,7 @@
-//! The dock's Places button: the Recycle Bin and each fixed or removable drive, read when the popup opens.
+//! The dock's Places button: the Recycle Bin and each fixed or removable drive, read when the popup opens, on a short worker
+//! (`ask_places`), since a sleeping drive can stall the call.
 //! Network drives are left out (a stat on one can hang the host thread) and nothing is kept or polled.
-//! A pinned folder's stack (its newest files) is read here too, once per click, on a short worker (`ask`).
+//! A pinned folder's stack (its newest files) is read here too, once per click, on the same worker (`ask`).
 use std::path::{Path, PathBuf};
 use windows::{
     Win32::{
@@ -76,6 +77,8 @@ pub struct Answer {
     pub slot: usize,
     pub folder: String,
     pub files: Option<Vec<PathBuf>>,
+    /// The Places popup's rows, for a question asked with `ask_places`.
+    pub places: Option<Vec<Place>>,
     request: u64,
     asked: std::time::Instant,
 }
@@ -112,6 +115,15 @@ pub fn invalidate() {
 /// Asks a short worker whether `folder` is a folder and what its newest files are: a stat on a slow or offline
 /// share must not stop the host. One question at a time; false when one is still out or no worker could start.
 pub fn ask(dock: isize, slot: usize, folder: String) -> bool {
+    start(dock, slot, folder, false)
+}
+
+/// Asks the same worker for the Places rows (`list`): a sleeping drive must not stop the host either.
+pub fn ask_places(dock: isize) -> bool {
+    start(dock, 0, String::new(), true)
+}
+
+fn start(dock: isize, slot: usize, folder: String, listing: bool) -> bool {
     use std::sync::atomic::Ordering::{AcqRel, Release};
     if ASKING.swap(true, AcqRel) {
         return false;
@@ -123,13 +135,15 @@ pub fn ask(dock: isize, slot: usize, folder: String) -> bool {
         .name("roqa-stack".into())
         .spawn(move || {
             let path = Path::new(&folder);
-            let files = path.is_dir().then(|| newest_files(path, STACK));
+            let files = (!listing && path.is_dir()).then(|| newest_files(path, STACK));
+            let places = listing.then(list);
             if let Ok(mut slot_answer) = ANSWER.lock() {
                 *slot_answer = Some(Answer {
                     dock,
                     slot,
                     folder,
                     files,
+                    places,
                     request,
                     asked,
                 });
@@ -227,6 +241,7 @@ mod tests {
             slot: 0,
             folder: String::new(),
             files: None,
+            places: None,
             request,
             asked,
         };

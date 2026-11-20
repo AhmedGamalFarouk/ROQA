@@ -92,7 +92,7 @@ impl Desktop {
             }
             Some(SoundAction::Test) => {
                 let missing = prayer_tab::resolve(&self.settings.prayer_sound, &[])
-                    .is_some_and(|path| !std::path::Path::new(path).is_file());
+                    .is_some_and(Self::sound_missing);
                 let status = if !self.play_prayer_sound(Instant::now()) {
                     "No sound to play. Pick another file."
                 } else if missing {
@@ -155,6 +155,12 @@ impl Desktop {
         let Some(path) = paths.into_iter().next() else {
             return;
         };
+        if shelf_os::is_network(&path) {
+            if let Some(window) = &self.settings_window {
+                let _ = window.say("Pick a file on this PC.");
+            }
+            return;
+        }
         let next = Settings {
             prayer_sound: path,
             ..self.settings.clone()

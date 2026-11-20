@@ -3030,7 +3030,7 @@ impl Desktop {
     fn press_button(&mut self, hwnd: HWND, button: Button) {
         match (button, button.keys()) {
             (Button::Quick, _) => self.open_quick_menu(hwnd),
-            (Button::Places, _) => self.open_places_menu(hwnd),
+            (Button::Places, _) => self.ask_places(hwnd),
             (Button::Tray, _) => self.open_flyout(hwnd, Button::Tray),
             (_, Some(keys)) => {
                 if !dock::send_keys(keys) {
@@ -3339,9 +3339,9 @@ impl Desktop {
         if self.shelf.shelf.set_missing(index, !found) {
             self.request_notches(Repaint::Full, |_| true);
         }
-        if found {
-            shelf_os::open(&path, reveal, network);
-        } else {
+        if found && !shelf_os::open(&path, reveal, network) {
+            self.show_open_failed();
+        } else if !found {
             self.show_notice(
                 "File missing. Add it from its new location.".into(),
                 Instant::now(),
@@ -4096,12 +4096,7 @@ impl Desktop {
             let said = self.keys.looked();
             self.key_pill(said);
         }
-        if let Some(answer) = crate::places::answer() {
-            self.stack_ready(answer);
-        }
-        if shelf_os::network_failed() {
-            self.show_notice("Windows couldn't open this app.".into(), Instant::now());
-        }
+        self.worker_answers();
         if native_window::caps_read() {
             self.key_pill(Some(keys::caps_text()));
         }

@@ -2,15 +2,21 @@
 //! dependency. Wi-Fi and Bluetooth are radios (`Windows.Devices.Radios`), the power mode is the active
 //! power overlay. Volume lives in `audio`. Brightness is not here: monitors answer over DDC/CI on the edge
 //! slider's worker, which this popup cannot reach.
-use std::time::{Duration, Instant};
+use std::{
+    sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 use windows::{
     Devices::Radios::{Radio, RadioAccessStatus, RadioKind, RadioState},
     core::{GUID, Result},
 };
 use windows_future::{AsyncStatus, IAsyncOperation};
 
-/// How long a radio call may take before the popup gives up on it. Local radio calls answer in a few
-/// milliseconds; a stuck driver must not hold the host thread.
+/// How long a radio call may take before the worker gives up on it. Local radio calls answer in a few
+/// milliseconds; a stuck driver must not hold the worker for ever.
 const WAIT: Duration = Duration::from_millis(700);
 
 fn wait<T: windows::core::RuntimeType + 'static>(operation: &IAsyncOperation<T>) -> Result<T> {
@@ -24,38 +30,11 @@ fn wait<T: windows::core::RuntimeType + 'static>(operation: &IAsyncOperation<T>)
         }
         #[expect(
             clippy::disallowed_methods,
-            reason = "bounded wait on a WinRT call, on a worker"
+            reason = "bounded wait on a WinRT call, on the radio worker (`refresh`), never the host"
         )]
         std::thread::sleep(Duration::from_millis(2));
     }
     operation.GetResults()
-}
-
-thread_local! {
-    /// The radios found so far (UI thread only): reading `State()` of a kept one is instant, while the lookup
-    /// waits on the host thread.
-    static RADIOS: std::cell::RefCell<Vec<Radio>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// The radio of `kind`, when the machine has one; looked up again only when the kept one stopped answering.
-fn radio(kind: RadioKind) -> Option<Radio> {
-    let kept = RADIOS.with_borrow(|radios| {
-        radios
-            .iter()
-            .find(|radio| radio.Kind() == Ok(kind) && radio.State().is_ok())
-            .cloned()
-    });
-    if kept.is_some() {
-        return kept;
-    }
-    let found = wait(&Radio::GetRadiosAsync().ok()?).ok()?;
-    let radios: Vec<Radio> = found.into_iter().collect();
-    let radio = radios
-        .iter()
-        .find(|radio| radio.Kind() == Ok(kind))
-        .cloned();
-    RADIOS.set(radios);
-    radio
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,31 +51,84 @@ impl Kind {
     }
 }
 
-/// Whether the radio is on; `None` when the machine has no such radio (or it cannot be read).
+/// The radios as the last worker read them, `[Wi-Fi, Bluetooth]`; `None` while unknown or when the machine has no
+/// such radio. Reading it is instant: the lookup and the flip are WinRT calls a worker waits on, never the host.
+static LAST: Mutex<[Option<bool>; 2]> = Mutex::new([None; 2]);
+static BUSY: AtomicBool = AtomicBool::new(false);
+static CHANGED: AtomicBool = AtomicBool::new(false);
+/// Posted to the host when a worker has read the radios; it only wakes the loop (`changed` says why).
+const READY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 65;
+
+/// Whether the radio was on at the last read; `None` when unknown or the machine has no such radio.
 pub fn radio_on(kind: Kind) -> Option<bool> {
-    Some(radio(kind.radio())?.State().ok()? == RadioState::On)
+    LAST.lock().unwrap_or_else(PoisonError::into_inner)[kind as usize]
 }
 
-/// Flips the radio. Returns whether Windows accepted it.
-pub fn toggle_radio(kind: Kind) -> bool {
-    let flip = || -> Result<bool> {
-        let Some(radio) = radio(kind.radio()) else {
-            return Ok(false);
-        };
-        if wait(&Radio::RequestAccessAsync()?)? != RadioAccessStatus::Allowed {
-            return Ok(false);
+/// Whether a worker stored new radio states since the last call.
+pub fn changed() -> bool {
+    CHANGED.swap(false, Ordering::AcqRel)
+}
+
+/// Reads every radio and, with `flip`, switches that one first, all on a short worker. One run at a time: false
+/// when one is still out or no worker could start. The result comes with `READY` and `changed`.
+pub fn refresh(flip: Option<Kind>) -> bool {
+    use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+    /// Frees the slot and balances the worker's COM, also when the worker unwinds.
+    struct Done(bool);
+    impl Drop for Done {
+        fn drop(&mut self) {
+            if self.0 {
+                // SAFETY: balances the successful initialisation on this same worker.
+                unsafe { CoUninitialize() };
+            }
+            BUSY.store(false, Ordering::Release);
         }
-        let to = if radio.State()? == RadioState::On {
-            RadioState::Off
-        } else {
-            RadioState::On
+    }
+    if BUSY.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    // SAFETY: a scalar thread id query.
+    let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    let spawned = std::thread::Builder::new()
+        .name("roqa-radio".into())
+        .spawn(move || {
+            // SAFETY: a new worker; the guard below balances it on this thread.
+            let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+            let done = Done(com);
+            match read(flip) {
+                Ok(states) => *LAST.lock().unwrap_or_else(PoisonError::into_inner) = states,
+                Err(error) => eprintln!("Quick settings: radio: {error}"),
+            }
+            CHANGED.store(true, Ordering::Release);
+            drop(done);
+            let _ = crate::native_window::post_wake(host, READY);
+        });
+    if spawned.is_err() {
+        BUSY.store(false, Ordering::Release);
+    }
+    spawned.is_ok()
+}
+
+/// The radios' states, after flipping `flip` when Windows allows it.
+fn read(flip: Option<Kind>) -> Result<[Option<bool>; 2]> {
+    let radios: Vec<Radio> = wait(&Radio::GetRadiosAsync()?)?.into_iter().collect();
+    let mut states = [None; 2];
+    for kind in [Kind::WiFi, Kind::Bluetooth] {
+        let Some(radio) = radios.iter().find(|radio| radio.Kind() == Ok(kind.radio())) else {
+            continue;
         };
-        Ok(wait(&radio.SetStateAsync(to)?)? == RadioAccessStatus::Allowed)
-    };
-    flip().unwrap_or_else(|error| {
-        eprintln!("Quick settings: radio: {error}");
-        false
-    })
+        if flip == Some(kind) && wait(&Radio::RequestAccessAsync()?)? == RadioAccessStatus::Allowed
+        {
+            let to = if radio.State()? == RadioState::On {
+                RadioState::Off
+            } else {
+                RadioState::On
+            };
+            wait(&radio.SetStateAsync(to)?)?;
+        }
+        states[kind as usize] = radio.State().ok().map(|state| state == RadioState::On);
+    }
+    Ok(states)
 }
 
 /// The power overlays of Settings > System > Power, from the most thrifty to the fastest.
@@ -163,6 +195,14 @@ pub fn next_mode() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_radio_rows_read_the_last_states() {
+        *LAST.lock().unwrap() = [Some(true), None];
+        assert_eq!(radio_on(Kind::WiFi), Some(true));
+        assert_eq!(radio_on(Kind::Bluetooth), None);
+        *LAST.lock().unwrap() = [None; 2];
+    }
 
     #[test]
     fn each_mode_has_its_own_overlay_and_label() {

@@ -105,16 +105,28 @@ impl Desktop {
             }
         }
     }
+    /// A launch failed or was refused (a busy network worker): said the same way wherever something is opened.
+    pub(super) fn show_open_failed(&mut self) {
+        self.show_notice("Windows couldn't open that.".into(), Instant::now());
+    }
     /// A permission question from a hook shows on the notice row with Allow and Deny, a short peek that stays under
     /// a full-screen app (the agent's own prompt is still there). It waits as long as the hook does. When the row is
     /// busy or no notch can show, the hook is told at once (`ipc::pass`) so its agent asks in the terminal.
     pub(super) fn show_ask(&mut self, id: u32, text: String, now: Instant) {
-        if !self.power.announce(
-            text,
-            now,
-            Duration::from_secs(agent::ASK_SECS),
-            power::Extra::Ask(id),
-        ) {
+        // The hook measured at 96 DPI; a notch at another scale may cut the question, and Allow must not show then.
+        let whole = self
+            .surfaces
+            .iter()
+            .filter(|s| s.kind() == SurfaceKind::Notch)
+            .all(|s| crate::graphics::ask_fits_at(&text, s.dpi, 0.0));
+        if !whole
+            || !self.power.announce(
+                text,
+                now,
+                Duration::from_secs(agent::ASK_SECS),
+                power::Extra::Ask(id),
+            )
+        {
             crate::ipc::pass(id);
             return;
         }
@@ -422,14 +434,19 @@ impl Desktop {
             window.set_water(&water::text(self.water_today(), &self.settings.water_cfg));
         }
     }
+    /// Whether a chosen sound is not used: its file is gone, or it is on a network share (a stat or a play there can
+    /// stall the host with no time bound, so it is never touched).
+    pub(super) fn sound_missing(path: &str) -> bool {
+        shelf_os::is_network(path) || !std::path::Path::new(path).is_file()
+    }
     /// Plays the chosen sound (none when silent or no default exists); false when nothing played.
     pub(super) fn play_prayer_sound(&mut self, now: Instant) -> bool {
         let found = prayer_os::discover();
         let Some(mut path) = prayer_tab::resolve(&self.settings.prayer_sound, &found) else {
             return false;
         };
-        // A file that is gone plays the default instead; the stored setting is left as it is.
-        if !std::path::Path::new(path).is_file() {
+        // A file that is gone or on a share plays the default instead; the stored setting is left as it is.
+        if Self::sound_missing(path) {
             let Some(default) = prayer_tab::default_sound(&found) else {
                 return false;
             };

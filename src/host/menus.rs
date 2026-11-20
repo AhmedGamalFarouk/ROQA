@@ -79,6 +79,8 @@ impl Desktop {
         else {
             return;
         };
+        // The radios are read on a worker; their rows join the open popup when it answers (`refresh_quick_menu`).
+        quick::refresh(None);
         let (items, titles) = self.quick_rows();
         if items.is_empty() {
             return;
@@ -106,9 +108,17 @@ impl Desktop {
             Err(error) => eprintln!("Quick settings: {error}"),
         }
     }
-    /// The Places button's popup above it: the Recycle Bin and each drive as the shell reports them now;
-    /// a click opens that place in Explorer.
-    pub(super) fn open_places_menu(&mut self, hwnd: HWND) {
+    /// The Places button's popup above it: the Recycle Bin and each drive as the shell reports them now, read on a
+    /// worker (`stack_ready` opens it); a click opens that place in Explorer.
+    pub(super) fn ask_places(&mut self, hwnd: HWND) {
+        self.dismiss_preview();
+        self.close_menu();
+        if !crate::places::ask_places(hwnd.0 as isize) {
+            self.show_notice("Still reading a folder.".into(), Instant::now());
+        }
+    }
+    /// Opens the Places popup with the rows a worker read (`places::ask_places`).
+    fn open_places_menu(&mut self, hwnd: HWND, places: Vec<crate::places::Place>) {
         self.dismiss_preview();
         self.close_menu();
         let Some(dock) = self.dock_at(hwnd).filter(|dock| dock.visible) else {
@@ -129,7 +139,6 @@ impl Desktop {
         else {
             return;
         };
-        let places = crate::places::list();
         let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Button(Button::Places));
         let spec = dock_menu::Spec {
             dock: hwnd,
@@ -165,6 +174,15 @@ impl Desktop {
     /// out of date (a later click, a menu opened since, too slow) or the slot holds another pin now, and a path that is
     /// not a folder is launched like any other pin.
     pub(super) fn stack_ready(&mut self, answer: crate::places::Answer) {
+        let (current, slow) = (answer.current(), answer.slow());
+        if let Some(places) = answer.places {
+            if current {
+                self.open_places_menu(HWND(answer.dock as *mut _), places);
+            } else if slow {
+                self.show_notice("Places were slow. Try again.".into(), Instant::now());
+            }
+            return;
+        }
         let held = self
             .dock_items
             .get(answer.slot)
@@ -208,10 +226,12 @@ impl Desktop {
         }
         .filter(|path| {
             item.members.is_empty()
-                && path.ends_with(".exe")
+                && std::path::Path::new(path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
                 && (shelf_os::is_network(path) || std::path::Path::new(path).is_file())
         });
-        let quoted: Vec<_> = paths.iter().map(|path| format!("\"{path}\"")).collect();
+        let quoted: Vec<_> = paths.iter().map(|path| quote_path(path)).collect();
         let opened =
             program.is_some_and(|program| dock::launch_with(program, Some(&quoted.join(" "))));
         if !opened {
@@ -260,7 +280,9 @@ impl Desktop {
             return;
         };
         if files.is_empty() {
-            dock::launch(folder);
+            if !dock::launch(folder) {
+                self.show_open_failed();
+            }
             return;
         }
         let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Slot(slot));
@@ -357,10 +379,10 @@ impl Desktop {
                 }
             }
             Quick::WiFi => {
-                quick::toggle_radio(quick::Kind::WiFi);
+                quick::refresh(Some(quick::Kind::WiFi));
             }
             Quick::Bluetooth => {
-                quick::toggle_radio(quick::Kind::Bluetooth);
+                quick::refresh(Some(quick::Kind::Bluetooth));
             }
             Quick::Power => quick::next_mode(),
             Quick::KeepAwake => {
@@ -402,6 +424,38 @@ impl Desktop {
                 dock::restore_foreground(menu.hwnd(), menu.return_to);
                 return;
             }
+        }
+        let (items, titles) = self.quick_rows();
+        if menu.relist(items, titles, Vec::new()).is_ok() {
+            self.menu = Some(menu);
+        } else {
+            dock::restore_foreground(menu.hwnd(), menu.return_to);
+        }
+    }
+    /// What the short workers left for the host (read on every pass): a folder or the Places rows (`places`), new radio
+    /// states for an open quick settings popup in place (`quick::refresh`), and a failed network launch.
+    pub(super) fn worker_answers(&mut self) {
+        if let Some(answer) = crate::places::answer() {
+            self.stack_ready(answer);
+        }
+        if quick::changed() {
+            self.refresh_quick_menu();
+        }
+        if shelf_os::network_failed() {
+            self.show_open_failed();
+        }
+    }
+    fn refresh_quick_menu(&mut self) {
+        let Some(mut menu) = self.menu.take() else {
+            return;
+        };
+        if !menu
+            .items()
+            .iter()
+            .any(|item| matches!(item, Item::Quick(_)))
+        {
+            self.menu = Some(menu);
+            return;
         }
         let (items, titles) = self.quick_rows();
         if menu.relist(items, titles, Vec::new()).is_ok() {
@@ -688,6 +742,7 @@ impl Desktop {
                         && !dock::launch(&file.to_string_lossy())
                     {
                         eprintln!("Folder stack: the shell did not open {}", file.display());
+                        self.show_open_failed();
                     }
                 }
                 Item::PinDownloads => {
@@ -700,6 +755,7 @@ impl Desktop {
                         && !dock::launch(&place.target)
                     {
                         eprintln!("Places: the shell did not open {}", place.target);
+                        self.show_open_failed();
                     }
                 }
                 Item::RemoveShelf => {
@@ -819,5 +875,23 @@ impl Desktop {
         if !current || menu.paint().is_err() {
             self.close_menu();
         }
+    }
+}
+
+/// `path` as one command-line argument: quoted, with a trailing backslash doubled so it cannot escape the closing
+/// quote (a dropped drive root `E:\` would otherwise swallow the arguments after it).
+fn quote_path(path: &str) -> String {
+    let tail = if path.ends_with('\\') { "\\" } else { "" };
+    format!("\"{path}{tail}\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quote_path;
+
+    #[test]
+    fn a_dropped_path_is_one_argument() {
+        assert_eq!(quote_path(r"C:\a b\c.txt"), r#""C:\a b\c.txt""#);
+        assert_eq!(quote_path(r"E:\"), r#""E:\\""#);
     }
 }

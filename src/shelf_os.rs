@@ -324,7 +324,8 @@ impl Drop for NetworkPermit {
     }
 }
 
-pub fn open(path: &str, reveal: bool, network: bool) {
+/// Whether it started (a network open is only handed to its worker; its failure comes later, `network_failed`).
+pub fn open(path: &str, reveal: bool, network: bool) -> bool {
     let (file, parameters) = if reveal {
         // `"` cannot occur: `shelf::validate` rejects it.
         (
@@ -335,9 +336,9 @@ pub fn open(path: &str, reveal: bool, network: bool) {
         (path.to_owned(), None)
     };
     if network {
-        open_network(&file, parameters.as_deref());
+        open_network(&file, parameters.as_deref())
     } else {
-        dock::shell(&file, parameters.as_deref(), false);
+        dock::shell(&file, parameters.as_deref(), false)
     }
 }
 
