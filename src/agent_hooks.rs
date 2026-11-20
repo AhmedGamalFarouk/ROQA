@@ -713,7 +713,9 @@ pub fn plan(spec: &Spec, home: &Path, exe: &Path, add: bool) -> Result<Plan, Str
             .and_then(|text| Json::parse(&text))
             .filter(|json| matches!(json, Json::Obj(_)))
             .ok_or_else(unreadable)?,
-        Err(_) => Json::Obj(Vec::new()),
+        // Only a file that is not there starts empty; one ROQA cannot check is left alone, never written over.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Json::Obj(Vec::new()),
+        Err(_) => return Err(unreadable()),
     };
     let found = strip(&mut json, spec.id);
     if !add {

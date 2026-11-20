@@ -845,6 +845,46 @@ fn repositions(message: u32, wparam: WPARAM, taskbar_created: u32) -> Option<boo
 
 #[cfg(test)]
 mod tests {
+    /// Every private message id is `WM_APP` plus a number, spread over many files: no two may share one.
+    #[test]
+    fn every_wm_app_id_is_distinct() {
+        fn scan(dir: &std::path::Path, seen: &mut Vec<(u32, String)>) {
+            let needle = format!("{} + ", "WM_APP");
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    scan(&path, seen);
+                    continue;
+                }
+                for line in std::fs::read_to_string(&path).unwrap_or_default().lines() {
+                    let code = line.trim_start();
+                    if code.starts_with("//") {
+                        continue;
+                    }
+                    if let Some((_, tail)) = code.split_once(needle.as_str()) {
+                        let digits: String =
+                            tail.chars().take_while(char::is_ascii_digit).collect();
+                        seen.push((digits.parse().unwrap(), path.display().to_string()));
+                    }
+                }
+            }
+        }
+        let mut seen = Vec::new();
+        scan(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut seen,
+        );
+        assert!(seen.len() > 20, "the scan found the ids");
+        for (at, (id, file)) in seen.iter().enumerate() {
+            let twin = seen[..at].iter().find(|(other, _)| other == id);
+            assert!(
+                twin.is_none(),
+                "message id {id} is used in {file} and in {}",
+                twin.unwrap().1
+            );
+        }
+    }
+
     #[test]
     fn device_arrivals_map_to_one_alert_each() {
         use super::*;

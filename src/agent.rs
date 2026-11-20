@@ -300,11 +300,14 @@ pub fn ask(name: &str) {
     else {
         return;
     };
-    if !whole || !crate::graphics::ask_fits(&line) {
-        // Answer in the terminal: say so on the pill, and print nothing so the agent asks at once.
+    // Answer in the terminal: say so on the pill, and print nothing so the agent asks at once.
+    let needs_you = || {
         let _ = crate::ipc::Command::Agent.signal_after(|| {
             let _ = write(name, Report::State(State::Needs));
         });
+    };
+    if !whole || !crate::graphics::ask_fits(&line) {
+        needs_you();
         return;
     }
     let id = std::process::id();
@@ -327,7 +330,9 @@ pub fn ask(name: &str) {
     let decision = match woke.0.wrapping_sub(WAIT_OBJECT_0.0) {
         0 => r#"{"behavior":"allow"}"#,
         1 => r#"{"behavior":"deny","message":"Denied from ROQA"}"#,
-        // 2 is ROQA saying it cannot show the question; anything else is the wait running out.
+        // 2 is ROQA saying it cannot show the question: the terminal asks, and the pill says so.
+        2 => return needs_you(),
+        // Anything else is the wait running out.
         _ => return,
     };
     println!(
