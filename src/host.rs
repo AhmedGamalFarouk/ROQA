@@ -3899,17 +3899,25 @@ impl Desktop {
             );
         }
         let surfaces = &self.surfaces;
+        // A popup opened from a surface (app menu, folder stack, Places, quick settings) holds it up like the
+        // pointer does: the pointer left the surface for the popup, which is not leaving.
+        let popup = |s: &Surface| {
+            [&self.menu, &self.hover_popup]
+                .into_iter()
+                .flatten()
+                .any(|menu| menu.dock() == s.window.0)
+        };
         changed |= self.tuck_notch.tick(now, |device| {
             surfaces.iter().any(|s| {
                 s.kind() == SurfaceKind::Notch
                     && s.monitor == device
-                    && (s.hovered || s.motion.target() > 0.0)
+                    && (s.hovered || s.motion.target() > 0.0 || popup(s))
             })
         });
         changed |= self.tuck.tick(now, |device| {
-            surfaces
-                .iter()
-                .any(|s| s.kind() == SurfaceKind::Dock && s.monitor == device && s.hovered)
+            surfaces.iter().any(|s| {
+                s.kind() == SurfaceKind::Dock && s.monitor == device && (s.hovered || popup(s))
+            })
         });
         if changed {
             self.apply_visibility()?;

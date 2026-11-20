@@ -397,6 +397,36 @@ mod tests {
         tuck.sync(true, frame(1, "A", b(0, 0, 800, 600)), &docks, &[], moved);
         assert!(tuck.shown("B"));
     }
+    /// The pointer leaves a revealed dock for a popup it opened: the host's `held` (pointer on the dock, or a popup
+    /// of that dock open) keeps it up until the popup closes, then it slides away.
+    #[test]
+    fn an_open_popup_keeps_a_revealed_dock_up_until_it_closes() {
+        let _class = crate::native_window::WindowClass::register().unwrap();
+        let at = b(0, 0, 40, 2);
+        let mut tuck = Tuck::default();
+        tuck.covers.push(("A".to_owned(), k(1)));
+        tuck.strips.push(Strip {
+            // Never shown: no window appears on any screen.
+            window: NativeWindow::create_hidden(at, w!("ROQA Dock Edge")).unwrap(),
+            monitor: "A".to_owned(),
+            at,
+            hover: Hover::default(),
+            tracking: false,
+            rest: None,
+        });
+        let now = Instant::now();
+        assert!(tuck.alert("A", now, Duration::ZERO) && tuck.shown("A"));
+        tuck.release("A", now);
+        let (hovered, mut popup) = (false, true);
+        let mut later = now;
+        for _ in 0..3 {
+            later = tuck.deadline().unwrap();
+            assert!(!tuck.tick(later, |_| hovered || popup) && tuck.shown("A"));
+        }
+        popup = false;
+        let due = tuck.deadline().unwrap();
+        assert!(due > later && tuck.tick(due, |_| hovered || popup) && !tuck.shown("A"));
+    }
     #[test]
     fn off_forgets_everything() {
         let docks = [("A".to_owned(), b(0, 0, 10, 10))];
