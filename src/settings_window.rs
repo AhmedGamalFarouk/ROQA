@@ -140,6 +140,7 @@ const AGENT_BTN: usize = 215;
 const ASK_BTN: usize = 236;
 /// The Windows notifications peek.
 const NOTIFS: usize = 237;
+const CAPS_PILL: usize = 238;
 /// The four shortcut switches (`hotkeys::KEYS` order).
 const HOTKEY: usize = 222;
 /// The hidden-apps list and its "Show in dock" button.
@@ -365,6 +366,7 @@ const PAGES: &[Page] = &[
                     r(PRIVACY, C, "Privacy indicator", ""),
                     r(CLIP, C, "Keep copied text on the Shelf", ""),
                     r(NOTIFS, C, "Show Windows notifications", ""),
+                    r(CAPS_PILL, C, "Caps Lock pill", ""),
                 ],
             },
             Card {
@@ -1523,6 +1525,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         FSHIDE => &mut s.hide_fullscreen,
         AUTOSTART => &mut s.autostart,
         HIDE_CAPTURE => &mut s.hide_capture,
+        CAPS_PILL => &mut s.caps_pill,
         RSOUNDS => &mut s.reminder_sounds,
         PPAUSE => &mut s.prayer_pause,
         WATER => &mut s.water,
@@ -3196,14 +3199,9 @@ mod tests {
     #[test]
     fn a_refused_last_switch_says_so_instead_of_applied() {
         // Asked for neither dock nor notch: refused even though the clamped result equals the current one.
-        assert_eq!(
-            footer_status(false, false, false, false),
-            Some("Keep the dock or the notch on.")
-        );
-        assert_eq!(
-            footer_status(false, false, false, true),
-            Some("Keep the dock or the notch on.")
-        );
+        let refused = Some("Keep the dock or the notch on.");
+        assert_eq!(footer_status(false, false, false, false), refused);
+        assert_eq!(footer_status(false, false, false, true), refused);
         assert_eq!(footer_status(false, true, false, true), Some("Applied."));
         assert_eq!(footer_status(false, true, false, false), None);
         assert_eq!(

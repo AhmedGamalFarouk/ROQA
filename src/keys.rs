@@ -56,6 +56,15 @@ pub fn looking() -> bool {
 /// Whether the Caps Lock hotkey is registered now: off while an elevated window or a full-screen app has the focus,
 /// where it could not be handed back. A static, since the window procedure hands the key back in a modal loop too.
 static HELD: AtomicBool = AtomicBool::new(false);
+/// The Settings switch "Caps Lock pill": off, the key is never taken.
+static WANTED: AtomicBool = AtomicBool::new(true);
+
+/// Turns the Caps Lock pill on or off (`Settings::apply_globals`); the grip follows at once.
+pub fn want_caps(on: bool) {
+    if WANTED.swap(on, Relaxed) != on {
+        grip();
+    }
+}
 
 /// The hotkey id of Caps Lock, clear of the shortcut groups' ids (`hotkeys::id` stays below 0x100).
 const CAPS: i32 = 0x1000;
@@ -140,7 +149,8 @@ pub fn grip() {
     let full_screen = crate::native_window::shell_fullscreen()
         && crate::native_window::fullscreen_candidate().is_some();
     // SAFETY: a scalar foreground query.
-    let want = !(full_screen || elevated_above_us(unsafe { GetForegroundWindow() }));
+    let want = WANTED.load(Relaxed)
+        && !(full_screen || elevated_above_us(unsafe { GetForegroundWindow() }));
     if want == HELD.load(Relaxed) {
         return;
     }
