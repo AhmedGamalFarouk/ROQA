@@ -1,5 +1,5 @@
 //! The settings window: a sidebar of pages and a card pane, built from the `PAGES` table (one loop creates the controls, one lays them out, `commit`/`show` read and write them by id).
-//! Standard child controls give mouse use and text scaling (keyboard navigation and screen readers are deliberately not supported); only the background, cards and sidebar are drawn here, in GDI with stock objects.
+//! Standard child controls give mouse use and text scaling (screen readers are deliberately not supported; keyboard use is `keyboard.rs`); only the background, cards and sidebar are drawn here, in GDI with stock objects.
 //! It owns no timer or thread: it exists only while open and does work only in the message loop turns its own controls cause.
 //! A change goes to the host (`take_change`) which applies it live; a timer request likewise (`take_start`).
 
@@ -25,6 +25,7 @@ use crate::{
     widgets::WidgetKind,
     window_model::WindowKey,
 };
+use keyboard::{focus_ring, ringed};
 use std::cell::RefCell;
 use windows::{
     Win32::{
@@ -970,7 +971,15 @@ fn draw_side(item: &DRAWITEMSTRUCT, p: &Paint) {
     unsafe {
         fill(dc, row, p.pal.side);
         if item.itemState.0 & ODS_SELECTED.0 != 0 {
-            round(dc, cell, (cell.bottom - cell.top) / 2, p.pal.sel, p.pal.sel);
+            let focused = focus_ring(item.hwndItem);
+            ringed(
+                dc,
+                cell,
+                (cell.bottom - cell.top) / 2,
+                p.pal.sel,
+                focused,
+                p,
+            );
         }
         let glyph = TILES[item.itemID as usize % TILES.len()];
         let ink = if item.itemState.0 & ODS_SELECTED.0 != 0 {
@@ -1059,7 +1068,7 @@ fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
     unsafe {
         fill(dc, r, p.pal.card);
         let track = if on { p.pal.accent } else { p.pal.off };
-        round(dc, pill, px(11), track, track);
+        ringed(dc, pill, px(11), track, focus_ring(h), p);
         let knob = RECT {
             left: thumb,
             top: mid - px(9),
@@ -1152,11 +1161,6 @@ fn draw_push(note: &NMCUSTOMDRAW, p: &Paint) {
     } else {
         (p.pal.sel, p.pal.text)
     };
-    let ring = if state & CDIS_FOCUS.0 != 0 {
-        p.pal.accent
-    } else {
-        fill_colour
-    };
     // SAFETY: the DC and rectangle come from this custom-draw notification.
     unsafe {
         fill(
@@ -1168,7 +1172,7 @@ fn draw_push(note: &NMCUSTOMDRAW, p: &Paint) {
                 p.pal.card
             },
         );
-        round(dc, r, (r.bottom - r.top) / 2, fill_colour, ring);
+        ringed(dc, r, (r.bottom - r.top) / 2, fill_colour, focus_ring(h), p);
         SetBkMode(dc, TRANSPARENT);
         SelectObject(dc, p.font.into());
         write(
@@ -1209,7 +1213,7 @@ fn draw_tile(note: &NMCUSTOMDRAW, p: &Paint) {
     unsafe {
         fill(dc, r, p.pal.card);
         // A capsule-cornered tile, lit by its fill (accent is not for status text); no outline.
-        round(dc, r, px(14), fill_colour, fill_colour);
+        ringed(dc, r, px(14), fill_colour, focus_ring(h), p);
         SetBkMode(dc, TRANSPARENT);
         // The display's name leads in semibold; its mode and ROQA's state follow, quiet, in one line each.
         let quiet = if on { p.pal.dim } else { ink };
@@ -1423,7 +1427,8 @@ unsafe extern "system" fn combo_proc(
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
                 fill(dc, rect, p.pal.card);
-                round(dc, rect, (rect.bottom - rect.top) / 2, p.pal.sel, p.pal.sel);
+                let radius = (rect.bottom - rect.top) / 2;
+                ringed(dc, rect, radius, p.pal.sel, focus_ring(hwnd), p);
                 let px = |v: i32| (v as f64 * p.scale).round() as i32;
                 let name = RECT {
                     left: rect.left + px(10),
@@ -2064,6 +2069,7 @@ Other hooks stay. A copy of the file is kept.",
                 );
             }
         }
+        self.tab_stops();
         self.layout()
     }
 
@@ -2134,6 +2140,7 @@ Other hooks stay. A copy of the file is kept.",
                 }
             }
         }
+        self.tab_stops();
         self.refresh_agents();
         Ok(())
     }
@@ -2432,8 +2439,8 @@ Other hooks stay. A copy of the file is kept.",
     }
 
     pub fn message(&mut self, message: &MSG) -> Result<bool> {
-        if message.hwnd != self.window {
-            return Ok(false);
+        if message.hwnd != self.window || (WM_KEYFIRST..=WM_KEYLAST).contains(&message.message) {
+            return self.key(message);
         }
         match message.message {
             ACTION => {
@@ -2522,34 +2529,6 @@ Other hooks stay. A copy of the file is kept.",
 
     pub fn closed(&self) -> bool {
         self.closed
-    }
-
-    fn scroll_message(&mut self, action: usize) -> Result<()> {
-        let mut scroll = SCROLLINFO {
-            cbSize: size_of::<SCROLLINFO>() as u32,
-            fMask: SIF_ALL,
-            ..Default::default()
-        };
-        // SAFETY: queries our own scroll bar; no callbacks into Rust state.
-        let next = unsafe {
-            GetScrollInfo(self.window, SB_VERT, &mut scroll)?;
-            match action as i32 {
-                0 => self.scroll - 48,
-                1 => self.scroll + 48,
-                2 => self.scroll - scroll.nPage as i32,
-                3 => self.scroll + scroll.nPage as i32,
-                4 | 5 => scroll.nTrackPos,
-                6 => 0,
-                7 => self.scroll_max,
-                _ => return Ok(()),
-            }
-        }
-        .clamp(0, self.scroll_max);
-        if next != self.scroll {
-            self.scroll = next;
-            self.layout()?;
-        }
-        Ok(())
     }
 
     /// The Windows text size changed.
@@ -3104,6 +3083,8 @@ fn footer_status(
         None
     }
 }
+
+mod keyboard;
 
 #[cfg(test)]
 mod tests {
