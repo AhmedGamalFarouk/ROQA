@@ -312,13 +312,13 @@ pub fn ask(name: &str) {
     }
     let id = std::process::id();
     let Ok(events) = crate::ipc::answer_events(id) else {
-        return;
+        return needs_you();
     };
     let mut written = Ok(());
     let shown = crate::ipc::Command::Agent.signal_after(|| written = write_ask(name, id, &line));
-    // A question that never reached the spool cannot be answered: back to the terminal at once.
+    // A question that never reached the spool cannot be answered: back to the terminal, and the pill says so.
     if shown.is_err() || written.is_err() {
-        return;
+        return needs_you();
     }
     let handles = [events[0].0, events[1].0, events[2].0];
     // SAFETY: the handles stay open until this function returns.

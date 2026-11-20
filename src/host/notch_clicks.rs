@@ -63,19 +63,19 @@ impl Desktop {
         if let Some(letter) = self.power.eject()
             && layout::notice_button_at(width, dpi, progress, live, 0, (x, y))
         {
-            let started = crate::system_os::eject_in_background(letter);
-            self.power.clear();
-            self.power.announce(
-                if started {
-                    format!("Ejecting {letter}:")
-                } else {
-                    "Still ejecting another drive".into()
-                },
-                Instant::now(),
-                DRIVE_NOTICE,
-                power::Extra::None,
-            );
-            self.request_notches(Repaint::Full, |_| true);
+            if crate::system_os::eject_in_background(letter) {
+                self.power.clear();
+                self.power.announce(
+                    format!("Ejecting {letter}:"),
+                    Instant::now(),
+                    DRIVE_NOTICE,
+                    power::Extra::None,
+                );
+                self.request_notches(Repaint::Full, |_| true);
+            } else {
+                // The row keeps its Eject button so the click can be tried again; the notice waits behind it.
+                self.show_notice("Still ejecting another drive".into(), Instant::now());
+            }
             return true;
         }
         if let power::Extra::Ask(hook) = self.power.extra()

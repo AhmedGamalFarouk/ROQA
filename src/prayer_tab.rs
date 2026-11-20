@@ -306,11 +306,8 @@ mod tests {
 
     #[test]
     fn a_network_or_absent_sound_is_missing_without_a_look_at_the_share() {
-        assert!(missing(r"\server\share	akbeer.wav"));
-        assert!(missing(
-            r"C:
-o\sucholder	akbeer.wav"
-        ));
+        assert!(missing(r"\\server\share\takbeer.wav"));
+        assert!(missing(r"C:\no\such\folder\takbeer.wav"));
     }
     /// A day's times as the timeline `events` reads (today only).
     fn line(times: &prayer::Times) -> Vec<(i32, Prayer)> {
