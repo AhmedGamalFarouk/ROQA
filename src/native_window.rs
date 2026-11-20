@@ -12,10 +12,10 @@ use windows::Win32::{
     Foundation::{COLORREF, E_FAIL, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
     Graphics::Gdi::{
-        DeleteObject, EnumDisplayMonitors, ExtCreateRegion, GetMonitorInfoW, HDC, HMONITOR,
-        MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW,
-        MonitorFromPoint, MonitorFromWindow, RDH_RECTANGLES, RGNDATA, RGNDATAHEADER, SetBkColor,
-        SetTextColor, SetWindowRgn, ValidateRect,
+        BeginPaint, DeleteObject, EndPaint, EnumDisplayMonitors, ExtCreateRegion, GetMonitorInfoW,
+        HDC, HMONITOR, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
+        MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT, RDH_RECTANGLES, RGNDATA,
+        RGNDATAHEADER, SetBkColor, SetTextColor, SetWindowRgn,
     },
     System::{
         LibraryLoader::GetModuleHandleW,
@@ -809,7 +809,11 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_ERASEBKGND => LRESULT(1),
             WM_PAINT => {
-                let _ = ValidateRect(Some(hwnd), None);
+                // BeginPaint, not ValidateRect: only it clears the region a hidden layered window (the notch shadow,
+                // made hidden) keeps; otherwise WM_PAINT comes back forever and the host thread never idles.
+                let mut paint = PAINTSTRUCT::default();
+                BeginPaint(hwnd, &mut paint);
+                let _ = EndPaint(hwnd, &paint);
                 LRESULT(0)
             }
             WM_CLOSE => {
@@ -905,6 +909,32 @@ mod tests {
         assert_eq!(device_bit(DBT_DEVTYP_DEVICEINTERFACE.0, none, false), 0);
     }
     use super::*;
+
+    /// A notch shadow made and kept hidden (a full-screen app on its monitor) paints once, not in a loop that kept
+    /// the host thread busy and its wait unreached.
+    #[test]
+    fn a_hidden_shadow_paints_once_not_forever() {
+        let _class = WindowClass::register().unwrap();
+        let shadow = NativeWindow::create_shadow(Bounds {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 20,
+        })
+        .unwrap();
+        let mut paints = 0;
+        let mut message = MSG::default();
+        // SAFETY: this thread's own queue; every message is dispatched to the window made above.
+        unsafe {
+            while paints < 50 && PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                paints += usize::from(message.message == WM_PAINT);
+                DispatchMessageW(&message);
+            }
+        }
+        drop(shadow);
+        assert!(paints <= 1, "{paints} paints");
+    }
+
     #[test]
     fn one_power_post_serves_every_window_until_the_host_reads() {
         let pending = AtomicBool::new(false);
