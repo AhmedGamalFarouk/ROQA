@@ -442,8 +442,7 @@ enum Role {
         linger: Option<Instant>,
         area: Vec<Bounds>,
     },
-    /// Hovered cell, per-cell hover progress and the tooltips of its buttons (none if the control could not
-    /// be made).
+    /// Hovered cell and per-cell hover progress.
     Dock {
         hover: Option<usize>,
         slots: Vec<Tween>,
@@ -2906,31 +2905,22 @@ impl Desktop {
     }
 
     fn show_hover_popup(&mut self, hwnd: HWND, hit: Hit) {
-        let item = hit.slot().and_then(|slot| self.dock_items.get(slot));
-        if item.is_some_and(|item| item.members.is_empty() && !item.windows.is_empty()) {
+        // Only a folder's member list pops up; the dock has no tooltips.
+        let Some(item) = hit
+            .slot()
+            .and_then(|slot| self.dock_items.get(slot))
+            .filter(|item| !item.members.is_empty())
+        else {
             return;
-        }
-        let (identity, members, label) = match item {
-            Some(item) => (
-                item.identity.clone(),
-                item.members.clone(),
-                dock::pinned_as(item, &self.pins)
-                    .as_ref()
-                    .and_then(|pin| self.pins.folder(pin))
-                    .map_or_else(
-                        || crate::pins::display_name(&item.identity),
-                        |folder| folder.name.clone(),
-                    ),
-            ),
-            None => (
-                Identity::Unavailable(0),
-                Vec::new(),
-                match hit {
-                    Hit::Button(button) => button.label().into(),
-                    Hit::Slot(_) => return,
-                },
-            ),
         };
+        let (identity, members) = (item.identity.clone(), item.members.clone());
+        let label = dock::pinned_as(item, &self.pins)
+            .as_ref()
+            .and_then(|pin| self.pins.folder(pin))
+            .map_or_else(
+                || crate::pins::display_name(&item.identity),
+                |folder| folder.name.clone(),
+            );
         let Some(dock) = self.dock_at(hwnd) else {
             return;
         };

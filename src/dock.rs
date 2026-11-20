@@ -254,18 +254,6 @@ impl Button {
     pub fn index(self) -> usize {
         self as usize
     }
-    /// The accessible name and the hover tooltip.
-    pub fn label(self) -> &'static str {
-        [
-            "Start",
-            "Search",
-            "Task View",
-            "Show desktop",
-            "Quick settings",
-            "Drives and Recycle Bin",
-            "Show hidden icons",
-        ][self.index()]
-    }
     /// Settings store key.
     pub fn key(self) -> &'static str {
         [
@@ -1802,18 +1790,6 @@ mod tests {
         let b = Buttons::default();
         let narrow = width_px(b, 4, 96) - 2 * px(SLOT_DIPS, 96);
         assert_eq!(visible_slots(b, narrow, 96, 4), 2);
-    }
-
-    #[test]
-    fn every_button_has_a_distinct_tooltip_label() {
-        let labels: Vec<_> = Button::ALL.iter().map(|b| b.label()).collect();
-        assert!(labels.iter().all(|label| !label.is_empty()));
-        assert!(
-            labels
-                .iter()
-                .enumerate()
-                .all(|(at, label)| !labels[..at].contains(label))
-        );
     }
 
     #[test]

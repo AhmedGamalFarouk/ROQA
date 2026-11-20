@@ -14,6 +14,7 @@ One folder, one branch: work on `main` in this checkout. No branches, no worktre
 
 ## Hard rules (owner decisions, do not reopen)
 - ROQA ignores Windows' Animation effects switch, and the dock and notch have no Narrator or UI Automation support (owner decision 2026-11-19). Do not add either.
+- The dock has no tooltips (owner decision 2026-11-20).
 - No size limit (owner decision 2026-11-16): `verify.ps1` reports the exe size; put the byte delta in every report. Performance rules above still hold.
 - Live tests and screenshots happen on the second (non-primary) monitor only, so the owner's main screen is left alone (owner decision 2026-11-18). Never place ROQA, Settings, a backdrop or the mouse on the primary monitor for a test.
 - Answers to the owner are concise (owner decision 2026-11-18): short plain lines with only what changed, what is left and what they must decide; no recaps, no detail they did not ask for.
