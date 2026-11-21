@@ -4383,11 +4383,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             {
                 let hit = dock.dock_hit(message.lParam, desktop.dock_slots());
                 if hit == Some(Hit::Button(Button::Start)) {
-                    desktop.dismiss_preview();
-                    // The "Start" hover label would sit over the menu: drop it and restart its delay.
-                    desktop.hover_popup = None;
-                    desktop.hover_spot = None;
-                    desktop.open_flyout(message.hwnd, crate::anchored::Kind::WinX);
+                    desktop.open_windows_links(message.hwnd);
                     continue;
                 }
                 desktop.open_menu(message.hwnd, hit.and_then(Hit::slot), message.lParam);

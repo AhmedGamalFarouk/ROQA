@@ -41,6 +41,7 @@
 - **Device batteries:** The battery button beside hidden icons lists connected paired wireless/network devices and Windows-reported receiver batteries. Each physical device appears once; missing or conflicting readings show Unavailable. Updates and removals come from Windows device events, without polling.
   Coverage depends on drivers exposing `System.Devices.BatteryLife` on the device or its Windows container. Receivers that expose only a USB receiver cannot identify or report each wireless peripheral; vendor protocols and direct Bluetooth GATT reads are not implemented. A receiver remaining plugged in may still be reported connected after its peripheral switches off. No hardware coverage is claimed until tested on that hardware.
 - **Dock Context Menu:** Clean right-click menu with options to launch new instances, pin/unpin apps, and close windows.
+- **Windows quick links:** Right-click the dock Windows icon for Windows settings, installed apps, system, network, power, File Explorer, and Task Manager. The menu stays above that icon on its monitor. Left-click Start and physical Win+X keep their Windows behavior.
 - **Notification Badges:** Real-time unread counter and status indicator dots on application icons.
 - **Desktop Strip:** Quick show-desktop strip.
 

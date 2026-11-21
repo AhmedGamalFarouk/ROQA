@@ -78,6 +78,11 @@ impl Desktop {
     pub(super) fn open_quick_menu(&mut self, hwnd: HWND) {
         self.open_status_menu(hwnd, Button::Quick);
     }
+    pub(super) fn open_windows_links(&mut self, hwnd: HWND) {
+        self.hover_popup = None;
+        self.hover_spot = None;
+        self.open_status_menu(hwnd, Button::Start);
+    }
     fn open_status_menu(&mut self, hwnd: HWND, button: Button) {
         self.dismiss_preview();
         self.close_menu();
@@ -103,11 +108,19 @@ impl Desktop {
         if button == Button::Quick {
             quick::refresh(None);
         }
-        let (items, titles) = if button == Button::Battery {
-            let titles = crate::device_battery::titles();
-            (vec![Item::Battery; titles.len()], titles)
-        } else {
-            self.quick_rows()
+        let (items, titles) = match button {
+            Button::Start => (
+                dock_menu::WindowsLink::ALL
+                    .into_iter()
+                    .map(Item::WindowsLink)
+                    .collect(),
+                Vec::new(),
+            ),
+            Button::Battery => {
+                let titles = crate::device_battery::titles();
+                (vec![Item::Battery; titles.len()], titles)
+            }
+            _ => self.quick_rows(),
         };
         if items.is_empty() {
             return;
@@ -122,10 +135,10 @@ impl Desktop {
             dock_bounds: bounds,
             work,
             dpi,
-            app: if button == Button::Battery {
-                "Device batteries"
-            } else {
-                "Quick settings"
+            app: match button {
+                Button::Start => "Quick links",
+                Button::Battery => "Device batteries",
+                _ => "Quick settings",
             }
             .into(),
             titles,
@@ -815,6 +828,11 @@ impl Desktop {
         }
         if menu.slot == dock_menu::APP {
             match item {
+                Item::WindowsLink(link) => {
+                    if !dock::launch(link.details().1) {
+                        self.show_open_failed();
+                    }
+                }
                 Item::Settings => {
                     if let Err(error) = self.open_settings() {
                         eprintln!("Settings: {error}");
@@ -923,6 +941,7 @@ impl Desktop {
             Item::Settings
             | Item::Quit
             | Item::Quick(_)
+            | Item::WindowsLink(_)
             | Item::Place(_)
             | Item::File(_)
             | Item::PinDownloads

@@ -10,7 +10,7 @@ use windows::Win32::{
     Foundation::{HWND, RECT},
     System::SystemInformation::GetTickCount,
     UI::{
-        Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_B, VK_LWIN, VK_RETURN, VK_S, VK_X},
+        Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_B, VK_LWIN, VK_RETURN, VK_S},
         WindowsAndMessaging::*,
     },
 };
@@ -20,7 +20,6 @@ use windows::Win32::{
 pub struct Owner(pub HWND);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    WinX,
     Start,
     Tray,
     Search,
@@ -28,7 +27,6 @@ pub enum Kind {
 impl Kind {
     fn keys(self) -> &'static [VIRTUAL_KEY] {
         match self {
-            Self::WinX => &[VK_LWIN, VK_X],
             Self::Start => &[VK_LWIN],
             Self::Tray => &[VK_LWIN, VK_B],
             Self::Search => &[VK_LWIN, VK_S],
@@ -36,7 +34,6 @@ impl Kind {
     }
     fn class(self) -> &'static str {
         match self {
-            Self::WinX => "Xaml_WindowedPopupClass",
             Self::Tray => "TopLevelWindowForOverflowXamlIsland",
             Self::Start | Self::Search => "Windows.UI.Core.CoreWindow",
         }
@@ -46,7 +43,7 @@ impl Kind {
         class == self.class()
             && name
                 == match self {
-                    Self::WinX | Self::Tray => "explorer.exe",
+                    Self::Tray => "explorer.exe",
                     Self::Start => "startmenuexperiencehost.exe",
                     Self::Search => "searchhost.exe",
                 }
@@ -222,7 +219,6 @@ impl Native {
             }
         }
     }
-    // Leave Win+X placement to Windows: moving its top-level XAML HWND cannot establish input placement.
     // Retain tray positioning only after identifying the exact requested Explorer window.
     fn observe(&mut self, event: Event) {
         let Some(r) = self.request.as_mut() else {
@@ -277,7 +273,7 @@ fn identify(window: HWND, kind: Kind) -> Option<WindowKey> {
         }
         GetWindowThreadProcessId(window, Some(&mut process));
     }
-    if matches!(kind, Kind::WinX | Kind::Tray) && !explorer_window(window) {
+    if kind == Kind::Tray && !explorer_window(window) {
         return None;
     }
     let executable = window_source::process_executable(process)?;

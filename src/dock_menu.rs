@@ -63,6 +63,7 @@ pub enum Item {
     Quit,
     /// A row of the quick settings popup; its text is the setting's state (`Spec::titles`).
     Quick(Quick),
+    WindowsLink(WindowsLink),
     /// A row of the Places popup (an index into the host's list); its text is in `Spec::titles`.
     Place(usize),
     /// A row of a folder stack (an index into the host's list of files); its text is in `Spec::titles`.
@@ -83,6 +84,39 @@ pub enum Quick {
     Lock,
     Sleep,
     Theme,
+}
+/// Fixed, ordinary shell launches from the dock Windows button's right-click menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowsLink {
+    Settings,
+    Apps,
+    System,
+    Network,
+    Power,
+    Explorer,
+    TaskManager,
+}
+impl WindowsLink {
+    pub const ALL: [Self; 7] = [
+        Self::Settings,
+        Self::Apps,
+        Self::System,
+        Self::Network,
+        Self::Power,
+        Self::Explorer,
+        Self::TaskManager,
+    ];
+    pub fn details(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Settings => ("Windows settings", "ms-settings:"),
+            Self::Apps => ("Installed apps", "ms-settings:appsfeatures"),
+            Self::System => ("System", "ms-settings:about"),
+            Self::Network => ("Network settings", "ms-settings:network"),
+            Self::Power => ("Power and battery", "ms-settings:powersleep"),
+            Self::Explorer => ("File Explorer", "explorer.exe"),
+            Self::TaskManager => ("Task Manager", "taskmgr.exe"),
+        }
+    }
 }
 impl Item {
     pub fn label(self) -> &'static str {
@@ -109,6 +143,7 @@ impl Item {
             Item::Settings => "Settings",
             Item::Quit => "Quit ROQA",
             Item::Quick(_) => "Setting",
+            Item::WindowsLink(link) => link.details().0,
             Item::Place(_) => "Place",
             Item::File(_) => "File",
             Item::PinDownloads => "Pin Downloads",
@@ -669,6 +704,80 @@ mod tests {
         let mut pins = Pins::default();
         pins.add(identity.clone()).unwrap();
         pins
+    }
+
+    #[test]
+    fn windows_links_are_fixed_ordinary_shell_targets() {
+        let rows: Vec<_> = WindowsLink::ALL
+            .into_iter()
+            .map(|link| (Item::WindowsLink(link).label(), link.details().1))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Windows settings", "ms-settings:"),
+                ("Installed apps", "ms-settings:appsfeatures"),
+                ("System", "ms-settings:about"),
+                ("Network settings", "ms-settings:network"),
+                ("Power and battery", "ms-settings:powersleep"),
+                ("File Explorer", "explorer.exe"),
+                ("Task Manager", "taskmgr.exe"),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_links_stay_above_the_clicked_start_on_its_monitor() {
+        for dpi in [96, 144, 192] {
+            for rtl in [false, true] {
+                for work in [
+                    Bounds {
+                        x: -1920,
+                        y: 80,
+                        width: 1920,
+                        height: 1080,
+                    },
+                    Bounds {
+                        x: 1920,
+                        y: -200,
+                        width: 1920,
+                        height: 1080,
+                    },
+                ] {
+                    let buttons = dock::Buttons {
+                        rtl,
+                        battery: true,
+                        ..dock::Buttons::default()
+                    };
+                    let width = dock::width_px(buttons, 3, dpi);
+                    for x in [
+                        work.x,
+                        work.x + (work.width - width) / 2,
+                        work.x + work.width - width,
+                    ] {
+                        let dock = Bounds {
+                            x,
+                            y: work.y + work.height - dock::px(64, dpi),
+                            width,
+                            height: dock::px(64, dpi),
+                        };
+                        let (left, cell) =
+                            dock::span(buttons, width, dpi, dock::Hit::Button(dock::Button::Start));
+                        let anchor = dock.x + left + cell / 2;
+                        let size = (dock::px(266, dpi), dock::px(300, dpi));
+                        let popup = place(anchor, dock, work, size);
+                        assert_eq!(popup.y + popup.height, dock.y);
+                        assert!(popup.x >= work.x && popup.x + popup.width <= work.x + work.width);
+                        assert!(popup.y >= work.y);
+                        if (work.x + size.0 / 2..=work.x + work.width - size.0 / 2)
+                            .contains(&anchor)
+                        {
+                            assert_eq!(popup.x + popup.width / 2, anchor);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@ fn key(id: usize) -> WindowKey {
 fn request(owner: usize, now: Instant) -> Request {
     Request {
         owner: Owner(hwnd(owner)),
-        kind: Kind::WinX,
+        kind: Kind::Start,
         since: 100,
         due: Some(now + OPEN_WAIT),
         window: None,
@@ -105,8 +105,7 @@ fn late_or_unidentified_shows_do_not_acquire_an_indefinite_hold() {
 }
 #[test]
 fn shell_source_and_class_must_both_match_the_requested_kind() {
-    assert!(Kind::WinX.matches("Xaml_WindowedPopupClass", r"c:\windows\explorer.exe"));
-    assert!(!Kind::WinX.matches("Xaml_WindowedPopupClass", r"c:\other.exe"));
+    assert!(!Kind::Tray.matches(Kind::Tray.class(), r"c:\other.exe"));
     assert!(!Kind::Tray.matches("Xaml_WindowedPopupClass", r"c:\windows\explorer.exe"));
     assert!(Kind::Tray.matches(Kind::Tray.class(), "explorer.exe"));
     assert!(Kind::Start.matches(Kind::Start.class(), "startmenuexperiencehost.exe"));
