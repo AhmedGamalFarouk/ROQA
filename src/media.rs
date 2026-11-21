@@ -678,7 +678,9 @@ pub fn now_ticks() -> i64 {
 }
 
 /// The current track's album art, the only entry kept. Replacing it cancels its read and orphans
-/// its slot, so a late decode for an older track is never drawn.
+/// its slot, so a late decode for an older track is never drawn. Every properties read replaces it:
+/// players often publish a new title while the thumbnail is still the previous track's, then the
+/// real one in a later update with the same title.
 #[derive(Default)]
 struct Art {
     /// Session generation, title and artist of the track it belongs to.
@@ -686,9 +688,9 @@ struct Art {
     read: Option<IAsyncOperation<IRandomAccessStreamWithContentType>>,
     /// Filled once, on the icon worker, when decoding succeeds; a failed track stays empty.
     pixels: Arc<OnceLock<IconPixels>>,
-    /// The host has handled the pixels' arrival, which repaints exactly once. The worker fills the
-    /// slot before its wake, so comparing the slot across one refresh would miss it.
-    seen: bool,
+    /// The same track's art from an earlier read and its entry number, drawn until `pixels` lands
+    /// so a re-read never flickers to the placeholder.
+    earlier: Option<(u64, Arc<OnceLock<IconPixels>>)>,
 }
 impl Drop for Art {
     fn drop(&mut self) {
@@ -742,6 +744,9 @@ pub struct Media {
     art: Art,
     /// Album art entries started; the current entry's number keys its uploaded bitmap.
     arts: u64,
+    /// The art entry the last refresh reported as drawn. The worker fills a slot before its wake,
+    /// so only a comparison with what was drawn catches an arrival or a removal.
+    drawn: Option<u64>,
     /// The icon worker's queue, which decodes album art; none until `start`.
     jobs: Option<Sender<Job>>,
     state: State,
@@ -769,6 +774,7 @@ impl Media {
             seek: None,
             art: Art::default(),
             arts: 0,
+            drawn: None,
             jobs: None,
             state: State::default(),
             wake: Arc::new(Wake {
@@ -799,8 +805,12 @@ impl Media {
     }
     /// The shown track's album art, once decoded, and its entry number, which changes with the art.
     pub fn art(&self) -> Option<(u64, &IconPixels)> {
-        let pixels = self.state.view.shown().and(self.art.pixels.get())?;
-        Some((self.arts, pixels))
+        self.state.view.shown()?;
+        match (self.art.pixels.get(), &self.art.earlier) {
+            (Some(pixels), _) => Some((self.arts, pixels)),
+            (None, Some((entry, earlier))) => Some((*entry, earlier.get()?)),
+            (None, None) => None,
+        }
     }
     /// Work is pending that no wake may have announced: a post can fail, or be consumed by a modal
     /// loop, while the bits stay set.
@@ -808,7 +818,7 @@ impl Media {
         self.wake.dirty.load(Ordering::Relaxed) != 0
     }
     /// After resume or an Explorer restart, events may have been missed: re-reads the current
-    /// session, its playback state and timeline, and its properties (new art only for a new track).
+    /// session, its playback state and timeline, and its properties and art.
     pub fn reconnect(&self) {
         self.wake
             .dirty
@@ -1018,10 +1028,14 @@ impl Media {
                     if generation == self.state.generation
                         && !(title.is_empty() && artist.is_empty())
                     {
+                        let key = (generation, title.clone(), artist.clone());
                         if cover == 0 {
                             self.art_skipped = true;
+                            // The art drawn when a notch returns must match the new title.
+                            if key != self.art.key {
+                                self.art = Art::default();
+                            }
                         } else {
-                            let key = (generation, title.clone(), artist.clone());
                             self.read_art(key, || properties.Thumbnail(), cover);
                         }
                     }
@@ -1074,30 +1088,37 @@ impl Media {
             self.log();
         }
         slow("host refresh", started);
-        let arrived = !self.art.seen && self.art.pixels.get().is_some();
-        self.art.seen |= arrived;
-        // Art for a track that is not drawn changes nothing on screen.
-        expired
-            || redraw(&before, &self.state.view)
-            || (arrived && self.state.view.shown().is_some())
+        if self.art.pixels.get().is_some() {
+            self.art.earlier = None;
+        }
+        // Art for a track that is not drawn changes nothing on screen (`art` is none).
+        let art = self.art().map(|(entry, _)| entry);
+        let art_changed = std::mem::replace(&mut self.drawn, art) != art;
+        expired || redraw(&before, &self.state.view) || art_changed
     }
-    /// Starts reading a new track's `thumbnail` for a `side` pixels decode. Any step that fails
-    /// leaves the track without art, and the same track is never read again.
+    /// Starts reading the track's `thumbnail` for a `side` pixels decode. A new track drops the old
+    /// art at once; the same track keeps its art until the new read lands. Any step that fails
+    /// leaves the track without art.
     fn read_art(
         &mut self,
         key: (u64, String, String),
         thumbnail: impl FnOnce() -> Result<IRandomAccessStreamReference>,
         side: u32,
     ) {
-        if key == self.art.key {
-            return;
-        }
+        let earlier = if key == self.art.key {
+            match self.art.pixels.get() {
+                Some(_) => Some((self.arts, Arc::clone(&self.art.pixels))),
+                None => self.art.earlier.take(),
+            }
+        } else {
+            None
+        };
         self.arts += 1;
         self.art = Art {
             key,
             read: None,
             pixels: Arc::default(),
-            seen: false,
+            earlier,
         };
         let Some(jobs) = self.jobs.clone() else {
             return;
@@ -1121,7 +1142,11 @@ impl Media {
             });
         match read {
             Ok(read) => self.art.read = Some(read),
-            Err(error) => eprintln!("Media: no album art: {error}"),
+            Err(error) => {
+                // The track has no art now: the placeholder, never the earlier art.
+                self.art.earlier = None;
+                eprintln!("Media: no album art: {error}");
+            }
         }
     }
     /// Shows the player behind chip `index` (an index into `Track::players`) from now on.
@@ -2223,7 +2248,7 @@ mod tests {
     }
 
     #[test]
-    fn album_art_is_one_entry_per_track_and_a_failed_track_is_never_read_again() {
+    fn album_art_always_matches_the_title_and_follows_a_later_thumbnail() {
         let (jobs, incoming) = sync_channel(4);
         let mut media = Media::create();
         media.jobs = Some(jobs);
@@ -2232,15 +2257,15 @@ mod tests {
         media.state.apply(properties(generation, "One"));
         media.state.apply(playback(Status::Playing, Instant::now()));
         let key = |title: &str| (generation, title.to_string(), "Artist".to_string());
-        let reads = Cell::new(0);
-        let missing = || {
-            reads.set(reads.get() + 1);
-            Err(E_FAIL.into())
+        let missing = || Err(E_FAIL.into());
+        let entry = |media: &Media| media.art().map(|(entry, _)| entry);
+        // The properties read that calls `read_art` runs inside a woken refresh.
+        let woken = |media: &mut Media| {
+            media.wake.raise(READY);
+            media.refresh(72)
         };
-        // No thumbnail: the no-art layout, and the same track is not read again.
+        // No thumbnail: the no-art layout.
         media.read_art(key("One"), missing, 72);
-        media.read_art(key("One"), missing, 72);
-        assert_eq!(reads.get(), 1);
         assert!(media.art().is_none());
         // A new track's stream reaches the worker for a decode at the drawn side.
         media.read_art(key("Two"), thumbnail, 108);
@@ -2257,13 +2282,38 @@ mod tests {
         // The current track's art repaints once when it arrives.
         current(pixels());
         assert!(media.refresh(72));
-        let entry = media.art().map(|(entry, _)| entry);
-        assert!(entry.is_some());
+        let first = entry(&media);
+        assert!(first.is_some());
         assert!(!media.refresh(72));
+        // The player sends the track's real thumbnail later under the same title: it is read, and
+        // the earlier art stays drawn (same entry, same bitmap) until it lands.
+        media.read_art(key("Three"), thumbnail, 108);
+        assert!(!woken(&mut media));
+        assert_eq!(entry(&media), first);
+        let (_, later) = art_job(&incoming);
+        later(pixels());
+        assert!(media.refresh(72));
+        assert!(entry(&media).is_some_and(|entry| Some(entry) != first));
+        // The same track loses its thumbnail: the placeholder, repainted.
         media.read_art(key("Three"), missing, 72);
-        assert_eq!(reads.get(), 1);
-        // The same entry keeps its number, so its uploaded bitmap is reused.
-        assert_eq!(media.art().map(|(entry, _)| entry), entry);
+        assert!(woken(&mut media));
+        assert!(media.art().is_none());
+        // The title changes: the old art is gone at once, before the new one lands.
+        media.read_art(key("Four"), thumbnail, 108);
+        let (_, four) = art_job(&incoming);
+        four(pixels());
+        assert!(media.refresh(72));
+        assert!(media.art().is_some());
+        media.read_art(key("Five"), thumbnail, 108);
+        assert!(woken(&mut media));
+        assert!(media.art().is_none());
+        // A new track without art shows the placeholder, never the previous track's art.
+        let (_, five) = art_job(&incoming);
+        five(pixels());
+        assert!(media.refresh(72));
+        media.read_art(key("Six"), missing, 72);
+        assert!(woken(&mut media));
+        assert!(media.art().is_none());
         // Ending the session drops the entry.
         media.end_session();
         assert!(media.art().is_none());
