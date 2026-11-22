@@ -2692,15 +2692,10 @@ impl Desktop {
             return Ok(());
         }
         if self.dock_generation != Some(model.generation) {
-            // An app pinned by its exe that now runs under a stable app ID keeps that ID from here on.
-            for window in &model.windows {
-                if let (Identity::Application(_), Some(path)) =
-                    (&window.identity, &window.executable)
-                {
-                    let pin = Identity::Executable(path.clone());
-                    if self.pins.position(&pin).is_some() || self.pins.hides(&pin, None) {
-                        self.change_pins(|pins| pins.upgrade(&pin, &window.identity));
-                    }
+            // A pin follows the identity its app's windows now group under, from here on.
+            for (pin, to) in crate::window_model::pin_upgrades(&model.windows) {
+                if self.pins.position(&pin).is_some() || self.pins.hides(&pin, None) {
+                    self.change_pins(|pins| pins.upgrade(&pin, &to));
                 }
             }
             self.dock_generation = Some(model.generation);

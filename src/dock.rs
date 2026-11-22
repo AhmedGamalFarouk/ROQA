@@ -1047,6 +1047,7 @@ mod tests {
             minimized: false,
             foreground,
             current_desktop: true,
+            unlaunchable_id: None,
         }
     }
     fn key(handle: usize) -> WindowKey {
@@ -1292,6 +1293,7 @@ mod tests {
             minimized: false,
             foreground: false,
             current_desktop,
+            unlaunchable_id: None,
         };
         let model = WindowModel {
             windows: vec![make(1, "(3) A", true), make(2, "[7] B", false)],

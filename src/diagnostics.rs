@@ -267,6 +267,7 @@ mod tests {
             minimized: false,
             foreground: true,
             current_desktop: true,
+            unlaunchable_id: None,
         };
         WindowModel {
             generation: 3,

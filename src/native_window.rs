@@ -876,8 +876,11 @@ fn repositions(message: u32, wparam: WPARAM, taskbar_created: u32) -> Option<boo
 mod tests {
     #[test]
     fn shell_full_screen_windows_are_kept_until_they_leave_and_bounded() {
-        use super::{WindowKey, note_fullscreen, shell_fullscreen};
-        let key = |handle| WindowKey { handle, process: 1 };
+        use super::{SHELL_FULLSCREEN, note_fullscreen};
+        // The set alone: `shell_fullscreen` also reads the live system state, true while anything is full screen.
+        let shell_fullscreen =
+            |handle| SHELL_FULLSCREEN.with_borrow(|windows| windows.contains(&handle));
+        let key = |handle| handle;
         assert!(note_fullscreen(7, true));
         assert!(!note_fullscreen(7, true));
         assert!(

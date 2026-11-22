@@ -25,6 +25,8 @@ pub struct WindowRecord {
     pub foreground: bool,
     /// False for a window the shell cloaked because it lives on another virtual desktop.
     pub current_desktop: bool,
+    /// The window's own app ID when the shell cannot start it, so it groups by exe; older pins used it.
+    pub unlaunchable_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -74,6 +76,37 @@ impl WindowModel {
     }
 }
 
+/// Pin rewrites the running windows call for: an exe pin to the one app ID every window of that exe shares
+/// (an exe that hosts several apps, like a browser and its web apps, keeps its pin), and an app pin whose
+/// ID the shell cannot start to the exe its windows now group under.
+pub fn pin_upgrades(windows: &[WindowRecord]) -> Vec<(Identity, Identity)> {
+    let mut shared: BTreeMap<&str, Option<&Identity>> = BTreeMap::new();
+    let mut upgrades = Vec::new();
+    for window in windows {
+        let Some(path) = window.executable.as_deref() else {
+            continue;
+        };
+        let id = matches!(window.identity, Identity::Application(_)).then_some(&window.identity);
+        shared
+            .entry(path)
+            .and_modify(|seen| {
+                if *seen != id {
+                    *seen = None;
+                }
+            })
+            .or_insert(id);
+        if let Some(id) = &window.unlaunchable_id {
+            upgrades.push((Identity::Application(id.clone()), window.identity.clone()));
+        }
+    }
+    upgrades.extend(
+        shared
+            .into_iter()
+            .filter_map(|(path, id)| Some((Identity::Executable(path.to_string()), id?.clone()))),
+    );
+    upgrades
+}
+
 // One scan in flight; any intervening invalidation requests one newer snapshot.
 #[derive(Default)]
 pub struct ScanSchedule {
@@ -119,7 +152,45 @@ mod tests {
             minimized: false,
             foreground: false,
             current_desktop: true,
+            unlaunchable_id: None,
         }
+    }
+    #[test]
+    fn exe_pins_upgrade_only_when_every_window_of_the_exe_shares_one_id() {
+        let app = |id: &str| Identity::Application(id.into());
+        let on = |handle, path: &str, identity| WindowRecord {
+            executable: Some(path.into()),
+            ..record(handle, 1, "w", identity)
+        };
+        let windows = [
+            on(1, r"c:\chrome.exe", app("Chrome._crx_yt")),
+            on(2, r"c:\chrome.exe", app("Chrome")),
+            on(3, r"c:\edge.exe", app("Edge._crx_app")),
+            on(
+                4,
+                r"c:\edge.exe",
+                Identity::Executable(r"c:\edge.exe".into()),
+            ),
+            on(5, r"c:\t3.exe", app("T3")),
+            on(6, r"c:\t3.exe", app("T3")),
+        ];
+        assert_eq!(
+            pin_upgrades(&windows),
+            [(Identity::Executable(r"c:\t3.exe".into()), app("T3"))]
+        );
+    }
+    #[test]
+    fn unlaunchable_app_pins_move_to_the_exe_their_windows_group_under() {
+        let exe = Identity::Executable(r"c:\portable.exe".into());
+        let window = WindowRecord {
+            executable: Some(r"c:\portable.exe".into()),
+            unlaunchable_id: Some("Portable.App".into()),
+            ..record(1, 1, "w", exe.clone())
+        };
+        assert_eq!(
+            pin_upgrades(&[window]),
+            [(Identity::Application("Portable.App".into()), exe)]
+        );
     }
     fn snapshot(generation: u64, windows: Vec<WindowRecord>) -> Snapshot {
         Snapshot {

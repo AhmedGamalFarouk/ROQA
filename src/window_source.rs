@@ -86,16 +86,20 @@ struct Shell {
 
 impl Shell {
     /// The ID the taskbar groups this window under, when it is explicit (set by the window, its process or
-    /// its package) and the shell can start it. Unlike an exe path it survives updates that move the exe
-    /// (Discord's `app-<version>` folders, Store apps' versioned folders), so a pin keeps its icon and launch.
-    fn app_id(&mut self, hwnd: HWND) -> Option<String> {
-        let id = self.resolve(hwnd).unwrap_or_else(|| application_id(hwnd))?;
+    /// its package), and whether the shell can start it. Unlike an exe path it survives updates that move
+    /// the exe (Discord's `app-<version>` folders, Store apps' versioned folders), so a pin keeps its icon
+    /// and launch.
+    fn app_id(&mut self, hwnd: HWND) -> Option<(String, bool)> {
+        let id = match self.resolve(hwnd) {
+            Some(Some(id)) => id,
+            _ => application_id(hwnd)?,
+        };
         let launchable = *self.launchable.entry(id.clone()).or_insert_with(|| {
             let target = HSTRING::from(format!(r"shell:AppsFolder\{id}"));
             // SAFETY: parses a shell name into an owned item that is dropped at once.
             unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(&target, None) }.is_ok()
         });
-        launchable.then_some(id)
+        Some((id, launchable))
     }
 
     /// The resolver's answer: `Some(None)` when its ID is only derived from the exe path, `None` when it
@@ -257,10 +261,10 @@ fn inspect(
             .entry(process)
             .or_insert_with(|| process_executable(process))
             .clone();
-        let identity = match (shell.app_id(hwnd), &executable) {
-            (Some(id), _) => Identity::Application(id),
-            (None, Some(path)) => Identity::Executable(path.clone()),
-            (None, None) => Identity::Unavailable(process),
+        let (identity, unlaunchable_id) = match (shell.app_id(hwnd), &executable) {
+            (Some((id, true)), _) => (Identity::Application(id), None),
+            (id, Some(path)) => (Identity::Executable(path.clone()), id.map(|(id, _)| id)),
+            (_, None) => (Identity::Unavailable(process), None),
         };
         let mut current_process = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut current_process));
@@ -278,12 +282,13 @@ fn inspect(
             minimized: IsIconic(hwnd).as_bool(),
             foreground: hwnd == foreground,
             current_desktop: !elsewhere,
+            unlaunchable_id,
         })
     }
 }
 
 /// Explicit AppUserModelID set on the window (packaged apps, frame hosts, self-grouping apps); the
-/// fallback when the resolver gives no answer.
+/// fallback when the resolver gives no explicit answer.
 fn application_id(hwnd: HWND) -> Option<String> {
     // SAFETY: reads a window property through the documented shell store on this COM-initialized worker;
     // the PROPVARIANT is cleared on every path after conversion.

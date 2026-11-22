@@ -223,9 +223,10 @@ impl Pins {
         changed
     }
 
-    /// Rewrites an exe pin (in the list, its folder and the hidden apps) to the app ID its running windows now
-    /// have, so the next update that moves the exe cannot blank it. Where `to` is already there, `from` just
-    /// goes. Returns whether anything changed.
+    /// Rewrites a pin (in the list, its folder and the hidden apps) to the identity its running windows now
+    /// have: an exe pin to its app ID, so the next update that moves the exe cannot blank it, or an app pin
+    /// the shell cannot start to its exe. Where `to` is already there, `from` just goes. Returns whether
+    /// anything changed.
     pub fn upgrade(&mut self, from: &Identity, to: &Identity) -> bool {
         let (Some(from), Some(to)) = (normalize(from), normalize(to)) else {
             return false;
