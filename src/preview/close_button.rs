@@ -28,6 +28,9 @@ use windows::{
     core::{Error, Result},
 };
 
+/// `WM_MOUSEMOVE`'s key-state bit for the left button.
+const MK_LBUTTON: usize = 0x0001;
+
 pub(super) struct CloseButton {
     window: NativeWindow,
     palette: Palette,
@@ -151,6 +154,12 @@ impl CloseButton {
         }
         match message.message {
             WM_PAINT => self.paint(),
+            // The release was lost: drop the press and its capture, which would take every move over ROQA.
+            WM_MOUSEMOVE if self.pressed && message.wParam.0 & MK_LBUTTON == 0 => {
+                self.pressed = false;
+                // SAFETY: releases this thread's pointer capture; harmless if it is already gone.
+                let _ = unsafe { ReleaseCapture() };
+            }
             WM_MOUSEMOVE => self.point(message),
             WM_MOUSELEAVE => {
                 self.hovered = false;

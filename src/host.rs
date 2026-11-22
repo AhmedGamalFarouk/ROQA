@@ -1253,6 +1253,14 @@ struct Drag {
     group: Option<usize>,
 }
 
+/// Ends a dock drag, releasing the pointer capture its press took; no drag leaves any capture alone.
+fn take_drag(drag: &mut Option<Drag>) -> Option<Drag> {
+    let drag = drag.take()?;
+    // SAFETY: releases this thread's own pointer capture; harmless if it is already gone.
+    let _ = unsafe { ReleaseCapture() };
+    Some(drag)
+}
+
 /// Applies one pin edit: only a real change (`edit` returns true) rewrites the store's pin section and marks
 /// it dirty, once. Returns whether the dock must be rebuilt.
 fn edit_pins(
@@ -3082,13 +3090,9 @@ impl Desktop {
     /// Left button released on a dock. Returns true when it ended a reorder drag (so it is not a click):
     /// the pin moves to the slot under the pointer, as one store change.
     fn end_drag(&mut self, hwnd: HWND, lparam: LPARAM) -> bool {
-        let Some(drag) = self.drag.take() else {
+        let Some(drag) = take_drag(&mut self.drag) else {
             return false;
         };
-        // SAFETY: releases this thread's own pointer capture.
-        unsafe {
-            let _ = ReleaseCapture();
-        }
         if !drag.active {
             return false;
         }
@@ -3547,8 +3551,10 @@ impl Desktop {
                 let entered = surface.track_pointer()?;
                 if let Some(drag) = &mut self.drag {
                     if message.wParam.0 & MK_LBUTTON == 0 {
-                        // The release was lost (capture stolen): no drag, no click.
-                        self.drag = None;
+                        // The release was lost: no drag, no click. ROQA is never the foreground app, so a
+                        // capture it still holds would take every pointer move over its windows (the edge
+                        // strips included) and nothing would reveal.
+                        take_drag(&mut self.drag);
                         surface.live = true;
                     } else {
                         let x = point(message.lParam).0;
@@ -4451,6 +4457,36 @@ fn remember_fullscreen(
 mod clock_wait_tests {
     use super::*;
     use crate::window_model::Identity;
+
+    #[test]
+    fn ending_a_dock_drag_releases_its_capture_and_no_drag_leaves_others() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetCapture;
+        let _class = WindowClass::register().unwrap();
+        let at = Bounds {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
+        let window = NativeWindow::create_hidden(at, w!("Drag test")).unwrap();
+        // SAFETY: this thread's own hidden test window; it is never shown or given input.
+        unsafe { SetCapture(window.0) };
+        let mut none = None;
+        assert!(take_drag(&mut none).is_none());
+        // SAFETY: scalar capture query on this thread.
+        assert_eq!(unsafe { GetCapture() }, window.0);
+        let mut drag = Some(Drag {
+            from: 0,
+            x: 0,
+            active: false,
+            at: 0,
+            gap: Tween::rest(0.0),
+            group: None,
+        });
+        assert!(take_drag(&mut drag).is_some() && drag.is_none());
+        // SAFETY: scalar capture query on this thread.
+        assert!(unsafe { GetCapture() }.is_invalid());
+    }
 
     #[test]
     fn icons_are_sized_for_the_dock_else_the_notch() {
