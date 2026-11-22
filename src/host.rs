@@ -4183,6 +4183,7 @@ pub fn run(probe: Probe, diagnostics: Option<std::path::PathBuf>) -> Result<()> 
     // One short worker reads the radios now, so the first Quick settings popup already has their rows.
     quick::refresh(None);
     crate::device_battery::start();
+    crate::system_os::ensure_start_shortcut();
     crate::error_log::started();
     let result = event_loop(&controls, &mut desktop, &mut catalog);
     desktop.flush_store(true);

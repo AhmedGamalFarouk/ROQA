@@ -153,4 +153,4 @@ ROQA is entirely portable. To remove it cleanly:
 ./scripts/uninstall.ps1 -KeepData
 ```
 
-ROQA leaves zero background services, zero scheduled tasks, and zero orphaned registry keys. Agent hooks added in Settings stay in the agents' own files: press Undo there first (the script lists any that remain).
+ROQA leaves zero background services, zero scheduled tasks, and zero orphaned registry keys. It adds a Start menu shortcut (`%AppData%\Microsoft\Windows\Start Menu\Programs\ROQA.lnk`) so Windows search finds it; delete that file too. Agent hooks added in Settings stay in the agents' own files: press Undo there first (the script lists any that remain).

@@ -1,5 +1,7 @@
 //! Small Windows switches the settings and quick settings reach: start at sign-in, keep awake, lock and sleep. Each is one
-//! call made when the user asks; nothing here runs on its own.
+//! call made when the user asks; the only thing here that runs on its own is the Start menu shortcut at start-up.
+
+use std::{ffi::OsStr, path::Path, path::PathBuf};
 
 use windows::{
     Win32::{
@@ -10,6 +12,10 @@ use windows::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         },
         System::{
+            Com::{
+                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+                CoTaskMemFree, CoUninitialize, IPersistFile, STGM_READ,
+            },
             Power::{
                 ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetSuspendState,
                 SetThreadExecutionState,
@@ -19,9 +25,84 @@ use windows::{
                 RegOpenKeyExW, RegSetValueExW,
             },
         },
+        UI::Shell::{
+            FOLDERID_LocalAppData, FOLDERID_Programs, IShellLinkW, KF_FLAG_DONT_VERIFY,
+            SHGetKnownFolderPath, SLGP_RAWPATH, ShellLink,
+        },
     },
-    core::{HSTRING, w},
+    core::{HSTRING, Interface, w},
 };
+
+/// Puts ROQA.lnk in the user's Start menu Programs folder, so Windows search finds ROQA, when it is missing or
+/// points at another exe (ROQA moved). One short worker at start-up; a test profile never touches the Start menu.
+pub fn ensure_start_shortcut() {
+    let _ = std::thread::Builder::new()
+        .name("roqa-shortcut".into())
+        .spawn(|| {
+            if let Err(error) = write_start_shortcut() {
+                eprintln!("Start menu shortcut: {error}");
+            }
+        });
+}
+
+fn write_start_shortcut() -> windows::core::Result<()> {
+    let (Ok(exe), Some(local), Some(programs)) = (
+        std::env::current_exe(),
+        known_folder(&FOLDERID_LocalAppData),
+        known_folder(&FOLDERID_Programs),
+    ) else {
+        return Ok(());
+    };
+    if redirected(std::env::var_os("LOCALAPPDATA").as_deref(), &local) {
+        return Ok(());
+    }
+    let shortcut = HSTRING::from(programs.join("ROQA.lnk").as_os_str());
+    // SAFETY: this worker's own apartment, balanced below; the link objects are dropped before it ends, and the
+    // path buffer is sized and terminated by GetPath.
+    unsafe {
+        let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let result = (|| {
+            let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+            let file: IPersistFile = link.cast()?;
+            let current = file.Load(&shortcut, STGM_READ).ok().and_then(|()| {
+                let mut path = [0u16; 32768];
+                link.GetPath(&mut path, std::ptr::null_mut(), SLGP_RAWPATH.0 as u32)
+                    .ok()?;
+                let len = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+                Some(PathBuf::from(String::from_utf16_lossy(&path[..len])))
+            });
+            if !needs_write(current.as_deref(), &exe) {
+                return Ok(());
+            }
+            link.SetPath(&HSTRING::from(exe.as_os_str()))?;
+            file.Save(&shortcut, true)
+        })();
+        if com {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
+    // SAFETY: the returned string is copied, then freed with CoTaskMemFree as the API requires.
+    unsafe {
+        let path = SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY, None).ok()?;
+        let owned = path.to_string().ok().map(PathBuf::from);
+        CoTaskMemFree(Some(path.0 as _));
+        owned
+    }
+}
+
+/// True when LOCALAPPDATA is not the user's real folder: the test and capture scripts point it at a private profile.
+fn redirected(env: Option<&OsStr>, real: &Path) -> bool {
+    let trim = |p: &OsStr| p.to_string_lossy().trim_end_matches('\\').to_owned();
+    !env.is_some_and(|env| trim(env).eq_ignore_ascii_case(&trim(real.as_os_str())))
+}
+
+fn needs_write(current: Option<&Path>, exe: &Path) -> bool {
+    !current.is_some_and(|path| path.as_os_str().eq_ignore_ascii_case(exe.as_os_str()))
+}
 
 /// Writes (on) or removes (off) ROQA's value under the user's Run key. Off by default and never touched
 /// unless the switch changes, so a user who never turns it on gets no registry entry. False when the registry
@@ -210,6 +291,31 @@ pub fn sleep() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shortcut_is_written_when_missing_or_pointing_elsewhere() {
+        let exe = Path::new(r"G:\Code\ROQA\target\release\roqa.exe");
+        assert!(needs_write(None, exe));
+        assert!(needs_write(Some(Path::new(r"C:\Old\roqa.exe")), exe));
+        assert!(!needs_write(
+            Some(Path::new(r"g:\code\roqa\TARGET\release\ROQA.EXE")),
+            exe
+        ));
+    }
+
+    #[test]
+    fn a_test_profile_is_recognised_by_its_redirected_local_app_data() {
+        let real = Path::new(r"C:\Users\A\AppData\Local");
+        assert!(!redirected(
+            Some(OsStr::new(r"c:\users\a\appdata\local\")),
+            real
+        ));
+        assert!(redirected(
+            Some(OsStr::new(r"G:\Code\ROQA\artifacts\runtime\profile")),
+            real
+        ));
+        assert!(redirected(None, real));
+    }
 
     #[test]
     fn one_eject_at_a_time_keeps_the_first_unread_answer_and_names_its_drive() {
