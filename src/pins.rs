@@ -4,7 +4,7 @@
 //! target are derived from it, so the store keeps one string per pin: `app:<aumid>` or `exe:<path>`.
 
 use crate::store::Store;
-use crate::window_model::Identity;
+use crate::window_model::{Identity, stable_executable};
 
 /// Hard cap so a runaway add loop cannot grow the list or the store (UNVERIFIED value; a few dozen is plenty).
 pub const MAX_PINS: usize = 32;
@@ -50,7 +50,8 @@ fn encode(identity: &Identity) -> Option<String> {
 fn decode(text: &str) -> Option<Identity> {
     let identity = match text.split_once(':')? {
         ("app", id) => Identity::Application(id.into()),
-        ("exe", path) => Identity::Executable(path.into()),
+        // Migrates pins saved before versioned Squirrel paths were keyed on their stub.
+        ("exe", path) => Identity::Executable(stable_executable(path.into())),
         _ => return None,
     };
     normalize(&identity)

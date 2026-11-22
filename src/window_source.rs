@@ -1,6 +1,6 @@
 use crate::{
     ipc::OwnedHandle,
-    window_model::{Identity, Snapshot, SourceStats, WindowKey, WindowRecord},
+    window_model::{Identity, Snapshot, SourceStats, WindowKey, WindowRecord, stable_executable},
 };
 use std::{
     collections::BTreeMap,
@@ -194,7 +194,7 @@ fn inspect(
         // carries the version and is deleted by the next update, which left its pin a blank tile.
         let identity = match (application_id(hwnd).or(package), &executable) {
             (Some(id), _) => Identity::Application(id),
-            (None, Some(path)) => Identity::Executable(path.clone()),
+            (None, Some(path)) => Identity::Executable(stable_executable(path.clone())),
             (None, None) => Identity::Unavailable(process),
         };
         let mut current_process = 0;

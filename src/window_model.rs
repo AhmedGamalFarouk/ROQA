@@ -107,6 +107,21 @@ impl ScanSchedule {
     }
 }
 
+/// Squirrel installs (Discord, Slack) run `<root>\app-<version>\x.exe`, a folder a later update deletes; the
+/// `<root>\x.exe` stub beside `Update.exe` always starts the current version, so pins key on it instead.
+pub fn stable_executable(path: String) -> String {
+    let stub = || {
+        let exe = std::path::Path::new(&path);
+        let version = exe.parent()?;
+        version.file_name()?.to_str()?.strip_prefix("app-")?;
+        let root = version.parent()?;
+        let stub = root.join(exe.file_name()?);
+        (root.join("update.exe").is_file() && stub.is_file())
+            .then(|| stub.to_string_lossy().into_owned())
+    };
+    stub().unwrap_or(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +216,26 @@ mod tests {
         assert!(!schedule.has_pending());
         assert_eq!(schedule.request(), None);
         assert!(!schedule.complete(first));
+    }
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test fixture files in a temp folder"
+    )]
+    fn squirrel_versioned_exes_key_on_the_root_stub() {
+        let root = std::env::temp_dir().join(format!("roqa-squirrel-{}", std::process::id()));
+        let versioned = root.join("app-1.0.9").join("chat.exe");
+        std::fs::create_dir_all(versioned.parent().unwrap()).unwrap();
+        for file in [&versioned, &root.join("chat.exe")] {
+            std::fs::write(file, b"").unwrap();
+        }
+        let path = versioned.to_string_lossy().into_owned();
+        // No Update.exe: not a Squirrel install, the path stays.
+        assert_eq!(stable_executable(path.clone()), path);
+        std::fs::write(root.join("Update.exe"), b"").unwrap();
+        let stable = stable_executable(path);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(stable, root.join("chat.exe").to_string_lossy());
     }
 }
