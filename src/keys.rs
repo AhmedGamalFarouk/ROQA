@@ -146,8 +146,8 @@ fn register_caps() -> bool {
 /// Holds Caps Lock unless an elevated window or a full-screen app (a game, a call) has the focus, and releases it
 /// there. The host asks at a focus change and on its full-screen pass.
 pub fn grip() {
-    let full_screen = crate::native_window::shell_fullscreen()
-        && crate::native_window::fullscreen_candidate().is_some();
+    let full_screen = crate::native_window::fullscreen_candidate()
+        .is_some_and(|(key, _)| crate::native_window::shell_fullscreen(key));
     // SAFETY: a scalar foreground query.
     let want = WANTED.load(Relaxed)
         && !(full_screen || elevated_above_us(unsafe { GetForegroundWindow() }));

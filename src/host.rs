@@ -1538,7 +1538,9 @@ impl Desktop {
             topology_due: None,
             topology_retries: 0,
             fullscreen: native_window::fullscreen_candidate()
-                .filter(|_| settings.hide_fullscreen && native_window::shell_fullscreen())
+                .filter(|(key, _)| {
+                    settings.hide_fullscreen && native_window::shell_fullscreen(*key)
+                })
                 .into_iter()
                 .collect(),
             fullscreen_generation: None,
@@ -2659,6 +2661,14 @@ impl Desktop {
         const ACTIVATED: usize = 4;
         const FLASH: usize = 0x8006;
         const RUDE_ACTIVATED: usize = 0x8004;
+        // Undocumented, seen on Windows 11: sent for a window covering its monitor, on any monitor.
+        const FULLSCREEN_ENTER: usize = 0x35;
+        const FULLSCREEN_EXIT: usize = 0x36;
+        if matches!(code, FULLSCREEN_ENTER | FULLSCREEN_EXIT | DESTROYED)
+            && native_window::note_fullscreen(window, code == FULLSCREEN_ENTER)
+        {
+            self.fullscreen_generation = None; // the next pass admits or drops it
+        }
         let marked = self.flashing.contains(&window);
         match code {
             FLASH if !marked => self.flashing.push(window),
@@ -3741,7 +3751,7 @@ impl Desktop {
             .and_then(|key| native_window::fullscreen_monitor(key).map(|device| (key, device)));
         let admitted = candidate
             .clone()
-            .filter(|_| native_window::shell_fullscreen());
+            .filter(|(key, _)| native_window::shell_fullscreen(*key));
         let waiting = candidate.is_some() && admitted.is_none();
         let normal_monitor = admitted
             .is_none()

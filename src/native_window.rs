@@ -652,12 +652,33 @@ pub fn fullscreen_monitor(key: WindowKey) -> Option<String> {
     topology::covers(bounds(rect), area, maximized).then(|| device_name(&info))
 }
 
-/// Whether Windows reports a full-screen app (or exclusive Direct3D). Windows sends no notification
-/// when one starts or stops, and a failed query reads as false.
-pub fn shell_fullscreen() -> bool {
-    // SAFETY: shell state query with an out value owned by the binding.
-    unsafe { SHQueryUserNotificationState() }
-        .is_ok_and(|state| state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN)
+thread_local! {
+    /// Windows the shell hook reported entering full screen and not yet leaving it (UI thread only).
+    static SHELL_FULLSCREEN: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Notes the shell hook's full-screen enter or leave (a destroyed window leaves). Returns whether the set
+/// changed. Bounded: past 16 windows a new one is ignored rather than replacing one still full screen.
+pub fn note_fullscreen(window: usize, entered: bool) -> bool {
+    SHELL_FULLSCREEN.with_borrow_mut(|windows| {
+        let known = windows.contains(&window);
+        match (entered, known) {
+            (true, false) if windows.len() < 16 => windows.push(window),
+            (false, true) => windows.retain(|w| *w != window),
+            _ => return false,
+        }
+        true
+    })
+}
+
+/// Whether Windows reports `key` as a full-screen app. The system-wide state (also exclusive Direct3D)
+/// only sees the main monitor; the shell hook names a full-screen window on any monitor, but only
+/// one that enters full screen while ROQA runs. A failed query reads as false.
+pub fn shell_fullscreen(key: WindowKey) -> bool {
+    SHELL_FULLSCREEN.with_borrow(|windows| windows.contains(&key.handle))
+        // SAFETY: shell state query with an out value owned by the binding.
+        || unsafe { SHQueryUserNotificationState() }
+            .is_ok_and(|state| state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN)
 }
 
 unsafe extern "system" fn collect_monitor(
@@ -853,6 +874,26 @@ fn repositions(message: u32, wparam: WPARAM, taskbar_created: u32) -> Option<boo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shell_full_screen_windows_are_kept_until_they_leave_and_bounded() {
+        use super::{WindowKey, note_fullscreen, shell_fullscreen};
+        let key = |handle| WindowKey { handle, process: 1 };
+        assert!(note_fullscreen(7, true));
+        assert!(!note_fullscreen(7, true));
+        assert!(
+            note_fullscreen(8, true),
+            "a second monitor's app does not replace the first"
+        );
+        assert!(shell_fullscreen(key(7)) && shell_fullscreen(key(8)));
+        assert!(!note_fullscreen(9, false));
+        assert!(note_fullscreen(7, false));
+        assert!(!shell_fullscreen(key(7)) && shell_fullscreen(key(8)));
+        for window in 100..120 {
+            note_fullscreen(window, true);
+        }
+        assert!(!shell_fullscreen(key(119)) && shell_fullscreen(key(8)));
+    }
+
     /// Every private message id is `WM_APP` plus a number, spread over many files: no two may share one.
     #[test]
     fn every_wm_app_id_is_distinct() {
