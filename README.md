@@ -33,7 +33,7 @@
 - **Interactive Mascot:** Expressive reactive eyes with glance intent, wake animations, and customizable mood presets.
 
 ### Application Dock
-- **Window Grouping & Catalog:** Tracks running windows by AppUserModelID and executable path via native out-of-context win-events.
+- **Window Grouping & Catalog:** Tracks running windows via native out-of-context win-events and groups and pins them by the app ID the Windows taskbar uses, falling back to the executable path, so pins survive app updates.
 - **Shell Icons:** Asynchronous background icon extraction with bounded memory caching.
 - **Pin Management:** Pinned applications with drag-and-drop reordering, middle-click/context-menu launch.
 - **Window Switching & Minimizing:** Single-click activation, window cycling within groups, and minimizing.

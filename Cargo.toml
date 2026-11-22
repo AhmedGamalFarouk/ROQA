@@ -26,8 +26,6 @@ windows = { version = "=0.62.2", features = [
     "UI_ViewManagement",
     "Win32_System_WinRT",
     "Win32_Storage_EnhancedStorage",
-    # GetApplicationUserModelId: a packaged app with no window ID groups and pins by its package ID.
-    "Win32_Storage_Packaging_Appx",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Ole",
     # AddClipboardFormatListener and the clipboard reads of the Shelf's Copied list; GlobalAlloc for copying back.

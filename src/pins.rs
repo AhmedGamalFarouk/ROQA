@@ -4,7 +4,7 @@
 //! target are derived from it, so the store keeps one string per pin: `app:<aumid>` or `exe:<path>`.
 
 use crate::store::Store;
-use crate::window_model::{Identity, stable_executable};
+use crate::window_model::Identity;
 
 /// Hard cap so a runaway add loop cannot grow the list or the store (UNVERIFIED value; a few dozen is plenty).
 pub const MAX_PINS: usize = 32;
@@ -50,8 +50,7 @@ fn encode(identity: &Identity) -> Option<String> {
 fn decode(text: &str) -> Option<Identity> {
     let identity = match text.split_once(':')? {
         ("app", id) => Identity::Application(id.into()),
-        // Migrates pins saved before versioned Squirrel paths were keyed on their stub.
-        ("exe", path) => Identity::Executable(stable_executable(path.into())),
+        ("exe", path) => Identity::Executable(path.into()),
         _ => return None,
     };
     normalize(&identity)
@@ -219,6 +218,31 @@ impl Pins {
             let before = folder.members.len();
             folder.members.retain(|member| member != &identity);
             changed |= before != folder.members.len();
+        }
+        self.1.retain(|folder| folder.members.len() >= 2);
+        changed
+    }
+
+    /// Rewrites an exe pin (in the list, its folder and the hidden apps) to the app ID its running windows now
+    /// have, so the next update that moves the exe cannot blank it. Where `to` is already there, `from` just
+    /// goes. Returns whether anything changed.
+    pub fn upgrade(&mut self, from: &Identity, to: &Identity) -> bool {
+        let (Some(from), Some(to)) = (normalize(from), normalize(to)) else {
+            return false;
+        };
+        let mut changed = false;
+        let lists = [&mut self.0, &mut self.2]
+            .into_iter()
+            .chain(self.1.iter_mut().map(|folder| &mut folder.members));
+        for list in lists {
+            if let Some(at) = list.iter().position(|identity| *identity == from) {
+                if list.contains(&to) {
+                    list.remove(at);
+                } else {
+                    list[at] = to.clone();
+                }
+                changed = true;
+            }
         }
         self.1.retain(|folder| folder.members.len() >= 2);
         changed
@@ -437,6 +461,28 @@ mod tests {
         assert!(!pins.remove(&Identity::Unavailable(1)));
         assert!(pins.remove(&exe(r"C:\A.exe")));
         assert_eq!(pins.items(), [app("B")]);
+    }
+
+    #[test]
+    fn an_exe_pin_upgrades_to_its_app_id_everywhere_once() {
+        let mut pins = Pins::default();
+        pins.add(exe(r"C:\Apps\Chat\app-1.0\chat.exe")).unwrap();
+        pins.add(exe(r"c:\tools\edit.exe")).unwrap();
+        assert!(pins.group(
+            &exe(r"c:\apps\chat\app-1.0\chat.exe"),
+            &exe(r"c:\tools\edit.exe")
+        ));
+        pins.hide(exe(r"c:\apps\chat\app-1.0\chat.exe"));
+        let chat = app("com.squirrel.Chat.Chat");
+        assert!(pins.upgrade(&exe(r"c:\apps\chat\app-1.0\chat.exe"), &chat));
+        assert_eq!(pins.items(), [chat.clone(), exe(r"c:\tools\edit.exe")]);
+        assert_eq!(pins.hidden(), std::slice::from_ref(&chat));
+        assert!(pins.folder(&chat).is_some());
+        assert!(!pins.upgrade(&exe(r"c:\apps\chat\app-1.0\chat.exe"), &chat));
+        // A second exe of an app already pinned by ID folds into that pin.
+        pins.add(exe(r"c:\apps\chat\app-1.1\chat.exe")).unwrap();
+        assert!(pins.upgrade(&exe(r"c:\apps\chat\app-1.1\chat.exe"), &chat));
+        assert_eq!(pins.items(), [chat, exe(r"c:\tools\edit.exe")]);
     }
 
     #[test]

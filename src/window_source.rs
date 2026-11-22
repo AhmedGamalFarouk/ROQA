@@ -1,6 +1,6 @@
 use crate::{
     ipc::OwnedHandle,
-    window_model::{Identity, Snapshot, SourceStats, WindowKey, WindowRecord, stable_executable},
+    window_model::{Identity, Snapshot, SourceStats, WindowKey, WindowRecord},
 };
 use std::{
     collections::BTreeMap,
@@ -10,15 +10,12 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::{ERROR_SUCCESS, HWND, LPARAM},
+        Foundation::{HWND, LPARAM},
         Graphics::Dwm::{DWM_CLOAKED_SHELL, DWMWA_CLOAKED, DwmGetWindowAttribute},
-        Storage::{
-            EnhancedStorage::PKEY_AppUserModel_ID,
-            Packaging::Appx::{APPLICATION_USER_MODEL_ID_MAX_LENGTH, GetApplicationUserModelId},
-        },
+        Storage::EnhancedStorage::PKEY_AppUserModel_ID,
         System::{
             Com::{
-                CLSCTX_ALL, CoCreateInstance,
+                CLSCTX_ALL, CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree,
                 StructuredStorage::{PropVariantClear, PropVariantToBSTR},
             },
             Threading::{
@@ -28,14 +25,14 @@ use windows::{
         },
         UI::{
             Shell::{
-                IVirtualDesktopManager,
+                IShellItem, IVirtualDesktopManager,
                 PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
-                VirtualDesktopManager,
+                SHCreateItemFromParsingName, VirtualDesktopManager,
             },
             WindowsAndMessaging::*,
         },
     },
-    core::{BOOL, PWSTR},
+    core::{BOOL, GUID, HRESULT, HSTRING, IUnknown, IUnknown_Vtbl, PWSTR, interface},
 };
 
 const MAX_HANDLES: usize = 4096;
@@ -57,12 +54,81 @@ unsafe extern "system" fn enumerate(hwnd: HWND, parameter: LPARAM) -> BOOL {
     BOOL(1)
 }
 
-/// The shell's virtual-desktop manager: created once, on the first shell-cloaked window; `None` until then.
-type Desktops = Option<IVirtualDesktopManager>;
+// The taskbar's app resolver (appresolver.dll), UNDOCUMENTED like `policy_config`: Windows 8+ vtable
+// order. Only `GetAppIDForWindow` (`app_id_for_window`) is called; the first two are slot placeholders
+// (the vtable is positional, so the Rust names are free). Any failure falls back
+// to the window's own ID property, then to the exe path.
+#[interface("de25675a-72de-44b4-9373-05170450c140")]
+unsafe trait IApplicationResolver: IUnknown {
+    unsafe fn app_id_for_shortcut(&self) -> HRESULT;
+    unsafe fn app_id_for_shortcut_object(&self) -> HRESULT;
+    unsafe fn app_id_for_window(
+        &self,
+        window: HWND,
+        id: *mut PWSTR,
+        pinning_prevented: *mut BOOL,
+        explicit: *mut BOOL,
+        embedded_shortcut_valid: *mut BOOL,
+    ) -> HRESULT;
+}
+
+/// `CLSID_StartMenuCacheAndAppResolver` (threading model Both: usable from this MTA worker).
+const RESOLVER: GUID = GUID::from_u128(0x660b90c8_73a9_4b58_8cae_355b7f55341b);
+
+/// Shell objects of the worker, each created on first use.
+#[derive(Default)]
+struct Shell {
+    desktops: Option<IVirtualDesktopManager>,
+    resolver: Option<IApplicationResolver>,
+    /// Whether `shell:AppsFolder\<id>` names an app, per ID; cleared by each full scan so a new install shows.
+    launchable: BTreeMap<String, bool>,
+}
+
+impl Shell {
+    /// The ID the taskbar groups this window under, when it is explicit (set by the window, its process or
+    /// its package) and the shell can start it. Unlike an exe path it survives updates that move the exe
+    /// (Discord's `app-<version>` folders, Store apps' versioned folders), so a pin keeps its icon and launch.
+    fn app_id(&mut self, hwnd: HWND) -> Option<String> {
+        let id = self.resolve(hwnd).unwrap_or_else(|| application_id(hwnd))?;
+        let launchable = *self.launchable.entry(id.clone()).or_insert_with(|| {
+            let target = HSTRING::from(format!(r"shell:AppsFolder\{id}"));
+            // SAFETY: parses a shell name into an owned item that is dropped at once.
+            unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(&target, None) }.is_ok()
+        });
+        launchable.then_some(id)
+    }
+
+    /// The resolver's answer: `Some(None)` when its ID is only derived from the exe path, `None` when it
+    /// gave no answer.
+    fn resolve(&mut self, hwnd: HWND) -> Option<Option<String>> {
+        // SAFETY: in-proc COM object owned by this worker; the out string is freed on every path and the
+        // flags are owned locals.
+        unsafe {
+            if self.resolver.is_none() {
+                self.resolver = CoCreateInstance(&RESOLVER, None, CLSCTX_INPROC_SERVER).ok();
+            }
+            let resolver = self.resolver.as_ref()?;
+            let mut id = PWSTR::null();
+            let (mut prevented, mut explicit, mut embedded) = (BOOL(0), BOOL(0), BOOL(0));
+            let result = resolver.app_id_for_window(
+                hwnd,
+                &mut id,
+                &mut prevented,
+                &mut explicit,
+                &mut embedded,
+            );
+            let text = (!id.is_null()).then(|| id.to_string().ok()).flatten();
+            CoTaskMemFree(Some(id.0.cast()));
+            result.ok().ok()?;
+            Some(text.filter(|id| explicit.as_bool() && !id.is_empty()))
+        }
+    }
+}
 
 /// Whether a window the shell cloaked is on another virtual desktop (not merely suspended on this one). A
 /// failed call drops the manager so Explorer's next incarnation gets a fresh one; the window stays omitted.
-fn on_other_desktop(desktops: &mut Desktops, hwnd: HWND) -> bool {
+fn on_other_desktop(shell: &mut Shell, hwnd: HWND) -> bool {
+    let desktops = &mut shell.desktops;
     // SAFETY: free-threaded shell COM object owned by this worker; scalar HWND argument.
     unsafe {
         if desktops.is_none() {
@@ -81,7 +147,8 @@ fn on_other_desktop(desktops: &mut Desktops, hwnd: HWND) -> bool {
     }
 }
 
-fn full_scan(generation: u64, cancel: &AtomicBool, desktops: &mut Desktops) -> Snapshot {
+fn full_scan(generation: u64, cancel: &AtomicBool, shell: &mut Shell) -> Snapshot {
+    shell.launchable.clear();
     let started = Instant::now();
     let mut state = Enumeration {
         handles: Vec::new(),
@@ -117,7 +184,7 @@ fn full_scan(generation: u64, cancel: &AtomicBool, desktops: &mut Desktops) -> S
             own_process,
             foreground,
             &mut executables,
-            desktops,
+            shell,
         ) {
             snapshot.windows.push(window);
         }
@@ -132,8 +199,8 @@ fn inspect(
     hwnd: HWND,
     own_process: u32,
     foreground: HWND,
-    executables: &mut BTreeMap<u32, (Option<String>, Option<String>)>,
-    desktops: &mut Desktops,
+    executables: &mut BTreeMap<u32, Option<String>>,
+    shell: &mut Shell,
 ) -> Option<WindowRecord> {
     // SAFETY: only documented, non-message metadata queries against possibly transient foreign HWNDs.
     // Every failed/destroyed window is skipped, never dereferenced. Own HWNDs are excluded before text queries.
@@ -169,7 +236,7 @@ fn inspect(
         }
         // A window on another virtual desktop is cloaked by the shell: it stays, flagged (the dock may filter
         // it). Any other cloak (a suspended app, a hidden frame) still omits it.
-        let elsewhere = cloaked == DWM_CLOAKED_SHELL && on_other_desktop(desktops, hwnd);
+        let elsewhere = cloaked == DWM_CLOAKED_SHELL && on_other_desktop(shell, hwnd);
         if cloaked != 0 && !elsewhere {
             return None;
         }
@@ -186,15 +253,13 @@ fn inspect(
             return None;
         }
         let title = String::from_utf16_lossy(&title[..length as usize]);
-        let (executable, package) = executables
+        let executable = executables
             .entry(process)
-            .or_insert_with(|| (process_executable(process), package_application_id(process)))
+            .or_insert_with(|| process_executable(process))
             .clone();
-        // A packaged app that names no window ID (Electron Store apps) still has its package's: its exe path
-        // carries the version and is deleted by the next update, which left its pin a blank tile.
-        let identity = match (application_id(hwnd).or(package), &executable) {
+        let identity = match (shell.app_id(hwnd), &executable) {
             (Some(id), _) => Identity::Application(id),
-            (None, Some(path)) => Identity::Executable(stable_executable(path.clone())),
+            (None, Some(path)) => Identity::Executable(path.clone()),
             (None, None) => Identity::Unavailable(process),
         };
         let mut current_process = 0;
@@ -217,7 +282,8 @@ fn inspect(
     }
 }
 
-/// Explicit AppUserModelID set on the window (packaged apps, frame hosts, self-grouping apps).
+/// Explicit AppUserModelID set on the window (packaged apps, frame hosts, self-grouping apps); the
+/// fallback when the resolver gives no answer.
 fn application_id(hwnd: HWND) -> Option<String> {
     // SAFETY: reads a window property through the documented shell store on this COM-initialized worker;
     // the PROPVARIANT is cleared on every path after conversion.
@@ -227,25 +293,6 @@ fn application_id(hwnd: HWND) -> Option<String> {
         let text = PropVariantToBSTR(&value).ok().map(|text| text.to_string());
         let _ = PropVariantClear(&mut value);
         text.filter(|id| !id.is_empty())
-    }
-}
-
-/// The AppUserModelID of a packaged process (`Family!App`); `None` for an unpackaged one.
-fn package_application_id(process: u32) -> Option<String> {
-    // SAFETY: limited query rights; the owned handle closes on every return path, and the buffer is
-    // the documented maximum ID length with its terminator.
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process).ok()?;
-        let handle = OwnedHandle(handle);
-        let mut id = [0u16; APPLICATION_USER_MODEL_ID_MAX_LENGTH as usize + 1];
-        let mut length = id.len() as u32;
-        if GetApplicationUserModelId(handle.0, &mut length, Some(PWSTR(id.as_mut_ptr())))
-            != ERROR_SUCCESS
-        {
-            return None;
-        }
-        let end = id.iter().position(|&unit| unit == 0)?;
-        Some(String::from_utf16_lossy(&id[..end])).filter(|id| !id.is_empty())
     }
 }
 
@@ -275,7 +322,7 @@ pub struct SourceState {
     windows: BTreeMap<usize, WindowRecord>,
     stats: SourceStats,
     needs_full: bool,
-    desktops: Desktops,
+    shell: Shell,
 }
 impl SourceState {
     pub fn reconcile(
@@ -286,7 +333,7 @@ impl SourceState {
         cancel: &AtomicBool,
     ) -> Snapshot {
         if full || self.needs_full {
-            let mut snapshot = full_scan(generation, cancel, &mut self.desktops);
+            let mut snapshot = full_scan(generation, cancel, &mut self.shell);
             self.stats.full_scans += 1;
             self.stats.inspected += snapshot.stats.inspected;
             self.needs_full = !snapshot.complete;
@@ -320,7 +367,7 @@ impl SourceState {
                 own_process,
                 foreground,
                 &mut executables,
-                &mut self.desktops,
+                &mut self.shell,
             ) {
                 if !self.windows.contains_key(&handle) && self.windows.len() == MAX_WINDOWS {
                     complete = false;
@@ -346,18 +393,5 @@ impl SourceState {
                 Some("Incremental window update incomplete; full repair required.".into())
             },
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unpackaged_or_missing_processes_have_no_package_id() {
-        // SAFETY: scalar query of this test process's own id.
-        let own = unsafe { GetCurrentProcessId() };
-        assert_eq!(package_application_id(own), None);
-        assert_eq!(package_application_id(u32::MAX), None);
     }
 }

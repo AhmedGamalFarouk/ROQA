@@ -1,4 +1,5 @@
-//! Switching the default render endpoint: the one UNDOCUMENTED call in ROQA.
+//! Switching the default render endpoint: one of ROQA's two UNDOCUMENTED calls (the other is the
+//! taskbar's app resolver in `window_source`).
 //!
 //! Windows has no public API to change the default audio device (the Sound settings page and the volume
 //! flyout do it through the private `IPolicyConfig` COM interface). The user explicitly asked for the
