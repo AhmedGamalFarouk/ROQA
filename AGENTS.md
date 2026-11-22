@@ -5,7 +5,7 @@ Every agent reads this file first. Briefs point here by path and never paste it.
 ## What it is
 Native Windows 11 dock + notch in Rust: Win32, DirectComposition/Direct2D, some GDI text. One ~1.5 MB exe, dependencies only when they earn their size.
 Owner: Ahmed (they/them), does not read code. Report in plain language.
-One folder, one branch: work on `main` in this checkout. No branches, no worktrees.
+One folder: work on `main` in this checkout, no worktrees. Branches and PRs only through /ship and /land-and-deploy (owner decision 2026-11-22); everything else commits straight to `main`.
 
 ## Priorities, in order
 1. Performance and tiny footprint: single host (UI) thread (checked 2026-11-16: of ~23 threads at idle, ROQA starts only two parked workers, icons and window source; the rest are the GPU driver and the Windows thread pool), event-driven, no idle timers or threads, one motion clock (`src/motion.rs`), frames only while animating, in-app fast motion respected.
