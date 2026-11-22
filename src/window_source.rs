@@ -10,9 +10,12 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::{HWND, LPARAM},
+        Foundation::{ERROR_SUCCESS, HWND, LPARAM},
         Graphics::Dwm::{DWM_CLOAKED_SHELL, DWMWA_CLOAKED, DwmGetWindowAttribute},
-        Storage::EnhancedStorage::PKEY_AppUserModel_ID,
+        Storage::{
+            EnhancedStorage::PKEY_AppUserModel_ID,
+            Packaging::Appx::{APPLICATION_USER_MODEL_ID_MAX_LENGTH, GetApplicationUserModelId},
+        },
         System::{
             Com::{
                 CLSCTX_ALL, CoCreateInstance,
@@ -129,7 +132,7 @@ fn inspect(
     hwnd: HWND,
     own_process: u32,
     foreground: HWND,
-    executables: &mut BTreeMap<u32, Option<String>>,
+    executables: &mut BTreeMap<u32, (Option<String>, Option<String>)>,
     desktops: &mut Desktops,
 ) -> Option<WindowRecord> {
     // SAFETY: only documented, non-message metadata queries against possibly transient foreign HWNDs.
@@ -183,11 +186,13 @@ fn inspect(
             return None;
         }
         let title = String::from_utf16_lossy(&title[..length as usize]);
-        let executable = executables
+        let (executable, package) = executables
             .entry(process)
-            .or_insert_with(|| process_executable(process))
+            .or_insert_with(|| (process_executable(process), package_application_id(process)))
             .clone();
-        let identity = match (application_id(hwnd), &executable) {
+        // A packaged app that names no window ID (Electron Store apps) still has its package's: its exe path
+        // carries the version and is deleted by the next update, which left its pin a blank tile.
+        let identity = match (application_id(hwnd).or(package), &executable) {
             (Some(id), _) => Identity::Application(id),
             (None, Some(path)) => Identity::Executable(path.clone()),
             (None, None) => Identity::Unavailable(process),
@@ -222,6 +227,25 @@ fn application_id(hwnd: HWND) -> Option<String> {
         let text = PropVariantToBSTR(&value).ok().map(|text| text.to_string());
         let _ = PropVariantClear(&mut value);
         text.filter(|id| !id.is_empty())
+    }
+}
+
+/// The AppUserModelID of a packaged process (`Family!App`); `None` for an unpackaged one.
+fn package_application_id(process: u32) -> Option<String> {
+    // SAFETY: limited query rights; the owned handle closes on every return path, and the buffer is
+    // the documented maximum ID length with its terminator.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process).ok()?;
+        let handle = OwnedHandle(handle);
+        let mut id = [0u16; APPLICATION_USER_MODEL_ID_MAX_LENGTH as usize + 1];
+        let mut length = id.len() as u32;
+        if GetApplicationUserModelId(handle.0, &mut length, Some(PWSTR(id.as_mut_ptr())))
+            != ERROR_SUCCESS
+        {
+            return None;
+        }
+        let end = id.iter().position(|&unit| unit == 0)?;
+        Some(String::from_utf16_lossy(&id[..end])).filter(|id| !id.is_empty())
     }
 }
 
@@ -322,5 +346,18 @@ impl SourceState {
                 Some("Incremental window update incomplete; full repair required.".into())
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unpackaged_or_missing_processes_have_no_package_id() {
+        // SAFETY: scalar query of this test process's own id.
+        let own = unsafe { GetCurrentProcessId() };
+        assert_eq!(package_application_id(own), None);
+        assert_eq!(package_application_id(u32::MAX), None);
     }
 }
