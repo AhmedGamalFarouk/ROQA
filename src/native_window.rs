@@ -630,8 +630,6 @@ pub fn fullscreen_monitor(key: WindowKey) -> Option<String> {
     }
     // The desktop spans every monitor; under Presentation Settings (also QUNS_BUSY) it would read
     // as full screen.
-    // shortcut: a maximized window can still read as full screen under Presentation Settings
-    // when the work area equals the monitor (auto-hide taskbar); compare frames if users hit it.
     let mut class = [0u16; 16];
     // SAFETY: bounded writable buffer; a stale HWND yields 0 characters.
     let length = usize::try_from(unsafe { GetClassNameW(window, &mut class) }).ok()?;
@@ -642,13 +640,16 @@ pub fn fullscreen_monitor(key: WindowKey) -> Option<String> {
     }
     let mut rect = RECT::default();
     // SAFETY: scalar geometry queries on a transient foreign HWND; a stale one fails cleanly.
-    let monitor = unsafe {
+    let (monitor, maximized) = unsafe {
         GetWindowRect(window, &mut rect).ok()?;
-        MonitorFromWindow(window, MONITOR_DEFAULTTONULL)
+        (
+            MonitorFromWindow(window, MONITOR_DEFAULTTONULL),
+            IsZoomed(window).as_bool(),
+        )
     };
     let info = monitor_info(monitor).ok()?;
     let area = bounds(info.monitorInfo.rcMonitor);
-    topology::covers(bounds(rect), area).then(|| device_name(&info))
+    topology::covers(bounds(rect), area, maximized).then(|| device_name(&info))
 }
 
 /// Whether Windows reports a full-screen app (or exclusive Direct3D). Windows sends no notification
