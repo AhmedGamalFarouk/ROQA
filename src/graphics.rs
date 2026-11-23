@@ -232,8 +232,8 @@ pub struct NotchScene<'a> {
     pub rail: Option<RailScene<'a>>,
     /// The mascot's frame (`None` with the setting off); alpha 0 at rest, when the pill shows only the time.
     pub eyes: Option<Frame>,
-    /// Opacity of the microphone (orange) and camera (green) dots at the right of the pill and panel header.
-    pub privacy: [f32; 2],
+    /// Opacity of the microphone (orange), camera (green) and muted-mic (ink) dots at the right of the pill and header.
+    pub privacy: [f32; 3],
     /// The volume bar's pointer state: the thumb grows on hover and press, and a press shows the percent.
     pub grip: Grip,
     /// The volume bar's drawn fill in percent: it eases toward `volume`'s percent.
@@ -1047,7 +1047,7 @@ fn notch_text(
     if let Some(frame) = scene.eyes {
         tab_art::draw_eyes(context, scene, frame, body, scale, p)?;
     }
-    tab_art::draw_privacy(context, scene, body, scale)?;
+    tab_art::draw_privacy(context, scene, body, scale, p)?;
     tab_art::draw_low(context, scene, body, scale, p)?;
     if scene.tab == Tab::Media {
         media_page(context, scene, body, scale, art, status, p)?;
@@ -3256,7 +3256,7 @@ mod media_tests {
             tab: Tab::Media,
             rail: None,
             eyes: None,
-            privacy: [0.0; 2],
+            privacy: [0.0; 3],
             grip: Grip::default(),
             volume_fill: volume.map_or(0.0, |level| f32::from(level.percent)),
             weather: None,
@@ -3302,7 +3302,7 @@ mod media_tests {
                 tab: Tab::Media,
                 rail: None,
                 eyes: None,
-                privacy: [0.0; 2],
+                privacy: [0.0; 3],
                 grip: Grip::default(),
                 volume_fill: 0.0,
                 weather: None,
@@ -3549,7 +3549,7 @@ mod media_tests {
                 tab: Tab::Media,
                 rail: None,
                 eyes: None,
-                privacy: [0.0; 2],
+                privacy: [0.0; 3],
                 grip: Grip::default(),
                 volume_fill: 0.0,
                 weather: None,
@@ -3617,7 +3617,7 @@ mod media_tests {
                     tab: Tab::Media,
                     rail: None,
                     eyes: None,
-                    privacy: [0.0; 2],
+                    privacy: [0.0; 3],
                     grip: Grip::default(),
                     volume_fill: 0.0,
                     weather: None,
@@ -3673,7 +3673,7 @@ mod media_tests {
             tab: Tab::Media,
             rail: None,
             eyes: None,
-            privacy: [0.0; 2],
+            privacy: [0.0; 3],
             grip: Grip::default(),
             volume_fill: 0.0,
             weather: None,

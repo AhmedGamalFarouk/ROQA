@@ -234,6 +234,11 @@ impl Desktop {
     pub(super) fn notification_peek(&mut self) {
         self.pill(toast::take(), DEVICE_NOTICE);
     }
+    /// Ctrl+Alt+M or a click on the mic dot: mutes or unmutes the recording device and says which.
+    pub(super) fn toggle_mic(&mut self) {
+        let muted = self.mic.toggle();
+        self.key_pill(Some(crate::mic::toggle_text(muted).into()));
+    }
     pub(super) fn pill(&mut self, text: Option<String>, hold: Duration) {
         let Some(text) = text else {
             return;

@@ -657,7 +657,7 @@ mod tests {
         assert_eq!(settings.hotkeys, [false; hotkeys::COUNT]);
         assert!(settings.set("hkapps", "1") && settings.set("hktray", "1"));
         assert!(!settings.set("hkfuture", "1") && !settings.set("hknotch", "2"));
-        assert_eq!(settings.hotkeys, [false, true, false, true]);
+        assert_eq!(settings.hotkeys, [false, true, false, true, false]);
         let mut text = String::new();
         settings.write_lines(&mut text);
         assert!(text.lines().any(|l| l == "hkapps=1") && text.lines().any(|l| l == "hknotch=0"));
@@ -1165,7 +1165,7 @@ mod tests {
             water_cfg: [6, 300, 8, 20, 45],
             pomo_cfg: [50, 10, 30, 3],
             match_accent: true,
-            hotkeys: [true, false, true, true],
+            hotkeys: [true, false, true, true, true],
             autostart: true,
             hide_capture: true,
             caps_pill: false,

@@ -1386,6 +1386,8 @@ struct Desktop {
     icons: IconService,
     /// The default render endpoint's volume, bound once a media notch is first shown.
     audio: Audio,
+    /// The default recording device's mute (`mic.rs`), bound at start for the muted dot.
+    mic: crate::mic::Mic,
     /// Windows text size (Accessibility > Text size) scales the whole notch, whose only content is text.
     text: TextSettings,
     text_factor: f64,
@@ -1584,6 +1586,7 @@ impl Desktop {
             drag: None,
             media: Media::create(),
             audio: Audio::create(),
+            mic: crate::mic::Mic::start(),
             text,
             text_factor,
             clock: String::new(),
@@ -3114,6 +3117,7 @@ impl Desktop {
                 self.dock_away = !self.dock_away;
                 self.apply_visibility()?;
             }
+            4 => self.toggle_mic(),
             _ => {
                 let dock = self
                     .surfaces
@@ -4078,6 +4082,9 @@ impl Desktop {
             self.audio.start();
         }
         let volume = self.audio.refresh();
+        if self.mic.refresh() && self.pages.dots.set_muted(self.mic.muted(), Instant::now()) {
+            self.request_notches(Repaint::Full, |_| true);
+        }
         if self.audio.elsewhere()
             && let Some(level) = self.audio.level()
         {

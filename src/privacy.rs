@@ -25,6 +25,24 @@ pub fn in_use(start: u64, stop: u64) -> bool {
     start != 0 && stop == 0
 }
 
+/// The mic dot's centre in a notch window `width` wide, in pixels: the same place `draw_privacy` paints it.
+pub fn mic_dot(width: i32, dpi: u32, progress: f32, media: bool) -> (i32, i32) {
+    let shape = crate::layout::notch_shape(progress, media);
+    let body = crate::layout::notch_body(width, dpi, shape);
+    let scale = dpi as f32 / 96.0;
+    let middle = (shape.height / 2.0).min(15.0);
+    (
+        body.left + body.width - (23.0 * scale).round() as i32,
+        (middle * scale).round() as i32,
+    )
+}
+
+/// Whether a click at `(x, y)` lands on the mic dot centred at `dot`: a 9 DIP reach, wider than the 6 DIP dot.
+pub fn on_mic_dot(dot: (i32, i32), dpi: u32, (x, y): (i32, i32)) -> bool {
+    let reach = (9 * dpi / 96) as i32;
+    (x - dot.0).abs() <= reach && (y - dot.1).abs() <= reach
+}
+
 /// Which devices are in use right now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Use {
@@ -35,11 +53,13 @@ pub struct Use {
 const LEVELS: u8 = 3;
 const STEP: Duration = Duration::from_millis(60);
 
-/// The dots' fade: each dot's level climbs or falls one step per 60 ms (3 steps), only while it is changing.
+/// The dots' fade: each dot's level climbs or falls one step per 60 ms (3 steps), only while it is changing. The
+/// third is the muted mic's dot (`mic.rs`), which shows whether or not the privacy dots are on.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Dots {
     target: Use,
-    level: [u8; 2],
+    muted: bool,
+    level: [u8; 3],
     next: Option<Instant>,
 }
 
@@ -53,12 +73,22 @@ impl Dots {
         self.next = Some(now);
         self.tick(now)
     }
+    /// Sets whether the mic is muted; true when the dots need a repaint now.
+    pub fn set_muted(&mut self, muted: bool, now: Instant) -> bool {
+        if muted == self.muted {
+            return false;
+        }
+        self.muted = muted;
+        self.next = Some(now);
+        self.tick(now)
+    }
     /// Steps the fade when due; true when the drawn levels changed.
     pub fn tick(&mut self, now: Instant) -> bool {
         if self.next.is_none_or(|next| now < next) {
             return false;
         }
-        let goal = [self.target.mic, self.target.cam].map(|on| if on { LEVELS } else { 0 });
+        let goal =
+            [self.target.mic, self.target.cam, self.muted].map(|on| if on { LEVELS } else { 0 });
         for (level, goal) in self.level.iter_mut().zip(goal) {
             if *level < goal {
                 *level += 1;
@@ -72,8 +102,8 @@ impl Dots {
     pub fn due(&self) -> Option<Instant> {
         self.next
     }
-    /// Opacity of the microphone and camera dots, 0 to 1.
-    pub fn alpha(&self) -> [f32; 2] {
+    /// Opacity of the microphone, camera and muted-mic dots, 0 to 1.
+    pub fn alpha(&self) -> [f32; 3] {
         self.level.map(|level| f32::from(level) / f32::from(LEVELS))
     }
 }
@@ -251,19 +281,35 @@ mod tests {
             },
             t0
         ));
-        assert_eq!(dots.alpha(), [1.0 / 3.0, 0.0]);
+        assert_eq!(dots.alpha(), [1.0 / 3.0, 0.0, 0.0]);
         let mut now = t0;
         while let Some(due) = dots.due() {
             now = due;
             assert!(dots.tick(now));
         }
-        assert_eq!(dots.alpha(), [1.0, 0.0]);
+        assert_eq!(dots.alpha(), [1.0, 0.0, 0.0]);
         assert!(now - t0 <= STEP * 2, "three levels in two waits");
         assert!(dots.set(Use::default(), now));
         while let Some(due) = dots.due() {
             dots.tick(due);
         }
-        assert_eq!(dots.alpha(), [0.0, 0.0]);
+        assert_eq!(dots.alpha(), [0.0, 0.0, 0.0]);
         assert!(dots.due().is_none());
+        // The muted dot fades the same way, on its own.
+        assert!(!dots.set_muted(false, now));
+        assert!(dots.set_muted(true, now));
+        while let Some(due) = dots.due() {
+            dots.tick(due);
+        }
+        assert_eq!(dots.alpha(), [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn the_mic_dot_takes_a_click_near_it_only() {
+        let dot = mic_dot(600, 96, 0.0, false);
+        assert!(dot.0 > 300 && dot.1 > 0);
+        assert!(on_mic_dot(dot, 96, (dot.0 + 9, dot.1 - 9)));
+        assert!(!on_mic_dot(dot, 96, (dot.0 - 10, dot.1)));
+        assert!(on_mic_dot((40, 40), 192, (58, 22)));
     }
 }

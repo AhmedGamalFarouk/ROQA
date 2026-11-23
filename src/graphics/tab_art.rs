@@ -1450,14 +1450,18 @@ pub(super) fn draw_privacy(
     scene: &NotchScene,
     body: &D2D_RECT_F,
     scale: f32,
+    p: &Palette,
 ) -> Result<()> {
     let middle =
         (layout::notch_shape(scene.progress, scene.track.is_some()).height / 2.0).min(15.0);
     let (r, y) = (3.0 * scale, body.top + middle * scale);
-    // Orange for the microphone, green for the camera: fixed signal colours on every theme.
+    // Orange for the microphone, green for the camera: fixed signal colours on every theme. A muted mic's dot
+    // takes the mic's place in the theme's ink (`privacy::mic_dot` is that place).
+    let muted = scene.privacy[2];
     for (slot, (alpha, colour)) in [
         (scene.privacy[1], (34, 197, 94)),
-        (scene.privacy[0], (245, 158, 11)),
+        (scene.privacy[0] * (1.0 - muted), (245, 158, 11)),
+        (p.ink_alpha(muted), p.ink),
     ]
     .into_iter()
     .enumerate()
@@ -1465,7 +1469,7 @@ pub(super) fn draw_privacy(
         if alpha <= 0.0 {
             continue;
         }
-        let x = body.right - (14.0 + 9.0 * slot as f32) * scale;
+        let x = body.right - (14.0 + 9.0 * slot.min(1) as f32) * scale;
         let dot = D2D_RECT_F {
             left: x - r,
             top: y - r,

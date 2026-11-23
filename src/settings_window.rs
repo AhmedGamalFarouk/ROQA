@@ -142,7 +142,7 @@ const ASK_BTN: usize = 236;
 const NOTIFS: usize = 237;
 const CAPS_PILL: usize = 238;
 const HIDE_TASKBAR: usize = 239;
-/// The four shortcut switches (`hotkeys::KEYS` order).
+/// The five shortcut switches (`hotkeys::KEYS` order).
 const HOTKEY: usize = 222;
 /// The hidden-apps list and its "Show in dock" button.
 const HIDDEN: usize = 230;
@@ -610,6 +610,7 @@ const PAGES: &[Page] = &[
                     r(HOTKEY + 1, C, "Open dock apps by number", "Ctrl+Alt+1 to 9"),
                     r(HOTKEY + 2, C, "Hide or show the dock", "Ctrl+Alt+D"),
                     r(HOTKEY + 3, C, "Open hidden icons", "Ctrl+Alt+B"),
+                    r(HOTKEY + 4, C, "Mute the microphone", "Ctrl+Alt+M"),
                 ],
             },
             Card {
@@ -1546,7 +1547,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         DOCK_LEFT => &mut s.dock_left,
         PILLLOW => &mut s.widgets.pill_low,
         AGENT_ON => &mut s.agent_status,
-        HOTKEY..=225 => &mut s.hotkeys[id - HOTKEY],
+        HOTKEY..=226 => &mut s.hotkeys[id - HOTKEY],
         TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
         DBTN..=136 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,

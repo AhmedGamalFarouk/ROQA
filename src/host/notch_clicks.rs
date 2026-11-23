@@ -35,6 +35,18 @@ impl Desktop {
     /// A click on a drawn media control sends its command, one on the progress bar seeks, and one
     /// on the volume bar sets the volume; the notch stays nonactivating.
     pub(super) fn click_control(&mut self, notch: usize, lparam: LPARAM) -> bool {
+        // The mic dot, while it shows (in use, or muted), mutes or unmutes the mic, open or closed.
+        let dots = self.pages.dots.alpha();
+        if dots[0].max(dots[2]) > 0.0 {
+            let surface = &self.surfaces[notch];
+            let media = self.pages.track(&self.media).is_some();
+            let progress = surface.motion.value(Instant::now());
+            let dot = privacy::mic_dot(surface.bounds.width, surface.dpi, progress, media);
+            if privacy::on_mic_dot(dot, surface.dpi, point(lparam)) {
+                self.toggle_mic();
+                return true;
+            }
+        }
         // Click mode: a click on the closed pill opens it.
         let closed = &mut self.surfaces[notch];
         if motion::click_to_open()

@@ -11,12 +11,12 @@ use windows::Win32::UI::{
     WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
 };
 
-/// The shortcut groups: the notch, the dock's apps, the dock itself and the hidden-icons flyout.
-pub const COUNT: usize = 4;
+/// The shortcut groups: the notch, the dock's apps, the dock itself, the hidden-icons flyout and the mic's mute.
+pub const COUNT: usize = 5;
 /// Setting keys, written `hk<key>`.
-pub const KEYS: [&str; COUNT] = ["notch", "apps", "dock", "tray"];
+pub const KEYS: [&str; COUNT] = ["notch", "apps", "dock", "tray", "mic"];
 /// The keys of each group: apps are 1 to 9, the others one letter.
-const LETTERS: [&[u8]; COUNT] = [b"N", b"123456789", b"D", b"B"];
+const LETTERS: [&[u8]; COUNT] = [b"N", b"123456789", b"D", b"B", b"M"];
 
 /// The id `WM_HOTKEY` carries: the group (from 1) over the key's place in the group.
 fn id(group: usize, index: usize) -> i32 {
@@ -130,7 +130,7 @@ mod tests {
             }
         }
         assert_eq!(
-            (action(0), action(0x10 + 9), action(0x50)),
+            (action(0), action(0x10 + 9), action(0x60)),
             (None, None, None)
         );
     }
