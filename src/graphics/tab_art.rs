@@ -127,7 +127,7 @@ fn squashed(cell: D2D_RECT_F, (sx, sy): (f32, f32)) -> D2D_RECT_F {
     }
 }
 
-/// Quiet dots at rest; the hovered dot lends room to its glyph and name.
+/// Quiet glyphs at rest; the hovered one lends room to its glyph and name.
 fn items(
     context: &ID2D1DeviceContext,
     scene: &NotchScene,
@@ -158,9 +158,22 @@ fn items(
         let active = index == handle.layout.active;
         capsule(
             cell,
-            with_alpha(p.ink, p.ink_alpha((0.32 - 0.22 * expansion) * reveal)),
+            with_alpha(p.ink, p.ink_alpha(0.10 * expansion * reveal)),
         )?;
         if expansion <= 0.65 {
+            // At rest the tab is its glyph, ink .45, fading as the cell opens into glyph and name.
+            let fade = 1.0 - motion::smooth(expansion / 0.65);
+            let middle = (cell.left + cell.right) / 2.0;
+            glyphs::draw(
+                context,
+                pixel_square(
+                    middle - 7.0 * scale,
+                    (cell.top + cell.bottom) / 2.0 - 7.0 * scale,
+                    14.0 * scale,
+                ),
+                Glyph::tab(tab),
+                with_alpha(p.ink, p.ink_alpha(0.45 * fade * reveal)),
+            )?;
             continue;
         }
         let alpha = motion::smooth((expansion - 0.65) / 0.35) * reveal;

@@ -1094,7 +1094,8 @@ const RAIL_GAP: f32 = 10.0;
 const RAIL_HEIGHT: f32 = 24.0;
 
 fn rail_width(rail: Rail, index: usize) -> f32 {
-    let rest = if index == rail.active { 18.0 } else { 7.0 };
+    // A resting tab is its 14 DIP glyph in a 16 wide slot (`cook/design/lumabar-redesign.md`).
+    let rest = if index == rail.active { 18.0 } else { 16.0 };
     rest + (86.0 - rest) * rail.expansion[index].clamp(0.0, 1.08)
 }
 
@@ -2346,11 +2347,11 @@ mod tests {
     }
 
     #[test]
-    fn the_dot_rail_reserves_only_its_resting_width() {
+    fn the_glyph_rail_reserves_only_its_resting_width() {
         let (six_w, six_h) = rail_size(rail(6, 0));
-        assert_eq!((six_w, six_h), (119.0, 15.0));
+        assert_eq!((six_w, six_h), (164.0, 15.0));
         let (seven_w, seven_h) = rail_size(rail(7, 0));
-        assert_eq!((seven_w, seven_h), (136.0, 15.0));
+        assert_eq!((seven_w, seven_h), (190.0, 15.0));
         assert!(seven_w < NOTCH_WINDOW.0 as f32);
         assert!(rail_size(rail(3, 0)).0 < rail_size(rail(5, 0)).0);
     }
@@ -2490,7 +2491,7 @@ mod tests {
                         r.expansion[hovered] = amount;
                         let bounds = rail_bounds(width, dpi, 1.0, false, r).unwrap();
                         assert!(bounds.width >= rest.width);
-                        assert!(bounds.width <= scaled(222.0, dpi));
+                        assert!(bounds.width <= scaled(266.0, dpi));
                         assert!((bounds.x + bounds.width / 2).abs_diff(width / 2) <= 1);
                         let mut right = bounds.x;
                         for index in 0..r.count {
