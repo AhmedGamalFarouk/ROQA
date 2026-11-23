@@ -615,7 +615,11 @@ impl Slider {
     /// The level shown: the drag's, else the device's.
     fn percent(&self, audio: &Audio) -> Option<u8> {
         match self.kind {
-            Kind::Volume => self.drag.or(audio.level().map(|level| level.percent)),
+            // An app row's drag (`grab`) holds `drag` as a marker only: the pill keeps the device's level.
+            Kind::Volume => self
+                .drag
+                .filter(|_| self.grab.is_none())
+                .or(audio.level().map(|level| level.percent)),
             Kind::Brightness => match self.brightness {
                 Reading::Level(percent) => Some(self.drag.unwrap_or(percent)),
                 _ => None,
