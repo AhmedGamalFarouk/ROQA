@@ -1471,12 +1471,12 @@ pub(super) fn draw_privacy(
         (layout::notch_shape(scene.progress, scene.track.is_some()).height / 2.0).min(15.0);
     let (r, y) = (3.0 * scale, body.top + middle * scale);
     // Orange for the microphone, green for the camera: fixed signal colours on every theme. A muted mic's dot
-    // takes the mic's place in the theme's ink (`privacy::mic_dot` is that place).
+    // takes the mic's place in the theme's accent (`privacy::mic_dot` is that place).
     let muted = scene.privacy[2];
     for (slot, (alpha, colour)) in [
         (scene.privacy[1], (34, 197, 94)),
         (scene.privacy[0] * (1.0 - muted), (245, 158, 11)),
-        (p.ink_alpha(muted), p.ink),
+        (p.ink_alpha(muted), p.accent),
     ]
     .into_iter()
     .enumerate()

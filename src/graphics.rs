@@ -236,7 +236,7 @@ pub struct NotchScene<'a> {
     pub rail: Option<RailScene<'a>>,
     /// The mascot's frame (`None` with the setting off); alpha 0 at rest, when the pill shows only the time.
     pub eyes: Option<Frame>,
-    /// Opacity of the microphone (orange), camera (green) and muted-mic (ink) dots at the right of the pill and header.
+    /// Opacity of the microphone (orange), camera (green) and muted-mic (accent) dots at the right of the pill and header.
     pub privacy: [f32; 3],
     /// The volume bar's pointer state: the thumb grows on hover and press, and a press shows the percent.
     pub grip: Grip,
