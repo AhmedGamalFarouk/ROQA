@@ -56,6 +56,18 @@ fn native_popup_keeps_the_origin_through_pending_visible_and_exact_dismissal() {
     }
 }
 #[test]
+fn only_the_shown_panel_of_the_same_owner_and_kind_is_closed_by_a_second_click() {
+    let now = Instant::now();
+    let mut native = Native::default();
+    assert!(native.begin(request(11, now)));
+    // Still opening: the click is left to `open`, which keeps the first request.
+    assert_eq!(native.shown(Owner(hwnd(11)), Kind::Start), None);
+    native.request.as_mut().unwrap().window = Some(key(50));
+    assert_eq!(native.shown(Owner(hwnd(11)), Kind::Start), Some(key(50)));
+    assert_eq!(native.shown(Owner(hwnd(12)), Kind::Start), None);
+    assert_eq!(native.shown(Owner(hwnd(11)), Kind::Tray), None);
+}
+#[test]
 fn pending_timeout_and_failed_input_release_the_owner() {
     let now = Instant::now();
     let mut native = Native::default();

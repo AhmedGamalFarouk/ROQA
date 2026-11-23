@@ -758,10 +758,15 @@ impl Desktop {
             return false;
         };
         let own = message.hwnd == menu.hwnd();
+        let (dock, toggles) = (menu.dock(), toggled_by(menu.items()));
         match menu.message(message) {
             Event::Ignored => false,
             Event::Consumed => true,
             Event::Dismiss => {
+                let hit = self
+                    .dock_at(message.hwnd)
+                    .and_then(|surface| surface.dock_hit(message.lParam, self.dock_slots()));
+                self.swallow_up = toggle_press(toggles, dock, message, hit);
                 self.close_menu();
                 own // a press on another ROQA window still reaches it
             }
@@ -770,6 +775,12 @@ impl Desktop {
                 true
             }
         }
+    }
+    /// Takes the pending toggle-close: true when this release belongs to the press that closed the button's popup.
+    pub(super) fn swallow_release(&mut self, hwnd: HWND, hit: Option<Hit>) -> bool {
+        self.swallow_up
+            .take()
+            .is_some_and(|(dock, button)| dock == hwnd && hit == Some(Hit::Button(button)))
     }
     /// Does the chosen action on the slot's app, if the slot still holds it. A new instance leaves the
     /// foreground to the app it starts; the rest return it to the window the menu came from.
@@ -1026,9 +1037,67 @@ fn quote_path(path: &str) -> String {
     format!("\"{path}{tail}\"")
 }
 
+/// The dock button whose own popup lists these rows, so a second click on it closes that popup.
+fn toggled_by(items: &[Item]) -> Option<Button> {
+    match items.first()? {
+        Item::Quick(_) => Some(Button::Quick),
+        Item::Battery => Some(Button::Battery),
+        Item::Place(_) => Some(Button::Places),
+        _ => None,
+    }
+}
+/// A left press on the very button (on the very dock) that opened the popup: its release must not reopen it.
+fn toggle_press(
+    toggles: Option<Button>,
+    dock: HWND,
+    message: &MSG,
+    hit: Option<Hit>,
+) -> Option<(HWND, Button)> {
+    toggles
+        .filter(|&button| {
+            message.message == WM_LBUTTONDOWN
+                && message.hwnd == dock
+                && hit == Some(Hit::Button(button))
+        })
+        .map(|button| (dock, button))
+}
 #[cfg(test)]
 mod tests {
-    use super::quote_path;
+    use super::{quote_path, toggle_press, toggled_by};
+    use crate::dock::{Button, Hit};
+    use crate::dock_menu::{Item, Quick};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{MSG, WM_LBUTTONDOWN, WM_RBUTTONDOWN};
+
+    #[test]
+    fn a_second_press_on_the_same_button_closes_its_popup() {
+        let (dock, other) = (HWND(1 as _), HWND(2 as _));
+        let press = |hwnd, message| MSG {
+            hwnd,
+            message,
+            ..Default::default()
+        };
+        let quick = toggled_by(&[Item::Quick(Quick::Mute)]);
+        let at = |button| Some(Hit::Button(button));
+        let left = press(dock, WM_LBUTTONDOWN);
+        assert_eq!(
+            toggle_press(quick, dock, &left, at(Button::Quick)),
+            Some((dock, Button::Quick))
+        );
+        // Another button switches menus, another dock or a right press opens nothing new here.
+        assert_eq!(toggle_press(quick, dock, &left, at(Button::Battery)), None);
+        let elsewhere = press(other, WM_LBUTTONDOWN);
+        assert_eq!(
+            toggle_press(quick, dock, &elsewhere, at(Button::Quick)),
+            None
+        );
+        let right = press(dock, WM_RBUTTONDOWN);
+        assert_eq!(toggle_press(quick, dock, &right, at(Button::Quick)), None);
+        // An app's own menu is not a button popup.
+        assert_eq!(toggled_by(&[Item::Pin]), None);
+        assert_eq!(toggled_by(&[Item::Battery]), Some(Button::Battery));
+        assert_eq!(toggled_by(&[Item::Place(0)]), Some(Button::Places));
+    }
 
     #[test]
     fn a_dropped_path_is_one_argument() {

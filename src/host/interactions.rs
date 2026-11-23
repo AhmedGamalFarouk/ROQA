@@ -4,6 +4,12 @@ use super::*;
 impl Desktop {
     /// Opens a shell interaction with an explicit origin before injecting its opening input.
     pub(super) fn open_flyout(&mut self, hwnd: HWND, kind: crate::anchored::Kind) {
+        if self
+            .native_popup
+            .close_shown(crate::anchored::Owner(hwnd), kind)
+        {
+            return;
+        }
         let Some(surface) = self
             .surfaces
             .iter()

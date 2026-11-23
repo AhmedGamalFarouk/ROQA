@@ -1423,6 +1423,8 @@ struct Desktop {
     hover_spot: Option<(usize, Hit, Instant)>,
     native_popup: crate::anchored::Native,
     pending_popup: Option<(crate::anchored::Owner, Instant)>,
+    /// The dock button whose press just closed its own popup: its release ends that click (`swallow_release`).
+    swallow_up: Option<(HWND, Button)>,
     /// Wheel movement left over after the last whole notch on the volume bar or the open notch.
     volume_wheel: i32,
     /// Sideways wheel movement kept toward a track skip, and when the next skip is allowed (one skip per swipe).
@@ -1614,6 +1616,7 @@ impl Desktop {
             hover_spot: None,
             native_popup: Default::default(),
             pending_popup: None,
+            swallow_up: None,
             volume_wheel: 0,
             swipe: 0,
             swipe_until: Instant::now(),
@@ -4453,10 +4456,11 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 desktop.dismiss_preview();
             }
             if message.message == WM_LBUTTONUP && desktop.dock_at(message.hwnd).is_some() {
-                if !desktop.end_drag(message.hwnd, message.lParam) {
-                    let hit = desktop
-                        .dock_at(message.hwnd)
-                        .and_then(|dock| dock.dock_hit(message.lParam, desktop.dock_slots()));
+                let hit = desktop
+                    .dock_at(message.hwnd)
+                    .and_then(|dock| dock.dock_hit(message.lParam, desktop.dock_slots()));
+                let swallowed = desktop.swallow_release(message.hwnd, hit);
+                if !desktop.end_drag(message.hwnd, message.lParam) && !swallowed {
                     let clicked = desktop.activate(message.hwnd, hit);
                     desktop.recover(clicked, "Dock click");
                 }

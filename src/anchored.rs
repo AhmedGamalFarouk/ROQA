@@ -10,7 +10,7 @@ use windows::Win32::{
     Foundation::{HWND, RECT},
     System::SystemInformation::GetTickCount,
     UI::{
-        Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_B, VK_LWIN, VK_RETURN, VK_S},
+        Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_B, VK_ESCAPE, VK_LWIN, VK_RETURN, VK_S},
         WindowsAndMessaging::*,
     },
 };
@@ -172,6 +172,27 @@ impl Native {
     }
     pub fn owner(&self) -> Option<Owner> {
         self.request.as_ref().map(|r| r.owner)
+    }
+    /// The panel `owner` opened as `kind`, once it shows (not while it is still opening).
+    fn shown(&self, owner: Owner, kind: Kind) -> Option<WindowKey> {
+        self.request
+            .as_ref()
+            .filter(|r| r.owner == owner && r.kind == kind)
+            .and_then(|r| r.window)
+    }
+    /// A second click on the button whose panel shows: true when it does, and Esc closes it if it holds the
+    /// foreground, the panel's own close. Its hide event then releases the request like any dismissal.
+    pub fn close_shown(&self, owner: Owner, kind: Kind) -> bool {
+        let Some(window) = self.shown(owner, kind) else {
+            return false;
+        };
+        // SAFETY: scalar foreground query; the key goes only to the panel that is in front.
+        if unsafe { GetForegroundWindow() }.0 as usize == window.handle
+            && !dock::send_keys(&[VK_ESCAPE])
+        {
+            eprintln!("Shell popup: Windows refused the Esc key");
+        }
+        true
     }
     pub fn cancel(&mut self) {
         self.request = None;
