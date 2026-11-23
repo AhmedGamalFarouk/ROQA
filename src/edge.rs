@@ -1,7 +1,8 @@
 //! Edge sliders (features B2.5): volume on each monitor's right edge, brightness on its left. A thin
 //! invisible non-activating strip in the middle third of the edge waits for the pointer; after a short
 //! hover the same window grows into a small pill you drag (or scroll) to set the level, and shrinks back
-//! to the strip after the pointer leaves. Clicking the volume icon lists the output devices.
+//! to the strip after the pointer leaves. Clicking the volume icon lists the output devices. Beside the
+//! volume pill, one capsule slider per app playing sound; Core Audio session events keep the rows current.
 //!
 //! Everything is event-driven: mouse messages feed `Hover`, whose two deadlines are the only waits, and a
 //! pill is painted only when what it shows changes. The pill's canvas exists only while shown.
@@ -25,7 +26,7 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::LPARAM,
+        Foundation::{LPARAM, RECT},
         System::Threading::GetCurrentThreadId,
         UI::{
             Controls::WM_MOUSELEAVE,
@@ -204,6 +205,37 @@ pub fn layout(dpi: u32, kind: Kind, wide: bool) -> Layout {
     }
 }
 
+/// `pill` with a panel of `apps` mixer rows beside it, on the side away from the edge, and that panel;
+/// with no apps, `pill` unchanged and no panel.
+pub fn mixed(pill: Layout, dpi: u32, kind: Kind, apps: usize) -> (Layout, Option<Bounds>) {
+    if apps == 0 {
+        return (pill, None);
+    }
+    let margin = px(MARGIN, dpi);
+    let (_, mut panel) = list_layout(dpi, apps);
+    let room = panel.width + margin;
+    let height = pill.size.1.max(panel.height + 2 * margin);
+    let (dx, dy) = (
+        if kind.right() { room } else { 0 },
+        (height - pill.size.1) / 2,
+    );
+    let shift = |b: Bounds| Bounds {
+        x: b.x + dx,
+        y: b.y + dy,
+        ..b
+    };
+    panel.x = if kind.right() { margin } else { pill.size.0 };
+    panel.y = (height - panel.height) / 2;
+    let layout = Layout {
+        size: (pill.size.0 + room, height),
+        pill: shift(pill.pill),
+        track: shift(pill.track),
+        icon: shift(pill.icon),
+        caption: shift(pill.caption),
+    };
+    (layout, Some(panel))
+}
+
 /// The level a pointer at window row `y` means: 100 at the top of the track, 0 at its bottom, clamped.
 pub fn level_at(y: i32, layout: &Layout) -> u8 {
     let (top, height) = (layout.track.y, layout.track.height.max(1));
@@ -256,7 +288,11 @@ pub fn row_rect(dpi: u32, panel: Bounds, index: usize) -> Bounds {
 
 /// The row under window point `(x, y)`.
 pub fn row_at(dpi: u32, rows: usize, x: i32, y: i32) -> Option<usize> {
-    let (_, panel) = list_layout(dpi, rows);
+    row_in(dpi, list_layout(dpi, rows).1, rows, x, y)
+}
+
+/// The row of `panel` under window point `(x, y)`.
+fn row_in(dpi: u32, panel: Bounds, rows: usize, x: i32, y: i32) -> Option<usize> {
     (0..rows).find(|&index| {
         let row = row_rect(dpi, panel, index);
         (row.x..row.x + row.width).contains(&x) && (row.y..row.y + row.height).contains(&y)
@@ -423,10 +459,7 @@ enum Mode {
     /// count devices first.
     List {
         devices: Vec<Device>,
-        apps: Vec<App>,
         hover: Option<usize>,
-        /// The app whose slider the pointer is dragging.
-        grab: Option<usize>,
     },
 }
 impl Mode {
@@ -445,10 +478,12 @@ enum View {
         dim: bool,
         caption: String,
         unsupported: bool,
+        /// Each app's level and mute, and whether its icon has arrived (the panel beside the pill).
+        apps: Vec<(u8, bool, bool)>,
     },
     List {
         hover: Option<usize>,
-        /// Each app's level and mute, and whether its icon has arrived.
+        /// As in `Level`.
         apps: Vec<(u8, bool, bool)>,
     },
 }
@@ -465,6 +500,12 @@ struct Slider {
     /// Hidden while a full-screen app covers the monitor.
     suppressed: bool,
     mode: Mode,
+    /// The apps playing sound (volume only), beside the pill and after the devices in the list.
+    apps: Vec<App>,
+    /// The `Audio::apps_epoch` the apps were read at; `None` since the pill opened.
+    apps_read: Option<u32>,
+    /// The app whose slider the pointer is dragging.
+    grab: Option<usize>,
     drawn: Option<View>,
     /// The level being dragged, shown instead of the device's until the drag ends.
     drag: Option<u8>,
@@ -524,6 +565,9 @@ impl Slider {
             tracking: false,
             suppressed: false,
             mode: Mode::Level,
+            apps: Vec::new(),
+            apps_read: None,
+            grab: None,
             drawn: None,
             drag: None,
             wheel: 0,
@@ -544,7 +588,23 @@ impl Slider {
         self.kind == Kind::Brightness && self.brightness == Reading::Unsupported
     }
     fn layout(&self) -> Layout {
-        layout(self.dpi, self.kind, self.wide())
+        self.mixed().0
+    }
+    /// The pill's layout and the mixer panel beside it, if any apps are playing.
+    fn mixed(&self) -> (Layout, Option<Bounds>) {
+        let pill = layout(self.dpi, self.kind, self.wide());
+        mixed(pill, self.dpi, self.kind, self.apps.len())
+    }
+    /// The panel the app rows are in and the row number of the first: after the devices in the list,
+    /// alone beside the pill.
+    fn app_rows(&self) -> Option<(Bounds, usize)> {
+        match &self.mode {
+            Mode::List { devices, .. } => {
+                let (_, panel) = list_layout(self.dpi, Mode::rows(devices, &self.apps));
+                Some((panel, devices.len()))
+            }
+            Mode::Level => self.mixed().1.map(|panel| (panel, 0)),
+        }
     }
     /// The level shown: the drag's, else the device's.
     fn percent(&self, audio: &Audio) -> Option<u8> {
@@ -586,6 +646,9 @@ impl Slider {
         self.canvas = None;
         self.drawn = None;
         self.mode = Mode::Level;
+        self.apps.clear();
+        self.apps_read = None;
+        self.grab = None;
         self.wheel = 0;
         self.input = None;
         self.read_due = None;
@@ -633,20 +696,14 @@ impl Slider {
                 if self.drag.is_some() {
                     if message.wParam.0 & MK_LBUTTON == 0 {
                         self.end_drag(); // the release was lost
-                    } else if matches!(self.mode, Mode::List { .. }) {
+                    } else if self.grab.is_some() {
                         self.mix_to(x);
                     } else {
                         self.drag_to(y, audio);
                     }
-                } else if let Mode::List {
-                    devices,
-                    apps,
-                    hover,
-                    ..
-                } = &mut self.mode
-                {
+                } else if let Mode::List { devices, hover } = &mut self.mode {
                     // Only a device row lifts; an app row is a slider.
-                    *hover = row_at(self.dpi, Mode::rows(devices, apps), x, y)
+                    *hover = row_at(self.dpi, Mode::rows(devices, &self.apps), x, y)
                         .filter(|&row| row < devices.len());
                 }
             }
@@ -697,45 +754,47 @@ impl Slider {
         self.tracking = unsafe { TrackMouseEvent(&mut request) }.is_ok();
     }
     fn press(&mut self, x: i32, y: i32, audio: &Audio) {
-        match &mut self.mode {
-            Mode::List {
-                devices,
-                apps,
-                grab,
-                ..
-            } => {
-                let Some(row) = row_at(self.dpi, Mode::rows(devices, apps), x, y) else {
-                    return;
-                };
-                if let Some(device) = devices.get(row) {
-                    let device = device.clone();
-                    self.choose(device);
-                } else {
-                    let (_, panel) = list_layout(self.dpi, Mode::rows(devices, apps));
-                    let cell = row_rect(self.dpi, panel, row);
-                    let Some(app) = apps.get_mut(row - devices.len()) else {
-                        return; // the note row
-                    };
-                    if x < cell.x + px(MIX_ICON, self.dpi) {
-                        app.toggle_mute();
-                    } else {
-                        *grab = Some(row - devices.len());
-                        // SAFETY: captures the pointer for this thread's own live window.
-                        unsafe { SetCapture(self.window.0) };
-                        self.drag = Some(0);
-                        self.mix_to(x);
-                    }
-                }
+        let (layout, mixer) = self.mixed();
+        if let Mode::List { devices, .. } = &self.mode {
+            let first = devices.len();
+            let row = row_at(self.dpi, Mode::rows(devices, &self.apps), x, y);
+            match (row, row.and_then(|row| devices.get(row).cloned())) {
+                (_, Some(device)) => self.choose(device),
+                (Some(row), None) => self.press_app(row - first, x),
+                (None, None) => {}
             }
-            Mode::Level => {
-                if self.kind == Kind::Volume && on_icon(x, y, &self.layout(), self.dpi) {
-                    self.open_devices(audio);
-                } else if self.percent(audio).is_some() {
-                    // SAFETY: captures the pointer for this thread's own live window.
-                    unsafe { SetCapture(self.window.0) };
-                    self.drag_to(y, audio);
-                }
+        } else if let Some(panel) = mixer
+            && (panel.x..panel.x + panel.width).contains(&x)
+        {
+            // The panel's own padding does nothing; only its rows do.
+            if let Some(index) = row_in(self.dpi, panel, self.apps.len(), x, y) {
+                self.press_app(index, x);
             }
+        } else if self.kind == Kind::Volume && on_icon(x, y, &layout, self.dpi) {
+            self.open_devices(audio);
+        } else if self.percent(audio).is_some() {
+            // SAFETY: captures the pointer for this thread's own live window.
+            unsafe { SetCapture(self.window.0) };
+            self.drag_to(y, audio);
+        }
+    }
+    /// A press on app `index`'s row at column `x`: its icon mutes it, the rest grabs its slider.
+    fn press_app(&mut self, index: usize, x: i32) {
+        let Some((panel, first)) = self.app_rows() else {
+            return;
+        };
+        let cell = row_rect(self.dpi, panel, first + index);
+        let Some(app) = self.apps.get_mut(index) else {
+            return; // the note row
+        };
+        if x < cell.x + px(MIX_ICON, self.dpi) {
+            app.toggle_mute();
+        } else {
+            self.grab = Some(index);
+            // SAFETY: captures the pointer for this thread's own live window.
+            unsafe { SetCapture(self.window.0) };
+            self.drag = Some(0);
+            self.mix_to(x);
         }
     }
     /// Makes `device` the default output and returns to the pill.
@@ -757,15 +816,11 @@ impl Slider {
         if devices.is_empty() {
             return open_sound_settings();
         }
-        // Windows is asked for the apps once, here; nothing watches them while the list is open.
-        let apps = audio.apps();
-        match self.resize_to(list_layout(self.dpi, Mode::rows(&devices, &apps)).0) {
+        match self.resize_to(list_layout(self.dpi, Mode::rows(&devices, &self.apps)).0) {
             Ok(_) => {
                 self.mode = Mode::List {
                     devices,
-                    apps,
                     hover: None,
-                    grab: None,
                 };
                 self.drawn = None;
             }
@@ -828,25 +883,16 @@ impl Slider {
     }
     /// Sets the grabbed app's level from the pointer's column.
     fn mix_to(&mut self, x: i32) {
-        let Mode::List {
-            devices,
-            apps,
-            grab: Some(grab),
-            ..
-        } = &mut self.mode
-        else {
+        let (Some(grab), Some((panel, first))) = (self.grab, self.app_rows()) else {
             return;
         };
-        let (_, panel) = list_layout(self.dpi, Mode::rows(devices, apps));
-        let row = row_rect(self.dpi, panel, devices.len() + *grab);
-        if let Some(app) = apps.get_mut(*grab) {
+        let row = row_rect(self.dpi, panel, first + grab);
+        if let Some(app) = self.apps.get_mut(grab) {
             app.set(mix_percent(x, row));
         }
     }
     fn end_drag(&mut self) {
-        if let Mode::List { grab, .. } = &mut self.mode {
-            *grab = None;
-        }
+        self.grab = None;
         if self.drag.take().is_some() {
             // SAFETY: releases this thread's own capture.
             let _ = unsafe { ReleaseCapture() };
@@ -870,14 +916,42 @@ impl Slider {
 
     // Per pass.
 
+    /// Reads the apps again when Core Audio says they changed, or first after the pill opens, and fits
+    /// the window to the new rows. A drag on an app that is still there keeps going.
+    fn sync_apps(&mut self, audio: &Audio) {
+        let epoch = audio.apps_epoch();
+        if self.kind != Kind::Volume || self.canvas.is_none() || self.apps_read == Some(epoch) {
+            return;
+        }
+        self.apps_read = Some(epoch);
+        let grabbed = self.grab.and_then(|index| self.apps.get(index));
+        let grabbed = grabbed.map(|app| app.path.clone());
+        let held = grabbed.is_some();
+        self.apps = audio.apps();
+        self.grab = grabbed.and_then(|path| self.apps.iter().position(|app| app.path == path));
+        if held && self.grab.is_none() {
+            self.end_drag(); // the dragged app stopped
+        }
+        let size = match &self.mode {
+            Mode::List { devices, .. } => list_layout(self.dpi, Mode::rows(devices, &self.apps)).0,
+            Mode::Level => self.layout().size,
+        };
+        self.drawn = None;
+        if let Err(error) = self.resize_to(size) {
+            eprintln!("Edge slider: mixer: {error}");
+            self.close();
+        }
+    }
     fn view(&self, audio: &Audio) -> View {
+        let apps = self
+            .apps
+            .iter()
+            .map(|app| (app.percent, app.muted, app.icon.is_some()))
+            .collect();
         match &self.mode {
-            Mode::List { hover, apps, .. } => View::List {
+            Mode::List { hover, .. } => View::List {
                 hover: *hover,
-                apps: apps
-                    .iter()
-                    .map(|app| (app.percent, app.muted, app.icon.is_some()))
-                    .collect(),
+                apps,
             },
             Mode::Level => {
                 let unsupported =
@@ -899,6 +973,7 @@ impl Slider {
                         format!("{percent}%")
                     },
                     unsupported,
+                    apps,
                 }
             }
         }
@@ -922,10 +997,31 @@ impl Slider {
                         dim,
                         caption,
                         unsupported,
+                        ..
                     },
                     _,
                 ) => {
-                    let layout = self.layout();
+                    let (layout, mixer) = self.mixed();
+                    // The panel is drawn first over the whole surface, then only the pill's part.
+                    let update = mixer.map(|panel| {
+                        let rows = list_rows(self.dpi, panel, &[], &self.apps);
+                        let margin = px(MARGIN, self.dpi);
+                        let pill = layout.pill;
+                        let scene = ListScene {
+                            reveal: 1.0,
+                            dpi: self.dpi,
+                            panel,
+                            rows: &rows,
+                            hover: None,
+                        };
+                        canvas.paint_list(&scene).map(|()| RECT {
+                            left: (pill.x - margin).max(0),
+                            top: (pill.y - margin).max(0),
+                            right: (pill.x + pill.width + margin).min(layout.size.0),
+                            bottom: (pill.y + pill.height + margin).min(layout.size.1),
+                        })
+                    });
+                    let update = update.transpose()?;
                     canvas.paint_slider(&SliderScene {
                         dpi: self.dpi,
                         layout: &layout,
@@ -935,35 +1031,12 @@ impl Slider {
                         pressed: self.drag.is_some(),
                         caption,
                         note: unsupported.then(|| self.kind.right()),
+                        update,
                     })
                 }
-                (View::List { hover, .. }, Mode::List { devices, apps, .. }) => {
-                    let (_, panel) = list_layout(self.dpi, Mode::rows(devices, apps));
-                    let rows: Vec<ListRow> = devices
-                        .iter()
-                        .map(|device| (device.name.as_str(), device.current, None, None))
-                        .chain(apps.iter().map(|app| {
-                            (
-                                app.name.as_str(),
-                                false,
-                                app.icon.as_deref(),
-                                Some((app.percent, app.muted)),
-                            )
-                        }))
-                        .chain(
-                            apps.is_empty()
-                                .then_some(("Nothing is playing", false, None, None)),
-                        )
-                        .enumerate()
-                        .map(|(index, (name, current, icon, level))| ListRow {
-                            name,
-                            current,
-                            icon,
-                            room: false,
-                            level,
-                            rect: row_rect(self.dpi, panel, index),
-                        })
-                        .collect();
+                (View::List { hover, .. }, Mode::List { devices, .. }) => {
+                    let (_, panel) = list_layout(self.dpi, Mode::rows(devices, &self.apps));
+                    let rows = list_rows(self.dpi, panel, devices, &self.apps);
                     canvas.paint_list(&ListScene {
                         reveal: 1.0,
                         dpi: self.dpi,
@@ -982,6 +1055,41 @@ impl Slider {
             _ => self.drawn = Some(view),
         }
     }
+}
+
+/// The rows of `panel`: each device, then each app as a mixer row, or one saying none play. Beside the
+/// pill there are no devices, and never the note: the panel shows only while apps play.
+fn list_rows<'a>(
+    dpi: u32,
+    panel: Bounds,
+    devices: &'a [Device],
+    apps: &'a [App],
+) -> Vec<ListRow<'a>> {
+    devices
+        .iter()
+        .map(|device| (device.name.as_str(), device.current, None, None))
+        .chain(apps.iter().map(|app| {
+            (
+                app.name.as_str(),
+                false,
+                app.icon.as_deref(),
+                Some((app.percent, app.muted)),
+            )
+        }))
+        .chain(
+            apps.is_empty()
+                .then_some(("Nothing is playing", false, None, None)),
+        )
+        .enumerate()
+        .map(|(index, (name, current, icon, level))| ListRow {
+            name,
+            current,
+            icon,
+            room: false,
+            level,
+            rect: row_rect(dpi, panel, index),
+        })
+        .collect()
 }
 
 /// Asks the host's icon cache for an app's icon: the cached one, or `None` while it is on its way.
@@ -1081,12 +1189,11 @@ impl Edges {
                 slider.settle(Reading::Unsupported, graphics, palette);
             }
             slider.apply_input(audio);
-            if let Mode::List { apps, .. } = &mut slider.mode {
-                // An icon the service has not extracted yet is asked for again on each pass.
-                for app in apps.iter_mut().filter(|app| app.icon.is_none()) {
-                    let identity = Identity::Executable(app.path.clone());
-                    app.icon = icon(&identity, icons::sources(&identity, None));
-                }
+            slider.sync_apps(audio);
+            // An icon the service has not extracted yet is asked for again on each pass.
+            for app in slider.apps.iter_mut().filter(|app| app.icon.is_none()) {
+                let identity = Identity::Executable(app.path.clone());
+                app.icon = icon(&identity, icons::sources(&identity, None));
             }
             let target = slider.target();
             let read = std::mem::take(&mut slider.read_wanted);
@@ -1122,6 +1229,8 @@ impl Edges {
                 wait = Some(wait.map_or(due, |soonest| soonest.min(due)));
             }
         }
+        // Session events are subscribed to only while a volume pill shows.
+        audio.watch_apps(self.wants_audio());
         wait
     }
     /// The brightness worker, started on first need.
@@ -1466,5 +1575,51 @@ mod tests {
         settings.edge_volume = true;
         assert!(Kind::Volume.enabled(&settings) && !Kind::Brightness.enabled(&settings));
         assert!(Kind::Volume.right() && !Kind::Brightness.right());
+    }
+
+    #[test]
+    fn the_mixer_panel_sits_beside_the_pill_away_from_the_edge() {
+        let pill = layout(96, Kind::Volume, false);
+        // No apps: the pill alone, as before.
+        assert_eq!(mixed(pill, 96, Kind::Volume, 0), (pill, None));
+        // Two apps on the right edge: the panel on the left, the pill keeps its place at the edge.
+        let (wide, panel) = mixed(pill, 96, Kind::Volume, 2);
+        let panel = panel.unwrap();
+        assert_eq!(wide.size, (60 + 258, 216));
+        assert_eq!((panel.x, panel.width, panel.height), (8, 250, 80));
+        assert_eq!(panel.y, (216 - 80) / 2);
+        assert_eq!(wide.pill.x + wide.pill.width + 8, wide.size.0);
+        assert_eq!(wide.pill.x - (panel.x + panel.width), 8);
+        assert_eq!(
+            (wide.pill.y, wide.track.height),
+            (pill.pill.y, pill.track.height)
+        );
+        // Six apps are taller than the pill: the window grows and the pill is centred in it.
+        let (tall, panel) = mixed(pill, 96, Kind::Volume, crate::audio::MAX_APPS);
+        let panel = panel.unwrap();
+        assert_eq!(tall.size.1, panel.height + 16);
+        assert_eq!(tall.pill.y, (tall.size.1 - pill.pill.height) / 2);
+        // The level still maps to the moved track.
+        assert_eq!(level_at(tall.track.y, &tall), 100);
+        assert_eq!(level_at(tall.track.y + tall.track.height, &tall), 0);
+        // On the left edge the panel goes after the pill.
+        let left = layout(96, Kind::Brightness, false);
+        let (_, panel) = mixed(left, 96, Kind::Brightness, 1);
+        assert_eq!(panel.unwrap().x, left.size.0);
+    }
+
+    #[test]
+    fn rows_are_found_in_the_panel_they_belong_to() {
+        let (_, panel) = mixed(layout(96, Kind::Volume, false), 96, Kind::Volume, 2);
+        let panel = panel.unwrap();
+        let second = row_rect(96, panel, 1);
+        assert_eq!(row_in(96, panel, 2, second.x + 1, second.y + 1), Some(1));
+        assert_eq!(
+            row_in(96, panel, 2, panel.x + panel.width + 20, second.y),
+            None
+        );
+        // The list's own lookup is the same one on the list's panel.
+        let first = row_rect(96, list_layout(96, 3).1, 0);
+        assert_eq!(row_at(96, 3, first.x, first.y), Some(0));
     }
 }

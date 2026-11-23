@@ -60,7 +60,7 @@
 | **Graphics** | Direct2D 1.1, DirectWrite, WIC, DirectComposition via Windows SDK |
 | **Windowing & Events** | Pure Win32 (`CreateWindowExW`, `SetWinEventHook`) |
 | **Media Integration** | WinRT GSMTC (`Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager`) |
-| **Audio Endpoints** | Windows Core Audio APIs (`IMMDeviceEnumerator`, `IAudioEndpointVolume`) |
+| **Audio Endpoints** | Windows Core Audio APIs (`IMMDeviceEnumerator`, `IAudioEndpointVolume`, `IAudioSessionManager2` for per-app volume) |
 | **Weather & Networking** | Windows WinHTTP (`winhttp.dll`) with OS-managed TLS stack |
 | **Storage & Settings** | One `key=value` text file, written atomically: `%LOCALAPPDATA%\ROQA\store.roqa` |
 

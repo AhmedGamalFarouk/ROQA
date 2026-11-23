@@ -299,9 +299,10 @@ pub struct SliderScene<'a> {
     /// Muted or unsupported: the fill and icon are dimmed (the system grey text in high contrast).
     pub dim: bool,
     pub caption: &'a str,
-    /// `None`: the caption is centred in the pill. `Some(right)`: a note beside it, trailing-aligned
-    /// when the pill is on the right.
+    /// `None`: caption centred in the pill; `Some(right)`: a note beside it, on the pill's side.
     pub note: Option<bool>,
+    /// Redraws only this part (surface pixels), keeping the mixer panel drawn beside the pill.
+    pub update: Option<RECT>,
 }
 pub struct ListScene<'a> {
     pub reveal: f32,
@@ -516,12 +517,11 @@ impl Canvas {
             Ok(())
         })
     }
-    /// An edge slider's pill (`edge.rs`): the level fill in the accent, the icon at the bottom and the
-    /// caption (the percent while dragging, or why it does nothing).
+    /// An edge slider's pill (`edge.rs`): accent level fill, icon at the bottom, caption at the top.
     pub fn paint_slider(&self, scene: &SliderScene) -> Result<()> {
         let p = self.palette;
         let scale = scene.dpi as f32 / 96.0;
-        self.draw(|context, rect| {
+        self.draw_within(scene.update, |context, rect| {
             let at = |b: Bounds| surface_rect(rect, b);
             let layout = scene.layout;
             self.panel(context, at(layout.pill), layout.pill.width as f32 / 2.0)?;

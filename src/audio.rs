@@ -5,7 +5,11 @@
 //! callbacks may run on any Core Audio thread: they only set a dirty bit and post one scalar wake,
 //! so they never block, panic, register or unregister. Every bind, read and write happens on the
 //! host (STA) thread.
+//!
+//! While a volume pill shows, the mixer also watches the default output's app sessions (new ones,
+//! each one's state and level), so its rows follow apps that start or stop sound.
 use crate::{icons::IconPixels, window_source::process_executable};
+use std::cell::{Cell, RefCell};
 use std::sync::{
     Arc,
     atomic::{AtomicU32, AtomicU64, Ordering},
@@ -14,13 +18,15 @@ use windows::{
     Win32::{
         Foundation::PROPERTYKEY,
         Media::Audio::{
-            AUDIO_VOLUME_NOTIFICATION_DATA, AudioSessionStateActive, DEVICE_STATE,
-            DEVICE_STATE_ACTIVE, EDataFlow, ERole,
+            AUDIO_VOLUME_NOTIFICATION_DATA, AudioSessionDisconnectReason, AudioSessionState,
+            AudioSessionStateActive, DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole,
             Endpoints::{
                 IAudioEndpointVolume, IAudioEndpointVolumeCallback,
                 IAudioEndpointVolumeCallback_Impl, IAudioMeterInformation,
             },
-            IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice,
+            IAudioSessionControl, IAudioSessionControl2, IAudioSessionEnumerator,
+            IAudioSessionEvents, IAudioSessionEvents_Impl, IAudioSessionManager2,
+            IAudioSessionNotification, IAudioSessionNotification_Impl, IMMDevice,
             IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
             ISimpleAudioVolume, MMDeviceEnumerator, eConsole, eRender,
         },
@@ -33,7 +39,7 @@ use windows::{
         },
         UI::WindowsAndMessaging::WM_APP,
     },
-    core::{GUID, Interface, PCWSTR, Result, implement},
+    core::{BOOL, GUID, Interface, PCWSTR, Ref, Result, implement},
 };
 
 /// The visualizer's bar count: one per meter sample, oldest first.
@@ -48,6 +54,10 @@ const REBIND: u32 = 1;
 const VOLUME: u32 = 2;
 /// With `VOLUME`: the change was made by something other than ROQA (a volume key, another app).
 const EXTERNAL: u32 = 4;
+/// An app session appeared, started or stopped sound, or went away: the watch is rebuilt.
+const SESSIONS: u32 = 8;
+/// An app's level or mute changed outside ROQA: the mixer reads its rows again.
+const APP_LEVEL: u32 = 16;
 /// Event context of ROQA's own changes. Their notifications wake nothing: the setter already
 /// queued its own re-read.
 const ECHO: GUID = GUID::from_u128(0x9d8f3897_b1df_4a66_add8_1c91eefc0f51);
@@ -79,8 +89,8 @@ pub struct Device {
 /// The most apps the mixer lists.
 pub const MAX_APPS: usize = 6;
 
-/// An app with sound playing on the default output. Its session interfaces are held only while the
-/// volume list shows them; nothing is watched, so the level is as of the moment the list opened.
+/// An app with sound playing on the default output. Its session interfaces are held only while a
+/// volume pill or list shows it; `Audio::apps_epoch` says when the rows must be read again.
 pub struct App {
     pub name: String,
     /// The lowercase executable path, which is also the icon's identity.
@@ -295,6 +305,114 @@ impl IAudioEndpointVolumeCallback_Impl for VolumeEvents_Impl {
     }
 }
 
+#[implement(IAudioSessionNotification)]
+struct NewSessions(Arc<Wake>);
+impl IAudioSessionNotification_Impl for NewSessions_Impl {
+    fn OnSessionCreated(&self, _: Ref<IAudioSessionControl>) -> Result<()> {
+        self.0.raise(SESSIONS);
+        Ok(())
+    }
+}
+
+#[implement(IAudioSessionEvents)]
+struct SessionEvents(Arc<Wake>);
+impl IAudioSessionEvents_Impl for SessionEvents_Impl {
+    fn OnDisplayNameChanged(&self, _: &PCWSTR, _: *const GUID) -> Result<()> {
+        Ok(())
+    }
+    fn OnIconPathChanged(&self, _: &PCWSTR, _: *const GUID) -> Result<()> {
+        Ok(())
+    }
+    fn OnSimpleVolumeChanged(&self, _: f32, _: BOOL, context: *const GUID) -> Result<()> {
+        // SAFETY: Core Audio's context GUID is valid for this call; a null one still wakes.
+        if unsafe { context.as_ref() } != Some(&ECHO) {
+            self.0.raise(APP_LEVEL);
+        }
+        Ok(())
+    }
+    fn OnChannelVolumeChanged(&self, _: u32, _: *const f32, _: u32, _: *const GUID) -> Result<()> {
+        Ok(())
+    }
+    fn OnGroupingParamChanged(&self, _: *const GUID, _: *const GUID) -> Result<()> {
+        Ok(())
+    }
+    fn OnStateChanged(&self, _: AudioSessionState) -> Result<()> {
+        self.0.raise(SESSIONS);
+        Ok(())
+    }
+    fn OnSessionDisconnected(&self, _: AudioSessionDisconnectReason) -> Result<()> {
+        self.0.raise(SESSIONS);
+        Ok(())
+    }
+}
+
+/// The mixer's subscriptions on the default output: new sessions, and every session's state and
+/// level. Dropping it unregisters each one, then releases.
+struct Watch {
+    manager: IAudioSessionManager2,
+    created: IAudioSessionNotification,
+    sessions: Vec<(IAudioSessionControl, IAudioSessionEvents)>,
+}
+impl Drop for Watch {
+    fn drop(&mut self) {
+        // SAFETY: host thread, outside any callback; each sink is the one registered on its object.
+        unsafe {
+            if let Err(error) = self.manager.UnregisterSessionNotification(&self.created) {
+                eprintln!("Audio session event cleanup: {error}");
+            }
+            for (control, events) in &self.sessions {
+                let _ = control.UnregisterAudioSessionNotification(events);
+            }
+        }
+    }
+}
+
+/// Subscribes to `device`'s sessions. A session that cannot be watched is skipped; it still shows
+/// when the rows are read again for another reason.
+///
+/// # Safety
+/// Host thread, on a live device.
+unsafe fn watch(device: &IMMDevice, wake: &Arc<Wake>) -> Result<Watch> {
+    // SAFETY: per the contract; the sinks stay alive in `Watch` until they are unregistered.
+    unsafe {
+        let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None)?;
+        // Windows sends no new-session events before an enumerator was asked for once.
+        manager.GetSessionEnumerator()?;
+        let created: IAudioSessionNotification = NewSessions(Arc::clone(wake)).into();
+        manager.RegisterSessionNotification(&created)?;
+        let mut watch = Watch {
+            manager,
+            created,
+            sessions: Vec::new(),
+        };
+        // Listed after registering, so a session born in between is not missed.
+        let list = watch.manager.GetSessionEnumerator()?;
+        for index in 0..list.GetCount()? {
+            let Ok(control) = list.GetSession(index) else {
+                continue;
+            };
+            let events: IAudioSessionEvents = SessionEvents(Arc::clone(wake)).into();
+            if control.RegisterAudioSessionNotification(&events).is_ok() {
+                watch.sessions.push((control, events));
+            }
+        }
+        Ok(watch)
+    }
+}
+
+/// The default output's watch, or `None` (logged) when there is none to watch.
+fn open_watch(devices: Option<&Devices>, wake: &Arc<Wake>) -> Option<Watch> {
+    let enumerator = &devices?.enumerator;
+    // SAFETY: host-thread calls on the live enumerator and the device it returns.
+    unsafe {
+        enumerator
+            .GetDefaultAudioEndpoint(eRender, eConsole)
+            .and_then(|device| watch(&device, wake))
+            .inspect_err(|error| eprintln!("Audio: app sessions: {error}"))
+            .ok()
+    }
+}
+
 /// The device enumerator and its registered callback; dropping it unregisters, then releases.
 struct Devices {
     enumerator: IMMDeviceEnumerator,
@@ -397,7 +515,12 @@ fn read(volume: &IAudioEndpointVolume) -> Result<Level> {
 /// Host-thread owner of the Core Audio objects. Must be dropped on the host thread before its COM
 /// apartment guard.
 pub struct Audio {
-    // Teardown is field order: the volume callback is unregistered before the device callback.
+    // Teardown is field order: the session and volume callbacks go before the device callback.
+    watch: RefCell<Option<Watch>>,
+    /// A volume pill wants the app sessions watched (even while `watch` could not be opened).
+    watching: Cell<bool>,
+    /// Bumped whenever the apps playing sound, or their levels, may have changed.
+    apps_epoch: Cell<u32>,
     endpoint: Option<Endpoint>,
     devices: Option<Devices>,
     started: bool,
@@ -413,6 +536,9 @@ impl Audio {
     /// Idle until `start`; the calling thread is the host thread that `refresh` runs on.
     pub fn create() -> Self {
         Self {
+            watch: RefCell::new(None),
+            watching: Cell::new(false),
+            apps_epoch: Cell::new(0),
             endpoint: None,
             devices: None,
             started: false,
@@ -527,6 +653,15 @@ impl Audio {
                 .inspect_err(|error| eprintln!("Audio: level: {error}"))
                 .ok()
         });
+        if self.watching.get() && dirty & (REBIND | SESSIONS | APP_LEVEL) != 0 {
+            if dirty & (REBIND | SESSIONS) != 0 {
+                // The old sinks are unregistered before the new ones; a rebind may be another device.
+                let watch = self.watch.get_mut();
+                *watch = None;
+                *watch = open_watch(self.devices.as_ref(), &self.wake);
+            }
+            self.apps_epoch.set(self.apps_epoch.get().wrapping_add(1));
+        }
         let changed = before != self.level;
         self.elsewhere = changed && dirty & EXTERNAL != 0 && dirty & REBIND == 0;
         changed
@@ -587,6 +722,21 @@ impl Audio {
                 .inspect_err(|error| eprintln!("Audio: device list: {error}"))
                 .unwrap_or_default()
         }
+    }
+    /// Watches the app sessions while `on` (a volume pill shows) and stops when it is not; the first
+    /// call after a stop subscribes again and bumps `apps_epoch`. Host thread.
+    pub fn watch_apps(&self, on: bool) {
+        if !on {
+            self.watching.set(false);
+            *self.watch.borrow_mut() = None;
+        } else if !self.watching.replace(true) {
+            *self.watch.borrow_mut() = open_watch(self.devices.as_ref(), &self.wake);
+            self.apps_epoch.set(self.apps_epoch.get().wrapping_add(1));
+        }
+    }
+    /// Changes whenever `apps` may answer differently: compare it with the value the rows were read at.
+    pub fn apps_epoch(&self) -> u32 {
+        self.apps_epoch.get()
     }
     /// The apps playing sound on the default output now, asked once (host thread). Empty before
     /// `start` or when Windows will not say, which the list shows as nothing playing.
