@@ -246,6 +246,8 @@ pub struct NotchScene<'a> {
     pub privacy: [f32; 3],
     /// The volume bar's pointer state: the thumb grows on hover and press, and a press shows the percent.
     pub grip: Grip,
+    /// The wash behind the Media page's glance line, 0 to 1 (hover; drawn only behind a glance).
+    pub line_wash: f32,
     /// The volume bar's drawn fill in percent: it eases toward `volume`'s percent.
     pub volume_fill: f32,
     /// The Weather page's text and pictures; `Some` only while that page shows.
@@ -1150,6 +1152,12 @@ fn media_page(
     status: Option<&str>,
     p: &Palette,
 ) -> Result<()> {
+    // The host's line (a glance or a media status) can wash on hover; the default never does.
+    let wash = if status.is_some() {
+        scene.line_wash
+    } else {
+        0.0
+    };
     let status = scene
         .notice
         .is_none()
@@ -1252,24 +1260,41 @@ fn media_page(
         p,
     )?;
     let eyes_y = 72.0;
-    match status {
-        Some(line) => draw_text(
-            context,
-            line,
-            &Font {
-                size: 11.0 * scale,
-                ..font
-            },
-            D2D_RECT_F {
-                left: body.left + (centre - 56.0) * scale,
-                top: body.top + (eyes_y + 14.0) * scale,
-                right: body.left + (centre + 56.0) * scale,
-                bottom: body.top + (eyes_y + 30.0) * scale,
-            },
-            with_alpha(p.ink, p.ink_alpha(0.60 * date)),
-        ),
-        None => Ok(()),
+    let Some(line) = status else {
+        return Ok(());
+    };
+    let font = Font {
+        size: 11.0 * scale,
+        ..font
+    };
+    if wash > 0.0 {
+        // A capsule 24 high around the text, 8 each side (`layout::glance_at` is the click target).
+        let half = (text_width(line, &font)? / scale / 2.0 + 8.0).min(64.0);
+        let wash_rect = D2D_RECT_F {
+            left: body.left + (centre - half) * scale,
+            top: body.top + (eyes_y + 10.0) * scale,
+            right: body.left + (centre + half) * scale,
+            bottom: body.top + (eyes_y + 34.0) * scale,
+        };
+        // SAFETY: live draw context between BeginDraw/EndDraw; the brush is scoped to this draw.
+        unsafe {
+            let ink = with_alpha(p.ink, p.ink_alpha(0.10 * wash * date));
+            let brush = context.CreateSolidColorBrush(&ink, None)?;
+            context.FillRoundedRectangle(&rounded(wash_rect, 12.0 * scale), &brush);
+        }
     }
+    draw_text(
+        context,
+        line,
+        &font,
+        D2D_RECT_F {
+            left: body.left + (centre - 56.0) * scale,
+            top: body.top + (eyes_y + 14.0) * scale,
+            right: body.left + (centre + 56.0) * scale,
+            bottom: body.top + (eyes_y + 30.0) * scale,
+        },
+        with_alpha(p.ink, p.ink_alpha((0.60 + 0.40 * wash) * date)),
+    )
 }
 
 /// PROVISIONAL (S5): the plain pill's whole minutes left on the soonest timer, 12 DIP white 85 %, fading out
@@ -3222,6 +3247,7 @@ mod media_tests {
             eyes: None,
             privacy: [0.0; 3],
             grip: Grip::default(),
+            line_wash: 0.0,
             volume_fill: volume.map_or(0.0, |level| f32::from(level.percent)),
             weather: None,
             prayer: None,
@@ -3270,6 +3296,7 @@ mod media_tests {
                 eyes: None,
                 privacy: [0.0; 3],
                 grip: Grip::default(),
+                line_wash: 0.0,
                 volume_fill: 0.0,
                 weather: None,
                 prayer: None,
@@ -3519,6 +3546,7 @@ mod media_tests {
                 eyes: None,
                 privacy: [0.0; 3],
                 grip: Grip::default(),
+                line_wash: 0.0,
                 volume_fill: 0.0,
                 weather: None,
                 prayer: None,
@@ -3589,6 +3617,7 @@ mod media_tests {
                     eyes: None,
                     privacy: [0.0; 3],
                     grip: Grip::default(),
+                    line_wash: 0.0,
                     volume_fill: 0.0,
                     weather: None,
                     prayer: None,
@@ -3647,6 +3676,7 @@ mod media_tests {
             eyes: None,
             privacy: [0.0; 3],
             grip: Grip::default(),
+            line_wash: 0.0,
             volume_fill: 0.0,
             weather: None,
             prayer: None,

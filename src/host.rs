@@ -320,6 +320,8 @@ struct RailFx {
     pop: Tween,
     expansion: [Tween; 7],
     press: Tween,
+    /// The wash behind the Media page's glance line while the pointer is on it (`tabs::glance`).
+    line: Tween,
     /// The selected tab: it stays open (glyph and name) so the rail reads as tabs, not as dots.
     active: usize,
 }
@@ -331,11 +333,12 @@ impl RailFx {
             pop: Tween::rest(1.0),
             expansion: std::array::from_fn(|index| Tween::rest(f32::from(index == 0))),
             press: Tween::rest(0.0),
+            line: Tween::rest(0.0),
             active: 0,
         }
     }
     fn running(&self, now: Instant) -> bool {
-        [self.ind, self.pop, self.press]
+        [self.ind, self.pop, self.press, self.line]
             .iter()
             .chain(self.expansion.iter())
             .any(|tween| tween.running(now))
@@ -636,6 +639,17 @@ impl Surface {
         self.rail_fx.aim(self.tab_hover);
         self.live = true;
     }
+    fn set_line_hover(&mut self, over: bool) {
+        if over != (self.rail_fx.line.target() > 0.0) {
+            let (to, time) = if over {
+                (1.0, motion::HOVER_IN_TIME)
+            } else {
+                (0.0, motion::HOVER_OUT_TIME)
+            };
+            RailFx::go(&mut self.rail_fx.line, to, time, motion::SETTLE);
+            self.live = true;
+        }
+    }
     fn tab_rail(&self, pages: &Pages, media: bool, now: Instant) -> Option<layout::Rail> {
         pages.rail(media).map(|mut rail| {
             rail.expansion = self.rail_fx.expansion.map(|tween| tween.value(now));
@@ -650,6 +664,7 @@ impl Surface {
             } else {
                 self.set_notch_hover(false);
                 self.set_tab_hover(None);
+                self.set_line_hover(false);
             }
         }
     }
@@ -914,6 +929,7 @@ impl Surface {
             eyes: pages.eyes.map(|eyes| eyes.scene()),
             privacy: pages.dots.alpha(),
             grip: self.grip,
+            line_wash: self.rail_fx.line.value(now),
             volume_fill,
             weather: [Some(page), self.page_from]
                 .iter()
@@ -3735,6 +3751,10 @@ impl Desktop {
                     let tab = rail.and_then(|rail| {
                         layout::rail_tab_at(width, surface.dpi, progress, media, rail, (x, y))
                     });
+                    let plain = !media && self.media.view().status().is_none();
+                    surface.set_line_hover(
+                        plain && layout::glance_at(width, surface.dpi, progress, (x, y)),
+                    );
                     if tab != surface.tab_hover {
                         surface.set_tab_hover(tab);
                         surface.request(Repaint::Full);
