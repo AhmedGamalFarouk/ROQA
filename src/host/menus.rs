@@ -267,7 +267,8 @@ impl Desktop {
     }
     /// Files dropped on a dock slot open with that app: its program is started with the paths. A group of apps,
     /// a folder and an app with no program path (a packaged one) are told so instead. A program on a network share is
-    /// not looked at here: `dock::launch_with` starts it on the network worker.
+    /// not looked at here: `dock::launch_with` starts it on the network worker. Folders dropped anywhere else on the
+    /// dock (a gap, a button, a pinned folder) are pinned, each a stack.
     pub(super) fn drop_on_dock(&mut self, hwnd: HWND, x: i32, paths: &[String]) {
         let Some(dock) = self.dock_at(hwnd) else {
             return;
@@ -279,44 +280,43 @@ impl Desktop {
             dock.dpi,
             self.dock_slots(),
         );
-        let Some(Hit::Slot(slot)) = hit else {
-            return;
-        };
-        let Some(item) = self.dock_items.get(slot) else {
-            return;
-        };
-        let program = match &item.identity {
-            Identity::Executable(path) => Some(path.as_str()),
-            _ => item.executable.as_deref(),
-        }
-        .filter(|path| {
-            item.members.is_empty()
-                && std::path::Path::new(path)
+        let item = hit
+            .and_then(Hit::slot)
+            .and_then(|slot| self.dock_items.get(slot));
+        let program = item
+            .filter(|item| item.members.is_empty())
+            .and_then(|item| match &item.identity {
+                Identity::Executable(path) => Some(path.as_str()),
+                _ => item.executable.as_deref(),
+            })
+            .filter(|path| {
+                std::path::Path::new(path)
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-                && (shelf_os::is_network(path) || std::path::Path::new(path).is_file())
-        });
+                    && (shelf_os::is_network(path) || std::path::Path::new(path).is_file())
+            });
         let quoted: Vec<_> = paths.iter().map(|path| quote_path(path)).collect();
-        let opened =
-            program.is_some_and(|program| dock::launch_with(program, Some(&quoted.join(" "))));
-        if !opened {
+        if program.is_some_and(|program| dock::launch_with(program, Some(&quoted.join(" ")))) {
+            return;
+        }
+        // A share is not touched here (it may stall the host): its stack's worker reads it on the first click.
+        let folders = paths.iter().all(|path| {
+            if shelf_os::is_network(path) {
+                crate::places::may_be_folder(path)
+            } else {
+                std::path::Path::new(path).is_dir()
+            }
+        });
+        if folders && program.is_none() {
+            self.change_pins(|pins| {
+                paths.iter().fold(false, |added, path| {
+                    pins.add(Identity::Executable(path.clone())).is_ok() || added
+                })
+            });
+        } else if item.is_some() {
             self.show_notice("That app can't open files".into(), Instant::now());
         }
     }
-    /// Runs the dock action of pinned slot `slot` (launch, focus or cycle); with `folder`, only while the slot still
-    /// holds that path, since the click that asked may be a moment old.
-    pub(super) fn run_pin(&mut self, slot: usize, folder: Option<&str>) {
-        let Some(item) = self.dock_items.get(slot) else {
-            return;
-        };
-        if folder.is_some_and(|folder| item.identity != Identity::Executable(folder.to_owned())) {
-            return;
-        }
-        if let Some(action) = dock::action(item, dock::foreground_key()) {
-            self.run_dock_action(action);
-        }
-    }
-    /// A pinned folder's stack above its dock slot: its newest files as rows; a click opens that file and an empty
     /// A file drag moved over a dock (`x` is the screen column) or left it: the slot under it starts or restarts
     /// the raise delay; `refresh_raise` fires it.
     pub(super) fn drag_over_dock(&mut self, hwnd: HWND, x: Option<i32>) {
@@ -337,6 +337,20 @@ impl Desktop {
         self.raise
             .point_after(spot, Instant::now(), dock::RAISE_DELAY);
     }
+    /// Runs the dock action of pinned slot `slot` (launch, focus or cycle); with `folder`, only while the slot still
+    /// holds that path, since the click that asked may be a moment old.
+    pub(super) fn run_pin(&mut self, slot: usize, folder: Option<&str>) {
+        let Some(item) = self.dock_items.get(slot) else {
+            return;
+        };
+        if folder.is_some_and(|folder| item.identity != Identity::Executable(folder.to_owned())) {
+            return;
+        }
+        if let Some(action) = dock::action(item, dock::foreground_key()) {
+            self.run_dock_action(action);
+        }
+    }
+    /// A pinned folder's stack above its dock slot: its newest files as rows; a click opens that file and an empty
     /// folder opens in Explorer instead.
     fn open_stack(
         &mut self,
