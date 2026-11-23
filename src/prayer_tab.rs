@@ -143,6 +143,39 @@ pub struct View {
     pub rows: Vec<Row>,
     /// Where the sun is on the page's arc, 0 (Fajr) to 1 (Isha), moving through the five stops.
     pub sun: f32,
+    pub moon: Moon,
+}
+
+/// Today's moon: its phase name, the lit share of the disc (0 to 1) and whether the lit limb is on the right.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Moon {
+    pub name: &'static str,
+    pub lit: f32,
+    pub right: bool,
+}
+
+/// The moon at local noon of `ymd` from the mean synodic month (within a day of the true phase).
+/// South of the equator the same moon is seen upside down, so the lit limb swaps sides.
+pub fn moon(ymd: Ymd, south: bool) -> Moon {
+    const MONTH: f64 = 29.530_588_853;
+    // The new moon of 2000-01-06 18:14 UTC, in days since 1970-01-01.
+    const NEW: f64 = 10_962.0 + 18.233 / 24.0;
+    const NAMES: [&str; 8] = [
+        "New moon",
+        "Waxing crescent",
+        "First quarter",
+        "Waxing gibbous",
+        "Full moon",
+        "Waning gibbous",
+        "Last quarter",
+        "Waning crescent",
+    ];
+    let age = ((day_number(ymd) as f64 + 0.5 - NEW) / MONTH).rem_euclid(1.0);
+    Moon {
+        name: NAMES[(age * 8.0 + 0.5) as usize % 8],
+        lit: ((1.0 - (age * std::f64::consts::TAU).cos()) / 2.0) as f32,
+        right: (age < 0.5) != south,
+    }
 }
 
 /// The sun's place on the five-stop arc: the stop index plus the share of the interval to the next stop, over 4.
@@ -198,6 +231,7 @@ pub fn view(
         left: short,
         hijri,
         sun: sun(FIVE.map(|p| times[p as usize]), local.secs),
+        moon: moon(local.ymd, params.lat < 0.0),
         rows: FIVE
             .iter()
             .enumerate()
@@ -614,6 +648,29 @@ mod tests {
         assert_eq!(hijri_text("12|11|2026"), None);
         assert_eq!(hijri_text("x|1|1448"), None);
         assert_eq!(hijri_text(""), None);
+    }
+
+    #[test]
+    fn the_moon_follows_known_new_and_full_moons() {
+        // New: 2000-01-06, 2024-04-08 (eclipse), 2026-11-09. Full: 2000-01-21 (eclipse), 2026-11-24.
+        for day in [(2000, 1, 6), (2024, 4, 8), (2026, 11, 9)] {
+            let m = moon(day, false);
+            assert_eq!(m.name, "New moon", "{day:?}");
+            assert!(m.lit < 0.05, "{day:?} {}", m.lit);
+        }
+        for day in [(2000, 1, 21), (2026, 11, 24)] {
+            let m = moon(day, false);
+            assert_eq!(m.name, "Full moon", "{day:?}");
+            assert!(m.lit > 0.95, "{day:?} {}", m.lit);
+        }
+        // First quarter 2026-11-17: half lit, on the right in the north and on the left in the south.
+        let north = moon((2026, 11, 17), false);
+        assert_eq!(north.name, "First quarter");
+        assert!((north.lit - 0.5).abs() < 0.15, "{}", north.lit);
+        assert!(north.right && !moon((2026, 11, 17), true).right);
+        assert_eq!(moon((2026, 11, 12), false).name, "Waxing crescent");
+        assert_eq!(moon((2026, 11, 28), false).name, "Waning gibbous");
+        assert!(!moon((2026, 11, 28), false).right);
     }
 
     #[test]

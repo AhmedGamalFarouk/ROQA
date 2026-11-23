@@ -514,6 +514,71 @@ pub(super) fn draw(
     Ok(())
 }
 
+/// The moon in `square` (physical pixels): the icon stroke round the disc and the lit share filled inside it,
+/// bounded by the limb on the `right` (or left) and the terminator, a half ellipse `|1 - 2 lit|` of the radius wide.
+pub(super) fn moon(
+    context: &ID2D1RenderTarget,
+    square: D2D_RECT_F,
+    lit: f32,
+    right: bool,
+    color: D2D1_COLOR_F,
+) -> Result<()> {
+    let side = square.right - square.left;
+    let radius = 9.0 * side / GRID;
+    let (x, y) = (
+        (square.left + square.right) / 2.0,
+        (square.top + square.bottom) / 2.0,
+    );
+    let sweep = |clockwise: bool| {
+        if clockwise {
+            D2D1_SWEEP_DIRECTION_CLOCKWISE
+        } else {
+            D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE
+        }
+    };
+    let arc = |to: f32, width: f32, clockwise: bool| D2D1_ARC_SEGMENT {
+        point: Vector2 { X: x, Y: to },
+        size: D2D_SIZE_F {
+            width,
+            height: radius,
+        },
+        rotationAngle: 0.0,
+        sweepDirection: sweep(clockwise),
+        arcSize: D2D1_ARC_SIZE_SMALL,
+    };
+    // SAFETY: context is live between BeginDraw/EndDraw; the brush, geometry and sink are local, and the sink
+    // is closed before the geometry is filled.
+    unsafe {
+        let brush = context.CreateSolidColorBrush(&color, None)?;
+        let shape = context.GetFactory()?.CreatePathGeometry()?;
+        let sink = shape.Open()?;
+        sink.BeginFigure(
+            Vector2 {
+                X: x,
+                Y: y - radius,
+            },
+            D2D1_FIGURE_BEGIN_FILLED,
+        );
+        sink.AddArc(&arc(y + radius, radius, right));
+        // A crescent's terminator bows toward the lit limb, a gibbous moon's away from it.
+        sink.AddArc(&arc(
+            y - radius,
+            radius * (1.0 - 2.0 * lit).abs(),
+            right != (lit < 0.5),
+        ));
+        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink.Close()?;
+        context.FillGeometry(&shape, &brush, None);
+        let disc = D2D1_ELLIPSE {
+            point: Vector2 { X: x, Y: y },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        context.DrawEllipse(&disc, &brush, stroke_pixels(side), None);
+    }
+    Ok(())
+}
+
 thread_local! {
     static DC_TARGET: RefCell<Option<ID2D1DCRenderTarget>> = const { RefCell::new(None) };
 }
@@ -704,6 +769,46 @@ mod tests {
                 Seg::L(4.0, 5.0),
             ]
         );
+    }
+
+    #[test]
+    fn the_moon_draws_at_every_phase_on_either_side() {
+        use windows::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC};
+        let rect = windows::Win32::Foundation::RECT {
+            right: 16,
+            bottom: 16,
+            ..Default::default()
+        };
+        let square = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: 16.0,
+            bottom: 16.0,
+        };
+        // SAFETY: a memory DC made and deleted here; the factory and target are local.
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            let factory: ID2D1Factory =
+                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).expect("factory");
+            let target = factory
+                .CreateDCRenderTarget(&D2D1_RENDER_TARGET_PROPERTIES {
+                    pixelFormat: D2D1_PIXEL_FORMAT {
+                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    },
+                    ..Default::default()
+                })
+                .expect("target");
+            target.BindDC(dc, &rect).expect("bind");
+            for lit in [0.0, 0.02, 0.3, 0.5, 0.7, 0.98, 1.0] {
+                for right in [true, false] {
+                    target.BeginDraw();
+                    moon(&target, square, lit, right, bgr(0)).expect("moon");
+                    target.EndDraw(None, None).expect("end draw");
+                }
+            }
+            let _ = DeleteDC(dc);
+        }
     }
 
     #[test]
