@@ -195,6 +195,8 @@ impl Fx {
 pub struct NotchScene<'a> {
     pub time: &'a str,
     pub date: &'a str,
+    /// The Umm al-Qura date under the date line; empty draws nothing.
+    pub hijri: &'a str,
     /// The media session's track, drawn in the wider media notch; `None` draws the plain clock notch.
     pub track: Option<&'a Track>,
     /// The track's album art, drawn in its cover slot, and its entry number (`Media::art`).
@@ -1177,6 +1179,18 @@ fn media_page(
         row(82.0 - 6.0 * (1.0 - date), 10.0),
         with_alpha(p.ink, p.ink_alpha(0.60 * date)),
     )?;
+    if !scene.hijri.is_empty() {
+        draw_text(
+            context,
+            scene.hijri,
+            &Font {
+                size: 11.0 * scale,
+                ..font
+            },
+            row(100.0 - 6.0 * (1.0 - date), 9.0),
+            with_alpha(p.ink, p.ink_alpha(0.45 * date)),
+        )?;
+    }
     // The shared header: the page's title at the left (the tune disc takes the right).
     let title = layout::page_title(scene.dpi);
     draw_text(
@@ -3152,6 +3166,7 @@ mod media_tests {
         let scene = NotchScene {
             time,
             date: "Tuesday",
+            hijri: "",
             track: view.shown(),
             art: None,
             progress,
@@ -3198,6 +3213,7 @@ mod media_tests {
             let scene = NotchScene {
                 time: "9:50 pm",
                 date: "Tuesday",
+                hijri: "",
                 track: song.shown(),
                 art: Some((1, &art)),
                 progress,
@@ -3445,6 +3461,7 @@ mod media_tests {
             let scene = NotchScene {
                 time: "9:50 pm",
                 date: "Tuesday",
+                hijri: "",
                 track: song.shown(),
                 art: None,
                 progress,
@@ -3513,6 +3530,7 @@ mod media_tests {
                 let scene = NotchScene {
                     time: "9:50 pm",
                     date: "Tuesday",
+                    hijri: "",
                     track: song.shown(),
                     art: None,
                     progress: 1.0,
@@ -3566,6 +3584,7 @@ mod media_tests {
         let mut scene = NotchScene {
             time: "9:50 pm",
             date: "Tuesday",
+            hijri: "",
             track: song.shown(),
             art: None,
             progress: 1.0,

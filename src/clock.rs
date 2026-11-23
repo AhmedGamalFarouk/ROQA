@@ -16,9 +16,12 @@ pub struct Clock {
     pub hour: u8,
     /// Local minute, 0 to 59 (the rain pill counts to the next hour).
     pub minute: u8,
+    /// Today's Umm al-Qura date when asked for (the Prayer tab is on), else empty.
+    pub hijri: String,
 }
 
-pub fn now() -> Clock {
+/// The clock now; with `hijri`, also today's Umm al-Qura date (the Prayer tab is on).
+pub fn now(hijri: bool) -> Clock {
     // SAFETY: plain value query.
     let local = unsafe { GetLocalTime() };
     let mut time = [0u16; 64];
@@ -52,6 +55,12 @@ pub fn now() -> Clock {
         next_minute_ms: next_minute_ms(local.wSecond, local.wMilliseconds),
         hour: local.wHour.min(23) as u8,
         minute: local.wMinute.min(59) as u8,
+        hijri: if hijri {
+            let ymd = (local.wYear.into(), local.wMonth.into(), local.wDay.into());
+            crate::prayer_os::hijri(ymd).unwrap_or_default()
+        } else {
+            String::new()
+        },
     }
 }
 

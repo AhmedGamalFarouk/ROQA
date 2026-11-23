@@ -173,9 +173,10 @@ struct Pages {
     /// The mic and camera dots: what is in use and their fade.
     dots: privacy::Dots,
     /// The last pointer input on a notch, and the local hour at the last clock tick: what the
-    /// mascot's sleepy mood reads.
+    /// mascot's sleepy mood reads. Then that tick's Hijri date, empty with the Prayer tab off.
     last_input: Instant,
     hour: u8,
+    hijri: String,
     /// The Weather page's text, rebuilt by `refresh_weather` only while that page shows, and the feed
     /// revision and minute it was built for.
     weather: weather::View,
@@ -216,6 +217,7 @@ impl Pages {
             dots: privacy::Dots::default(),
             last_input: Instant::now(),
             hour: 12,
+            hijri: String::new(),
             weather: weather::View::default(),
             weather_key: None,
             prayer: prayer_tab::View::default(),
@@ -857,6 +859,7 @@ impl Surface {
         let scene = NotchScene {
             time,
             date,
+            hijri: &pages.hijri,
             track,
             art: media.art(),
             progress,
@@ -1746,9 +1749,10 @@ impl Desktop {
     fn refresh_clock(&mut self) -> Result<u32> {
         let now = Instant::now();
         if now >= self.clock_due {
-            let clock = clock::now();
+            let clock = clock::now(self.pages.tabs.on(Tab::Prayer));
             self.clock_due = now + Duration::from_millis(clock.next_minute_ms.into());
             self.pages.hour = clock.hour;
+            self.pages.hijri = clock.hijri;
             self.rain_soon(clock.hour, clock.minute);
             if clock.time != self.clock || clock.date != self.date {
                 (self.clock, self.date) = (clock.time, clock.date);
