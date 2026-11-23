@@ -240,6 +240,8 @@ pub enum Button {
     Tray,
     /// Connected wireless-device battery reports. Always present; no stored setting.
     Battery,
+    /// AI plan limits: hover shows them, a click refreshes. Shown by the Limits switch; no button key.
+    Limits,
 }
 impl Button {
     /// Configurable buttons; Battery is fixed and never stored.
@@ -269,7 +271,9 @@ impl Button {
             Button::Search => Some(&[VK_LWIN, VK_S]),
             Button::TaskView => Some(&[VK_LWIN, VK_TAB]),
             Button::Desktop => Some(&[VK_LWIN, VK_D]),
-            Button::Quick | Button::Places | Button::Tray | Button::Battery => None,
+            Button::Quick | Button::Places | Button::Tray | Button::Battery | Button::Limits => {
+                None
+            }
         }
     }
 }
@@ -279,6 +283,7 @@ impl Button {
 pub struct Buttons {
     pub shown: [bool; 7],
     pub battery: bool,
+    pub limits: bool,
     /// Mirrored for a right-to-left UI language: the dock runs from the right edge, as the taskbar does.
     /// The host sets it from the system; it is not a stored setting.
     pub rtl: bool,
@@ -293,15 +298,16 @@ impl Buttons {
         Self {
             shown,
             battery: false,
+            limits: false,
             rtl: false,
             centre: 0,
         }
     }
     pub fn on(self, button: Button) -> bool {
-        if button == Button::Battery {
-            self.battery
-        } else {
-            self.shown[button.index()]
+        match button {
+            Button::Battery => self.battery,
+            Button::Limits => self.limits,
+            _ => self.shown[button.index()],
         }
     }
     /// Start, Search, Task View and Places, in that order.
@@ -318,11 +324,12 @@ impl Buttons {
     fn has_tail(self) -> bool {
         self.tail().next().is_some()
     }
-    /// The hidden-icons chevron, device batteries, quick settings, then the pill.
+    /// The hidden-icons chevron, device batteries, AI limits, quick settings, then the pill.
     fn tail(self) -> impl Iterator<Item = Button> {
         [
             Button::Tray,
             Button::Battery,
+            Button::Limits,
             Button::Quick,
             Button::Desktop,
         ]
@@ -494,7 +501,7 @@ fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
             px(SLOT_DIPS, dpi),
         ),
         Hit::Button(Button::Desktop) => (width_px - strip, strip),
-        Hit::Button(button @ (Button::Quick | Button::Tray | Button::Battery)) => {
+        Hit::Button(button @ (Button::Quick | Button::Tray | Button::Battery | Button::Limits)) => {
             let end = if buttons.on(Button::Desktop) {
                 STRIP_DIPS
             } else {
@@ -535,7 +542,7 @@ pub fn hit_at(buttons: Buttons, x_px: i32, width_px: i32, dpi: u32, slots: usize
     let x_px = ltr_x(buttons, x_px, width_px);
     let on_button = Button::ALL
         .into_iter()
-        .chain([Button::Battery])
+        .chain([Button::Battery, Button::Limits])
         .filter(|b| buttons.on(*b))
         .find(|b| {
             let (left, width) = ltr_span(buttons, width_px, dpi, Hit::Button(*b));
@@ -885,6 +892,23 @@ mod tests {
                     Some(Hit::Button(Button::Battery))
                 );
                 assert_eq!(size, px(BTN_DIPS, dpi));
+                // AI limits takes the next cell and its own hit, and is absent when switched off.
+                let with = Buttons {
+                    limits: true,
+                    ..buttons
+                };
+                let width = width_px(with, 3, dpi);
+                assert_eq!(width - width_px(buttons, 3, dpi), px(BTN_DIPS, dpi));
+                let limits = cell_index(with, 3, Hit::Button(Button::Limits)).unwrap();
+                assert_eq!(limits, battery + 1);
+                let (left, _) = span(with, width, dpi, Hit::Button(Button::Limits));
+                let (beside, _) = span(with, width, dpi, Hit::Button(Button::Battery));
+                assert_eq!(left - beside, if rtl { -size } else { size });
+                assert_eq!(
+                    hit_at(with, left + size / 2, width, dpi, 3),
+                    Some(Hit::Button(Button::Limits))
+                );
+                assert_eq!(cell_index(buttons, 3, Hit::Button(Button::Limits)), None);
             }
         }
     }

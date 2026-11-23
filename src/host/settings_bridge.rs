@@ -326,6 +326,7 @@ impl Desktop {
         if old.dock_style != self.settings.dock_style
             || old.dock_buttons != self.settings.dock_buttons
             || old.dock_left != self.settings.dock_left
+            || old.tabs[Tab::Limits.index()] != self.settings.tabs[Tab::Limits.index()]
         {
             self.relayout_docks()?;
         }

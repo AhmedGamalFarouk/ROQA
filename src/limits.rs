@@ -12,11 +12,11 @@ pub const AGY_SECS: i64 = 5 * 60;
 /// Between two manual refreshes.
 pub const COOLDOWN_SECS: i64 = 30;
 pub const NO_CLAUDE: &str = "Open Claude Code once to begin";
-pub const NO_CODEX: &str = "No Codex limits yet. Try Refresh.";
+pub const NO_CODEX: &str = "No Codex limits yet. Click to refresh";
 pub const OFF_CODEX: &str = "Allow Codex in Settings";
 pub const NO_AGY: &str = "Antigravity gave no limits";
 pub const OFF_AGY: &str = "Allow Antigravity in Settings";
-pub const ASK_AGY: &str = "Try Refresh to read Antigravity";
+pub const ASK_AGY: &str = "Click to read Antigravity";
 pub const WAITING: &str = "Reading...";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -615,6 +615,42 @@ pub fn view(
     view
 }
 
+/// The dock popup's rows, in order: per tool its name (with "as of" or the age) and then a used-percent bar
+/// per window, or one quiet line saying why there is no reading. A bar is `Some(percent)`; text rows are `None`.
+/// While a read runs each name says "refreshing" instead.
+pub fn popup_rows(view: &View) -> Vec<(String, Option<u8>)> {
+    let mut rows = Vec::new();
+    for row in &view.rows {
+        let note = if view.refreshing {
+            "refreshing"
+        } else {
+            &row.as_of
+        };
+        rows.push((
+            if note.is_empty() {
+                row.name.to_owned()
+            } else {
+                format!("{}, {note}", row.name)
+            },
+            None,
+        ));
+        if let Some(why) = row.why {
+            rows.push((why.to_owned(), None));
+            continue;
+        }
+        for (label, line) in [("5h", &row.h5), ("Week", &row.wk)] {
+            match line {
+                Line::Used { pct, reset } => {
+                    rows.push((format!("{label}, resets {reset}"), Some(*pct)));
+                }
+                Line::Reset { reset } => rows.push((format!("{label}, reset at {reset}"), Some(0))),
+                Line::Hidden => {}
+            }
+        }
+    }
+    rows
+}
+
 /// The command Settings shows for Claude Code's `statusLine`: it writes the small file ROQA prefers
 /// (`%LOCALAPPDATA%\ROQA\claude-limits.json`). ROQA never edits `settings.json` itself.
 pub const SNIPPET: &str = r#"{"statusLine":{"type":"command","command":"powershell -NoProfile -Command \"$r=([Console]::In.ReadToEnd()|ConvertFrom-Json).rate_limits; if($r){$d=Join-Path $env:LOCALAPPDATA 'ROQA'; $null=New-Item -Force -ItemType Directory $d; $t=Join-Path $d 'claude-limits.tmp'; (@{at=[int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds();h5=$r.five_hour.used_percentage;h5_reset=$r.five_hour.resets_at;wk=$r.seven_day.used_percentage;wk_reset=$r.seven_day.resets_at}|ConvertTo-Json -Compress)|Set-Content -Encoding ascii $t; Move-Item -Force $t (Join-Path $d 'claude-limits.json')}\""}}"#;
@@ -1072,6 +1108,55 @@ mod tests {
             5000,
         );
         assert_eq!(l.rows[0], Some(Ok(ok)));
+    }
+
+    #[test]
+    fn the_popup_lists_each_tool_then_its_windows_as_bars() {
+        let at = |h: u8, m: u8| format!("{h:02}:{m:02}");
+        let row = |name, h5, wk, why: Option<&'static str>| RowView {
+            name,
+            h5,
+            wk,
+            as_of: if why.is_none() {
+                at(16, 56)
+            } else {
+                String::new()
+            },
+            stale: false,
+            why,
+        };
+        let view = View {
+            rows: vec![
+                row(
+                    "Claude",
+                    Line::Used {
+                        pct: 42,
+                        reset: at(18, 0),
+                    },
+                    Line::Reset {
+                        reset: "Sun 08:59".into(),
+                    },
+                    None,
+                ),
+                row("Codex", Line::Hidden, Line::Hidden, Some(OFF_CODEX)),
+            ],
+            refreshing: false,
+        };
+        assert_eq!(
+            popup_rows(&view),
+            [
+                ("Claude, 16:56".to_owned(), None),
+                ("5h, resets 18:00".to_owned(), Some(42)),
+                ("Week, reset at Sun 08:59".to_owned(), Some(0)),
+                ("Codex".to_owned(), None),
+                (OFF_CODEX.to_owned(), None),
+            ]
+        );
+        let busy = View {
+            refreshing: true,
+            ..view
+        };
+        assert_eq!(popup_rows(&busy)[0].0, "Claude, refreshing");
     }
 
     #[test]

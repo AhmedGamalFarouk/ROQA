@@ -119,10 +119,6 @@ impl Desktop {
             return true;
         }
         let page = self.page();
-        if page == Tab::Limits && layout::refresh_at(width, dpi, progress, live, x, y) {
-            self.start_limits(limits_os::now(), true);
-            return true;
-        }
         // Timer: the presets and Focus, or the controls of the countdown it shows. Weather and Prayer: the
         // "Set city" button opens Settings.
         let view = self.pages.timer_view(&self.timers, now);

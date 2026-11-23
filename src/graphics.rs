@@ -242,8 +242,6 @@ pub struct NotchScene<'a> {
     pub weather: Option<&'a crate::weather::View>,
     /// The Prayer page's text; `Some` only while that page shows.
     pub prayer: Option<&'a crate::prayer_tab::View>,
-    /// The Limits page's rows; `Some` only while that page shows.
-    pub limits: Option<&'a crate::limits::View>,
     /// The page a switch is leaving, drawn fading out beside the new one while `fx.page` runs.
     pub leaving: Option<Tab>,
     pub fx: Fx,
@@ -2610,6 +2608,7 @@ fn draw_button(
         dock::Button::Places => Glyph::Drive,
         dock::Button::Tray => Glyph::Chevron,
         dock::Button::Battery => Glyph::Battery,
+        dock::Button::Limits => Glyph::Limits,
     };
     glyphs::draw(context, square, shape, with_alpha(p.glyph, 1.0))
 }
@@ -3262,7 +3261,6 @@ mod media_tests {
             volume_fill: volume.map_or(0.0, |level| f32::from(level.percent)),
             weather: None,
             prayer: None,
-            limits: None,
             leaving: None,
             fx: Fx::REST,
         };
@@ -3309,7 +3307,6 @@ mod media_tests {
                 volume_fill: 0.0,
                 weather: None,
                 prayer: None,
-                limits: None,
                 leaving: None,
                 fx: Fx::REST,
             };
@@ -3557,7 +3554,6 @@ mod media_tests {
                 volume_fill: 0.0,
                 weather: None,
                 prayer: None,
-                limits: None,
                 leaving: None,
                 fx: Fx::REST,
             };
@@ -3626,7 +3622,6 @@ mod media_tests {
                     volume_fill: 0.0,
                     weather: None,
                     prayer: None,
-                    limits: None,
                     leaving: None,
                     fx: Fx::REST,
                 };
@@ -3683,7 +3678,6 @@ mod media_tests {
             volume_fill: 0.0,
             weather: None,
             prayer: None,
-            limits: None,
             leaving: None,
             fx: Fx::REST,
         };

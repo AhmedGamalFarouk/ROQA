@@ -51,12 +51,12 @@ pub const TILE_RADIUS: f32 = 14.0;
 pub const WIDE_W: f32 = 420.0;
 /// The notch HWND never moves or resizes: the media panel and ears plus room for the open
 /// overshoot and the soft shadow, keeping the plain panel's 40 DIP of side and 44 DIP of bottom
-/// shadow room (the window is 208 DIP tall so the Limits page, its notice row and the rail below fit). `notch_region` bounds body input; a separate transparent HWND draws the shadow.
+/// shadow room (the window is 208 DIP tall so a tall page, its notice row and the rail below fit). `notch_region` bounds body input; a separate transparent HWND draws the shadow.
 pub const NOTCH_WINDOW: (i32, i32) = (440, 216);
 /// Pointer slop around the drawn body that still counts as hovering it.
 const NOTCH_HOVER_SLOP: f32 = 4.0;
 
-/// A page that needs a taller panel than the plain 80 DIP (Limits): its height in DIPs, 0 for none. Set by
+/// A page that needs a taller panel than the plain 80 DIP (Widgets, the reminder list): its height in DIPs, 0 for none. Set by
 /// the host before each paint, like the pill size, so drawing and hit tests agree.
 static PAGE_HEIGHT: AtomicU16 = AtomicU16::new(0);
 /// The Widgets page's heights: one row of tiles, or two rows of compact ones. Both are 420 wide.
@@ -67,14 +67,6 @@ fn wide_page() -> bool {
 }
 pub fn set_page_height(dips: u16) {
     PAGE_HEIGHT.store(dips, Relaxed);
-}
-/// The Limits page's tool rows: the first at y 38 DIPs, `LIMITS_ROW` apart (two lines each: the used values, then
-/// the reset times and the freshness).
-pub const LIMITS_TOP: f32 = 44.0;
-pub const LIMITS_ROW: f32 = 34.0;
-/// The Limits page's panel height for `rows` tool rows: the rows and room for the gear under the last.
-pub fn limits_height(rows: usize) -> u16 {
-    (LIMITS_TOP + LIMITS_ROW * rows as f32) as u16 + 22
 }
 /// While a notice shows the plain panel grows by `NOTICE_ROOM` DIPs for its own row; `shown` (0 to 1) follows
 /// the notice's entry tween, in permille. Set by the host before each paint, like the page height.
@@ -543,17 +535,9 @@ pub fn gear_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, 
         && (g.y - slack..g.y + g.height + slack).contains(&y)
 }
 
-/// The header row's one action (Limits' Refresh, Shelf's Add files), centred on the header's middle line and
-/// ending 8 before the clock. Ends at y 29, above the Limits column labels (y 30).
+/// The header row's action slot, centred on the header's middle line and ending 8 before the clock. Ends at y 29.
+#[cfg(test)]
 const ACTION: (f32, f32, f32, f32) = (240.0, 9.0, 72.0, 20.0);
-pub fn refresh(dpi: u32) -> Bounds {
-    scaled_bounds(ACTION, dpi)
-}
-
-/// Whether a window point is on the Refresh button; false while the panel is closed.
-pub fn refresh_at(window_width: i32, dpi: u32, progress: f32, media: bool, x: i32, y: i32) -> bool {
-    on_slot(refresh(dpi), window_width, dpi, progress, media, x, y)
-}
 pub fn shelf_action(dpi: u32, undo: bool) -> Bounds {
     // Secondary actions clear the focal row, pager, clock and gear.
     scaled_bounds(
@@ -775,7 +759,7 @@ const POWER_NOTICE: [(f32, f32, f32, f32); 2] = [
     (12.0, MEDIA_EXPANDED.height + 4.0, 308.0, 14.0),
 ];
 
-/// The power pill's text slot in pixels from the body's left and top edges. A tall page (Limits) puts it in its
+/// The power pill's text slot in pixels from the body's left and top edges. A tall page (Widgets) puts it in its
 /// own row 6 under the page, like the plain panel, spanning the page's width.
 pub fn power_notice(media: bool, dpi: u32) -> Bounds {
     notice_slot(media, PAGE_HEIGHT.load(Relaxed), notice_ask(), dpi)
@@ -853,7 +837,7 @@ pub fn remind_button_at(
 
 /// The idle Timer page lists the reminders waiting, at most `REMIND_ROWS`: 16 high rows from y 98, each with its
 /// time, its label and a quiet cancel at the right end, which stops short of the media panel's settings button. The page grows to hold them, plus the 22 the notice row needs
-/// under the last (as the Limits page does), so a list is never taller than three rows.
+/// under the last, so a list is never taller than three rows.
 pub const REMIND_ROWS: usize = 3;
 const REMIND_TOP: f32 = 98.0;
 const REMIND_ROW: f32 = 16.0;
@@ -1727,29 +1711,6 @@ mod tests {
     }
 
     #[test]
-    fn the_limits_page_grows_with_its_rows_and_still_fits_the_window_with_the_rail() {
-        assert_eq!(limits_height(3), 168);
-        assert!(limits_height(2) < limits_height(3));
-        // Three rows, open overshoot (progress 1.07) and the rail below stay inside the notch window.
-        let shape = NOTCH_EXPANDED.height;
-        let page = f32::from(limits_height(3));
-        let tallest = NOTCH.height + (page.max(shape) - NOTCH.height) * 1.07;
-        assert!(
-            tallest
-                + rail_size(Rail {
-                    count: 6,
-                    active: 0,
-                    expansion: [0.0; 7]
-                })
-                .1
-                <= NOTCH_WINDOW.1 as f32
-        );
-        // The last row ends above the gear's row.
-        let last_end = LIMITS_TOP + LIMITS_ROW * 3.0;
-        assert!(last_end <= page - 26.0 + 4.0, "{last_end}");
-    }
-
-    #[test]
     fn volume_bar_maps_its_first_and_last_pixel_to_silent_and_full() {
         // Body x 40..400: the bar spans 312..358 and 88..108 at 100 %, beside the mute toggle.
         let at = |progress, x, y| volume_at(440, 96, progress, x, y);
@@ -1982,7 +1943,7 @@ mod tests {
         for (media, page, width) in [
             (false, 0, NOTCH_EXPANDED.width),
             (true, 0, MEDIA_EXPANDED.width),
-            (true, limits_height(3), MEDIA_EXPANDED.width),
+            (true, WIDGETS_TALL, MEDIA_EXPANDED.width),
         ] {
             for dpi in [96, 120, 144, 192, 240] {
                 let notice = notice_slot(media, page, false, dpi);
@@ -2140,12 +2101,7 @@ mod tests {
             for (media, page, room, body) in [
                 (false, 0, NOTICE_ROOM, NOTCH_EXPANDED.height),
                 (true, 0, MEDIA_NOTICE_ROOM, MEDIA_EXPANDED.height),
-                (
-                    true,
-                    limits_height(3),
-                    NOTICE_ROOM,
-                    f32::from(limits_height(3)),
-                ),
+                (true, WIDGETS_TALL, NOTICE_ROOM, f32::from(WIDGETS_TALL)),
             ] {
                 let (one, two) = (
                     notice_slot(media, page, false, dpi),
@@ -2165,14 +2121,10 @@ mod tests {
 
     #[test]
     fn a_tall_page_gets_its_notice_row_under_its_content_inside_the_grown_panel() {
-        let page = limits_height(3);
+        let page = WIDGETS_TALL;
         let notice = notice_slot(true, page, false, 96);
-        // 6 under the last row, 10 above the grown panel's bottom.
+        // 10 above the grown panel's bottom.
         assert_eq!(notice.y, i32::from(page) - 16);
-        assert!(
-            notice.y as f32 >= LIMITS_TOP + LIMITS_ROW * 3.0 + 6.0,
-            "6 under the last row"
-        );
         assert_eq!(
             f32::from(page) + NOTICE_ROOM - (notice.y + notice.height) as f32,
             10.0
@@ -2601,40 +2553,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn limits_refresh_clears_the_header_and_the_column_labels() {
-        // The Limits page's own header: title, clock, and the window labels (y 30, 12 high) under it.
-        let labels: [Rect; 2] = [(96.0, 30.0, 100.0, 12.0), (224.0, 30.0, 100.0, 12.0)];
-        for dpi in [96, 120, 144, 192, 240] {
-            let button = dips(refresh(dpi), dpi);
-            let title = dips(page_title(dpi), dpi);
-            let clock = dips(page_tune(true, dpi), dpi);
-            let first_row = LIMITS_TOP;
-            // Close to exact at every scale (whole-pixel rounding).
-            let near = |a: f32, b: f32| (a - b).abs() < 1.0;
-            assert!(near(button.1 + button.3, 29.0), "{dpi} {button:?}");
-            for other in [title, clock].into_iter().chain(labels) {
-                assert!(
-                    !overlap(
-                        (
-                            button.0 + 0.5,
-                            button.1 + 0.5,
-                            button.2 - 1.0,
-                            button.3 - 1.0
-                        ),
-                        other
-                    ),
-                    "{dpi}: {button:?} against {other:?}"
-                );
-            }
-            assert!(labels.iter().all(|label| label.1 + label.3 <= first_row));
-            // The first row's text starts under the button too.
-            assert!(button.1 + button.3 <= first_row);
-        }
-        // The Limits panel is 360 wide: the button also clears the page clock's slot there.
-        assert!(!overlap(ACTION, header_rects(360.0)[3]));
     }
 
     #[test]

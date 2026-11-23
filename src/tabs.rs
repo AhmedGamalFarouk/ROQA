@@ -30,9 +30,10 @@ impl Tab {
     /// Every tab is on by default except Limits, which reads other tools' files and runs nothing until asked.
     pub const DEFAULT: Flags = [true, true, true, true, true, false, true];
 
-    /// Every tab ships; a tab is hidden only by its Settings switch.
+    /// Every tab but Limits shows in the notch, hidden only by its Settings switch. Limits lives in the dock
+    /// now; its switch shows the dock button.
     pub fn available(self) -> bool {
-        true
+        self != Tab::Limits
     }
     pub fn index(self) -> usize {
         self as usize
@@ -154,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn tabs_keep_their_order_and_every_tab_ships() {
+    fn tabs_keep_their_order_and_limits_stays_out_of_the_notch() {
         let all = Visible::new([true; 7]);
         assert_eq!(
             all.as_slice(),
@@ -164,11 +165,10 @@ mod tests {
                 Tab::Prayer,
                 Tab::Timer,
                 Tab::Shelf,
-                Tab::Limits,
                 Tab::Widgets
             ]
         );
-        assert!(Tab::Weather.available() && Tab::Prayer.available());
+        assert!(Tab::Weather.available() && Tab::Prayer.available() && !Tab::Limits.available());
         assert_eq!(
             Visible::new([false, true, true, true, true, false, false]).as_slice(),
             [Tab::Weather, Tab::Prayer, Tab::Timer, Tab::Shelf]

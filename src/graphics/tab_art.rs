@@ -411,7 +411,6 @@ pub(super) fn page(
         Tab::Shelf => shelf_page(&g, scene),
         Tab::Weather => weather_page(&g, scene),
         Tab::Prayer => prayer_page(&g, scene),
-        Tab::Limits => limits_page(&g, scene),
         Tab::Widgets => widgets_page(&g, scene),
         _ => Ok(()),
     }
@@ -1263,116 +1262,6 @@ fn sun_arc(g: &Page, view: &crate::prayer_tab::View) -> Result<()> {
                 &brush,
             );
         }
-    }
-    Ok(())
-}
-
-/// The Limits page's secondary text (the window labels, reset times and "as of"), a step above the old 10 to
-/// 10.5; "resets Sun 08:59" is about 90 DIP, inside the 112 its line has.
-const SECONDARY: f32 = 11.0;
-
-/// The Limits page: Refresh in the header's action slot and two lines per tool: the name, then for each window a
-/// capsule bar with its used `NN%`; under them the name's "as of" (or the age when stale) and each window's "resets
-/// HH:MM". The fullest window is the page's one accent, the rest are quiet. A window that has reset says so, a
-/// hidden one draws nothing, and a tool without a reading says why. Stale rows are dimmed and say so in text.
-fn limits_page(g: &Page, scene: &NotchScene) -> Result<()> {
-    use crate::limits::Line;
-    let Some(view) = scene.limits else {
-        return Ok(());
-    };
-    g.chip(
-        g.slot(layout::refresh(scene.dpi)),
-        if view.refreshing {
-            "Refreshing"
-        } else {
-            "Refresh"
-        },
-    )?;
-    // Columns in DIPs from the body's left (the page is 360 wide): the name, then per window a bar and its used
-    // value on the first line and "resets ..." under it, the name's "as of" under the name.
-    const WINDOWS: [f32; 2] = [96.0, 224.0];
-    for (label, x) in ["5h used", "Weekly used"].into_iter().zip(WINDOWS) {
-        g.text(
-            label,
-            &g.font(SECONDARY, NORMAL, LEAD),
-            g.at(x, 30.0, 100.0, 12.0),
-            g.ink(0.6),
-        )?;
-    }
-    let fullest = view
-        .rows
-        .iter()
-        .filter(|row| !row.stale)
-        .flat_map(|row| [&row.h5, &row.wk])
-        .filter_map(|line| match line {
-            Line::Used { pct, .. } => Some(*pct),
-            _ => None,
-        })
-        .max();
-    for (index, row) in view.rows.iter().enumerate() {
-        // A one-line row (no reading) sits mid-band, so a two-line row above it does not crowd it.
-        let lift = if row.why.is_some() { 7.5 } else { 0.0 };
-        let y = layout::LIMITS_TOP + layout::LIMITS_ROW * index as f32 + lift;
-        let dim = if row.stale { 0.5 } else { 1.0 };
-        g.text(
-            row.name,
-            &g.font(11.5, SEMI, LEAD),
-            g.at(layout::PAD, y, 72.0, 16.0),
-            g.ink(dim),
-        )?;
-        // No reading: the name and one quiet line beside it, no empty bars.
-        if let Some(why) = row.why {
-            g.text(
-                why,
-                &g.font(SECONDARY, NORMAL, LEAD),
-                g.at(WINDOWS[0], y + 1.0, 248.0, 14.0),
-                g.ink(0.6),
-            )?;
-            continue;
-        }
-        for (line, x) in [&row.h5, &row.wk].into_iter().zip(WINDOWS) {
-            let (text, reset) = match line {
-                Line::Used { pct, reset } => {
-                    let bar = g.at(x, y + 5.0, 56.0, 6.0);
-                    g.fill(bar, None, g.ink(0.18 * dim))?;
-                    let mut part = bar;
-                    // A used window never draws narrower than a capsule's own height.
-                    part.right = bar.left
-                        + ((bar.right - bar.left) * f32::from(*pct) / 100.0).max(6.0 * g.scale);
-                    let focal = Some(*pct) == fullest && !row.stale;
-                    g.fill(
-                        part,
-                        None,
-                        if focal {
-                            g.accent(1.0)
-                        } else {
-                            g.ink(0.55 * dim)
-                        },
-                    )?;
-                    (format!("{pct}%"), format!("resets {reset}"))
-                }
-                Line::Reset { reset } => ("reset".to_owned(), format!("at {reset}")),
-                Line::Hidden => continue,
-            };
-            g.text(
-                &text,
-                &g.font(11.5, NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING),
-                g.at(x + 62.0, y, 40.0, 16.0),
-                g.ink(0.9 * dim),
-            )?;
-            g.text(
-                &reset,
-                &g.font(SECONDARY, NORMAL, LEAD),
-                g.at(x, y + 15.0, 112.0, 14.0),
-                g.ink(0.6 * dim),
-            )?;
-        }
-        g.text(
-            &row.as_of,
-            &g.font(SECONDARY, NORMAL, LEAD),
-            g.at(layout::PAD, y + 15.0, 76.0, 14.0),
-            g.ink(0.55),
-        )?;
     }
     Ok(())
 }

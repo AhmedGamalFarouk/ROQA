@@ -343,7 +343,6 @@ const PAGES: &[Page] = &[
                     r(TAB + 2, C, "Prayer tab", ""),
                     r(TAB + 3, C, "Timer tab", ""),
                     r(TAB + 4, C, "Shelf tab", ""),
-                    r(TAB + 5, C, "Limits tab", ""),
                     r(TAB + 6, C, "Widgets tab", ""),
                 ],
             },
@@ -548,6 +547,10 @@ const PAGES: &[Page] = &[
     Page {
         name: "Limits",
         cards: &[
+            Card {
+                label: "Dock",
+                rows: &[r(TAB + 5, C, "Show AI limits in the dock", "")],
+            },
             Card {
                 label: "Permissions",
                 rows: &[

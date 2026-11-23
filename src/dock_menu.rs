@@ -46,6 +46,8 @@ pub enum Item {
     MemberMenu(usize),
     Label,
     Battery,
+    /// An AI limit window: its used percent, drawn as a capsule bar; its text is in `Spec::titles`.
+    Limit(u8),
     NewInstance,
     Close(WindowKey),
     CloseAll,
@@ -129,7 +131,7 @@ impl Item {
             Item::Dissolve => "Ungroup apps",
             Item::RemoveMember => "Remove from folder",
             Item::Member(_) | Item::MemberMenu(_) => "App",
-            Item::Label | Item::Battery => "",
+            Item::Label | Item::Battery | Item::Limit(_) => "",
             Item::NewInstance => "New instance",
             Item::Close(_) => "Close window",
             Item::CloseAll => "Close all windows",
@@ -568,7 +570,10 @@ impl Menu {
                 current: false,
                 icon: self.icons.get(index).and_then(|icon| icon.as_deref()),
                 room: matches!(self.items[index], Item::File(_)),
-                level: None,
+                level: match self.items[index] {
+                    Item::Limit(pct) => Some((pct, false)),
+                    _ => None,
+                },
                 rect: row_rect(self.dpi, panel, index - self.offset),
             })
             .collect();
@@ -609,8 +614,12 @@ impl Menu {
         };
         match message.message {
             WM_MOUSEMOVE => {
-                self.selected = at(message)
-                    .filter(|&row| !matches!(self.items[row], Item::Label | Item::Battery));
+                self.selected = at(message).filter(|&row| {
+                    !matches!(
+                        self.items[row],
+                        Item::Label | Item::Battery | Item::Limit(_)
+                    )
+                });
                 if self.hover_popup {
                     use windows::Win32::UI::Input::KeyboardAndMouse::{
                         TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -629,7 +638,7 @@ impl Menu {
             windows::Win32::UI::Controls::WM_MOUSELEAVE => self.selected = None,
             WM_LBUTTONUP => {
                 return at(message).map_or(Event::Consumed, |row| {
-                    if self.items[row] == Item::Battery {
+                    if matches!(self.items[row], Item::Battery | Item::Limit(_)) {
                         Event::Consumed
                     } else {
                         Event::Choose(self.items[row])

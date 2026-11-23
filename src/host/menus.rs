@@ -527,6 +527,7 @@ impl Desktop {
         }
         match (button, button.keys()) {
             (Button::Battery, _) => self.open_status_menu(hwnd, button),
+            (Button::Limits, _) => self.start_limits(crate::limits_os::now(), true),
             (Button::Quick, _) => self.open_quick_menu(hwnd),
             (Button::Places, _) => self.ask_places(hwnd),
             (Button::Tray, _) => self.open_flyout(hwnd, crate::anchored::Kind::Tray),
@@ -954,7 +955,8 @@ impl Desktop {
             | Item::Member(_)
             | Item::MemberMenu(_)
             | Item::Label
-            | Item::Battery => {}
+            | Item::Battery
+            | Item::Limit(_) => {}
         }
     }
     /// Ends the open menu once it no longer describes the dock (its slot changed, or a full-screen app hid

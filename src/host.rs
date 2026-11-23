@@ -695,9 +695,7 @@ impl Surface {
         } else {
             Vec::new()
         };
-        layout::set_page_height(if page == Tab::Limits {
-            layout::limits_height(pages.limits.rows.len())
-        } else if page == Tab::Widgets {
+        layout::set_page_height(if page == Tab::Widgets {
             if pages.widgets.tall() || pages.month.is_some() {
                 layout::WIDGETS_TALL
             } else {
@@ -906,9 +904,6 @@ impl Surface {
                 .iter()
                 .any(|p| matches!(p, Some(Tab::Prayer | Tab::Widgets)))
                 .then_some(&pages.prayer),
-            limits: [Some(page), self.page_from]
-                .contains(&Some(Tab::Limits))
-                .then_some(&pages.limits),
             leaving: self.page_from,
             fx: Fx {
                 page: self.page_fx.value(now),
@@ -1095,7 +1090,7 @@ impl Surface {
             layout: self.dock_buttons,
             buttons: Button::ALL
                 .into_iter()
-                .chain([Button::Battery])
+                .chain([Button::Battery, Button::Limits])
                 .filter(|button| self.dock_buttons.on(*button))
                 .map(|button| (button, hover(Hit::Button(button))))
                 .collect(),
@@ -1653,6 +1648,7 @@ impl Desktop {
         Buttons {
             rtl: self.rtl,
             battery: true,
+            limits: self.settings.tabs[Tab::Limits.index()],
             centre: if self.settings.dock_left {
                 0
             } else {
@@ -2009,9 +2005,9 @@ impl Desktop {
             self.request_notches(Repaint::Full, |s| motion::reveal(s.motion.value(now)) > 0.0);
         }
     }
-    /// Limits (features U1): takes a finished worker's answer, starts one job when the Limits page newly opens
-    /// (the worker reads only what changed or aged out), and keeps the page text current while it shows. No
-    /// timer and no watcher: a hidden or switched-off tab costs nothing but this early return.
+    /// Limits (features U1): takes a finished worker's answer, starts one job when the dock's Limits popup newly
+    /// opens (the worker reads only what changed or aged out), and keeps its rows current while it shows. No
+    /// timer and no watcher: a closed popup costs nothing but this early return.
     #[inline(never)]
     fn refresh_limits(&mut self) {
         self.limits.configure(
@@ -2022,9 +2018,7 @@ impl Desktop {
         while let Some(outcome) = self.limits_io.poll() {
             self.limits.finish(outcome, now);
         }
-        let open = self.pages.tabs.on(Tab::Limits)
-            && self.page() == Tab::Limits
-            && self.surfaces.iter().any(Surface::expanded);
+        let open = self.limits_popup();
         if !open {
             self.limits_io.cancel();
         }
@@ -2045,8 +2039,26 @@ impl Desktop {
                 key.1,
             );
             self.pages.limits_key = Some(key);
-            self.request_notches(Repaint::Full, |s| s.expanded());
+            let (items, titles) = self.limits_items();
+            if let Some(popup) = &mut self.hover_popup
+                && popup.relist(items, titles, Vec::new()).is_err()
+            {
+                self.hover_popup = None;
+            }
         }
+    }
+    /// Whether the hover popup showing is the dock's Limits one.
+    fn limits_popup(&self) -> bool {
+        self.hover_popup.as_ref().is_some_and(|popup| {
+            popup.hover_hit == Some(Hit::Button(Button::Limits)) && !popup.closing()
+        })
+    }
+    /// The Limits popup's rows from the current view: a bar per window, text for the rest.
+    fn limits_items(&self) -> (Vec<Item>, Vec<String>) {
+        limits::popup_rows(&self.pages.limits)
+            .into_iter()
+            .map(|(text, bar)| (bar.map_or(Item::Label, Item::Limit), text))
+            .unzip()
     }
     /// A job for the Limits worker (`Limits::start` says no inside the cooldown or while one runs).
     fn start_limits(&mut self, now: i64, manual: bool) {
@@ -2918,7 +2930,10 @@ impl Desktop {
     }
 
     fn show_hover_popup(&mut self, hwnd: HWND, hit: Hit) {
-        // Only a folder's member list pops up; the dock has no tooltips.
+        if hit == Hit::Button(Button::Limits) {
+            return self.show_limits_popup(hwnd);
+        }
+        // Only a folder's member list and the AI limits pop up; the dock has no tooltips.
         let Some(item) = hit
             .slot()
             .and_then(|slot| self.dock_items.get(slot))
@@ -2987,6 +3002,58 @@ impl Desktop {
                 self.hover_popup = Some(popup);
             }
             Err(error) => eprintln!("Dock folder: {error}"),
+        }
+    }
+
+    /// The AI limits over their dock button: the last readings at once, and a read of what changed or aged out.
+    fn show_limits_popup(&mut self, hwnd: HWND) {
+        let Some((buttons, bounds, dpi, work)) = self.dock_at(hwnd).and_then(|dock| {
+            self.monitors
+                .iter()
+                .find(|monitor| monitor.device == dock.monitor)
+                .map(|monitor| (dock.dock_buttons, dock.bounds, dock.dpi, monitor.work))
+        }) else {
+            return;
+        };
+        let now = limits_os::now();
+        self.limits.configure(
+            (self.settings.limits_codex, self.settings.limits_agy),
+            self.settings.limits_group,
+        );
+        self.start_limits(now, false);
+        self.limits_open = true;
+        self.pages.limits = limits::view(
+            &self.limits.rows,
+            now,
+            &limits::clock(prayer_os::local_now().offset_min),
+            self.limits.busy(),
+        );
+        self.pages.limits_key = Some((self.limits.rev, self.limits.busy(), self.clock.clone()));
+        let (items, titles) = self.limits_items();
+        let hit = Hit::Button(Button::Limits);
+        let (left, width) = dock::span(buttons, bounds.width, dpi, hit);
+        let spec = dock_menu::Spec {
+            dock: hwnd,
+            slot: dock_menu::APP,
+            identity: Identity::Unavailable(0),
+            windows: Vec::new(),
+            items,
+            dock_bounds: bounds,
+            work,
+            dpi,
+            app: "AI limits".into(),
+            titles,
+            icons: Vec::new(),
+            x: bounds.x + left + width / 2,
+            below: None,
+            return_to: None,
+        };
+        match dock_menu::Menu::open_hover(&self.graphics, self.palette, spec) {
+            Ok(mut popup) => {
+                popup.hover_hit = Some(hit);
+                self.hover_popup = Some(popup);
+            }
+            Err(error) => eprintln!("Dock limits: {error}"),
         }
     }
 
