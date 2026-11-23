@@ -904,28 +904,25 @@ pub fn shelf_slot(_media: bool, index: usize, dpi: u32) -> Bounds {
     scaled_bounds((x, y, SHELF_CELL_W, SHELF_CELL_H), dpi)
 }
 
-/// A file capsule's remove target: its right-most 24 DIPs, in pixels from the body's left and top edges.
-pub fn shelf_remove(index: usize, dpi: u32) -> Bounds {
+/// A file capsule's remove target, its right-most 26 DIPs, or with `share` its Share target left of that.
+pub fn shelf_remove(index: usize, dpi: u32, share: bool) -> Bounds {
     let (x, y) = shelf_cell(index);
-    scaled_bounds((x + SHELF_CELL_W - 26.0, y, 26.0, SHELF_CELL_H), dpi)
+    let right = if share { 52.0 } else { 26.0 };
+    scaled_bounds((x + SHELF_CELL_W - right, y, 26.0, SHELF_CELL_H), dpi)
 }
 
-/// The shelf slot whose remove target is under a window point; the caller ignores slots that are not files.
+/// The shelf slot whose remove (or `share`) target is under a window point; the caller ignores non-files.
 pub fn shelf_remove_at(
     window_width: i32,
     dpi: u32,
     progress: f32,
+    share: bool,
     x: i32,
     y: i32,
 ) -> Option<usize> {
-    if motion::reveal(progress) < 1.0 {
-        return None;
-    }
-    let body = notch_body(window_width, dpi, notch_shape(progress, false));
     (0..crate::shelf::VISIBLE - 1).find(|&index| {
-        let target = shelf_remove(index, dpi);
-        (target.x..target.x + target.width).contains(&(x - body.left))
-            && (target.y..target.y + target.height).contains(&y)
+        let target = shelf_remove(index, dpi, share);
+        on_slot(target, window_width, dpi, progress, false, x, y)
     })
 }
 
@@ -2589,7 +2586,7 @@ mod tests {
         let window = scaled(440.0, 96);
         for index in 0..crate::shelf::VISIBLE - 1 {
             let cell = shelf_slot(false, index, 96);
-            let cross = shelf_remove(index, 96);
+            let cross = shelf_remove(index, 96, false);
             assert!(cross.x >= cell.x && cross.x + cross.width <= cell.x + cell.width);
             assert!(cross.y == cell.y && cross.height == cell.height);
             let body = notch_body(window, 96, notch_shape(1.0, false));
@@ -2597,12 +2594,14 @@ mod tests {
                 body.left + cross.x + cross.width / 2,
                 cross.y + cross.height / 2,
             );
-            assert_eq!(shelf_remove_at(window, 96, 1.0, x, y), Some(index));
+            let at = |share, x| shelf_remove_at(window, 96, 1.0, share, x, y);
+            assert_eq!(at(false, x), Some(index));
+            // Share sits left of the cross inside the capsule, and is its own target.
+            let share = shelf_remove(index, 96, true);
+            assert!(share.x >= cell.x && share.x + share.width <= cross.x && share.y == cell.y);
+            assert_eq!(at(true, body.left + share.x + 1), Some(index));
             // The capsule's name side is not a remove target.
-            assert_eq!(
-                shelf_remove_at(window, 96, 1.0, body.left + cell.x + 40, y),
-                None
-            );
+            assert_eq!(at(false, body.left + cell.x + 40), None);
             // Undo takes the grid's free cell and clears the gear.
             let undo = shelf_action(96, true);
             assert!(!hit(undo, cell));

@@ -12,8 +12,13 @@ windows-core = "=0.62.2"
 windows-numerics = "=0.3.1"
 # Same version the windows crate already locks; names the IAsyncOperation that media requests hold to cancel.
 windows-future = "=0.3.2"
+# Same version the windows crate already locks; the Shelf's Share hands the share sheet an IIterable of files.
+windows-collections = "=0.3.2"
 windows = { version = "=0.62.2", features = [
     "Media_Control",
+    # DataTransferManager and StorageFile: the Shelf's Share opens the Windows share sheet.
+    "ApplicationModel_DataTransfer",
+    "Storage",
     # Geolocator: the opt-in "Detect automatically" weather location (features W1).
     "Devices_Geolocation",
     # Radio: the Wi-Fi and Bluetooth switches of the dock's quick settings.

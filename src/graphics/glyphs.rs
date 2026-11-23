@@ -57,6 +57,8 @@ pub enum Glyph {
     /// The Widgets tab: a tall and two small tiles.
     Widgets,
     Close,
+    /// A Shelf file's Share button: an arrow rising out of a tray.
+    Share,
     /// Settings' Notch page: the notch hanging from the screen edge, with its eyes.
     Notch,
     /// Settings' About page.
@@ -73,7 +75,7 @@ pub enum Glyph {
     Repeat,
     RepeatOne,
 }
-const ALL: [Glyph; 43] = [
+const ALL: [Glyph; 44] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -108,6 +110,7 @@ const ALL: [Glyph; 43] = [
     Glyph::Music,
     Glyph::Widgets,
     Glyph::Close,
+    Glyph::Share,
     Glyph::Notch,
     Glyph::Info,
     Glyph::Drive,
@@ -238,6 +241,7 @@ impl Glyph {
             }
             Glyph::Charging => "M13 2L5 13h6l-1 9 9-12h-6z",
             Glyph::Add => "M12 4v16M4 12h16",
+            Glyph::Share => "M12 15V4M8 8l4-4 4 4M5 13v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4",
             Glyph::More => "M5 12h.01M12 12h.01M19 12h.01",
             Glyph::File => {
                 "M7 3.5h6l5 5v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2zM13 3.5v5h5"

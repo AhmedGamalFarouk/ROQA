@@ -207,7 +207,7 @@ impl Desktop {
                 self.start_file_picker();
                 return true;
             }
-            if let Some(index) = layout::shelf_remove_at(width, dpi, progress, x, y)
+            if let Some(index) = layout::shelf_remove_at(width, dpi, progress, false, x, y)
                 && let Some(entry) = self
                     .shelf
                     .shelf
@@ -216,6 +216,21 @@ impl Desktop {
             {
                 let path = entry.path.clone();
                 self.remove_shelf_entry(&path);
+                return true;
+            }
+            if surface.hovered
+                && let Some(index) = layout::shelf_remove_at(width, dpi, progress, true, x, y)
+                && let Some(entry) = self
+                    .shelf
+                    .shelf
+                    .absolute(index)
+                    .and_then(|index| self.shelf.shelf.entries().get(index))
+                    .filter(|entry| entry.check != crate::shelf::Check::Missing)
+            {
+                if let Err(error) = shelf_os::share(surface.window.0, &entry.path) {
+                    eprintln!("Share: {error}");
+                    self.show_open_failed();
+                }
                 return true;
             }
             if let Some(index) = self.shelf_slot_at(notch, lparam) {

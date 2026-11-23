@@ -3464,7 +3464,7 @@ impl Desktop {
             self.change_clips(Clips::clear);
             return true;
         }
-        if let Some(at) = layout::shelf_remove_at(width, dpi, progress, x, y)
+        if let Some(at) = layout::shelf_remove_at(width, dpi, progress, false, x, y)
             .and_then(|slot| clips.absolute(slot))
         {
             self.change_clips(|clips| clips.remove(at));

@@ -1,5 +1,5 @@
 //! The shelf's operating-system edges (M5 S6): the notch's `IDropTarget`, the standard file dialog and the
-//! shell open/reveal. Nothing here opens, reads or stats a file; paths only travel from the shell to the pure
+//! shell open/reveal and the share sheet. Nothing here opens, reads or stats a file; paths only travel from the shell to the pure
 //! `shelf` model, and back to the shell when the user activates an entry.
 
 use crate::{
@@ -7,6 +7,23 @@ use crate::{
     shelf::{MAX_DROP, MAX_PATH_CHARS},
 };
 use std::{cell::Cell, cell::RefCell, rc::Rc};
+use windows::{
+    ApplicationModel::DataTransfer::{DataRequestedEventArgs, DataTransferManager},
+    Foundation::TypedEventHandler,
+    Storage::{IStorageItem, StorageFile},
+    Win32::{
+        Foundation::{COLORREF, RECT},
+        UI::{
+            Shell::IDataTransferManagerInterop,
+            WindowsAndMessaging::{
+                CreateWindowExW, GetWindowRect, HWND_TOPMOST, LWA_ALPHA, SWP_SHOWWINDOW,
+                SetForegroundWindow, SetLayeredWindowAttributes, SetWindowPos, WS_EX_LAYERED,
+                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+            },
+        },
+    },
+    core::w,
+};
 use windows::{
     Win32::{
         Foundation::{HWND, POINTL},
@@ -28,8 +45,10 @@ use windows::{
             FOS_FORCEFILESYSTEM, FileOpenDialog, HDROP, IFileOpenDialog, SIGDN_FILESYSPATH,
         },
     },
-    core::{Interface, PCWSTR, Ref, Result, implement},
+    core::{HSTRING, Interface, PCWSTR, Ref, Result, implement},
 };
+use windows_collections::IIterable;
+use windows_future::{AsyncOperationCompletedHandler, IAsyncOperation};
 
 /// What the drop target tells the host; read once per host pass, so a drop adds no wake of its own.
 pub enum DropEvent {
@@ -402,6 +421,92 @@ pub fn is_network(path: &str) -> bool {
 }
 
 pub const PICKED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 60;
+
+thread_local! {
+    /// The share sheet's owner window, request handler and its token. Windows shows the sheet only for a visible
+    /// window that can be activated, which the notch never is: a 1 px, see-through, click-through popup at the
+    /// notch stands in. It is made once and reused; a new share replaces the handler, so none pile up.
+    static SHARING: RefCell<Option<(HWND, DataTransferManager, i64)>> = const { RefCell::new(None) };
+}
+
+/// Opens the Windows share sheet for one file at `notch` (works without app packaging). The sheet asks for the
+/// file later; it is resolved on a WinRT worker, never on the host thread.
+pub fn share(notch: HWND, path: &str) -> Result<()> {
+    let mut rect = RECT::default();
+    // SAFETY: `notch` is a live window of this thread; `rect` outlives the call.
+    unsafe { GetWindowRect(notch, &mut rect)? };
+    let owner = match SHARING.with_borrow(|slot| slot.as_ref().map(|slot| slot.0)) {
+        Some(owner) => owner,
+        // SAFETY: a system class, no parent and no retained pointers; the layered alpha is set before it shows.
+        None => unsafe {
+            let owner = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+                w!("STATIC"),
+                w!("ROQA Share"),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            SetLayeredWindowAttributes(owner, COLORREF(0), 1, LWA_ALPHA)?;
+            owner
+        },
+    };
+    // SAFETY: our own popup; the click that asked for the share gives this process the foreground.
+    unsafe {
+        let centre = (rect.left + rect.right) / 2;
+        SetWindowPos(
+            owner,
+            Some(HWND_TOPMOST),
+            centre,
+            rect.top,
+            1,
+            1,
+            SWP_SHOWWINDOW,
+        )?;
+        let _ = SetForegroundWindow(owner);
+    }
+    let interop = windows::core::factory::<DataTransferManager, IDataTransferManagerInterop>()?;
+    // SAFETY: `owner` is a live top-level window of this thread.
+    let manager: DataTransferManager = unsafe { interop.GetForWindow(owner)? };
+    let title = HSTRING::from(path.rsplit('\\').next().unwrap_or(path));
+    let path = HSTRING::from(path);
+    let handler =
+        TypedEventHandler::<DataTransferManager, DataRequestedEventArgs>::new(move |_, args| {
+            let Some(args) = args.as_ref() else {
+                return Ok(());
+            };
+            let request = args.Request()?;
+            let data = request.Data()?;
+            data.Properties()?.SetTitle(&title)?;
+            let deferral = request.GetDeferral()?;
+            StorageFile::GetFileFromPathAsync(&path)?.SetCompleted(
+                &AsyncOperationCompletedHandler::new(move |file, _| {
+                    // A file gone since it was shelved leaves the sheet empty; Windows says so itself.
+                    let file = file.as_ref();
+                    if let Some(file) =
+                        file.and_then(|file: &IAsyncOperation<StorageFile>| file.GetResults().ok())
+                    {
+                        let items: IIterable<IStorageItem> = vec![Some(file.cast()?)].into();
+                        data.SetStorageItemsReadOnly(&items)?;
+                    }
+                    deferral.Complete()
+                }),
+            )
+        });
+    let token = manager.DataRequested(&handler)?;
+    let old = SHARING.with_borrow_mut(|slot| slot.replace((owner, manager, token)));
+    if let Some((_, old, token)) = old {
+        old.RemoveDataRequested(token)?;
+    }
+    // SAFETY: as above.
+    unsafe { interop.ShowShareUIForWindow(owner) }
+}
 
 // A single on-demand STA owns the dialog and all of its COM results. Completion posts one host wake.
 // Cancellation carries only a window handle under a lock, never an apartment-bound COM interface.

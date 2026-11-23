@@ -1500,6 +1500,102 @@ pub(super) fn draw_privacy(
     Ok(())
 }
 
+/// Side of a shelf icon inside its capsule, in DIPs.
+const SHELF_ICON: f32 = 16.0;
+
+/// Outline file capsules share one focal row; the separate footer pager stays neutral.
+fn shelf_row(
+    context: &ID2D1DeviceContext,
+    scene: &NotchScene,
+    body: &D2D_RECT_F,
+    scale: f32,
+    p: &Palette,
+) -> Result<()> {
+    let reveal = motion::reveal(scene.progress);
+    if reveal <= 0.0 {
+        return Ok(());
+    }
+    let media = scene.track.is_some();
+    let ink = |alpha: f32| with_alpha(p.ink, p.ink_alpha(alpha));
+    for (index, slot) in scene.shelf.iter().enumerate().filter(|(_, slot)| !slot.add) {
+        let cell = layout::shelf_slot(
+            media,
+            if slot.more {
+                crate::shelf::VISIBLE - 1
+            } else {
+                index
+            },
+            scene.dpi,
+        );
+        let (left, top) = (body.left + cell.x as f32, body.top + cell.y as f32);
+        let rect = D2D_RECT_F {
+            left,
+            top,
+            right: left + cell.width as f32,
+            bottom: top + cell.height as f32,
+        };
+        let alpha = reveal * if slot.missing { DISABLED } else { 1.0 };
+        // SAFETY: a brush and a fill on the frame's own device context.
+        unsafe {
+            let brush = context.CreateSolidColorBrush(&ink(0.10 * reveal), None)?;
+            context.FillRoundedRectangle(&rounded(rect, cell.height as f32 / 2.0), &brush);
+        }
+        let side = (SHELF_ICON * scale).round();
+        let square = pixel_square(
+            left + 10.0 * scale,
+            top + ((cell.height as f32 - side) / 2.0).round(),
+            side,
+        );
+        let name = if slot.more { "Next" } else { slot.name };
+        let font = Font {
+            family: TEXT_FONT,
+            size: 11.5 * scale,
+            weight: DWRITE_FONT_WEIGHT_NORMAL,
+            designator: 1.0,
+            align: DWRITE_TEXT_ALIGNMENT_LEADING,
+        };
+        // A file capsule shows Share beside the cross while hovered: the name gives up that room.
+        let share = scene.shelf_hover && !scene.clips && !slot.missing;
+        let line = D2D_RECT_F {
+            left: left + 32.0 * scale,
+            right: rect.right
+                - if slot.more {
+                    12.0
+                } else if share {
+                    52.0
+                } else {
+                    28.0
+                } * scale,
+            ..rect
+        };
+        draw_text(context, name, &font, line, ink(0.9 * alpha))?;
+        if slot.more {
+            glyphs::draw(context, square, Glyph::More, ink(reveal))?;
+            continue;
+        }
+        glyphs::draw(context, square, Glyph::File, ink(0.7 * alpha))?;
+        if !scene.shelf_hover {
+            continue;
+        }
+        // The remove cross and Share, centred in their targets (`layout::shelf_remove`).
+        let buttons = [(false, Glyph::Close), (true, Glyph::Share)];
+        for (is_share, glyph) in buttons.into_iter().filter(|&(s, _)| share || !s) {
+            let target = layout::shelf_remove(index, scene.dpi, is_share);
+            glyphs::draw(
+                context,
+                pixel_square(
+                    body.left + target.x as f32 + (target.width as f32 - 16.0 * scale) / 2.0,
+                    body.top + target.y as f32 + (target.height as f32 - 16.0 * scale) / 2.0,
+                    16.0 * scale,
+                ),
+                glyph,
+                ink(0.6 * reveal),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
