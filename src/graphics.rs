@@ -69,10 +69,12 @@ use windows_numerics::{Matrix3x2, Vector2};
 mod glyphs;
 pub use glyphs::{draw_gdi as draw_settings_glyph, round_gdi};
 mod ask;
+mod shot;
 mod tab_art;
 use ask::wrapped;
 pub use ask::{ask_fits, ask_fits_at};
 pub use glyphs::Glyph;
+pub use shot::ShotScene;
 
 #[derive(Clone)]
 pub struct Graphics {
@@ -218,6 +220,8 @@ pub struct NotchScene<'a> {
     pub notice: Option<&'a str>,
     /// What the notice row carries besides its text: an Eject button or a progress bar.
     pub extra: Extra,
+    /// The screenshot pill on the notice row while it shows (no notice then).
+    pub shot: Option<ShotScene<'a>>,
     /// The file shelf's visible entries (S6, PROVISIONAL); empty draws nothing.
     pub shelf: &'a [ShelfSlot<'a>],
     pub shelf_undo: bool,
@@ -270,6 +274,8 @@ pub struct ShelfSlot<'a> {
     pub missing: bool,
     pub more: bool,
     pub add: bool,
+    /// A kept screenshot's thumbnail, drawn in place of the file glyph.
+    pub thumb: Option<&'a IconPixels>,
 }
 
 /// Dock material (docs/design/roqa-visual-spec.md, colours from the theme): bar, ink-alpha hover fill, whole-pixel icon lift.
@@ -326,6 +332,8 @@ pub struct Canvas {
     /// The album art's device bitmap and its entry number. Reused while the entry is unchanged and
     /// released with the canvas, which a device loss or rebuild replaces.
     art: RefCell<Option<(u64, ID2D1Bitmap1)>>,
+    /// The screenshot chip's two thumbnails, kept like `art`.
+    shots: shot::Thumbs,
     /// The theme's colours, fixed for this canvas: a theme change rebuilds the surfaces.
     palette: Palette,
     /// The baked liquid-glass brushes, built on first paint and kept until the canvas is replaced.
@@ -353,6 +361,7 @@ impl Canvas {
                 width: bounds.width as u32,
                 height: bounds.height as u32,
                 art: RefCell::default(),
+                shots: RefCell::default(),
                 palette,
                 glass: RefCell::default(),
             };
@@ -463,7 +472,8 @@ impl Canvas {
                 upload(context, pixels)
             });
             let drawn = art
-                .and_then(|art| notch_text(context, scene, &body, scale, art.as_ref(), status, &p));
+                .and_then(|art| notch_text(context, scene, &body, scale, art.as_ref(), status, &p))
+                .and_then(|()| shot::chip(context, scene, &body, scale, &p, &self.shots));
             // SAFETY: balances the PushAxisAlignedClip above on the same live context.
             unsafe { context.PopAxisAlignedClip() };
             drawn?;
@@ -3178,6 +3188,7 @@ mod media_tests {
             reminders: &[],
             notice: None,
             extra: Extra::None,
+            shot: None,
             shelf: &[],
             shelf_undo: false,
             shelf_hover: false,
@@ -3225,6 +3236,7 @@ mod media_tests {
                 reminders: &[],
                 notice: None,
                 extra: Extra::None,
+                shot: None,
                 shelf: &[],
                 shelf_undo: false,
                 shelf_hover: false,
@@ -3473,6 +3485,7 @@ mod media_tests {
                 reminders: &[],
                 notice: None,
                 extra: Extra::None,
+                shot: None,
                 shelf: &[],
                 shelf_undo: false,
                 shelf_hover: false,
@@ -3542,6 +3555,7 @@ mod media_tests {
                     reminders: &[],
                     notice: None,
                     extra: Extra::None,
+                    shot: None,
                     shelf: &[],
                     shelf_undo: false,
                     shelf_hover: false,
@@ -3599,6 +3613,7 @@ mod media_tests {
             reminders: &[],
             notice: None,
             extra: Extra::None,
+            shot: None,
             shelf: &[],
             shelf_undo: false,
             shelf_hover: false,

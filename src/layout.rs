@@ -86,13 +86,31 @@ pub fn set_notice_ask(ask: bool) {
 pub fn notice_ask() -> bool {
     NOTICE_ASK.load(Relaxed)
 }
-/// The extra room for a question `shown` (0 to 1) of the way in.
+/// The screenshot pill's row is `SHOT_ROOM` high in place of `NOTICE_ROOM` (design: moon-and-screenshot-pill).
+/// Set by the host while the pill shows; the last value stays through its fade-out, like `NOTICE_ASK`.
+pub const SHOT_ROOM: f32 = 36.0;
+static NOTICE_SHOT: AtomicBool = AtomicBool::new(false);
+pub fn set_notice_shot(shot: bool) {
+    NOTICE_SHOT.store(shot, Relaxed);
+}
+pub fn notice_shot() -> bool {
+    NOTICE_SHOT.load(Relaxed)
+}
+/// The chip's width in DIPs: it follows its text, measured when drawn, so hit tests match the last frame.
+static SHOT_W: AtomicU16 = AtomicU16::new(190);
+pub fn set_shot_width(dips: u16) {
+    SHOT_W.store(dips, Relaxed);
+}
+/// The extra room for a question or the screenshot pill `shown` (0 to 1) of the way in.
 fn ask_room(shown: f32) -> f32 {
-    if notice_ask() {
-        ASK_ROOM * shown.clamp(0.0, 1.0)
+    let room = if notice_ask() {
+        ASK_ROOM
+    } else if notice_shot() {
+        SHOT_ROOM - NOTICE_ROOM
     } else {
         0.0
-    }
+    };
+    room * shown.clamp(0.0, 1.0)
 }
 /// `height` grown for a notice `shown` (0 to 1) of the way in.
 fn with_notice(height: f32, shown: f32) -> f32 {
@@ -762,7 +780,46 @@ const POWER_NOTICE: [(f32, f32, f32, f32); 2] = [
 /// The power pill's text slot in pixels from the body's left and top edges. A tall page (Widgets) puts it in its
 /// own row 6 under the page, like the plain panel, spanning the page's width.
 pub fn power_notice(media: bool, dpi: u32) -> Bounds {
-    notice_slot(media, PAGE_HEIGHT.load(Relaxed), notice_ask(), dpi)
+    let slot = notice_slot(media, PAGE_HEIGHT.load(Relaxed), notice_ask(), dpi);
+    if notice_shot() && !notice_ask() {
+        Bounds {
+            height: slot.height + scaled(SHOT_ROOM - NOTICE_ROOM, dpi),
+            ..slot
+        }
+    } else {
+        slot
+    }
+}
+
+/// The screenshot chip, 44 high and centred in a panel `body_width` pixels wide, its bottom 16 above the grown
+/// panel's edge, in pixels from the body's left and top edges.
+pub fn shot_chip(media: bool, dpi: u32, body_width: i32) -> Bounds {
+    let slot = power_notice(media, dpi);
+    let width = scaled(f32::from(SHOT_W.load(Relaxed)), dpi);
+    Bounds {
+        x: (body_width - width) / 2,
+        y: slot.y + slot.height - scaled(50.0, dpi),
+        width,
+        height: scaled(44.0, dpi),
+    }
+}
+/// Whether a window point is on the screenshot chip at `progress`; none while the panel is closed.
+pub fn shot_chip_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    (x, y): (i32, i32),
+) -> bool {
+    let body = notch_body(window_width, dpi, notch_shape(progress, true));
+    panel_offset(
+        window_width,
+        dpi,
+        progress,
+        shot_chip(media, dpi, body.width),
+        (x, y),
+    )
+    .is_some()
 }
 /// The row, two lines high for a permission question (`ask`): the room it grows by is exactly the line it adds.
 fn notice_slot(media: bool, page: u16, ask: bool, dpi: u32) -> Bounds {

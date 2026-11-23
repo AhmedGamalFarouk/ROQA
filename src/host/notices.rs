@@ -20,6 +20,8 @@ impl Desktop {
             self.media.command(crate::media::PLAY_PAUSE);
         }
         self.prayer.adhan_until = Some(now + PRAYER_NOTICE);
+        // A prayer takes the row from a screenshot pill, which returns after it.
+        self.power.yield_shot();
         self.show_notice(prayer_tab::notice(event), now);
     }
     /// Expands every notch with `text` for `PRAYER_NOTICE`; on a monitor a full-screen app covers it appears
@@ -426,17 +428,24 @@ impl Desktop {
     #[inline(never)]
     pub(super) fn refresh_power(&mut self) -> u32 {
         let now = Instant::now();
-        if self.power.over(now) {
-            self.surfaces.iter_mut().for_each(Surface::close_alert);
+        let ended = self.power.over(now);
+        // The screenshot pill takes a freed row first; the notice that waited for the row shows after it.
+        let shot = self.sync_shots(now);
+        let promoted = self.power.promote(now);
+        if ended || shot || promoted {
+            if self.power.text().is_none() && !self.shelf.shots.showing() {
+                self.surfaces.iter_mut().for_each(Surface::close_alert);
+            } else if shot || promoted {
+                self.open_notches();
+            }
             self.request_notches(Repaint::Full, |_| true);
         }
-        // The notice that waited for the row shows now.
-        if self.power.promote(now) {
-            self.open_notches();
-            self.request_notches(Repaint::Full, |_| true);
-        }
+        let shot_due = self.shelf.shots.deadline();
         self.power
             .deadline()
+            .into_iter()
+            .chain(shot_due)
+            .min()
             .map_or(INFINITE, |due| milliseconds_until(due, now))
     }
     pub(super) fn water_today(&self) -> u8 {

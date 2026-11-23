@@ -226,15 +226,6 @@ impl Desktop {
         let old = std::mem::replace(&mut self.settings, next);
         self.settings.apply_globals();
         self.water_due = None; // the schedule follows the new hours
-        if old.clipboard != self.settings.clipboard {
-            for notch in self
-                .surfaces
-                .iter()
-                .filter(|s| s.kind() == SurfaceKind::Notch)
-            {
-                clipboard_os::watch(notch.window.0, self.settings.clipboard);
-            }
-        }
         if old.notifications != self.settings.notifications {
             self.toasts = self.settings.notifications.then(toast::Toasts::new);
         }

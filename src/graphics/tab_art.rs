@@ -1555,7 +1555,7 @@ fn shelf_row(
             align: DWRITE_TEXT_ALIGNMENT_LEADING,
         };
         // A file capsule shows Share beside the cross while hovered: the name gives up that room.
-        let share = scene.shelf_hover && !scene.clips && !slot.missing;
+        let share = scene.shelf_hover && !scene.clips && !slot.missing && slot.thumb.is_none();
         let line = D2D_RECT_F {
             left: left + 32.0 * scale,
             right: rect.right
@@ -1573,7 +1573,10 @@ fn shelf_row(
             glyphs::draw(context, square, Glyph::More, ink(reveal))?;
             continue;
         }
-        glyphs::draw(context, square, Glyph::File, ink(0.7 * alpha))?;
+        match slot.thumb {
+            Some(pixels) => super::shot::small(context, square, scale, pixels, alpha)?,
+            None => glyphs::draw(context, square, Glyph::File, ink(0.7 * alpha))?,
+        }
         if !scene.shelf_hover {
             continue;
         }

@@ -46,6 +46,8 @@ windows = { version = "=0.62.2", features = [
     # GetDriveTypeW: a mapped network drive is not stat'ed on the host thread (slice S7).
     "Win32_Storage_FileSystem",
     "Win32_UI_Shell_PropertiesSystem",
+    # SHCreateDataObject: the screenshot pill drags its image out from memory.
+    "Win32_UI_Shell_Common",
     "Win32_Graphics_Direct2D_Common",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",

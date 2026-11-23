@@ -2,7 +2,8 @@
 //! ROQA never reads, copies or thumbnails the file, and this module does no I/O, so a UNC path is only ever
 //! marked "not checked" here. Whether a target still exists is learned at activation (`mark_missing`).
 
-use crate::store::Store;
+use crate::{shots::Shot, store::Store};
+use std::rc::Rc;
 
 /// Hard ceiling and default of the entries kept (UNVERIFIED default from m5-preparation.md section 4). A new
 /// one evicts the oldest beyond the shelf's cap.
@@ -39,6 +40,23 @@ pub struct Entry {
     pub path: String,
     pub name: String,
     pub check: Check,
+    /// A screenshot dropped from the pill: held in memory, never written to the store.
+    pub shot: Option<Kept>,
+}
+
+/// A kept screenshot, compared by its id.
+#[derive(Clone)]
+pub struct Kept(pub Rc<Shot>);
+impl PartialEq for Kept {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id == other.0.id
+    }
+}
+impl Eq for Kept {}
+impl std::fmt::Debug for Kept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Kept({})", self.0.id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +139,7 @@ pub fn validate(path: &str) -> Result<Entry, Reject> {
             Check::Unknown
         },
         path,
+        shot: None,
     })
 }
 
@@ -138,7 +157,12 @@ impl Shelf {
 
     /// Replaces the store's shelf section; true when it changed, so the caller marks the store dirty.
     pub fn write_to(&self, store: &mut Store) -> bool {
-        let paths: Vec<String> = self.entries.iter().map(|e| e.path.clone()).collect();
+        let paths: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|e| e.shot.is_none())
+            .map(|e| e.path.clone())
+            .collect();
         let changed = store.shelf != paths;
         store.shelf = paths;
         changed
@@ -210,6 +234,27 @@ impl Shelf {
             self.entries = fresh;
         }
         added
+    }
+
+    /// Keeps a screenshot dropped from the pill at the front, evicting the oldest beyond the cap; false when
+    /// it is already here.
+    pub fn add_shot(&mut self, shot: Rc<Shot>) -> bool {
+        let path = format!("shot:{}", shot.id);
+        if self.has(&path) {
+            return false;
+        }
+        let name = format!("Screenshot {}", shot.time);
+        self.entries.insert(
+            0,
+            Entry {
+                path,
+                name,
+                check: Check::NotChecked,
+                shot: Some(Kept(shot)),
+            },
+        );
+        self.entries.truncate(self.cap);
+        true
     }
 
     /// Sets the cap within `1..=MAX`; true when entries beyond it were dropped (the oldest go first).

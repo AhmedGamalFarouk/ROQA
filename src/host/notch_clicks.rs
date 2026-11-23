@@ -13,6 +13,7 @@ impl Desktop {
         else {
             return false;
         };
+        self.shot_input(notch, message);
         if message.message == WM_LBUTTONUP {
             self.pages.touch();
             let surface = &mut self.surfaces[notch];
@@ -225,7 +226,9 @@ impl Desktop {
                     .shelf
                     .absolute(index)
                     .and_then(|index| self.shelf.shelf.entries().get(index))
-                    .filter(|entry| entry.check != crate::shelf::Check::Missing)
+                    .filter(|entry| {
+                        entry.check != crate::shelf::Check::Missing && entry.shot.is_none()
+                    })
             {
                 if let Err(error) = shelf_os::share(surface.window.0, &entry.path) {
                     eprintln!("Share: {error}");

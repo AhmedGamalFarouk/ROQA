@@ -57,6 +57,8 @@ mod settings;
 mod settings_window;
 mod shelf;
 mod shelf_os;
+mod shot_os;
+mod shots;
 mod sort;
 mod stopwatch;
 mod store;

@@ -34,9 +34,10 @@ use windows::{
                 CoTaskMemFree, CoUninitialize, DVASPECT_CONTENT, FORMATETC, IDataObject,
                 TYMED_HGLOBAL,
             },
+            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
             Ole::{
-                CF_HDROP, DROPEFFECT, DROPEFFECT_LINK, DROPEFFECT_NONE, IDropTarget,
-                IDropTarget_Impl, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
+                CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_NONE,
+                IDropTarget, IDropTarget_Impl, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
             },
             SystemServices::MODIFIERKEYS_FLAGS,
         },
@@ -59,6 +60,8 @@ pub enum DropEvent {
     Dock(HWND, i32, Vec<String>),
     /// A file drag is over a dock at this screen column, or (`None`) has left it or dropped.
     DockOver(HWND, Option<i32>),
+    /// A screenshot from the pill (its id, `shot_os`) dropped on the notch: the Shelf keeps it.
+    Shot(u64),
 }
 pub type Drops = Rc<RefCell<Vec<DropEvent>>>;
 
@@ -100,6 +103,31 @@ fn dropped_files(data: &IDataObject) -> Vec<String> {
     }
 }
 
+/// The id of a screenshot dragged from the pill.
+fn dropped_shot(data: &IDataObject) -> Option<u64> {
+    // SAFETY: the medium is owned until `ReleaseStgMedium`; its global is read only while locked, and only
+    // when it holds the id's eight bytes.
+    unsafe {
+        let mut medium = data
+            .GetData(&crate::shot_os::format(crate::shot_os::shot_format(), -1))
+            .ok()?;
+        let mut id = None;
+        if medium.tymed == TYMED_HGLOBAL.0 as u32 {
+            let global = medium.u.hGlobal;
+            let start = GlobalLock(global).cast::<u8>();
+            if !start.is_null() && GlobalSize(global) >= 8 {
+                let bytes = std::slice::from_raw_parts(start, 8);
+                id = bytes.try_into().ok().map(u64::from_le_bytes);
+            }
+            if !start.is_null() {
+                let _ = GlobalUnlock(global);
+            }
+        }
+        ReleaseStgMedium(&mut medium);
+        id
+    }
+}
+
 #[implement(IDropTarget)]
 struct DropTarget {
     hwnd: HWND,
@@ -110,13 +138,17 @@ struct DropTarget {
     accepts: Cell<bool>,
     /// The screen column last reported over a dock, so a drag resting still adds no events.
     column: Cell<i32>,
+    /// The drag now over the notch is a screenshot from the pill (copied, not linked).
+    shot: Cell<bool>,
 }
 
-fn answer(effect: *mut DROPEFFECT, accepts: bool) {
+fn answer(effect: *mut DROPEFFECT, accepts: bool, shot: bool) {
     if !effect.is_null() {
         // SAFETY: OLE passes a valid, writable effect for the call's duration; checked non-null above.
         unsafe {
-            *effect = if accepts {
+            *effect = if accepts && shot {
+                DROPEFFECT_COPY
+            } else if accepts {
                 DROPEFFECT_LINK
             } else {
                 DROPEFFECT_NONE
@@ -142,10 +174,22 @@ impl IDropTarget_Impl for DropTarget_Impl {
         point: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> Result<()> {
+        // A screenshot from the pill is for the Shelf only, never a dock. It is asked first: the shell's data
+        // object it travels in may also answer for files.
+        let shot = !self.dock
+            && data.as_ref().is_some_and(|data| {
+                // SAFETY: `data` is the live object OLE hands this call; the format is a plain value.
+                unsafe {
+                    data.QueryGetData(&crate::shot_os::format(crate::shot_os::shot_format(), -1))
+                }
+                .is_ok()
+            });
         // SAFETY: `data` is the live object OLE hands this call; the format is a plain value.
-        let files = data
-            .as_ref()
-            .is_some_and(|data| unsafe { data.QueryGetData(&hdrop_format()) }.is_ok());
+        let files = shot
+            || data
+                .as_ref()
+                .is_some_and(|data| unsafe { data.QueryGetData(&hdrop_format()) }.is_ok());
+        self.shot.set(shot);
         self.accepts.set(files);
         if files && !self.dock {
             self.drops
@@ -155,7 +199,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         if files && self.dock {
             self.over(point.x);
         }
-        answer(effect, files);
+        answer(effect, files, shot);
         Ok(())
     }
     fn DragOver(
@@ -167,7 +211,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         if self.dock && self.accepts.get() && point.x != self.column.get() {
             self.over(point.x);
         }
-        answer(effect, self.accepts.get());
+        answer(effect, self.accepts.get(), self.shot.get());
         Ok(())
     }
     fn DragLeave(&self) -> Result<()> {
@@ -192,6 +236,12 @@ impl IDropTarget_Impl for DropTarget_Impl {
         effect: *mut DROPEFFECT,
     ) -> Result<()> {
         let accepted = self.accepts.replace(false);
+        if accepted && self.shot.replace(false) {
+            let id = data.as_ref().and_then(dropped_shot);
+            answer(effect, id.is_some(), true);
+            self.drops.borrow_mut().extend(id.map(DropEvent::Shot));
+            return Ok(());
+        }
         let files = if accepted {
             data.as_ref().map(dropped_files).unwrap_or_default()
         } else {
@@ -202,7 +252,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
                 .borrow_mut()
                 .push(DropEvent::DockOver(self.hwnd, None));
         }
-        answer(effect, !files.is_empty());
+        answer(effect, !files.is_empty(), false);
         if self.dock {
             if !files.is_empty() {
                 self.drops
@@ -229,6 +279,7 @@ pub fn register(hwnd: HWND, drops: &Drops, dock: bool) -> Result<()> {
         dock,
         accepts: Cell::new(false),
         column: Cell::new(i32::MIN),
+        shot: Cell::new(false),
     }
     .into();
     // SAFETY: `hwnd` is our own live window on this OLE-initialised STA thread.

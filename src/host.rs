@@ -3,6 +3,7 @@ mod menus;
 mod notch_clicks;
 mod notices;
 mod settings_bridge;
+mod shots;
 use crate::{
     agent,
     audio::{self, Audio},
@@ -708,6 +709,11 @@ impl Surface {
         });
         let progress = self.motion.value(now);
         let notice = power.text();
+        // The screenshot pill holds the row while no notice shows; its row eases in and out like one.
+        let shot_on = shelf.shots.showing() && notice.is_none();
+        if shot_on {
+            self.last_notice.clear();
+        }
         // A switch of page while the panel is open slides and fades the new one in; a notice eases in.
         if let Some(dir) = motion::page_switch(self.page_at, page.index(), progress > 0.9)
             && self.visible
@@ -724,7 +730,7 @@ impl Surface {
         {
             self.last_notice = text.to_owned();
         }
-        if notice.is_some() != self.notice_on {
+        if (notice.is_some() || shot_on) != self.notice_on {
             self.notice_on = !self.notice_on;
             if self.visible {
                 // Fades in, and out again when it ends (the text stays in `last_notice` for that).
@@ -745,10 +751,14 @@ impl Surface {
             self.page_from = None;
         }
         let fading_out = notice.is_none() && self.notice_fx.running(now);
-        let notice = notice.or(fading_out.then_some(self.last_notice.as_str()));
+        let notice = notice.or((shot_on || fading_out).then_some(self.last_notice.as_str()));
         // The plain panel makes room for the notice's row as it eases in, and gives it back as it leaves.
         if power.text().is_some() {
             layout::set_notice_ask(matches!(power.extra(), power::Extra::Ask(_)));
+            layout::set_notice_shot(false);
+        } else if shot_on {
+            layout::set_notice_ask(false);
+            layout::set_notice_shot(true);
         }
         layout::set_notice_shown(if notice.is_some() {
             self.notice_fx.value(now)
@@ -827,6 +837,7 @@ impl Surface {
                 missing: false,
                 more,
                 add: false,
+                thumb: None,
             };
             let more = shelf.clips.has_more().then(|| clip("", true));
             previews
@@ -845,6 +856,7 @@ impl Surface {
                     missing: entry.check == Check::Missing,
                     more: false,
                     add: false,
+                    thumb: entry.shot.as_ref().map(|kept| &kept.0.thumb),
                 })
                 .collect()
         };
@@ -854,6 +866,7 @@ impl Surface {
                 missing: false,
                 more: shelf.shelf.overflow(),
                 add: shelf.shelf.is_empty(),
+                thumb: None,
             });
         }
         let scene = NotchScene {
@@ -871,6 +884,7 @@ impl Surface {
             reminders: &reminders,
             notice,
             extra: power.extra(),
+            shot: shots::scene(&shelf.shots, shot_on, now),
             shelf: &slots,
             shelf_undo: shelf.removed.is_some() && !copied,
             shelf_hover: self.hovered,
@@ -1284,6 +1298,8 @@ struct ShelfView {
     /// The Copied list and whether the Shelf page shows it instead of the files (not persisted).
     clips: Clips,
     copied: bool,
+    /// The screenshot pill's stack (memory only).
+    shots: crate::shots::Shots,
 }
 
 /// As `edit_pins`, only a real persisted change marks the store dirty.
@@ -1375,6 +1391,8 @@ struct Desktop {
     shelf: ShelfView,
 
     drops: Drops,
+    /// A press on the screenshot chip or a kept shot, until it moves into a drag.
+    shot_press: Option<shots::ShotPress>,
     /// An icon finished this pass (`refresh_dock` collected it).
     icons_arrived: bool,
     /// The dock icon table kept between the frames of one dock animation; dropped when the dock changes.
@@ -1586,8 +1604,10 @@ impl Desktop {
                 shelf,
                 clips,
                 copied: false,
+                shots: crate::shots::Shots::default(),
             },
             drops: Drops::default(),
+            shot_press: None,
             icons_arrived: false,
             animation_icons: None,
             store,
@@ -1722,9 +1742,8 @@ impl Desktop {
                 &self.shelf,
                 &self.pages,
             )?;
-            if self.settings.clipboard {
-                clipboard_os::watch(surface.window.0, true);
-            }
+            // Always on: a screenshot's image starts the pill; text joins Copied only when that is on.
+            clipboard_os::watch(surface.window.0, true);
             self.surfaces.push(surface);
         } else {
             self.surfaces.push(surface);
@@ -2445,6 +2464,7 @@ impl Desktop {
                     || surface.volume_fill.running(now)
                     || surface.page_fx.running(now)
                     || surface.notice_fx.running(now)
+                    || self.shelf.shots.running(now)
                     || surface.rail_fx.running(now)
                     || surface.slide.running(now)
                     || match &surface.role {
@@ -3271,6 +3291,7 @@ impl Desktop {
                     self.add_shelf_files(&paths)
                 }
                 DropEvent::Files(_) => {}
+                DropEvent::Shot(_) => {}
                 DropEvent::Dock(hwnd, x, paths) => self.drop_on_dock(hwnd, x, &paths),
                 DropEvent::DockOver(hwnd, x) => self.drag_over_dock(hwnd, x),
             }
@@ -3365,7 +3386,13 @@ impl Desktop {
             self.change_shelf(Shelf::next_page);
             return;
         };
-        let Some(entry) = self.shelf.shelf.entries().get(index) else {
+        let Some(entry) = self
+            .shelf
+            .shelf
+            .entries()
+            .get(index)
+            .filter(|e| e.shot.is_none())
+        else {
             return;
         };
         let path = entry.path.clone();
@@ -3401,6 +3428,7 @@ impl Desktop {
             .shelf
             .absolute(index)
             .and_then(|index| self.shelf.shelf.entries().get(index))
+            .filter(|entry| entry.shot.is_none())
         else {
             return false;
         };
@@ -3971,8 +3999,10 @@ impl Desktop {
     /// posts while a message box or a drag loop runs, and a flag left set would silence its feature for good.
     fn read_wakes(&mut self) {
         if native_window::clip_read() {
+            crate::shot_os::check();
             self.capture_clip();
         }
+        self.take_shots();
         if native_window::power_read() {
             if self.power.update(power::Raw::read(), Instant::now()) {
                 self.open_notches();
@@ -4639,6 +4669,7 @@ mod clock_wait_tests {
             shelf: Shelf::default(),
             clips: Clips::default(),
             copied: false,
+            shots: crate::shots::Shots::default(),
         };
         let (mut store, mut pending, now) = (Store::default(), Pending::default(), Instant::now());
         let mut add = |view: &mut ShelfView, list: &[&str]| {

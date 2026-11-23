@@ -91,7 +91,7 @@ unsafe fn read_open() -> Option<String> {
 ///
 /// # Safety
 /// The clipboard must be open on this thread.
-unsafe fn private() -> bool {
+pub unsafe fn private() -> bool {
     // SAFETY: the clipboard is open (caller contract).
     unsafe {
         if IsClipboardFormatAvailable(RegisterClipboardFormatW(w!(

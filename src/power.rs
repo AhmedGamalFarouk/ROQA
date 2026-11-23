@@ -129,6 +129,8 @@ pub struct Power {
     hold: Duration,
     /// One plain notice the row refused, shown when the row frees (`promote`); the first one refused stays.
     next: Option<(String, Duration)>,
+    /// The screenshot pill holds the row (`shots`), and whether it is hovered or dragged (held).
+    shot: Option<bool>,
 }
 
 impl Power {
@@ -164,7 +166,12 @@ impl Power {
     /// Whether `announce` with these would take the row now: a producer that must not lose its notice (a due
     /// reminder) asks first.
     pub fn admits(&self, now: Instant, hold: Duration, extra: Extra) -> bool {
-        if self.guarded() {
+        if self.guarded() || self.shot == Some(true) {
+            return false;
+        }
+        // A showing screenshot pill gives way only to a button row; a plain notice waits for it.
+        if self.shot.is_some() && !matches!(extra, Extra::Ask(_) | Extra::Eject(_) | Extra::Snooze)
+        {
             return false;
         }
         let firm = self.notice.as_ref().is_some_and(|(_, until)| now < *until)
@@ -189,6 +196,18 @@ impl Power {
         self.since = Some(now);
         self.hold = hold;
         true
+    }
+
+    /// The screenshot pill shows on the free row (`Some`, true while hovered or dragged), or not.
+    pub fn set_shot(&mut self, shot: Option<bool>) {
+        self.shot = shot;
+    }
+
+    /// A prayer takes the row from a showing screenshot pill that is not held; the pill returns after it.
+    pub fn yield_shot(&mut self) {
+        if self.shot == Some(false) {
+            self.shot = None;
+        }
     }
 
     /// Shows the queued notice once the row is free; true when it did.
