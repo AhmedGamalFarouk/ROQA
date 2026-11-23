@@ -187,7 +187,7 @@ impl Glyph {
                 "M4.5 9.5h2.7L12 5.6v12.8l-4.8-3.9H4.5a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1zM16 9.6l5 5M21 9.6l-5 5"
             }
             Glyph::Gear => {
-                "M3 7h3M10 7h11M3 17h11M18 17h3M8 5a2 2 0 1 0 0 4a2 2 0 1 0 0-4zM16 15a2 2 0 1 0 0 4a2 2 0 1 0 0-4z"
+                "M4 7h2M12 7h8M4 17h8M18 17h2M9 4a3 3 0 1 0 0 6a3 3 0 1 0 0-6zM15 14a3 3 0 1 0 0 6a3 3 0 1 0 0-6z"
             }
             // The brightness sun and the clear sky are one tracing: rays long enough to read at 16 px.
             Glyph::Sun | Glyph::Clear => {
@@ -220,7 +220,7 @@ impl Glyph {
             Glyph::Apps => {
                 "M6 4h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM16 4h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM6 14h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2zM16 14h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2z"
             }
-            Glyph::Limits => "M3.5 18a8.5 8.5 0 1 1 17 0M12 15l5-6",
+            Glyph::Limits => "M4.64 18.25A8.5 8.5 0 1 1 19.36 18.25M12 14l3.2-3.2",
             Glyph::Search => "M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13zM15.4 15.4L20.5 20.5",
             Glyph::TaskView => {
                 "M10 9h8a2 2 0 0 1 2 2v5.5a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2V11a2 2 0 0 1 2-2zM5 14.5V8a2 2 0 0 1 2-2h8"
@@ -237,7 +237,7 @@ impl Glyph {
                 "M17 3l3 3l-3 3M20 6H8a4 4 0 0 0-4 4v1M7 21l-3-3l3-3M4 18h12a4 4 0 0 0 4-4v-1M11 10.5l1.5-1.2V15"
             }
             Glyph::Battery => {
-                "M5 6h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2zM21 10v4"
+                "M5.5 6.5h9.5a3 3 0 0 1 3 3v5a3 3 0 0 1-3 3H5.5a3 3 0 0 1-3-3v-5a3 3 0 0 1 3-3zM21.25 10.5v3"
             }
             Glyph::Charging => "M13 2L5 13h6l-1 9 9-12h-6z",
             Glyph::Add => "M12 4v16M4 12h16",
@@ -410,31 +410,157 @@ fn stroke_style(factory: &ID2D1Factory) -> Result<ID2D1StrokeStyle> {
     }
 }
 
+/// The centre of a circular arc from `from` to `to` (SVG endpoint form, no rotation).
+fn centre(from: (f32, f32), radius: f32, large: bool, sweep: bool, to: (f32, f32)) -> (f32, f32) {
+    let (hx, hy) = ((from.0 - to.0) / 2.0, (from.1 - to.1) / 2.0);
+    let half = hx.hypot(hy).max(f32::EPSILON);
+    let rise = (radius * radius - half * half).max(0.0).sqrt() / half;
+    let sign = if large == sweep { -1.0 } else { 1.0 };
+    (
+        (from.0 + to.0) / 2.0 + sign * rise * hy,
+        (from.1 + to.1) / 2.0 - sign * rise * hx,
+    )
+}
+
+/// A grid point's pixel position per axis, where a rule fixed it.
+type Fix = ((f32, f32), [Option<f32>; 2]);
+
+fn slot(fixes: &mut Vec<Fix>, at: (f32, f32)) -> &mut [Option<f32>; 2] {
+    let index = fixes
+        .iter()
+        .position(|fix| (fix.0.0 - at.0).abs() < 5e-3 && (fix.0.1 - at.1).abs() < 5e-3)
+        .unwrap_or_else(|| {
+            fixes.push((at, [None; 2]));
+            fixes.len() - 1
+        });
+    &mut fixes[index].1
+}
+
+/// A glyph's path in device pixels for an icon `side` px wide: rails, not points
+/// (`cook/design/limits-icons-polish.md` C). A horizontal or vertical run snaps its fixed coordinate, an
+/// arc end rides the rail its other end sits on, a figure of arcs only snaps its centre and rounds its
+/// radius, a node on such a centre follows it, and everything else stays exact.
+fn place(path: &str, side: f32) -> Vec<Seg> {
+    let k = side / GRID;
+    // Each segment with the point it starts from, its figure's start and the figure's index.
+    let mut walk = Vec::new();
+    let (mut at, mut start, mut figure) = ((0.0, 0.0), (0.0, 0.0), 0);
+    parse(path, |segment| {
+        if let Seg::M(x, y) = segment {
+            figure += 1;
+            start = (x, y);
+        }
+        walk.push((at, segment, start, figure));
+        at = match segment {
+            Seg::M(x, y) | Seg::L(x, y) | Seg::A(_, _, _, x, y) => (x, y),
+            Seg::Z => start,
+        };
+    });
+    let mut fixes: Vec<Fix> = Vec::new();
+    // Rails (and `h.01` dots, which are both): the fixed coordinate snaps.
+    for &(from, segment, start, _) in &walk {
+        let to = match segment {
+            Seg::L(x, y) => (x, y),
+            Seg::Z if (from.0 - start.0).hypot(from.1 - start.1) > 0.02 => start,
+            _ => continue,
+        };
+        for (axis, (a, b)) in [(from.0, to.0), (from.1, to.1)].into_iter().enumerate() {
+            if (a - b).abs() < 0.02 {
+                slot(&mut fixes, from)[axis] = Some(snap(a, side));
+                slot(&mut fixes, to)[axis] = Some(snap(b, side));
+            }
+        }
+    }
+    // Circles and dials: the centre snaps, the radius rounds to whole pixels, the points follow.
+    let mut radii = vec![None; figure + 1];
+    for (index, radius) in radii.iter_mut().enumerate() {
+        let mut rest = walk.iter().filter(|w| w.3 == index).skip(1).peekable();
+        let Some(&&(from, Seg::A(r, large, sweep, x, y), _, _)) = rest.peek() else {
+            continue;
+        };
+        if !rest.all(|w| matches!(w.1, Seg::A(..) | Seg::Z)) {
+            continue;
+        }
+        let grid = centre(from, r, large, sweep, (x, y));
+        let new = (snap(grid.0, side), snap(grid.1, side));
+        let round = (r * k).round().max(1.0);
+        *radius = Some(round);
+        for &(_, segment, _, _) in walk.iter().filter(|w| w.3 == index) {
+            if let Seg::M(x, y) | Seg::A(_, _, _, x, y) = segment {
+                *slot(&mut fixes, (x, y)) = [
+                    Some(new.0 + (x - grid.0) * round / r),
+                    Some(new.1 + (y - grid.1) * round / r),
+                ];
+            }
+        }
+        // Anchor: a node on the centre (the gauge needle's pivot) takes the centre's pixel.
+        *slot(&mut fixes, grid) = [Some(new.0), Some(new.1)];
+    }
+    // Corners ride their rails: an unfixed arc end takes its other end's offset on that axis.
+    let mut rides = Vec::new();
+    for &(from, segment, _, index) in &walk {
+        let Seg::A(_, _, _, x, y) = segment else {
+            continue;
+        };
+        if radii[index].is_some() {
+            continue;
+        }
+        let (a, b) = (*slot(&mut fixes, from), *slot(&mut fixes, (x, y)));
+        for (axis, (from_v, to_v)) in [(from.0, x), (from.1, y)].into_iter().enumerate() {
+            match (a[axis], b[axis]) {
+                (None, Some(fixed)) => rides.push((from, axis, fixed + (from_v - to_v) * k)),
+                (Some(fixed), None) => rides.push(((x, y), axis, fixed + (to_v - from_v) * k)),
+                _ => {}
+            }
+        }
+    }
+    for (at, axis, value) in rides {
+        slot(&mut fixes, at)[axis].get_or_insert(value);
+    }
+    let mut point = |x: f32, y: f32| {
+        let fix = *slot(&mut fixes, (x, y));
+        (fix[0].unwrap_or(x * k), fix[1].unwrap_or(y * k))
+    };
+    walk.iter()
+        .map(|&(_, segment, _, index)| match segment {
+            Seg::M(x, y) => {
+                let (x, y) = point(x, y);
+                Seg::M(x, y)
+            }
+            Seg::L(x, y) => {
+                let (x, y) = point(x, y);
+                Seg::L(x, y)
+            }
+            Seg::A(r, large, sweep, x, y) => {
+                let (x, y) = point(x, y);
+                Seg::A(radii[index].unwrap_or(r * k), large, sweep, x, y)
+            }
+            Seg::Z => Seg::Z,
+        })
+        .collect()
+}
+
 fn build(factory: &ID2D1Factory, glyph: Glyph, side: f32) -> Result<ID2D1PathGeometry> {
     // SAFETY: the geometry and sink are local COM objects; the sink is closed before the geometry is used.
     unsafe {
         let shape = factory.CreatePathGeometry()?;
         let sink = shape.Open()?;
         let mut open = false;
-        parse(glyph.path(), |segment| {
-            let point = |x, y| Vector2 {
-                X: snap(x, side),
-                Y: snap(y, side),
-            };
+        for segment in place(glyph.path(), side) {
             match segment {
                 Seg::M(x, y) => {
                     if open {
                         sink.EndFigure(D2D1_FIGURE_END_OPEN);
                     }
-                    sink.BeginFigure(point(x, y), D2D1_FIGURE_BEGIN_HOLLOW);
+                    sink.BeginFigure(Vector2 { X: x, Y: y }, D2D1_FIGURE_BEGIN_HOLLOW);
                     open = true;
                 }
-                Seg::L(x, y) => sink.AddLine(point(x, y)),
+                Seg::L(x, y) => sink.AddLine(Vector2 { X: x, Y: y }),
                 Seg::A(radius, large, sweep, x, y) => sink.AddArc(&D2D1_ARC_SEGMENT {
-                    point: point(x, y),
+                    point: Vector2 { X: x, Y: y },
                     size: D2D_SIZE_F {
-                        width: radius * side / GRID,
-                        height: radius * side / GRID,
+                        width: radius,
+                        height: radius,
                     },
                     rotationAngle: 0.0,
                     sweepDirection: if sweep {
@@ -453,7 +579,7 @@ fn build(factory: &ID2D1Factory, glyph: Glyph, side: f32) -> Result<ID2D1PathGeo
                     open = false;
                 }
             }
-        });
+        }
         if open {
             sink.EndFigure(D2D1_FIGURE_END_OPEN);
         }
@@ -817,17 +943,53 @@ mod tests {
 
     #[test]
     fn strokes_snap_to_whole_pixels_at_every_size_and_scale() {
-        for dips in [16.0, 20.0, 24.0, 32.0] {
+        for dips in [16.0, 20.0, 24.0, 26.0, 32.0] {
             for scale in [1.0, 1.25, 1.5, 2.0] {
                 let side = (dips * scale as f32).round();
                 let width = stroke_pixels(side);
                 assert_eq!(width, width.round());
-                for coordinate in [2.8, 4.0, 8.5, 12.0, 20.0, 21.2] {
-                    let centre = snap(coordinate, side);
-                    assert_eq!((centre - width / 2.0).fract(), 0.0);
-                    assert_eq!((centre + width / 2.0).fract(), 0.0);
-                }
                 assert!((1.0..=side / 8.0 + 1.0).contains(&width), "{side}: {width}");
+                let k = side / GRID;
+                let crisp = |v: f32| {
+                    let edge = v - width / 2.0;
+                    assert!((edge - edge.round()).abs() < 1e-3, "{side}: {v}");
+                };
+                let end = |s: Seg| match s {
+                    Seg::M(x, y) | Seg::L(x, y) | Seg::A(_, _, _, x, y) => (x, y),
+                    Seg::Z => panic!("no end"),
+                };
+                // Battery: the four body rails and the nub land on whole px; a corner keeps radius and chord.
+                let battery = place(Glyph::Battery.path(), side);
+                for (index, x) in [(3, true), (7, true), (11, true), (0, false), (5, false)] {
+                    let (px, py) = end(battery[index]);
+                    crisp(if x { px } else { py });
+                }
+                let Seg::A(radius, ..) = battery[2] else {
+                    panic!("corner")
+                };
+                assert!((radius - 3.0 * k).abs() < 1e-3);
+                let (a, b) = (end(battery[1]), end(battery[2]));
+                assert!((b.0 - a.0 - 3.0 * k).abs() < 1e-3 && (b.1 - a.1 - 3.0 * k).abs() < 1e-3);
+                // Quick sliders: a knob's centre is on the stroke's phase grid, its radius whole px.
+                let gear = place(Glyph::Gear.path(), side);
+                let (top, Seg::A(radius, ..)) = (end(gear[8]), gear[9]) else {
+                    panic!("knob")
+                };
+                let bottom = end(gear[9]);
+                assert_eq!(radius, radius.round());
+                crisp(top.0);
+                crisp((top.1 + bottom.1) / 2.0);
+                // Limits: the needle starts on the dial's centre.
+                let limits = place(Glyph::Limits.path(), side);
+                let Seg::A(radius, large, sweep, ..) = limits[1] else {
+                    panic!("dial")
+                };
+                let pivot = centre(end(limits[0]), radius, large, sweep, end(limits[1]));
+                let needle = end(limits[2]);
+                assert!(
+                    (pivot.0 - needle.0).abs() < 1e-3 && (pivot.1 - needle.1).abs() < 1e-3,
+                    "{side}"
+                );
             }
         }
         assert_eq!(stroke_pixels(16.0), 1.0);
