@@ -644,14 +644,23 @@ pub(super) fn draw(
     Ok(())
 }
 
-/// The moon in `square` (physical pixels): the icon stroke round the disc and the lit share filled inside it,
-/// bounded by the limb on the `right` (or left) and the terminator, a half ellipse `|1 - 2 lit|` of the radius wide.
+/// How the moon is inked: the lit share's fill, the disc under it (the dark side), and a ring round the disc
+/// with its width in pixels.
+pub(super) struct MoonInk {
+    pub lit: D2D1_COLOR_F,
+    pub disc: Option<D2D1_COLOR_F>,
+    pub ring: Option<(D2D1_COLOR_F, f32)>,
+}
+
+/// The moon in `square` (physical pixels, a 9-unit disc on the 24 grid): the disc, the lit share filled over it,
+/// bounded by the limb on the `right` (or left) and the terminator, a half ellipse `|1 - 2 lit|` of the radius wide,
+/// then the ring.
 pub(super) fn moon(
     context: &ID2D1RenderTarget,
     square: D2D_RECT_F,
     lit: f32,
     right: bool,
-    color: D2D1_COLOR_F,
+    ink: &MoonInk,
 ) -> Result<()> {
     let side = square.right - square.left;
     let radius = 9.0 * side / GRID;
@@ -679,7 +688,15 @@ pub(super) fn moon(
     // SAFETY: context is live between BeginDraw/EndDraw; the brush, geometry and sink are local, and the sink
     // is closed before the geometry is filled.
     unsafe {
-        let brush = context.CreateSolidColorBrush(&color, None)?;
+        let disc = D2D1_ELLIPSE {
+            point: Vector2 { X: x, Y: y },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        if let Some(color) = ink.disc {
+            context.FillEllipse(&disc, &context.CreateSolidColorBrush(&color, None)?);
+        }
+        let brush = context.CreateSolidColorBrush(&ink.lit, None)?;
         let shape = context.GetFactory()?.CreatePathGeometry()?;
         let sink = shape.Open()?;
         sink.BeginFigure(
@@ -699,14 +716,37 @@ pub(super) fn moon(
         sink.EndFigure(D2D1_FIGURE_END_CLOSED);
         sink.Close()?;
         context.FillGeometry(&shape, &brush, None);
-        let disc = D2D1_ELLIPSE {
-            point: Vector2 { X: x, Y: y },
-            radiusX: radius,
-            radiusY: radius,
-        };
-        context.DrawEllipse(&disc, &brush, stroke_pixels(side), None);
+        if let Some((color, width)) = ink.ring {
+            let ring = context.CreateSolidColorBrush(&color, None)?;
+            context.DrawEllipse(&disc, &ring, width, None);
+        }
     }
     Ok(())
+}
+
+/// The dock's moon icon ink: dark themes fill the lit share in ink round a faint ring; Light fills the disc in
+/// ink and cuts the lit share back to `body`, so a full moon is an open ring, never a black disc.
+pub(super) fn moon_icon(ink: (u8, u8, u8), body: D2D1_COLOR_F, side: f32) -> MoonInk {
+    let color = |alpha: f32| D2D1_COLOR_F {
+        r: f32::from(ink.0) / 255.0,
+        g: f32::from(ink.1) / 255.0,
+        b: f32::from(ink.2) / 255.0,
+        a: alpha,
+    };
+    let width = stroke_pixels(side);
+    if ink.0 < 128 {
+        MoonInk {
+            lit: body,
+            disc: Some(color(1.0)),
+            ring: Some((color(0.55), width)),
+        }
+    } else {
+        MoonInk {
+            lit: color(1.0),
+            disc: None,
+            ring: Some((color(0.3), width)),
+        }
+    }
 }
 
 thread_local! {
@@ -933,7 +973,12 @@ mod tests {
             for lit in [0.0, 0.02, 0.3, 0.5, 0.7, 0.98, 1.0] {
                 for right in [true, false] {
                     target.BeginDraw();
-                    moon(&target, square, lit, right, bgr(0)).expect("moon");
+                    let ink = MoonInk {
+                        lit: bgr(0),
+                        disc: Some(bgr(0x808080)),
+                        ring: Some((bgr(0), 1.0)),
+                    };
+                    moon(&target, square, lit, right, &ink).expect("moon");
                     target.EndDraw(None, None).expect("end draw");
                 }
             }

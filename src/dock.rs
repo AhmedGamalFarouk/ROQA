@@ -291,6 +291,8 @@ pub enum Button {
     Battery,
     /// AI plan limits: hover shows them, a click refreshes. Shown by the Limits switch; no button key.
     Limits,
+    /// Today's moon phase; hover or a click shows the moon's popup. Shown by "Moon on the dock"; no button key.
+    Moon,
 }
 impl Button {
     /// Configurable buttons; Battery is fixed and never stored.
@@ -320,9 +322,12 @@ impl Button {
             Button::Search => Some(&[VK_LWIN, VK_S]),
             Button::TaskView => Some(&[VK_LWIN, VK_TAB]),
             Button::Desktop => Some(&[VK_LWIN, VK_D]),
-            Button::Quick | Button::Places | Button::Tray | Button::Battery | Button::Limits => {
-                None
-            }
+            Button::Quick
+            | Button::Places
+            | Button::Tray
+            | Button::Battery
+            | Button::Limits
+            | Button::Moon => None,
         }
     }
 }
@@ -333,6 +338,9 @@ pub struct Buttons {
     pub shown: [bool; 7],
     pub battery: bool,
     pub limits: bool,
+    /// The moon button with today's phase as its icon draws it: lit share in percent and the lit limb on the
+    /// right; `None` with the switch off.
+    pub moon: Option<(u8, bool)>,
     /// Mirrored for a right-to-left UI language: the dock runs from the right edge, as the taskbar does.
     /// The host sets it from the system; it is not a stored setting.
     pub rtl: bool,
@@ -348,6 +356,7 @@ impl Buttons {
             shown,
             battery: false,
             limits: false,
+            moon: None,
             rtl: false,
             centre: 0,
         }
@@ -356,6 +365,7 @@ impl Buttons {
         match button {
             Button::Battery => self.battery,
             Button::Limits => self.limits,
+            Button::Moon => self.moon.is_some(),
             _ => self.shown[button.index()],
         }
     }
@@ -373,12 +383,13 @@ impl Buttons {
     fn has_tail(self) -> bool {
         self.tail().next().is_some()
     }
-    /// The hidden-icons chevron, device batteries, AI limits, quick settings, then the pill.
+    /// The hidden-icons chevron, device batteries, AI limits, the moon, quick settings, then the pill.
     fn tail(self) -> impl Iterator<Item = Button> {
         [
             Button::Tray,
             Button::Battery,
             Button::Limits,
+            Button::Moon,
             Button::Quick,
             Button::Desktop,
         ]
@@ -550,7 +561,13 @@ fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
             px(SLOT_DIPS, dpi),
         ),
         Hit::Button(Button::Desktop) => (width_px - strip, strip),
-        Hit::Button(button @ (Button::Quick | Button::Tray | Button::Battery | Button::Limits)) => {
+        Hit::Button(
+            button @ (Button::Quick
+            | Button::Tray
+            | Button::Battery
+            | Button::Limits
+            | Button::Moon),
+        ) => {
             let end = if buttons.on(Button::Desktop) {
                 STRIP_DIPS
             } else {
@@ -591,7 +608,7 @@ pub fn hit_at(buttons: Buttons, x_px: i32, width_px: i32, dpi: u32, slots: usize
     let x_px = ltr_x(buttons, x_px, width_px);
     let on_button = Button::ALL
         .into_iter()
-        .chain([Button::Battery, Button::Limits])
+        .chain([Button::Battery, Button::Limits, Button::Moon])
         .filter(|b| buttons.on(*b))
         .find(|b| {
             let (left, width) = ltr_span(buttons, width_px, dpi, Hit::Button(*b));
@@ -988,6 +1005,22 @@ mod tests {
                     Some(Hit::Button(Button::Limits))
                 );
                 assert_eq!(cell_index(buttons, 3, Hit::Button(Button::Limits)), None);
+                // The moon sits after the limits, with its own hit.
+                let moon = Buttons {
+                    moon: Some((84, true)),
+                    ..with
+                };
+                let width = width_px(moon, 3, dpi);
+                assert_eq!(
+                    cell_index(moon, 3, Hit::Button(Button::Moon)),
+                    Some(limits + 1)
+                );
+                let (left, _) = span(moon, width, dpi, Hit::Button(Button::Moon));
+                assert_eq!(
+                    hit_at(moon, left + size / 2, width, dpi, 3),
+                    Some(Hit::Button(Button::Moon))
+                );
+                assert_eq!(cell_index(with, 3, Hit::Button(Button::Moon)), None);
             }
         }
     }

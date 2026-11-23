@@ -74,6 +74,96 @@ impl Desktop {
             dock::restore_foreground(menu.hwnd(), menu.return_to);
         }
     }
+    /// Today's moon (`pages.moon`, for the dock button and its popup), rebuilt once the date or hemisphere
+    /// changes; the docks repaint only when it did.
+    pub(super) fn refresh_moon(&mut self) -> Result<()> {
+        let today = prayer_os::local_now().ymd;
+        let south = self
+            .weather
+            .place
+            .as_ref()
+            .is_some_and(|place| place.lat < 0);
+        if (today, south) == (self.pages.moon.ymd, self.pages.moon.south) {
+            return Ok(());
+        }
+        let day = crate::prayer_tab::moon_day(today, south, &prayer_os::hijri);
+        if day != self.pages.moon {
+            self.pages.moon = day;
+            if self.settings.dock_moon {
+                self.relayout_docks()?;
+            }
+        }
+        Ok(())
+    }
+    /// A click on the moon does what hover does: opens its popup now, or closes it and keeps it closed until
+    /// the pointer leaves the button.
+    fn toggle_moon(&mut self, hwnd: HWND) {
+        let (hit, now) = (Hit::Button(Button::Moon), Instant::now());
+        if self
+            .hover_popup
+            .as_ref()
+            .is_some_and(|popup| popup.hover_hit == Some(hit) && !popup.closing())
+        {
+            self.hover_popup = None;
+            self.hover_spot = Some((hwnd.0 as usize, hit, now + Duration::from_secs(86_400)));
+        } else {
+            self.hover_spot = Some((hwnd.0 as usize, hit, now));
+            self.show_hover_popup(hwnd, hit);
+        }
+    }
+    /// The moon's popup over its dock button: today's phase, lit share and Hijri date, then the next full moon,
+    /// new moon and Hijri month.
+    pub(super) fn show_moon_popup(&mut self, hwnd: HWND) {
+        let Some((buttons, bounds, dpi, work)) = self.dock_at(hwnd).and_then(|dock| {
+            self.monitors
+                .iter()
+                .find(|monitor| monitor.device == dock.monitor)
+                .map(|monitor| (dock.dock_buttons, dock.bounds, dock.dpi, monitor.work))
+        }) else {
+            return;
+        };
+        let (day, moon) = (&self.pages.moon, self.pages.moon.moon);
+        let dates = [("Full moon", moon.next_full), ("New moon", moon.next_new)]
+            .map(|(label, ymd)| (label.to_owned(), ymd))
+            .into_iter()
+            .chain(day.month.clone());
+        let titles: Vec<String> =
+            std::iter::once(format!("{}\n{}% lit\n{}", moon.name, moon.pct, day.hijri))
+                .chain(
+                    dates.map(|(label, ymd)| {
+                        format!("{label}\t{}", crate::prayer_tab::short_date(ymd))
+                    }),
+                )
+                .collect();
+        let items = std::iter::once(Item::Moon(moon.pct, moon.right))
+            .chain(std::iter::repeat_n(Item::MoonDate, titles.len() - 1))
+            .collect();
+        let hit = Hit::Button(Button::Moon);
+        let (left, width) = dock::span(buttons, bounds.width, dpi, hit);
+        let spec = dock_menu::Spec {
+            dock: hwnd,
+            slot: dock_menu::APP,
+            identity: Identity::Unavailable(0),
+            windows: Vec::new(),
+            items,
+            dock_bounds: bounds,
+            work,
+            dpi,
+            app: "Moon".into(),
+            titles,
+            icons: Vec::new(),
+            x: bounds.x + left + width / 2,
+            below: None,
+            return_to: None,
+        };
+        match dock_menu::Menu::open_hover(&self.graphics, self.palette, spec) {
+            Ok(mut popup) => {
+                popup.hover_hit = Some(hit);
+                self.hover_popup = Some(popup);
+            }
+            Err(error) => eprintln!("Dock moon: {error}"),
+        }
+    }
     /// The sliders button's popup, refreshed in place as worker results arrive.
     pub(super) fn open_quick_menu(&mut self, hwnd: HWND) {
         self.open_status_menu(hwnd, Button::Quick);
@@ -589,6 +679,7 @@ impl Desktop {
         match (button, button.keys()) {
             (Button::Battery, _) => self.open_status_menu(hwnd, button),
             (Button::Limits, _) => self.start_limits(crate::limits_os::now(), true),
+            (Button::Moon, _) => self.toggle_moon(hwnd),
             (Button::Quick, _) => self.open_quick_menu(hwnd),
             (Button::Places, _) => self.ask_places(hwnd),
             (Button::Tray, _) => self.open_flyout(hwnd, crate::anchored::Kind::Tray),
@@ -1028,7 +1119,9 @@ impl Desktop {
             | Item::MemberMenu(_)
             | Item::Label
             | Item::Battery
-            | Item::Limit(_) => {}
+            | Item::Limit(_)
+            | Item::Moon(..)
+            | Item::MoonDate => {}
         }
     }
     /// Ends the open menu once it no longer describes the dock (its slot changed, or a full-screen app hid

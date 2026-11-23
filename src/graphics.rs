@@ -67,6 +67,7 @@ use windows::core::{Error, HRESULT, Interface, PCWSTR, Result, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
 mod glyphs;
+mod moon;
 pub use glyphs::{draw_gdi as draw_settings_glyph, round_gdi};
 mod ask;
 mod limit_row;
@@ -637,6 +638,14 @@ impl Canvas {
             let dot = 6.0 * scale;
             for (index, row) in scene.rows.iter().enumerate() {
                 let cell = surface_rect(rect, row.rect);
+                if let Some((lit, right)) = row.moon {
+                    moon::hero(context, cell, lit, right, row.name, scale, &p)?;
+                    continue;
+                }
+                if let Some(value) = row.value {
+                    moon::date_row(context, cell, row.name, value, scale, &p)?;
+                    continue;
+                }
                 let (left, middle) = (cell.left + 12.0 * scale, (cell.top + cell.bottom) / 2.0);
                 // A mixer row is a capsule slider: the track, and the level filled in the accent.
                 if let Some((percent, muted)) = row.level {
@@ -2470,7 +2479,7 @@ fn paint_slots(
             &cell(dock::Hit::Button(button)),
             button,
             hover,
-            scene.layout.rtl,
+            scene.layout,
             px,
             p,
         )?;
@@ -2515,12 +2524,12 @@ fn draw_button(
     cell: &D2D_RECT_F,
     button: dock::Button,
     hover: f32,
-    rtl: bool,
+    layout: dock::Buttons,
     px: &dyn Fn(i32) -> f32,
     p: &Palette,
 ) -> Result<()> {
     if button == dock::Button::Desktop {
-        return desktop_pill(context, cell, hover, rtl, px, p);
+        return desktop_pill(context, cell, hover, layout.rtl, px, p);
     }
     let centre = (
         (cell.left + cell.right) / 2.0,
@@ -2546,6 +2555,11 @@ fn draw_button(
     }
     let side = px(DOCK_GLYPH);
     let square = pixel_square(centre.0 - side / 2.0, centre.1 - side / 2.0, side);
+    if let (dock::Button::Moon, Some((pct, right))) = (button, layout.moon) {
+        let crate::theme::Rgba(r, g, b, _) = p.body;
+        let ink = glyphs::moon_icon(p.glyph, with_alpha((r, g, b), 1.0), side);
+        return glyphs::moon(context, square, f32::from(pct) / 100.0, right, &ink);
+    }
     let shape = match button {
         dock::Button::Start => unreachable!("drawn above"),
         dock::Button::Search => Glyph::Search,
@@ -2556,6 +2570,7 @@ fn draw_button(
         dock::Button::Tray => Glyph::Chevron,
         dock::Button::Battery => Glyph::Battery,
         dock::Button::Limits => Glyph::Limits,
+        dock::Button::Moon => return Ok(()), // drawn above while switched on
     };
     glyphs::draw(context, square, shape, with_alpha(p.glyph, 1.0))
 }

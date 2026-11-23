@@ -318,6 +318,7 @@ impl Desktop {
             || old.dock_buttons != self.settings.dock_buttons
             || old.dock_left != self.settings.dock_left
             || old.tabs[Tab::Limits.index()] != self.settings.tabs[Tab::Limits.index()]
+            || old.dock_moon != self.settings.dock_moon
         {
             self.relayout_docks()?;
         }

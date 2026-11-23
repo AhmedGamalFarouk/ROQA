@@ -188,6 +188,7 @@ struct Pages {
     /// The Limits page, rebuilt by `refresh_limits` only while that page shows, and what it was built for.
     limits: limits::View,
     limits_key: Option<(u32, bool, String)>,
+    moon: prayer_tab::MoonDay,
     widgets: crate::widgets::WidgetConfig,
     /// The Widgets page's month grid: the (year, month) shown, `None` for the tiles.
     month: Option<(u16, u16)>,
@@ -225,6 +226,7 @@ impl Pages {
             prayer_key: None,
             limits: limits::View::default(),
             limits_key: None,
+            moon: prayer_tab::moon_day(prayer_os::local_now().ymd, false, &prayer_os::hijri),
             widgets: settings.widgets,
             month: None,
             water: ((0, 0), 0),
@@ -1108,7 +1110,7 @@ impl Surface {
             layout: self.dock_buttons,
             buttons: Button::ALL
                 .into_iter()
-                .chain([Button::Battery, Button::Limits])
+                .chain([Button::Battery, Button::Limits, Button::Moon])
                 .filter(|button| self.dock_buttons.on(*button))
                 .map(|button| (button, hover(Hit::Button(button))))
                 .collect(),
@@ -1685,6 +1687,7 @@ impl Desktop {
             rtl: self.rtl,
             battery: true,
             limits: self.settings.tabs[Tab::Limits.index()],
+            moon: self.settings.dock_moon.then(|| self.pages.moon.icon()),
             centre: if self.settings.dock_left {
                 0
             } else {
@@ -1776,6 +1779,7 @@ impl Desktop {
             self.pages.hour = clock.hour;
             self.pages.hijri = clock.hijri;
             self.rain_soon(clock.hour, clock.minute);
+            self.refresh_moon()?;
             if clock.time != self.clock || clock.date != self.date {
                 (self.clock, self.date) = (clock.time, clock.date);
                 self.request_notches(Repaint::Full, |_| true);
@@ -2977,6 +2981,9 @@ impl Desktop {
     fn show_hover_popup(&mut self, hwnd: HWND, hit: Hit) {
         if hit == Hit::Button(Button::Limits) {
             return self.show_limits_popup(hwnd);
+        }
+        if hit == Hit::Button(Button::Moon) {
+            return self.show_moon_popup(hwnd);
         }
         // Only a folder's member list and the AI limits pop up; the dock has no tooltips.
         let Some(item) = hit

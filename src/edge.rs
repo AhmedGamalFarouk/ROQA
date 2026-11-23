@@ -263,6 +263,10 @@ pub struct ListRow<'a> {
     pub level: Option<(u8, bool)>,
     /// An AI limit row: its used percent, drawn as a thin bar under the text.
     pub bar: Option<u8>,
+    /// The moon popup's hero (its lit share and lit limb); `name` holds its three lines.
+    pub moon: Option<(f32, bool)>,
+    /// A right-aligned value after the name (a moon date row).
+    pub value: Option<&'a str>,
     pub rect: Bounds,
 }
 
@@ -1090,6 +1094,8 @@ fn list_rows<'a>(
             room: false,
             level,
             bar: None,
+            moon: None,
+            value: None,
             rect: row_rect(dpi, panel, index),
         })
         .collect()

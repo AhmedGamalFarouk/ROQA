@@ -1177,21 +1177,6 @@ fn prayer_page(g: &Page, scene: &NotchScene) -> Result<()> {
         g.at(layout::PAD, 72.0, 176.0, 14.0),
         g.ink(0.55),
     )?;
-    // Today's moon under the sun arc, on the Hijri line: the month it counts is the moon's.
-    let moon = view.moon;
-    glyphs::moon(
-        g.context,
-        g.at(226.0, 72.0, 14.0, 14.0),
-        moon.lit,
-        moon.right,
-        g.ink(0.7),
-    )?;
-    g.text(
-        moon.name,
-        &g.font(10.5, NORMAL, LEAD),
-        g.at(244.0, 72.0, 92.0, 14.0),
-        g.ink(0.55),
-    )?;
     sun_arc(g, view)?;
     for (index, row) in view.rows.iter().enumerate() {
         let chip = g.slot(layout::prayer_chip(index, scene.dpi));

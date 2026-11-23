@@ -71,6 +71,8 @@ const CITY: usize = 114;
 const DETECT: usize = 115;
 const UNITS: usize = 116;
 const DOCKSTYLE: usize = 117;
+/// Prayer page: the moon as a dock button.
+const PMOON: usize = 118;
 const CAPTION: usize = 119;
 const MONITOR: usize = 120;
 /// The "Displays" card (index in page 0): the monitor tiles are drawn on a map instead of in rows.
@@ -498,6 +500,10 @@ const PAGES: &[Page] = &[
                         "Pauses a playing player (Media tab on), never resumes",
                     ),
                 ],
+            },
+            Card {
+                label: "Dock",
+                rows: &[r(PMOON, C, "Moon on the dock", "")],
             },
             Card {
                 label: "Fine-tune",
@@ -1539,6 +1545,7 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         HIDE_TASKBAR => &mut s.hide_taskbar,
         RSOUNDS => &mut s.reminder_sounds,
         PPAUSE => &mut s.prayer_pause,
+        PMOON => &mut s.dock_moon,
         WATER => &mut s.water,
         MATCH_ACCENT => &mut s.match_accent,
         DOCK_BADGES => &mut s.dock_badges,

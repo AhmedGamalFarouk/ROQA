@@ -102,6 +102,8 @@ pub struct Settings {
     pub reminder_sounds: bool,
     /// Pause a playing media session when a prayer reminder fires (never resumed).
     pub prayer_pause: bool,
+    /// Today's moon phase as a dock button (on by default).
+    pub dock_moon: bool,
     /// Minutes added to Fajr, Dhuhr, Asr, Maghrib and Isha.
     pub prayer_shift: [i8; 5],
     /// Water reminders (off by default) and their goal, glass, hours and interval (`water::Config`).
@@ -168,6 +170,7 @@ impl Default for Settings {
             anim_fast: false,
             reminder_sounds: true,
             prayer_pause: false,
+            dock_moon: true,
             prayer_shift: [0; 5],
             water: false,
             water_cfg: water::DEFAULT,
@@ -320,6 +323,7 @@ impl Settings {
             "hidetaskbar" => flag(value).map(|v| self.hide_taskbar = v).is_some(),
             "rsounds" => flag(value).map(|v| self.reminder_sounds = v).is_some(),
             "ppause" => flag(value).map(|v| self.prayer_pause = v).is_some(),
+            "dockmoon" => flag(value).map(|v| self.dock_moon = v).is_some(),
             "notchopen" => matches!(value, "hover" | "click")
                 .then(|| self.open_click = value == "click")
                 .is_some(),
@@ -524,6 +528,7 @@ hidedelay={}
             "fshide={}
 rsounds={}
 ppause={}
+dockmoon={}
 notchopen={}
 animspeed={}
 notchsize={}
@@ -535,6 +540,7 @@ pcfg={},{},{},{}
             u8::from(self.hide_fullscreen),
             u8::from(self.reminder_sounds),
             u8::from(self.prayer_pause),
+            u8::from(self.dock_moon),
             ["hover", "click"][usize::from(self.open_click)],
             ["normal", "fast"][usize::from(self.anim_fast)],
             self.notch_size,
@@ -848,6 +854,7 @@ mod tests {
             anim_fast: true,
             reminder_sounds: false,
             prayer_pause: true,
+            dock_moon: false,
             prayer_shift: [-5, 0, 7, 30, -30],
             water: true,
             water_cfg: [6, 300, 8, 20, 45],
@@ -871,6 +878,7 @@ mod tests {
             "animspeed=fast",
             "rsounds=0",
             "ppause=1",
+            "dockmoon=0",
             "pshift=-5,0,7,30,-30",
             "water=1",
             "wcfg=6,300,8,20,45",
@@ -1160,6 +1168,7 @@ mod tests {
             anim_fast: true,
             reminder_sounds: false,
             prayer_pause: true,
+            dock_moon: false,
             prayer_shift: [1, -2, 3, -4, 5],
             water: true,
             water_cfg: [6, 300, 8, 20, 45],

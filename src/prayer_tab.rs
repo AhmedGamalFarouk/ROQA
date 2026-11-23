@@ -143,15 +143,89 @@ pub struct View {
     pub rows: Vec<Row>,
     /// Where the sun is on the page's arc, 0 (Fajr) to 1 (Isha), moving through the five stops.
     pub sun: f32,
-    pub moon: Moon,
 }
 
-/// Today's moon: its phase name, the lit share of the disc (0 to 1) and whether the lit limb is on the right.
+/// Today's moon: its phase name, the lit share of the disc (0 to 1), whether the lit limb is on the right, the lit
+/// share in whole percent and the next full and new moon after today.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Moon {
     pub name: &'static str,
     pub lit: f32,
     pub right: bool,
+    pub pct: u8,
+    pub next_full: Ymd,
+    pub next_new: Ymd,
+}
+
+/// The dock moon's popup for one day: the moon, today's Hijri date without "AH", and the next Hijri month's
+/// first day ("1 Rajab") with its date. Built once a day (`moon_day`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MoonDay {
+    pub ymd: Ymd,
+    pub south: bool,
+    pub moon: Moon,
+    pub hijri: String,
+    pub month: Option<(String, Ymd)>,
+}
+
+impl MoonDay {
+    /// What the dock's moon icon draws: the lit share in percent and whether the lit limb is on the right.
+    pub fn icon(&self) -> (u8, bool) {
+        (self.moon.pct, self.moon.right)
+    }
+}
+
+/// The civil date of a day number (the inverse of `day_number`).
+pub fn ymd_of(day: i64) -> Ymd {
+    let z = day + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y as i32, m, d)
+}
+
+/// "Tue 24 Nov".
+pub fn short_date(ymd: Ymd) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    // 1970-01-01 was a Thursday.
+    let weekday = (day_number(ymd) + 4).rem_euclid(7) as usize;
+    format!(
+        "{} {} {}",
+        DAYS[weekday],
+        ymd.2,
+        MONTHS[(ymd.1 as usize).clamp(1, 12) - 1]
+    )
+}
+
+/// The first day after `ymd` that `hijri` (the Umm al-Qura text of a date) calls the 1st of a month: "1 Rajab".
+pub fn next_month(ymd: Ymd, hijri: &dyn Fn(Ymd) -> Option<String>) -> Option<(String, Ymd)> {
+    let today = day_number(ymd);
+    (1..=30).map(|ahead| ymd_of(today + ahead)).find_map(|day| {
+        let text = hijri(day)?;
+        let (month, _year) = text.trim_end_matches(" AH").rsplit_once(' ')?;
+        month.starts_with("1 ").then(|| (month.to_owned(), day))
+    })
+}
+
+/// The popup facts for `ymd` (see `MoonDay`); `hijri` is `prayer_os::hijri`.
+pub fn moon_day(ymd: Ymd, south: bool, hijri: &dyn Fn(Ymd) -> Option<String>) -> MoonDay {
+    MoonDay {
+        ymd,
+        south,
+        moon: moon(ymd, south),
+        hijri: hijri(ymd)
+            .map(|text| text.trim_end_matches(" AH").to_owned())
+            .unwrap_or_default(),
+        month: next_month(ymd, hijri),
+    }
 }
 
 /// The moon at local noon of `ymd` from the mean synodic month (within a day of the true phase).
@@ -170,11 +244,28 @@ pub fn moon(ymd: Ymd, south: bool) -> Moon {
         "Last quarter",
         "Waning crescent",
     ];
-    let age = ((day_number(ymd) as f64 + 0.5 - NEW) / MONTH).rem_euclid(1.0);
+    let today = day_number(ymd);
+    let age = ((today as f64 + 0.5 - NEW) / MONTH).rem_euclid(1.0);
+    // The day after today whose noon is nearest the phase `at` (today itself counts as done: the next one).
+    let next = |at: f64| {
+        let ahead = ((at - age).rem_euclid(1.0) * MONTH).round() as i64;
+        ymd_of(
+            today
+                + if ahead == 0 {
+                    MONTH.round() as i64
+                } else {
+                    ahead
+                },
+        )
+    };
+    let lit = (1.0 - (age * std::f64::consts::TAU).cos()) / 2.0;
     Moon {
         name: NAMES[(age * 8.0 + 0.5) as usize % 8],
-        lit: ((1.0 - (age * std::f64::consts::TAU).cos()) / 2.0) as f32,
+        lit: lit as f32,
         right: (age < 0.5) != south,
+        pct: (lit * 100.0).round() as u8,
+        next_full: next(0.5),
+        next_new: next(0.0),
     }
 }
 
@@ -231,7 +322,6 @@ pub fn view(
         left: short,
         hijri,
         sun: sun(FIVE.map(|p| times[p as usize]), local.secs),
-        moon: moon(local.ymd, params.lat < 0.0),
         rows: FIVE
             .iter()
             .enumerate()
@@ -671,6 +761,37 @@ mod tests {
         assert_eq!(moon((2026, 11, 12), false).name, "Waxing crescent");
         assert_eq!(moon((2026, 11, 28), false).name, "Waning gibbous");
         assert!(!moon((2026, 11, 28), false).right);
+        // The next full and new moon after a day; on the day itself, the one after it.
+        assert_eq!(moon((2026, 11, 17), false).next_full, (2026, 11, 24));
+        assert_eq!(moon((2026, 11, 24), false).next_new, (2026, 12, 9));
+        assert_eq!(moon((2026, 11, 24), false).next_full, (2026, 12, 24));
+        assert_eq!(moon((2026, 11, 24), false).pct, 100);
+    }
+
+    #[test]
+    fn dates_step_by_day_and_read_short() {
+        for ymd in [(1970, 1, 1), (2024, 2, 29), (2026, 12, 31), (2000, 3, 1)] {
+            assert_eq!(ymd_of(day_number(ymd)), ymd);
+        }
+        assert_eq!(short_date((2026, 11, 24)), "Tue 24 Nov");
+        assert_eq!(short_date((2026, 12, 9)), "Wed 9 Dec");
+    }
+
+    #[test]
+    fn the_next_hijri_month_is_the_first_day_called_1() {
+        let hijri = |ymd: Ymd| {
+            Some(match ymd {
+                (2026, 12, 10) => "1 Rajab 1448 AH".to_owned(),
+                _ => format!("{} Jumada II 1448 AH", ymd.2 % 28 + 2),
+            })
+        };
+        assert_eq!(
+            next_month((2026, 11, 23), &hijri),
+            Some(("1 Rajab".to_owned(), (2026, 12, 10)))
+        );
+        assert_eq!(next_month((2026, 11, 23), &|_| None), None);
+        let day = moon_day((2026, 11, 23), false, &hijri);
+        assert_eq!(day.hijri, "25 Jumada II 1448");
     }
 
     #[test]

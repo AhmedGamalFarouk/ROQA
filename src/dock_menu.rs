@@ -48,6 +48,11 @@ pub enum Item {
     Battery,
     /// An AI limit window: its used percent, drawn as a capsule bar; its text is in `Spec::titles`.
     Limit(u8),
+    /// The moon popup's hero: the lit share in percent and whether the lit limb is on the right; its three
+    /// lines are in `Spec::titles`. It stands `MOON_HERO` DIPs taller than a row.
+    Moon(u8, bool),
+    /// A moon popup date row: `Spec::titles` holds "label\tdate".
+    MoonDate,
     NewInstance,
     Close(WindowKey),
     CloseAll,
@@ -131,7 +136,7 @@ impl Item {
             Item::Dissolve => "Ungroup apps",
             Item::RemoveMember => "Remove from folder",
             Item::Member(_) | Item::MemberMenu(_) => "App",
-            Item::Label | Item::Battery | Item::Limit(_) => "",
+            Item::Label | Item::Battery | Item::Limit(_) | Item::Moon(..) | Item::MoonDate => "",
             Item::NewInstance => "New instance",
             Item::Close(_) => "Close window",
             Item::CloseAll => "Close all windows",
@@ -325,6 +330,17 @@ fn point(lparam: windows::Win32::Foundation::LPARAM) -> (i32, i32) {
     )
 }
 
+/// DIPs the moon hero (92 high, then its divider and gap, 6) stands over one row.
+const MOON_HERO: i32 = 98 - 34;
+/// The extra height of a list that opens with the moon hero.
+fn hero(items: &[Item], dpi: u32) -> i32 {
+    if matches!(items.first(), Some(Item::Moon(..))) {
+        dock::px(MOON_HERO, dpi)
+    } else {
+        0
+    }
+}
+
 fn visible_rows(dpi: u32, work: Bounds, count: usize) -> usize {
     count.min(((work.height - dock::px(48, dpi)) / dock::px(34, dpi)).max(1) as usize)
 }
@@ -342,6 +358,7 @@ impl Menu {
         let dpi = spec.dpi;
         let visible_rows = visible_rows(dpi, spec.work, spec.items.len());
         let (mut size, _) = list_layout(dpi, visible_rows);
+        size.1 += hero(&spec.items, dpi);
         if hover && spec.items == [Item::Label] {
             size.0 = crate::graphics::dock_label_width(&spec.app, dpi)? + dock::px(6, dpi);
         }
@@ -559,6 +576,8 @@ impl Menu {
         }
         let (_, mut panel) = list_layout(self.dpi, self.visible_rows);
         panel.width = self.bounds.width - 2 * panel.x;
+        let hero = hero(&self.items, self.dpi);
+        panel.height += hero;
         let rows: Vec<ListRow> = self
             .items
             .iter()
@@ -566,7 +585,15 @@ impl Menu {
             .skip(self.offset)
             .take(self.visible_rows)
             .map(|(index, _)| ListRow {
-                name: row_label(&self.items, &self.titles, index),
+                name: match (
+                    self.items[index],
+                    row_label(&self.items, &self.titles, index),
+                ) {
+                    (Item::MoonDate, text) => {
+                        text.split_once('\t').map_or(text, |(label, _)| label)
+                    }
+                    (_, text) => text,
+                },
                 current: false,
                 icon: self.icons.get(index).and_then(|icon| icon.as_deref()),
                 room: matches!(self.items[index], Item::File(_)),
@@ -575,7 +602,28 @@ impl Menu {
                     Item::Limit(pct) => Some(pct),
                     _ => None,
                 },
-                rect: row_rect(self.dpi, panel, index - self.offset),
+                moon: match self.items[index] {
+                    Item::Moon(pct, right) => Some((f32::from(pct) / 100.0, right)),
+                    _ => None,
+                },
+                value: (self.items[index] == Item::MoonDate)
+                    .then(|| {
+                        self.titles
+                            .get(index)?
+                            .split_once('\t')
+                            .map(|(_, date)| date)
+                    })
+                    .flatten(),
+                rect: {
+                    let mut rect = row_rect(self.dpi, panel, index - self.offset);
+                    // The hero takes the extra height; the rows under it move down by as much.
+                    if index == 0 {
+                        rect.height += hero;
+                    } else {
+                        rect.y += hero;
+                    }
+                    rect
+                },
             })
             .collect();
         self.canvas.paint_list(&ListScene {
@@ -618,7 +666,11 @@ impl Menu {
                 self.selected = at(message).filter(|&row| {
                     !matches!(
                         self.items[row],
-                        Item::Label | Item::Battery | Item::Limit(_)
+                        Item::Label
+                            | Item::Battery
+                            | Item::Limit(_)
+                            | Item::Moon(..)
+                            | Item::MoonDate
                     )
                 });
                 if self.hover_popup {
@@ -639,7 +691,10 @@ impl Menu {
             windows::Win32::UI::Controls::WM_MOUSELEAVE => self.selected = None,
             WM_LBUTTONUP => {
                 return at(message).map_or(Event::Consumed, |row| {
-                    if matches!(self.items[row], Item::Battery | Item::Limit(_)) {
+                    if matches!(
+                        self.items[row],
+                        Item::Battery | Item::Limit(_) | Item::Moon(..) | Item::MoonDate
+                    ) {
                         Event::Consumed
                     } else {
                         Event::Choose(self.items[row])
