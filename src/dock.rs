@@ -81,6 +81,53 @@ pub struct DockItem {
     pub active: bool,
     pub badge: Badge,
     pub members: Vec<DockItem>,
+    /// A recently closed app, kept faded at the end until it opens again (`with_recent`); never stored.
+    pub recent: bool,
+}
+
+/// How many recently closed apps the dock keeps.
+pub const RECENT: usize = 3;
+
+/// Apps that closed since `before` (unpinned, launchable, with no window left on any desktop) go to the front of
+/// `recent`, which keeps `RECENT`; an app back on the dock, pinned or hidden leaves it. The rest end `items`, faded.
+pub fn with_recent(
+    items: &mut Vec<DockItem>,
+    recent: &mut Vec<DockItem>,
+    before: &[DockItem],
+    pins: &Pins,
+    model: &WindowModel,
+) {
+    let same = |a: &DockItem, b: &DockItem| {
+        a.identity == b.identity || (a.executable.is_some() && a.executable == b.executable)
+    };
+    for item in before {
+        if item.windows.is_empty()
+            || !item.members.is_empty()
+            || pins::launch_target(&item.identity).is_none()
+            || model.windows.iter().any(|w| w.identity == item.identity)
+            || items.iter().any(|now| same(now, item))
+        {
+            continue;
+        }
+        recent.retain(|old| !same(old, item));
+        recent.insert(
+            0,
+            DockItem {
+                windows: Vec::new(),
+                active: false,
+                badge: Badge::None,
+                recent: true,
+                ..item.clone()
+            },
+        );
+    }
+    recent.truncate(RECENT);
+    recent.retain(|old| {
+        !items.iter().any(|now| same(now, old))
+            && pinned_as(old, pins).is_none()
+            && !pins.hides(&old.identity, old.executable.as_deref())
+    });
+    items.extend(recent.iter().cloned());
 }
 
 /// One item per real catalog group, in stable identity order. No placeholder rows. With `desktop_only`, a
@@ -111,6 +158,7 @@ pub fn items(model: &WindowModel, desktop_only: bool) -> Vec<DockItem> {
                 windows: vec![window.key],
                 active: window.foreground,
                 badge: title_badge(&window.title),
+                recent: false,
                 members: Vec::new(),
             }),
         }
@@ -152,6 +200,7 @@ pub fn items_with_pins(model: &WindowModel, pins: &Pins, desktop_only: bool) -> 
                     windows: Vec::new(),
                     active: false,
                     badge: Badge::None,
+                    recent: false,
                     members: Vec::new(),
                 }),
         );
@@ -1104,6 +1153,72 @@ mod tests {
         assert!(super::items(&WindowModel::default(), false).is_empty());
     }
 
+    #[test]
+    fn closed_apps_stay_faded_until_they_open_again() {
+        let app = |name: &str, windows: Vec<WindowKey>| DockItem {
+            identity: Identity::Executable(format!("c:\\{name}.exe")),
+            executable: Some(format!("c:\\{name}.exe")),
+            windows,
+            active: false,
+            badge: Badge::Count(2),
+            members: Vec::new(),
+            recent: false,
+        };
+        let pins = pins_of(&[Identity::Executable("c:\\pinned.exe".into())]);
+        let none = WindowModel::default();
+        // "web" still has a window somewhere (another virtual desktop).
+        let open = WindowModel {
+            generation: 1,
+            windows: vec![record(3, Identity::Executable("c:\\web.exe".into()), false)],
+            incomplete: None,
+        };
+        let mut recent = Vec::new();
+        // A pin's last window closing leaves its launcher; only the unpinned app becomes recent.
+        let before = vec![app("pinned", vec![key(1)]), app("mail", vec![key(2)])];
+        let mut items = vec![app("pinned", Vec::new())];
+        with_recent(&mut items, &mut recent, &before, &pins, &none);
+        assert_eq!(items.len(), 2);
+        assert!(items[1].recent && items[1].windows.is_empty());
+        assert_eq!(items[1].badge, Badge::None);
+        // Still open on another desktop: not closed.
+        let mut items = Vec::new();
+        let mut others = Vec::new();
+        with_recent(
+            &mut items,
+            &mut others,
+            &[app("web", vec![key(3)])],
+            &pins,
+            &open,
+        );
+        assert!(items.is_empty() && others.is_empty());
+        // Newest first, at most RECENT; a reopened app leaves the list.
+        for name in ["a", "b", "c"] {
+            let mut items = vec![app("pinned", Vec::new())];
+            with_recent(
+                &mut items,
+                &mut recent,
+                &[app(name, vec![key(4)])],
+                &pins,
+                &none,
+            );
+        }
+        let names: Vec<_> = recent
+            .iter()
+            .map(|r| r.executable.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["c:\\c.exe", "c:\\b.exe", "c:\\a.exe"]);
+        let mut items = vec![app("b", vec![key(5)])];
+        with_recent(&mut items, &mut recent, &[], &pins, &none);
+        assert_eq!(items.len(), 3);
+        assert!(!items[0].recent && items[1..].iter().all(|item| item.recent));
+        // Pinning one takes it off the list (it is a pin now).
+        let pins = pins_of(&[Identity::Executable("c:\\c.exe".into())]);
+        let mut items = Vec::new();
+        with_recent(&mut items, &mut recent, &[], &pins, &none);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].executable.as_deref(), Some("c:\\a.exe"));
+    }
+
     fn pins_of(identities: &[Identity]) -> Pins {
         let mut pins = Pins::default();
         for identity in identities {
@@ -1336,6 +1451,7 @@ mod tests {
             windows: handles.iter().map(|h| key(*h)).collect(),
             active: false,
             badge: Badge::None,
+            recent: false,
         };
         assert_eq!(
             action(&item(&[1, 2]), Some(key(8))),
@@ -1433,6 +1549,7 @@ mod tests {
             windows: vec![key(1)],
             active: false,
             badge: Badge::None,
+            recent: false,
         };
         let aumid = running(Identity::Application("Vendor.App".into()), r"c:\vendor.exe");
         let mut pins = Pins::default();
@@ -1455,6 +1572,7 @@ mod tests {
             windows: vec![],
             active: false,
             badge: Badge::None,
+            recent: false,
         };
         assert_eq!(pinned_as(&gone, &pins), None);
         let unavailable = running(Identity::Unavailable(3), r"c:\other.exe");

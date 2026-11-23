@@ -1051,6 +1051,7 @@ impl Surface {
                     windows: item.windows.len(),
                     active: item.active,
                     badge: item.badge,
+                    faded: item.recent,
                     hover: if held { 1.0 } else { hover(Hit::Slot(index)) },
                     dx,
                     held,
@@ -1424,6 +1425,8 @@ struct Desktop {
     /// Sideways wheel movement kept toward a track skip, and when the next skip is allowed (one skip per swipe).
     swipe: i32,
     swipe_until: Instant,
+    /// Recently closed apps the dock keeps faded at its end, newest first; in memory only (`dock::with_recent`).
+    recent: Vec<DockItem>,
     /// The volume and brightness sliders on every monitor's edges, rebuilt to match the monitors and
     /// settings whenever either changes (`edges_dirty`).
     edges: Edges,
@@ -1612,6 +1615,7 @@ impl Desktop {
             swipe: 0,
             swipe_until: Instant::now(),
             edges: Edges::default(),
+            recent: Vec::new(),
             edges_dirty: true,
             pages,
             weather,
@@ -2723,6 +2727,13 @@ impl Desktop {
                 if !self.settings.dock_badges {
                     item.badge = dock::Badge::None;
                 } else if !item.active
+            dock::with_recent(
+                &mut items,
+                &mut self.recent,
+                &self.dock_items,
+                &self.pins,
+                model,
+            );
                     && item
                         .windows
                         .iter()
@@ -3257,26 +3268,6 @@ impl Desktop {
                 DropEvent::DockOver(hwnd, x) => self.drag_over_dock(hwnd, x),
             }
         }
-    }
-    /// A file drag moved over a dock (`x` is the screen column) or left it: the slot under it starts or restarts
-    /// the raise delay; `refresh_raise` fires it.
-    fn drag_over_dock(&mut self, hwnd: HWND, x: Option<i32>) {
-        let slots = self.dock_slots();
-        let spot = x.and_then(|x| {
-            let dock = self.dock_at(hwnd)?;
-            match dock::hit_at(
-                dock.dock_buttons,
-                x - dock.bounds.x,
-                dock.bounds.width,
-                dock.dpi,
-                slots,
-            )? {
-                Hit::Slot(slot) => Some((hwnd.0 as usize, slot)),
-                Hit::Button(_) => None,
-            }
-        });
-        self.raise
-            .point_after(spot, Instant::now(), dock::RAISE_DELAY);
     }
     /// A file drag rested on a running app's slot: its window comes forward, once per rest. A group of apps
     /// and an app with no window are left alone. The wait is the one deadline, none while nothing is armed.

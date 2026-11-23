@@ -317,6 +317,26 @@ impl Desktop {
         }
     }
     /// A pinned folder's stack above its dock slot: its newest files as rows; a click opens that file and an empty
+    /// A file drag moved over a dock (`x` is the screen column) or left it: the slot under it starts or restarts
+    /// the raise delay; `refresh_raise` fires it.
+    pub(super) fn drag_over_dock(&mut self, hwnd: HWND, x: Option<i32>) {
+        let slots = self.dock_slots();
+        let spot = x.and_then(|x| {
+            let dock = self.dock_at(hwnd)?;
+            match dock::hit_at(
+                dock.dock_buttons,
+                x - dock.bounds.x,
+                dock.bounds.width,
+                dock.dpi,
+                slots,
+            )? {
+                Hit::Slot(slot) => Some((hwnd.0 as usize, slot)),
+                Hit::Button(_) => None,
+            }
+        });
+        self.raise
+            .point_after(spot, Instant::now(), dock::RAISE_DELAY);
+    }
     /// folder opens in Explorer instead.
     fn open_stack(
         &mut self,

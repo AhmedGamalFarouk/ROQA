@@ -707,6 +707,7 @@ mod tests {
             windows: windows.iter().map(|&h| key_of(h)).collect(),
             active: false,
             badge: crate::dock::Badge::None,
+            recent: false,
         }
     }
     fn pinned(identity: &Identity) -> Pins {

@@ -145,6 +145,8 @@ pub struct DockSlot<'a> {
     pub icon: Option<&'a IconPixels>,
     pub mini: Vec<Option<&'a IconPixels>>,
     pub running: bool,
+    /// A recently closed app: its icon is drawn at half strength.
+    pub faded: bool,
     /// Open windows in the group: a resting group shows up to three dots, one per window.
     pub windows: usize,
     pub active: bool,
@@ -2799,7 +2801,7 @@ fn draw_slot(
             context.DrawBitmap(
                 &upload(context, pixels)?,
                 Some(&frame),
-                1.0,
+                if slot.faded { 0.5 } else { 1.0 },
                 D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
                 None,
                 None,
