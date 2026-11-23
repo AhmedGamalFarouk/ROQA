@@ -570,8 +570,9 @@ impl Menu {
                 current: false,
                 icon: self.icons.get(index).and_then(|icon| icon.as_deref()),
                 room: matches!(self.items[index], Item::File(_)),
-                level: match self.items[index] {
-                    Item::Limit(pct) => Some((pct, false)),
+                level: None,
+                bar: match self.items[index] {
+                    Item::Limit(pct) => Some(pct),
                     _ => None,
                 },
                 rect: row_rect(self.dpi, panel, index - self.offset),

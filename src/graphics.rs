@@ -69,6 +69,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 mod glyphs;
 pub use glyphs::{draw_gdi as draw_settings_glyph, round_gdi};
 mod ask;
+mod limit_row;
 mod shot;
 mod tab_art;
 use ask::wrapped;
@@ -679,6 +680,10 @@ impl Canvas {
                         };
                         context.FillRoundedRectangle(&rounded(shape, dot / 2.0), &brush);
                     }
+                }
+                if let Some(percent) = row.bar {
+                    limit_row::paint(context, &p, cell, row.name, percent, scale)?;
+                    continue;
                 }
                 // Only a marked row keeps room for its dot; the others start on the inset.
                 let mut text = D2D_RECT_F {

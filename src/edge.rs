@@ -261,6 +261,8 @@ pub struct ListRow<'a> {
     pub room: bool,
     /// A mixer row: the app's level and whether it is muted; drawn as a capsule slider.
     pub level: Option<(u8, bool)>,
+    /// An AI limit row: its used percent, drawn as a thin bar under the text.
+    pub bar: Option<u8>,
     pub rect: Bounds,
 }
 
@@ -1087,6 +1089,7 @@ fn list_rows<'a>(
             icon,
             room: false,
             level,
+            bar: None,
             rect: row_rect(dpi, panel, index),
         })
         .collect()
