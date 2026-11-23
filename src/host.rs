@@ -2727,10 +2727,6 @@ impl Desktop {
             }
             self.dock_generation = Some(model.generation);
             let mut items = dock::items_with_pins(model, &self.pins, self.settings.desktop_only);
-            for item in &mut items {
-                if !self.settings.dock_badges {
-                    item.badge = dock::Badge::None;
-                } else if !item.active
             dock::with_recent(
                 &mut items,
                 &mut self.recent,
@@ -2738,6 +2734,10 @@ impl Desktop {
                 &self.pins,
                 model,
             );
+            for item in &mut items {
+                if !self.settings.dock_badges {
+                    item.badge = dock::Badge::None;
+                } else if !item.active
                     && item
                         .windows
                         .iter()
