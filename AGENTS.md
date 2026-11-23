@@ -35,7 +35,7 @@ One folder: work on `main` in this checkout, no worktrees. Branches and PRs only
 ## Commands
 - Cargo only through `scripts\cargo.ps1 <args>`.
 - Gate: `scripts\verify.ps1` (fmt, clippy -D warnings, tests, locked release build, size report). A change is not done until it passes.
-- Lints: `clippy.toml` (`disallowed-methods`, each with a `reason` that names the right approach) and `[lints]` in `Cargo.toml`; `verify.ps1` also fails a src file over 2,500 lines (four files have a no-growth ceiling there, keyed by path under `src`). An existing correct use gets `#[expect(clippy::disallowed_methods, reason = "...")]` at the narrowest spot, never a blanket allow.
+- Lints: `clippy.toml` (`disallowed-methods`, each with a `reason` that names the right approach) and `[lints]` in `Cargo.toml`; `verify.ps1` also fails a src file over 2,500 lines (four files have a no-growth ceiling there, keyed by path under `src`; owner decision 2026-11-23: a ceiling may be raised when a feature needs it, say so in the report). An existing correct use gets `#[expect(clippy::disallowed_methods, reason = "...")]` at the narrowest spot, never a blanket allow.
 - Run: `scripts\run.ps1 start` (builds, then launches the owner's ROQA on their own settings) and `scripts\run.ps1 quit`. A live test uses `scripts\run.ps1 start -Test` (test monitor only, private copy of the store).
 - Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. A full run takes about 6 minutes and returns on its own; run it in the background. If a pass fails with "Settings not found", ROQA crashed: check `Get-WinEvent` Application id 1000 before blaming the tool. Capture stores use fixed sample data (weather shows 3 hours, 29 degrees): that is the fixture, not a bug. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
 - Reuse a round's stills when `git rev-parse HEAD` and the exe SHA256 match its `provenance.json`.
@@ -57,7 +57,7 @@ One folder: work on `main` in this checkout, no worktrees. Branches and PRs only
 ## Brand (approved; full spec `cook/brand/BRAND.md`, board `cook/brand/board.png`)
 - Companion-like and playful: calm, caring, springy when it greets you.
 - One capsule shape grammar (radius = height/2; tiles = parent radius minus inset; never a sharp corner or hairline box).
-- One accent, Lamp `#FFB454` (Light theme `#9A5200`). Accent only on: eyes, the one primary action, progress fill, selected indicator, today marker, prayer sun.
+- One accent, Lamp `#FFB454` (Light theme `#9A5200`). Accent only on: eyes, the one primary action, progress fill, selected indicator, today marker, prayer sun, the muted-mic dot (owner decision 2026-11-23).
 - One outline icon style: 20 px grid, stroke 1.75, round caps, accent only when active.
 - Three motion curves in `src/motion.rs`: settle, pop, slide. Nothing else.
 - Type: Segoe UI Variable, sentence case, tabular numerals, no uppercase labels.
@@ -97,3 +97,6 @@ The Chief reads only that final message (`t3_thread_read` limit 1), never a tran
 - Capture, running tests, regression eyeballing: Gemini 3.8 Flash (provider `antigravity`, model `gemini-3.8-flash-high`). If it stalls (it did twice on 2026-11-15), switch to Codex Luna (`codex`, `gpt-6-luna`, medium) without waiting.
 - Critics (owner decision 2026-11-16): two per scored round, Sol 6.1 (`codex`, `gpt-6.1-sol`, medium) and Opus 5.5 (`claudeAgent`, `claude-opus-5-5`, medium). Tie-breaker only when they differ by more than 1.0.
 - Code changes: the model the owner names. Codex workers have no ponytail skill: apply "smallest complete change" by hand.
+
+## Design-first rule (owner decision 2026-11-23)
+Any change that adds or reshapes UI goes to a designer worker first. The designer uses the design skills it needs (impeccable, gstack /design-review and /plan-design-review, /design-consultation), reads `cook/brand/BRAND.md` and this file, and writes a spec plus mock stills to `cook/design/<name>.md` before an implement worker starts. Implement workers build to that spec and do not redesign.
