@@ -145,6 +145,25 @@ impl Desktop {
         };
         let idle = view.as_ref().is_none_or(|view| view.done);
         let waiting = self.pages.reminders.waiting().len();
+        // The plain Media page's glance line opens the tab it speaks for (hidden under a notice or a media status).
+        if page == Tab::Media
+            && self.pages.tabs.on(Tab::Media)
+            && !live
+            && self.power.text().is_none()
+            && self.media.view().status().is_none()
+            && layout::glance_at(width, dpi, progress, (x, y))
+        {
+            let glance = crate::tabs::glance(
+                &self.pages.tabs,
+                view.as_ref(),
+                &self.pages.prayer,
+                &self.pages.weather,
+            );
+            if let Some((_, tab)) = glance {
+                self.select_tab(tab);
+            }
+            return true;
+        }
         if page == Tab::Timer
             && idle
             && let Some(index) =

@@ -315,7 +315,8 @@ impl Desktop {
         if !self.pages.tabs.on(Tab::Prayer) {
             return sound_wait;
         }
-        let shown = self.page() == Tab::Prayer
+        // The plain Media page's glance (`tabs::glance`) reads the page's next prayer too.
+        let shown = matches!(self.page(), Tab::Prayer | Tab::Media)
             || (self.page() == Tab::Widgets
                 && self
                     .pages

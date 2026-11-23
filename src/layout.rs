@@ -866,6 +866,13 @@ pub fn notice_button_at(
     .is_some()
 }
 
+/// The plain Media page's status line under the eyes (`graphics::media_page`), 24 high so the 11 DIP line is
+/// easy to click: it opens the tab its glance came from.
+pub fn glance_at(window_width: i32, dpi: u32, progress: f32, (x, y): (i32, i32)) -> bool {
+    let line = scaled_bounds((NOTCH_EXPANDED.width - 128.0, 82.0, 112.0, 24.0), dpi);
+    on_slot(line, window_width, dpi, progress, false, x, y)
+}
+
 /// The idle Timer page's "Remind" chip: 60 x 24 left of "Stopwatch" on the "Pick a time" row (y 40).
 pub fn remind_button(dpi: u32) -> Bounds {
     scaled_bounds(

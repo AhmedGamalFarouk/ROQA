@@ -931,7 +931,10 @@ impl Surface {
             },
         };
         shadow.paint(&scene, self.window.0)?;
+        let glance =
+            crate::tabs::glance(&pages.tabs, timer.as_ref(), &pages.prayer, &pages.weather);
         let status = track.is_none().then(|| media.view().status()).flatten();
+        let status = status.or(glance.as_ref().map(|(text, _)| text.as_str()));
         self.canvas
             .paint_notch(&scene, status.filter(|_| pages.tabs.on(Tab::Media)))
     }
@@ -2033,7 +2036,8 @@ impl Desktop {
             key.as_ref()
                 .is_some_and(|(rev, clock)| *rev == self.weather.rev && *clock == self.clock)
         };
-        if shown && self.pages.tabs.on(Tab::Weather) && !current(&self.pages.weather_key) {
+        let reads = shown || self.page() == Tab::Media; // and for the Media page glance (`tabs::glance`)
+        if reads && self.pages.tabs.on(Tab::Weather) && !current(&self.pages.weather_key) {
             let fahrenheit = self.settings.units.fahrenheit(&self.region);
             self.pages.weather = weather::view(
                 &self.weather,

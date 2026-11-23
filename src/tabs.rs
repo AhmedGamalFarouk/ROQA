@@ -138,9 +138,87 @@ impl Tabs {
     }
 }
 
+/// The plain Media page's line under the eyes (`cook/design/lumabar-redesign.md`): the next thing that matters,
+/// from a tab that is on, and the tab a click opens. `None` keeps "Nothing playing". Built from views the host
+/// already holds; nothing is fetched for it.
+pub fn glance(
+    tabs: &Tabs,
+    timer: Option<&crate::timer::View>,
+    prayer: &crate::prayer_tab::View,
+    weather: &crate::weather::View,
+) -> Option<(String, Tab)> {
+    let timer = timer
+        .filter(|view| tabs.on(Tab::Timer) && !view.done && !view.watch)
+        .map(|view| {
+            (
+                format!("Timer, {} min left", view.left.div_ceil(60)),
+                Tab::Timer,
+            )
+        });
+    let ready = tabs.on(Tab::Prayer) && prayer.message.is_none() && !prayer.next.is_empty();
+    let prayer = ready.then(|| {
+        let row = prayer.rows.iter().find(|row| row.name == prayer.next);
+        let text = match row {
+            // An hour or more away ("in 2 h 10 min"): the clock time reads better.
+            Some(row) if prayer.left.contains(" h") => format!("{} at {}", prayer.next, row.time),
+            _ => format!("{} {}", prayer.next, prayer.left),
+        };
+        (text, Tab::Prayer)
+    });
+    let ready = tabs.on(Tab::Weather) && weather.message.is_none() && !weather.temp.is_empty();
+    let weather = ready.then(|| {
+        let text = format!("{}, {}", weather.temp, weather.cond.to_lowercase());
+        (text, Tab::Weather)
+    });
+    timer.or(prayer).or(weather)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_glance_says_the_next_thing_from_a_tab_that_is_on() {
+        let mut prayer = crate::prayer_tab::View {
+            next: "Maghrib".into(),
+            left: "in 12 min".into(),
+            rows: vec![crate::prayer_tab::Row {
+                name: "Maghrib",
+                time: "5:01 pm".into(),
+                current: false,
+            }],
+            ..Default::default()
+        };
+        let weather = crate::weather::View {
+            temp: "29°".into(),
+            cond: "Clear",
+            ..Default::default()
+        };
+        let timer = crate::timer::View::paused(1050, 1500, String::new(), None);
+        let all = Tabs::new([true; 7], Tab::Media);
+        let text = |tabs: &Tabs, timer, prayer: &_| glance(tabs, timer, prayer, &weather);
+        assert_eq!(
+            text(&all, Some(&timer), &prayer),
+            Some(("Timer, 18 min left".into(), Tab::Timer))
+        );
+        assert_eq!(
+            text(&all, None, &prayer),
+            Some(("Maghrib in 12 min".into(), Tab::Prayer))
+        );
+        prayer.left = "in 2 h 10 min".into();
+        assert_eq!(text(&all, None, &prayer).unwrap().0, "Maghrib at 5:01 pm");
+        // A switched-off tab never speaks; with none left the page keeps "Nothing playing".
+        let mut flags = [true; 7];
+        flags[Tab::Timer.index()] = false;
+        flags[Tab::Prayer.index()] = false;
+        let quiet = Tabs::new(flags, Tab::Media);
+        assert_eq!(
+            text(&quiet, Some(&timer), &prayer),
+            Some(("29°, clear".into(), Tab::Weather))
+        );
+        flags[Tab::Weather.index()] = false;
+        assert_eq!(text(&Tabs::new(flags, Tab::Media), None, &prayer), None);
+    }
 
     #[test]
     fn weather_and_prayer_switch_independently() {
