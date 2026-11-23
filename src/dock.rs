@@ -9,8 +9,8 @@ use windows::Win32::{
     System::Threading::GetCurrentProcessId,
     UI::{
         Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
-            VK_D, VK_LWIN, VK_S, VK_TAB,
+            INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+            VIRTUAL_KEY, VK_D, VK_LWIN, VK_S, VK_TAB,
         },
         Shell::{SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW},
         WindowsAndMessaging::{
@@ -719,6 +719,36 @@ pub fn action(item: &DockItem, foreground: Option<WindowKey>) -> Option<Action> 
             item.windows[(position + 1) % item.windows.len()],
         ))
     }
+}
+
+/// The window one wheel step over an app's slot brings forward: the one after (`forward`) or before the
+/// foreground one among the app's windows, or its first or last when none of them is in front.
+pub fn wheel_target(
+    item: &DockItem,
+    foreground: Option<WindowKey>,
+    forward: bool,
+) -> Option<WindowKey> {
+    let count = item.windows.len();
+    let index = match (
+        foreground.and_then(|key| item.windows.iter().position(|w| *w == key)),
+        forward,
+    ) {
+        (Some(at), true) => (at + 1) % count,
+        (Some(at), false) => (at + count - 1) % count,
+        (None, true) => 0,
+        (None, false) => count.checked_sub(1)?,
+    };
+    item.windows.get(index).copied()
+}
+
+/// Brings `key` forward on a wheel turn. Windows does not count a wheel turn as input that may switch the
+/// foreground, so one empty mouse input (no move, no button) is injected first, as a click would have been.
+pub fn activate_on_wheel(key: WindowKey) -> bool {
+    let nothing = INPUT {
+        r#type: INPUT_MOUSE,
+        ..Default::default()
+    };
+    send_events(&[nothing]) && perform(Action::Activate(key))
 }
 
 pub fn foreground_key() -> Option<WindowKey> {
@@ -1467,6 +1497,14 @@ mod tests {
             Some(Action::Minimize(key(1)))
         );
         assert_eq!(action(&item(&[]), None), None);
+        // The wheel steps both ways and wraps; it never minimizes a lone window.
+        let three = item(&[1, 2, 3]);
+        assert_eq!(wheel_target(&three, Some(key(3)), true), Some(key(1)));
+        assert_eq!(wheel_target(&three, Some(key(1)), false), Some(key(3)));
+        assert_eq!(wheel_target(&three, Some(key(8)), false), Some(key(3)));
+        assert_eq!(wheel_target(&three, None, true), Some(key(1)));
+        assert_eq!(wheel_target(&item(&[1]), Some(key(1)), true), Some(key(1)));
+        assert_eq!(wheel_target(&item(&[]), None, false), None);
     }
 
     #[test]

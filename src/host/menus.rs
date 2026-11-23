@@ -350,6 +350,33 @@ impl Desktop {
             self.run_dock_action(action);
         }
     }
+    /// The wheel over a dock's app slot steps through that app's windows: down to the next, up to the previous.
+    pub(super) fn wheel_dock(&mut self, message: &MSG) {
+        let delta = i32::from((message.wParam.0 >> 16) as u16 as i16);
+        let (steps, rest) = edge::wheel_steps(self.volume_wheel, delta);
+        self.volume_wheel = rest;
+        let slots = self.dock_slots();
+        let hovered = self
+            .dock_at(message.hwnd)
+            .and_then(|surface| match surface.role {
+                Role::Dock {
+                    hover: Some(cell), ..
+                } => dock::cell(surface.dock_buttons, slots, cell).and_then(Hit::slot),
+                _ => None,
+            });
+        let Some(item) = hovered.and_then(|slot| self.dock_items.get(slot)) else {
+            return;
+        };
+        if steps != 0
+            && let Some(key) = dock::wheel_target(item, dock::foreground_key(), steps < 0)
+            && !dock::activate_on_wheel(key)
+        {
+            self.show_notice(
+                "Can't switch. Try the Windows taskbar.".into(),
+                Instant::now(),
+            );
+        }
+    }
     /// A pinned folder's stack above its dock slot: its newest files as rows; a click opens that file and an empty
     /// folder opens in Explorer instead.
     fn open_stack(

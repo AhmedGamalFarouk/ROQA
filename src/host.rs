@@ -1425,7 +1425,7 @@ struct Desktop {
     pending_popup: Option<(crate::anchored::Owner, Instant)>,
     /// The dock button whose press just closed its own popup: its release ends that click (`swallow_release`).
     swallow_up: Option<(HWND, Button)>,
-    /// Wheel movement left over after the last whole notch on the volume bar or the open notch.
+    /// Wheel movement left over after the last whole notch on the volume bar, the open notch or a dock slot.
     volume_wheel: i32,
     /// Sideways wheel movement kept toward a track skip, and when the next skip is allowed (one skip per swipe).
     swipe: i32,
@@ -3767,6 +3767,7 @@ impl Desktop {
                         .set(f32::from(edge::step_level(level.percent, steps, fine)) / 100.0);
                 }
             }
+            WM_MOUSEWHEEL if surface.kind() == SurfaceKind::Dock => self.wheel_dock(message),
             // The open notch: the wheel flips the tabs, a sideways swipe on a live Music page skips the track.
             WM_MOUSEWHEEL if surface.expanded() => {
                 let delta = i32::from((message.wParam.0 >> 16) as u16 as i16);
