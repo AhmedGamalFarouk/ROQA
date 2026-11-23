@@ -14,6 +14,8 @@ pub struct Clock {
     pub next_minute_ms: u32,
     /// Local hour, 0 to 23 (the mascot sleeps late at night).
     pub hour: u8,
+    /// Local minute, 0 to 59 (the rain pill counts to the next hour).
+    pub minute: u8,
 }
 
 pub fn now() -> Clock {
@@ -49,6 +51,7 @@ pub fn now() -> Clock {
         date: text(&date, date_len),
         next_minute_ms: next_minute_ms(local.wSecond, local.wMilliseconds),
         hour: local.wHour.min(23) as u8,
+        minute: local.wMinute.min(59) as u8,
     }
 }
 

@@ -1444,6 +1444,8 @@ struct Desktop {
     agents: agent::Agents,
     /// The registered global shortcuts and the dock's hidden-by-shortcut state (this run only).
     hotkeys: hotkeys::Hotkeys,
+    /// The hour whose coming rain the notch already announced (`weather::rain_soon`), so it says it once.
+    rain_told: Option<u8>,
     dock_away: bool,
     /// When the next water reminder is due; `None` until `refresh_water` computes it.
     water_due: Option<Instant>,
@@ -1621,6 +1623,7 @@ impl Desktop {
             prayer: PrayerRun::default(),
             agents: agent::Agents::default(),
             hotkeys: hotkeys::Hotkeys::default(),
+            rain_told: None,
             dock_away: false,
             water_due: None,
         };
@@ -1742,6 +1745,7 @@ impl Desktop {
             let clock = clock::now();
             self.clock_due = now + Duration::from_millis(clock.next_minute_ms.into());
             self.pages.hour = clock.hour;
+            self.rain_soon(clock.hour, clock.minute);
             if clock.time != self.clock || clock.date != self.date {
                 (self.clock, self.date) = (clock.time, clock.date);
                 self.request_notches(Repaint::Full, |_| true);

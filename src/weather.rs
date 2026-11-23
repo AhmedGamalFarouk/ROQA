@@ -90,6 +90,27 @@ impl Icon {
     }
 }
 
+/// The "rain soon" pill from the forecast already fetched: "Rain in 40 min" when the hour now (local `hour`, at
+/// `minute`) is dry and the next hour's forecast is wet; `None` otherwise. Nothing is fetched for it.
+pub fn rain_soon(report: &Report, hour: u8, minute: u8) -> Option<String> {
+    let wet = |code| {
+        matches!(
+            Icon::from_wmo(code),
+            Icon::Drizzle | Icon::Rain | Icon::Storm
+        )
+    };
+    let code_at = |h| {
+        report
+            .hours
+            .iter()
+            .find(|row| row.hour == h)
+            .map(|row| row.code)
+    };
+    let now = code_at(hour).unwrap_or(report.code);
+    (!wet(now) && code_at((hour + 1) % 24).is_some_and(wet))
+        .then(|| format!("Rain in {} min", 60 - u16::from(minute.min(59))))
+}
+
 /// A place in 1e-4 degrees (about 11 m), and whether the device located it (else it was geocoded).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Place {
@@ -892,6 +913,27 @@ mod tests {
             detected: false,
             name: "Cairo".into(),
         }
+    }
+
+    #[test]
+    fn rain_soon_says_when_the_next_hour_turns_wet() {
+        let hour = |hour, code| Hour {
+            hour,
+            tenths: 200,
+            code,
+        };
+        let mut forecast = report(0);
+        forecast.hours = vec![hour(15, 61), hour(16, 61)];
+        assert_eq!(rain_soon(&forecast, 14, 20), Some("Rain in 40 min".into()));
+        // Raining already, or a dry next hour: nothing to say.
+        forecast.code = 63;
+        assert_eq!(rain_soon(&forecast, 14, 20), None);
+        assert_eq!(rain_soon(&forecast, 15, 0), None);
+        forecast.hours = vec![hour(0, 95)];
+        forecast.code = 0;
+        assert_eq!(rain_soon(&forecast, 23, 59), Some("Rain in 1 min".into()));
+        forecast.hours = vec![hour(15, 3)];
+        assert_eq!(rain_soon(&forecast, 14, 20), None);
     }
 
     #[test]

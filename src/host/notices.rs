@@ -236,6 +236,22 @@ impl Desktop {
         // A script's `roqa.exe notify` line, the same kind of short peek.
         self.pill(native_window::notify_take(), DEVICE_NOTICE);
     }
+    /// On the minute clock: a short pill when the fetched forecast turns wet next hour, once per such hour.
+    pub(super) fn rain_soon(&mut self, hour: u8, minute: u8) {
+        let next = (hour + 1) % 24;
+        if !self.pages.tabs.on(Tab::Weather) || self.rain_told == Some(next) {
+            return;
+        }
+        let text = self
+            .weather
+            .report
+            .as_ref()
+            .and_then(|report| weather::rain_soon(report, hour, minute));
+        if text.is_some() {
+            self.rain_told = Some(next);
+            self.pill(text, DEVICE_NOTICE);
+        }
+    }
     /// Ctrl+Alt+M or a click on the mic dot: mutes or unmutes the recording device and says which.
     pub(super) fn toggle_mic(&mut self) {
         let muted = self.mic.toggle();
