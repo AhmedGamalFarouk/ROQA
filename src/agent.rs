@@ -1,5 +1,6 @@
 //! AI agent status: what a coding agent reported with `roqa.exe agent <name> <state>` (working, needs you, done),
-//! and the progress any script reports with `roqa.exe progress <name> <0-100|done>`.
+//! and the progress any script reports with `roqa.exe progress <name> <0-100|done>`. `roqa.exe notify "text"` shows one
+//! line on the same pill; it goes to ROQA in memory (`notify`), never through the spool.
 //! The client drops one small file per report in a spool folder and signals the resident process, which reads and
 //! removes each (a name cannot travel in a named event). The tracker is pure: the host asks it for the pill text, the
 //! eyes' state and the one deadline it must wake for.
@@ -171,6 +172,64 @@ fn spool() -> Option<PathBuf> {
     path.push("ROQA");
     path.push("agent");
     Some(path)
+}
+
+/// Marks the `WM_COPYDATA` of `roqa.exe notify "text"`: the line travels in memory to the notch, never through a file.
+pub const NOTIFY_TAG: usize = 0x524F_514E;
+/// The longest notify line, in characters; a longer one is cut with an ellipsis.
+pub const NOTIFY_CHARS: usize = 40;
+
+/// The pill line of `roqa.exe notify "text"`: one line, control characters as spaces, at most `NOTIFY_CHARS`; none if
+/// nothing is left.
+pub fn notify_text(text: &str) -> Option<String> {
+    let line: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.is_empty() {
+        return None;
+    }
+    if line.chars().count() <= NOTIFY_CHARS {
+        return Some(line);
+    }
+    let cut: String = line.chars().take(NOTIFY_CHARS - 1).collect();
+    Some(format!("{}\u{2026}", cut.trim_end()))
+}
+
+/// The client's half of `roqa.exe notify`: hands the line to the running ROQA in memory. Not running is not an error.
+pub fn notify(text: &str) {
+    use windows::Win32::{
+        Foundation::{LPARAM, WPARAM},
+        System::DataExchange::COPYDATASTRUCT,
+        UI::WindowsAndMessaging::{
+            FindWindowW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_COPYDATA,
+        },
+    };
+    let Some(line) = notify_text(text) else {
+        return;
+    };
+    let units: Vec<u16> = line.encode_utf16().collect();
+    let data = COPYDATASTRUCT {
+        dwData: NOTIFY_TAG,
+        cbData: (units.len() * 2) as u32,
+        lpData: units.as_ptr() as *mut _,
+    };
+    // SAFETY: `data` and `units` outlive the synchronous send; Windows copies them into ROQA's process.
+    unsafe {
+        let Ok(surface) = FindWindowW(crate::native_window::CLASS, None) else {
+            return;
+        };
+        let _ = SendMessageTimeoutW(
+            surface,
+            WM_COPYDATA,
+            WPARAM(0),
+            LPARAM(&data as *const COPYDATASTRUCT as isize),
+            SMTO_ABORTIFHUNG,
+            1000,
+            None,
+        );
+    }
 }
 
 /// A permission question from the hook `roqa.exe agent ask <name>`, as a spool line `ask <id> <name> <text>`: `id`
@@ -468,6 +527,15 @@ mod tests {
         );
         assert!(parse("ask x claude Bash").is_none() && parse("ask 1 claude").is_none());
         assert!(parse("ask 1 bad!name text").is_none());
+    }
+
+    #[test]
+    fn a_notify_line_is_one_short_line_or_nothing() {
+        assert_eq!(notify_text("  Build\n done\t "), Some("Build done".into()));
+        assert_eq!(notify_text(" \r\n "), None);
+        let long = notify_text(&"word ".repeat(20)).unwrap();
+        assert_eq!(long.chars().count(), NOTIFY_CHARS);
+        assert!(long.ends_with("word\u{2026}"));
     }
 
     #[test]

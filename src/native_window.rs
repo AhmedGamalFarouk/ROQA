@@ -123,6 +123,15 @@ fn device_bit(kind: u32, interface: GUID, not_a_drive: bool) -> u32 {
         _ => 0,
     }
 }
+/// The line of the latest `roqa.exe notify` not yet read; a second one that comes first never replaces it.
+static NOTIFY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// The notify line since the last read, read on every pass.
+pub fn notify_take() -> Option<String> {
+    NOTIFY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
 /// Posted (once until read) when the session unlocks or the display turns on: the mascot wakes.
 pub const WAKE: u32 = WM_APP + 8;
 static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
@@ -770,6 +779,28 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
                 CAPS_PENDING.store(true, Ordering::Release);
             }
             return LRESULT(0);
+        }
+        if message == WM_COPYDATA && lparam.0 != 0 {
+            let data = &*(lparam.0 as *const windows::Win32::System::DataExchange::COPYDATASTRUCT);
+            if data.dwData != crate::agent::NOTIFY_TAG || data.lpData.is_null() {
+                return LRESULT(0);
+            }
+            // Bounded before reading: a line is at most `NOTIFY_CHARS` (two units each for safety).
+            let bytes = std::slice::from_raw_parts(
+                data.lpData as *const u8,
+                (data.cbData as usize).min(crate::agent::NOTIFY_CHARS * 4),
+            );
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            if let Some(line) = crate::agent::notify_text(&String::from_utf16_lossy(&units)) {
+                NOTIFY
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_or_insert(line);
+            }
+            return LRESULT(1);
         }
         if message == WM_ENDSESSION && wparam.0 != 0 {
             // Signing out or shutting down: the process may end as soon as this returns.

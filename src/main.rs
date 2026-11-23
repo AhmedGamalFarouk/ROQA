@@ -132,6 +132,10 @@ fn run() -> Result<()> {
             });
             Ok(())
         }
+        [command, words @ ..] if command == "notify" && !words.is_empty() => {
+            agent::notify(&words.join(" "));
+            Ok(())
+        }
         _ => Err(Error::new(
             E_INVALIDARG,
             "Expected no argument or one control command.",

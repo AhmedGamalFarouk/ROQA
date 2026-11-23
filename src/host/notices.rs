@@ -233,6 +233,8 @@ impl Desktop {
     /// A Windows notification's line (`toast.rs`) on the notice row, a short peek like a device alert.
     pub(super) fn notification_peek(&mut self) {
         self.pill(toast::take(), DEVICE_NOTICE);
+        // A script's `roqa.exe notify` line, the same kind of short peek.
+        self.pill(native_window::notify_take(), DEVICE_NOTICE);
     }
     /// Ctrl+Alt+M or a click on the mic dot: mutes or unmutes the recording device and says which.
     pub(super) fn toggle_mic(&mut self) {

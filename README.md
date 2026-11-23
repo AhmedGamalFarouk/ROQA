@@ -111,6 +111,10 @@ roqa --hide-dock         # Hide the dock
 # UI dialogs
 roqa --show-settings     # Open the settings panel
 
+# Script pills on the notch
+roqa progress <name> <0-100|done>  # A progress bar pill, such as "Build 42%"
+roqa notify "Build done"           # A one-line pill; the text is never written to disk
+
 # Diagnostics & Shutdown
 roqa --diagnostics <out> # Start ROQA with counters written to <out> (only when none runs)
 roqa --quit              # Gracefully shut down ROQA and persist settings
