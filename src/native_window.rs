@@ -658,7 +658,8 @@ pub fn fullscreen_monitor(key: WindowKey) -> Option<String> {
     };
     let info = monitor_info(monitor).ok()?;
     let area = bounds(info.monitorInfo.rcMonitor);
-    topology::covers(bounds(rect), area, maximized).then(|| device_name(&info))
+    let shell_confirmed = maximized && shell_fullscreen_window(key.handle);
+    topology::covers(bounds(rect), area, maximized, shell_confirmed).then(|| device_name(&info))
 }
 
 thread_local! {
@@ -680,11 +681,15 @@ pub fn note_fullscreen(window: usize, entered: bool) -> bool {
     })
 }
 
+fn shell_fullscreen_window(handle: usize) -> bool {
+    SHELL_FULLSCREEN.with_borrow(|windows| windows.contains(&handle))
+}
+
 /// Whether Windows reports `key` as a full-screen app. The system-wide state (also exclusive Direct3D)
 /// only sees the main monitor; the shell hook names a full-screen window on any monitor, but only
 /// one that enters full screen while ROQA runs. A failed query reads as false.
 pub fn shell_fullscreen(key: WindowKey) -> bool {
-    SHELL_FULLSCREEN.with_borrow(|windows| windows.contains(&key.handle))
+    shell_fullscreen_window(key.handle)
         // SAFETY: shell state query with an out value owned by the binding.
         || unsafe { SHQueryUserNotificationState() }
             .is_ok_and(|state| state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN)
@@ -907,25 +912,21 @@ fn repositions(message: u32, wparam: WPARAM, taskbar_created: u32) -> Option<boo
 mod tests {
     #[test]
     fn shell_full_screen_windows_are_kept_until_they_leave_and_bounded() {
-        use super::{SHELL_FULLSCREEN, note_fullscreen};
-        // The set alone: `shell_fullscreen` also reads the live system state, true while anything is full screen.
-        let shell_fullscreen =
-            |handle| SHELL_FULLSCREEN.with_borrow(|windows| windows.contains(&handle));
-        let key = |handle| handle;
+        use super::{note_fullscreen, shell_fullscreen_window};
         assert!(note_fullscreen(7, true));
         assert!(!note_fullscreen(7, true));
         assert!(
             note_fullscreen(8, true),
             "a second monitor's app does not replace the first"
         );
-        assert!(shell_fullscreen(key(7)) && shell_fullscreen(key(8)));
+        assert!(shell_fullscreen_window(7) && shell_fullscreen_window(8));
         assert!(!note_fullscreen(9, false));
         assert!(note_fullscreen(7, false));
-        assert!(!shell_fullscreen(key(7)) && shell_fullscreen(key(8)));
+        assert!(!shell_fullscreen_window(7) && shell_fullscreen_window(8));
         for window in 100..120 {
             note_fullscreen(window, true);
         }
-        assert!(!shell_fullscreen(key(119)) && shell_fullscreen(key(8)));
+        assert!(!shell_fullscreen_window(119) && shell_fullscreen_window(8));
     }
 
     /// Every private message id is `WM_APP` plus a number, spread over many files: no two may share one.

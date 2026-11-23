@@ -97,11 +97,13 @@ pub fn fit(rects: &[Bounds], width: i32, height: i32, gap: i32) -> Vec<Bounds> {
 }
 
 /// A window that spans a whole monitor, borders included, hides the shell UI on it when Windows
-/// also reports a full-screen app. A maximized window's frame hangs past the edges, so it spans the
-/// monitor whenever the work area is the whole screen (taskbar hidden); that is not full screen.
-pub fn covers(window: Bounds, monitor: Bounds, maximized: bool) -> bool {
-    !(maximized && window != monitor)
-        && window.x <= monitor.x
+/// also reports a full-screen app. With an auto-hidden taskbar, a maximized window can span the
+/// monitor without being full screen; even an exact match needs a report for that window.
+pub fn covers(window: Bounds, monitor: Bounds, maximized: bool, shell_confirmed: bool) -> bool {
+    if maximized {
+        return shell_confirmed && window == monitor;
+    }
+    window.x <= monitor.x
         && window.y <= monitor.y
         && window.x + window.width >= monitor.x + monitor.width
         && window.y + window.height >= monitor.y + monitor.height
@@ -241,24 +243,25 @@ mod tests {
     #[test]
     fn full_screen_means_covering_the_whole_monitor_including_negative_origins() {
         let left = monitor("L", -1920, -200, 96).work;
-        assert!(covers(left, left, false));
+        assert!(covers(left, left, false, false));
         let oversized = Bounds {
             x: left.x - 8,
             y: left.y - 8,
             width: left.width + 16,
             height: left.height + 16,
         };
-        assert!(covers(oversized, left, false));
+        assert!(covers(oversized, left, false, false));
         // A maximized browser on a monitor whose taskbar hides spans it too, frame and all: not full screen.
-        assert!(!covers(oversized, left, true));
+        assert!(!covers(oversized, left, true, true));
         // Full screen that leaves its window maximized fills the monitor exactly.
-        assert!(covers(left, left, true));
+        assert!(covers(left, left, true, true));
+        assert!(!covers(left, left, true, false));
         let mut short = left;
         short.height -= 1;
-        assert!(!covers(short, left, false));
+        assert!(!covers(short, left, false, false));
         let mut shifted = left;
         shifted.x += 1;
-        assert!(!covers(shifted, left, false));
+        assert!(!covers(shifted, left, false, false));
     }
 
     #[test]
