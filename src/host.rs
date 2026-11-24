@@ -2758,7 +2758,10 @@ impl Desktop {
                 return Ok(());
             }
             if changed {
-                self.hover_popup = None;
+                // A slider popup is about the system, not a dock slot: a changing app list leaves it open.
+                if !self.levels_popup() {
+                    self.hover_popup = None;
+                }
                 let shelf = self.shelf.shelf.entries();
                 self.icons.retain(|identity| {
                     items.iter().any(|item| &item.identity == identity || item.members.iter().any(|member| &member.identity == identity))
@@ -3136,11 +3139,12 @@ impl Desktop {
                 self.mute_row(row);
                 true
             }
+            // The slider popups stay open: a device choice or a click on a note row does not close them.
             Event::Choose(Item::Device(index, _)) => {
                 self.choose_device(index);
-                self.hover_popup = None;
                 true
             }
+            Event::Choose(Item::Label) if self.levels_popup() => true,
             Event::Choose(_) => {
                 self.hover_popup = None;
                 true

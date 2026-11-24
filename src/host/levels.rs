@@ -185,6 +185,15 @@ impl Desktop {
             Err(error) => eprintln!("Dock levels: {error}"),
         }
     }
+    /// Whether the open hover popup is the volume or brightness one.
+    pub(super) fn levels_popup(&self) -> bool {
+        self.hover_popup.as_ref().is_some_and(|popup| {
+            matches!(
+                popup.hover_hit,
+                Some(Hit::Button(Button::Volume | Button::Brightness))
+            )
+        })
+    }
     /// The brightness worker, started on first need.
     fn brightness_worker(&mut self) -> Option<&Brightness> {
         if self.brightness.is_none() {
@@ -323,7 +332,12 @@ impl Desktop {
         else {
             return;
         };
-        if let Err(error) = crate::policy_config::set_default(&device.id) {
+        let switched = crate::policy_config::set_default(&device.id);
+        // The rows show the new default at the next pass.
+        if let Some(levels) = &mut self.levels {
+            levels.devices = self.audio.devices();
+        }
+        if let Err(error) = switched {
             eprintln!("Dock volume: switch device: {error}");
             // SAFETY: a shell open of a fixed URI; the shell shows any failure itself.
             unsafe {
