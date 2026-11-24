@@ -17,6 +17,11 @@ if ($Action -eq 'start') {
     # -Test: ROQA runs on the test monitor only (scripts/monitor.ps1): a private copy of the owner's store with
     # the other monitors switched off, so the real store is never changed. Refreshed from the real store each start.
     $realLocal = $env:LOCALAPPDATA
+    # One ROQA per session: note who already runs, so only the process this call starts counts as started.
+    $before = @(Get-Process roqa -ErrorAction SilentlyContinue | ForEach-Object Id)
+    if ($Test -and $before.Count) {
+        throw "ROQA is already running (PID $($before -join ', ')); a test would only see it. Quit it first: ./scripts/run.ps1 quit"
+    }
     try {
         if ($Test) {
             . "$PSScriptRoot/monitor.ps1"
@@ -25,7 +30,12 @@ if ($Action -eq 'start') {
         Start-Process -FilePath $env:ComSpec -ArgumentList $command -WindowStyle Hidden
     } finally { $env:LOCALAPPDATA = $realLocal }
     Start-Sleep -Milliseconds 1000
-    $hostInstance = Get-Process roqa -ErrorAction SilentlyContinue | Select-Object -First 1
+    $hostInstance = Get-Process roqa -ErrorAction SilentlyContinue | Where-Object { $before -notcontains $_.Id } |
+        Select-Object -First 1
+    if (-not $hostInstance -and $before.Count) {
+        Write-Host "ROQA was already running (PID $($before -join ', ')); this start launched no other."
+        return
+    }
     if (-not $hostInstance) { throw "ROQA did not stay running. Diagnostics: $log" }
     Write-Host "ROQA is running (PID $($hostInstance.Id)). Quit with: ./scripts/run.ps1 quit"
 } else {

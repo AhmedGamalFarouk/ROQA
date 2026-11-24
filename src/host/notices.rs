@@ -82,11 +82,11 @@ impl Desktop {
     /// does not show over a full-screen app; a drive carries Eject.
     pub(super) fn show_device(&mut self, bits: u32) {
         let text = if bits & native_window::DRIVE_BIT != 0 {
-            "Drive connected"
+            "Drive connected."
         } else if bits & native_window::CAMERA_BIT != 0 {
-            "Camera connected"
+            "Camera connected."
         } else {
-            "Speaker connected"
+            "Speaker connected."
         };
         let letter = native_window::drive_read().filter(|_| bits & native_window::DRIVE_BIT != 0);
         let hold = if letter.is_some() {
@@ -230,9 +230,9 @@ impl Desktop {
                 .write_to(&mut self.store, &mut self.pending, now);
             let (hours, minutes) = (delay / 3600, delay % 3600 / 60);
             match (hours, minutes) {
-                (0, minutes) => format!("I'll remind you in {minutes} min"),
-                (hours, 0) => format!("I'll remind you in {hours} h"),
-                (hours, minutes) => format!("I'll remind you in {hours} h {minutes} min"),
+                (0, minutes) => format!("I'll remind you in {minutes} min."),
+                (hours, 0) => format!("I'll remind you in {hours} h."),
+                (hours, minutes) => format!("I'll remind you in {hours} h {minutes} min."),
             }
         } else {
             format!("{} reminders are already waiting.", remind::MAX)
@@ -327,7 +327,7 @@ impl Desktop {
                 .reminders
                 .write_to(&mut self.store, &mut self.pending, now);
             self.power.announce(
-                "Snoozed for 10 min".into(),
+                "Snoozed for 10 min.".into(),
                 now,
                 DEVICE_NOTICE,
                 power::Extra::Snoozed,

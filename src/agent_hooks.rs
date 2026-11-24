@@ -740,7 +740,7 @@ pub fn plan(spec: &Spec, home: &Path, exe: &Path, add: bool) -> Result<Plan, Str
 /// Writes a confirmed plan: first a timestamped copy of the file, then the new text or its removal.
 pub fn apply(plan: &Plan, stamp: &str) -> Result<(), String> {
     let path = &plan.path;
-    let failed = |e: std::io::Error| format!("Could not write {}: {e}", path.display());
+    let failed = |e: std::io::Error| format!("Couldn't write {}: {e}", path.display());
     if path.exists() {
         let mut backup = path.as_os_str().to_owned();
         backup.push(format!(".roqa-backup-{stamp}"));

@@ -322,7 +322,7 @@ impl Desktop {
                 self.request_notches(Repaint::Full, |_| true);
             } else {
                 // The row keeps its Eject button so the click can be tried again; the notice waits behind it.
-                self.show_notice("Still ejecting another drive".into(), Instant::now());
+                self.show_notice("Still ejecting another drive.".into(), Instant::now());
             }
             return true;
         }

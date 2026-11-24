@@ -77,7 +77,7 @@ Scale (DIP/weight): time 28/600 (timer 30/600), title 15/600, body 12/400, capti
 Fallback chain: Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI.
 
 ## 8. Voice
-Warm, brief, 7 words or fewer, sentence case, second person, no exclamation marks, no em dashes, no emoji. Say what happened, then what happens next only if it matters.
+Warm, brief, 7 words or fewer, sentence case, second person, no exclamation marks, no em dashes, no emoji. Say what happened, then what happens next only if it matters. Contractions always ("Couldn't", "Can't"). Every notice ends with a period except a live readout of a value (`Volume 41%`, `Ejecting E:`) and text that is not ROQA's (a Windows notification, a `notify` or agent line).
 ```
 Timer done      Round done. Rest a little.
 Timer cancelled Timer cancelled.

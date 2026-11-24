@@ -544,12 +544,14 @@ fn capped(
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// `name` as `.exe` or `.cmd` in the given extra directory, then in each PATH directory.
+/// `name` as `.exe` or `.cmd` in the given extra directory, then in each PATH directory. Only absolute directories
+/// count: an empty or relative PATH entry would resolve against ROQA's working directory.
 fn find(name: &str, extra: Option<PathBuf>) -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     extra
         .into_iter()
         .chain(std::env::split_paths(&path))
+        .filter(|dir| dir.is_absolute())
         .find_map(|dir| {
             ["exe", "cmd"]
                 .into_iter()

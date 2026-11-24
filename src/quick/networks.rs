@@ -7,7 +7,7 @@ use windows::{
     Devices::Enumeration::{DeviceInformation, DeviceInformationKind},
     Foundation::IPropertyValue,
     Win32::{
-        Foundation::{CloseHandle, ERROR_TIMEOUT, HANDLE, WAIT_OBJECT_0, WIN32_ERROR},
+        Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WIN32_ERROR},
         NetworkManagement::WiFi::*,
         System::{
             Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
@@ -28,11 +28,12 @@ pub struct Row {
     pub name: String,
     pub detail: String,
     pub connected: bool,
-    profile: Option<(GUID, String)>,
+    pub(crate) profile: Option<(GUID, String)>,
 }
 
 static BUSY: AtomicBool = AtomicBool::new(false);
-static ANSWER: Mutex<Option<(Page, Vec<Row>)>> = Mutex::new(None);
+/// The page, its rows, and whether a connect attempt failed.
+static ANSWER: Mutex<Option<(Page, Vec<Row>, bool)>> = Mutex::new(None);
 const READY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 120;
 
 struct Client(HANDLE);
@@ -143,6 +144,7 @@ struct ConnectionWait {
     guid: GUID,
     profile: HSTRING,
     event: HANDLE,
+    connected: AtomicBool,
 }
 
 impl Drop for ConnectionWait {
@@ -152,6 +154,14 @@ impl Drop for ConnectionWait {
             let _ = CloseHandle(self.event);
         }
     }
+}
+
+const COMPLETE: u32 = wlan_notification_acm_connection_complete.0 as u32;
+const ATTEMPT_FAIL: u32 = wlan_notification_acm_connection_attempt_fail.0 as u32;
+
+/// Only a completed connection with a success reason means Windows joined the network.
+fn succeeded(code: u32, reason: u32) -> bool {
+    code == COMPLETE && reason == WLAN_REASON_CODE_SUCCESS
 }
 
 unsafe extern "system" fn connection_changed(
@@ -166,11 +176,7 @@ unsafe extern "system" fn connection_changed(
     };
     if data.NotificationSource != WLAN_NOTIFICATION_SOURCE_ACM
         || data.InterfaceGuid != wait.guid
-        || ![
-            wlan_notification_acm_connection_complete.0 as u32,
-            wlan_notification_acm_connection_attempt_fail.0 as u32,
-        ]
-        .contains(&data.NotificationCode)
+        || ![COMPLETE, ATTEMPT_FAIL].contains(&data.NotificationCode)
         || (data.dwDataSize as usize) < std::mem::size_of::<WLAN_CONNECTION_NOTIFICATION_DATA>()
     {
         return;
@@ -189,6 +195,11 @@ unsafe extern "system" fn connection_changed(
         .position(|&unit| unit == 0)
         .unwrap_or(connection.strProfileName.len());
     if connection.strProfileName[..length] == *wait.profile {
+        // A later failure notice never undoes a success already seen.
+        wait.connected.fetch_or(
+            succeeded(data.NotificationCode, connection.wlanReasonCode),
+            Ordering::AcqRel,
+        );
         // SAFETY: the event remains live until the client has finished all callbacks.
         unsafe {
             let _ = SetEvent(wait.event);
@@ -200,13 +211,15 @@ unsafe extern "system" fn connection_changed(
     clippy::disallowed_methods,
     reason = "bounded wait on the network worker, never the host"
 )]
-fn connect(guid: GUID, profile: String) -> Result<()> {
+/// `Ok(false)` when Windows refused the profile or did not answer in time.
+fn connect(guid: GUID, profile: String) -> Result<bool> {
     // SAFETY: default security attributes and no name for this private event.
     let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }?;
     let wait = ConnectionWait {
         guid,
         profile: HSTRING::from(profile),
         event,
+        connected: AtomicBool::new(false),
     };
     let client = Client::open()?;
     let parameters = WLAN_CONNECTION_PARAMETERS {
@@ -229,10 +242,10 @@ fn connect(guid: GUID, profile: String) -> Result<()> {
         .ok()?;
         WIN32_ERROR(WlanConnect(client.0, &guid, &parameters, None)).ok()?;
         if WaitForSingleObject(wait.event, 8_000) != WAIT_OBJECT_0 {
-            return Err(ERROR_TIMEOUT.to_hresult().into());
+            return Ok(false);
         }
     }
-    Ok(())
+    Ok(wait.connected.load(Ordering::Acquire))
 }
 
 fn paired_devices() -> Result<Vec<Row>> {
@@ -281,7 +294,7 @@ fn paired_devices() -> Result<Vec<Row>> {
                 row.connected = true;
                 row.detail = battery.map_or_else(
                     || "Connected".into(),
-                    |percent| format!("Connected ? {percent}%"),
+                    |percent| format!("Connected · {percent}%"),
                 );
             }
             continue;
@@ -289,7 +302,7 @@ fn paired_devices() -> Result<Vec<Row>> {
         let detail = if connected {
             battery.map_or_else(
                 || "Connected".into(),
-                |percent| format!("Connected ? {percent}%"),
+                |percent| format!("Connected · {percent}%"),
             )
         } else {
             "Paired".into()
@@ -310,11 +323,22 @@ fn paired_devices() -> Result<Vec<Row>> {
     Ok(rows)
 }
 
+fn unavailable() -> Vec<Row> {
+    vec![Row {
+        name: "Windows access unavailable".into(),
+        detail: String::new(),
+        connected: false,
+        profile: None,
+    }]
+}
+
+/// Starts a list (or connect) job; false only while an earlier job or its unread answer holds the slot.
 pub fn request(page: Page, row: Option<&Row>) -> bool {
     let profile = row.and_then(|row| row.profile.clone());
     if BUSY.swap(true, Ordering::AcqRel) {
         return false;
     }
+    let connecting = profile.is_some();
     // SAFETY: reads this thread ID without pointers.
     let host = unsafe { GetCurrentThreadId() };
     let sent = std::thread::Builder::new()
@@ -322,8 +346,13 @@ pub fn request(page: Page, row: Option<&Row>) -> bool {
         .spawn(move || {
             // SAFETY: initializes COM on this worker only.
             let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+            let mut failed = false;
             let result = if let Some((guid, profile)) = profile {
-                connect(guid, profile).and_then(|()| saved_networks())
+                failed = !connect(guid, profile).unwrap_or_else(|error| {
+                    eprintln!("Wi-Fi connect: {error}");
+                    false
+                });
+                saved_networks()
             } else if page == Page::WiFi {
                 saved_networks()
             } else {
@@ -335,30 +364,43 @@ pub fn request(page: Page, row: Option<&Row>) -> bool {
             }
             let rows = result.unwrap_or_else(|error| {
                 eprintln!("Command center: {error}");
-                vec![Row {
-                    name: "Windows access unavailable".into(),
-                    detail: String::new(),
-                    connected: false,
-                    profile: None,
-                }]
+                unavailable()
             });
-            *ANSWER.lock().unwrap_or_else(PoisonError::into_inner) = Some((page, rows));
-            BUSY.store(false, Ordering::Release);
+            *ANSWER.lock().unwrap_or_else(PoisonError::into_inner) = Some((page, rows, failed));
             let _ = crate::native_window::post_wake(host, READY);
         })
         .is_ok();
     if !sent {
-        BUSY.store(false, Ordering::Release);
+        // The host reads the slot on every pass, so a failed start still leaves the page an answer.
+        *ANSWER.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((page, unavailable(), connecting));
     }
-    sent
+    true
 }
 
-pub fn answer() -> Option<(Page, Vec<Row>)> {
-    ANSWER.lock().unwrap_or_else(PoisonError::into_inner).take()
+/// Takes the finished answer and frees the slot for the next job, so no job overwrites an unread answer.
+pub fn answer() -> Option<(Page, Vec<Row>, bool)> {
+    let answer = ANSWER.lock().unwrap_or_else(PoisonError::into_inner).take();
+    if answer.is_some() {
+        BUSY.store(false, Ordering::Release);
+    }
+    answer
 }
 
 impl Row {
     pub fn can_connect(&self) -> bool {
         self.profile.is_some() && !self.connected
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_successful_completion_connects() {
+        assert!(succeeded(COMPLETE, WLAN_REASON_CODE_SUCCESS));
+        assert!(!succeeded(COMPLETE, WLAN_REASON_CODE_SUCCESS + 1));
+        assert!(!succeeded(ATTEMPT_FAIL, WLAN_REASON_CODE_SUCCESS));
     }
 }

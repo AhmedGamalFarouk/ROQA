@@ -414,14 +414,19 @@ fn write_rev(newest: &std::sync::Mutex<u64>, path: &Path, text: &str, rev: u64) 
 }
 
 /// Writes what `keep_unsaved` holds, at once and durably, on this thread: a sign-out (`WM_ENDSESSION`) or quit.
-/// It waits for a background write still out, then skips what that already saved.
-pub fn save_unsaved() {
+/// It waits for a background write still out, then skips what that already saved. A failed write keeps the copy
+/// (unless a newer one arrived meanwhile), so nothing is lost while ROQA still runs.
+pub fn save_unsaved() -> io::Result<()> {
     let held = UNSAVED.lock().ok().and_then(|mut unsaved| unsaved.take());
-    if let Some((path, text, rev)) = held
-        && let Err(error) = write_rev(&NEWEST, &path, &text, rev)
-    {
+    let Some((path, text, rev)) = held else {
+        return Ok(());
+    };
+    write_rev(&NEWEST, &path, &text, rev).inspect_err(|error| {
         eprintln!("Store: write failed: {error}");
-    }
+        if let Ok(mut unsaved) = UNSAVED.lock() {
+            unsaved.get_or_insert((path, text, rev));
+        }
+    })
 }
 
 /// Starts the debounced write of what `keep_unsaved` holds on one short-lived worker; false when nothing is held
@@ -859,16 +864,23 @@ end
     }
 
     #[test]
-    fn a_sign_out_writes_what_the_host_kept_and_a_written_store_keeps_nothing() {
+    fn a_sign_out_writes_what_the_host_kept_and_a_failed_write_keeps_it() {
         let dir = Dir::new("signout");
         let path = dir.file();
         keep_unsaved(&path, &sample(), true, 1);
-        save_unsaved();
+        save_unsaved().unwrap();
         assert_eq!(load(&path).0, sample());
         let _ = std::fs::remove_file(&path);
         keep_unsaved(&path, &sample(), false, 2);
-        save_unsaved();
+        save_unsaved().unwrap();
         assert!(!path.exists(), "clean: nothing to write");
+        // A failed final write (a folder where the file goes) keeps the copy for the next try.
+        std::fs::create_dir(&path).unwrap();
+        keep_unsaved(&path, &sample(), true, 3);
+        assert!(save_unsaved().is_err());
+        std::fs::remove_dir(&path).unwrap();
+        save_unsaved().unwrap();
+        assert_eq!(load(&path).0, sample());
     }
 
     #[test]

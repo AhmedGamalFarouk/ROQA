@@ -110,7 +110,7 @@ pub fn startup_failure(code: i32) {
         return;
     }
     let message: Vec<u16> = format!(
-        "ROQA could not complete startup (0x{:08X}). See %LOCALAPPDATA%\\ROQA\\error.log.",
+        "ROQA couldn't complete startup (0x{:08X}). See %LOCALAPPDATA%\\ROQA\\error.log.",
         code as u32
     )
     .encode_utf16()

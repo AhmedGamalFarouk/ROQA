@@ -2129,6 +2129,17 @@ Other hooks stay. A copy of the file is kept.",
         Ok(())
     }
 
+    /// Brings the open window forward as it is: its page and scroll stay.
+    pub fn raise(&self) {
+        // SAFETY: this live dialog's own HWND. Windows keeps its normal foreground restrictions.
+        unsafe {
+            if IsIconic(self.window).as_bool() {
+                let _ = ShowWindow(self.window, SW_RESTORE);
+            }
+            let _ = SetForegroundWindow(self.window);
+        }
+    }
+
     pub fn focus_city(&mut self) -> Result<()> {
         let page = self
             .items

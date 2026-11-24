@@ -5,7 +5,14 @@ use std::{ffi::OsStr, path::Path, path::PathBuf};
 
 use windows::{
     Win32::{
-        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE},
+        Foundation::{
+            ERROR_FILE_NOT_FOUND, ERROR_NOT_ALL_ASSIGNED, ERROR_SUCCESS, GENERIC_READ,
+            GENERIC_WRITE, GetLastError, HANDLE,
+        },
+        Security::{
+            AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED, SE_SHUTDOWN_NAME,
+            TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+        },
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         },
@@ -22,6 +29,7 @@ use windows::{
                 HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW,
                 RegOpenKeyExW, RegSetValueExW,
             },
+            Threading::{GetCurrentProcess, OpenProcessToken},
         },
         UI::Shell::{
             FOLDERID_LocalAppData, FOLDERID_Programs, IShellLinkW, KF_FLAG_DONT_VERIFY,
@@ -34,6 +42,10 @@ use windows::{
 /// Puts ROQA.lnk in the user's Start menu Programs folder, so Windows search finds ROQA, when it is missing or
 /// points at another exe (ROQA moved). One short worker at start-up; a test profile never touches the Start menu.
 pub fn ensure_start_shortcut() {
+    // A dev build never points the user's shortcut at itself.
+    if cfg!(debug_assertions) {
+        return;
+    }
     let _ = std::thread::Builder::new()
         .name("roqa-shortcut".into())
         .spawn(|| {
@@ -486,11 +498,41 @@ pub fn lock() {
     }
 }
 
-/// Puts the PC to sleep (not hibernate), asking running apps nothing.
-pub fn sleep() {
-    // SAFETY: scalar flags only.
+/// Puts the PC to sleep (not hibernate), asking running apps nothing; false when Windows refused. The shutdown
+/// privilege `SetSuspendState` needs is enabled only around the call.
+pub fn sleep() -> bool {
+    let mut token = HANDLE::default();
+    let mut wanted = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        ..Default::default()
+    };
+    wanted.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    let mut previous = TOKEN_PRIVILEGES::default();
+    let mut size = 0;
+    // SAFETY: the token is this process's own, owned by the guard below; every pointer is a local that outlives
+    // its call, and `previous` has room for the one privilege changed.
     unsafe {
-        let _ = SetSuspendState(false, false, false);
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token).is_err() {
+            return false;
+        }
+        let token = crate::ipc::OwnedHandle(token);
+        if LookupPrivilegeValueW(None, SE_SHUTDOWN_NAME, &mut wanted.Privileges[0].Luid).is_err()
+            || AdjustTokenPrivileges(
+                token.0,
+                false,
+                Some(&wanted),
+                std::mem::size_of::<TOKEN_PRIVILEGES>() as u32,
+                Some(&mut previous),
+                Some(&mut size),
+            )
+            .is_err()
+            || GetLastError() == ERROR_NOT_ALL_ASSIGNED
+        {
+            return false;
+        }
+        let slept = SetSuspendState(false, false, false);
+        let _ = AdjustTokenPrivileges(token.0, false, Some(&previous), 0, None, None);
+        slept
     }
 }
 

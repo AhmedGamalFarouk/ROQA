@@ -429,7 +429,7 @@ impl Desktop {
                 })
             });
         } else if item.is_some() {
-            self.show_notice("That app can't open files".into(), Instant::now());
+            self.show_notice("That app can't open files.".into(), Instant::now());
         }
     }
     /// A file drag moved over a dock (`x` is the screen column) or left it: the slot under it starts or restarts
@@ -967,7 +967,7 @@ impl Desktop {
                         let text = if crate::system_os::eject_volume_in_background(volume) {
                             format!("Ejecting {letter}:")
                         } else {
-                            "Still ejecting another drive".into()
+                            "Still ejecting another drive.".into()
                         };
                         self.show_notice(text, Instant::now());
                     }

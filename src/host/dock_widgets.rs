@@ -312,7 +312,7 @@ impl Desktop {
                 let meter = |usage: Option<&widgets::Usage>| {
                     usage.map_or_else(
                         || "Not available".to_owned(),
-                        |usage| format!("{}% ? {}", usage.percent, usage.detail),
+                        |usage| format!("{}% · {}", usage.percent, usage.detail),
                     )
                 };
                 rows.push((

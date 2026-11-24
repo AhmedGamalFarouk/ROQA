@@ -787,19 +787,28 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
         }
         if message == WM_COPYDATA && lparam.0 != 0 {
             let data = &*(lparam.0 as *const windows::Win32::System::DataExchange::COPYDATASTRUCT);
-            if data.dwData != crate::agent::NOTIFY_TAG || data.lpData.is_null() {
+            // Bounded before reading: a notify line is at most `NOTIFY_CHARS` (two units each for safety).
+            let cap = match data.dwData {
+                crate::agent::NOTIFY_TAG => crate::agent::NOTIFY_CHARS * 4,
+                crate::agent::ASK_TAG => crate::agent::ASK_BYTES,
+                _ => return LRESULT(0),
+            };
+            if data.lpData.is_null() {
                 return LRESULT(0);
             }
-            // Bounded before reading: a line is at most `NOTIFY_CHARS` (two units each for safety).
             let bytes = std::slice::from_raw_parts(
                 data.lpData as *const u8,
-                (data.cbData as usize).min(crate::agent::NOTIFY_CHARS * 4),
+                (data.cbData as usize).min(cap),
             );
             let units: Vec<u16> = bytes
                 .chunks_exact(2)
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect();
-            if let Some(line) = crate::agent::notify_text(&String::from_utf16_lossy(&units)) {
+            let text = String::from_utf16_lossy(&units);
+            if data.dwData == crate::agent::ASK_TAG {
+                return LRESULT(crate::agent::receive_ask(&text).into());
+            }
+            if let Some(line) = crate::agent::notify_text(&text) {
                 NOTIFY
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -809,7 +818,7 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
         }
         if message == WM_ENDSESSION && wparam.0 != 0 {
             // Signing out or shutting down: the process may end as soon as this returns.
-            crate::store::save_unsaved();
+            let _ = crate::store::save_unsaved();
             crate::taskbar::restore();
             return LRESULT(0);
         }

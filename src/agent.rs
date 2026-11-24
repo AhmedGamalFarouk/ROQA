@@ -1,6 +1,6 @@
 //! AI agent status: what a coding agent reported with `roqa.exe agent <name> <state>` (working, needs you, done),
 //! and the progress any script reports with `roqa.exe progress <name> <0-100|done>`. `roqa.exe notify "text"` shows one
-//! line on the same pill; it goes to ROQA in memory (`notify`), never through the spool.
+//! line on the same pill; it and a permission question (`ask`) go to ROQA in memory, never through the spool.
 //! The client drops one small file per report in a spool folder and signals the resident process, which reads and
 //! removes each (a name cannot travel in a named event). The tracker is pure: the host asks it for the pill text, the
 //! eyes' state and the one deadline it must wake for.
@@ -197,8 +197,20 @@ pub fn notify_text(text: &str) -> Option<String> {
     Some(format!("{}\u{2026}", cut.trim_end()))
 }
 
+/// Marks the `WM_COPYDATA` of a permission question `id name text` from `roqa.exe agent ask`.
+pub const ASK_TAG: usize = 0x524F_5141;
+/// The longest question message read, in bytes.
+pub const ASK_BYTES: usize = SPOOL_CAP as usize;
+
 /// The client's half of `roqa.exe notify`: hands the line to the running ROQA in memory. Not running is not an error.
 pub fn notify(text: &str) {
+    if let Some(line) = notify_text(text) {
+        send(NOTIFY_TAG, &line);
+    }
+}
+
+/// Hands `line` to the running ROQA as `WM_COPYDATA`; true when it took it.
+fn send(tag: usize, line: &str) -> bool {
     use windows::Win32::{
         Foundation::{LPARAM, WPARAM},
         System::DataExchange::COPYDATASTRUCT,
@@ -206,36 +218,45 @@ pub fn notify(text: &str) {
             FindWindowW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_COPYDATA,
         },
     };
-    let Some(line) = notify_text(text) else {
-        return;
-    };
     let units: Vec<u16> = line.encode_utf16().collect();
     let data = COPYDATASTRUCT {
-        dwData: NOTIFY_TAG,
+        dwData: tag,
         cbData: (units.len() * 2) as u32,
         lpData: units.as_ptr() as *mut _,
     };
+    let mut taken = 0;
     // SAFETY: `data` and `units` outlive the synchronous send; Windows copies them into ROQA's process.
     unsafe {
         let Ok(surface) = FindWindowW(crate::native_window::CLASS, None) else {
-            return;
+            return false;
         };
-        let _ = SendMessageTimeoutW(
+        SendMessageTimeoutW(
             surface,
             WM_COPYDATA,
             WPARAM(0),
             LPARAM(&data as *const COPYDATASTRUCT as isize),
             SMTO_ABORTIFHUNG,
             1000,
-            None,
-        );
+            Some(&mut taken),
+        )
+        .0 != 0
+            && taken == 1
     }
 }
 
-/// A permission question from the hook `roqa.exe agent ask <name>`, as a spool line `ask <id> <name> <text>`: `id`
-/// is the hook process, whose answer events the click will set.
-pub fn write_ask(name: &str, id: u32, text: &str) -> std::io::Result<()> {
-    append(&format!("ask {id} {name} {text}\n"))
+/// Questions received in memory and not yet read, oldest first (at most `MAX`; a later one is refused, never dropped).
+static ASKS: Mutex<Vec<(String, Report)>> = Mutex::new(Vec::new());
+
+/// The resident's half of a question message `id name text`: queued for `take`; false when malformed or full.
+pub fn receive_ask(message: &str) -> bool {
+    let mut asks = ASKS.lock().unwrap_or_else(PoisonError::into_inner);
+    match parse_ask(message) {
+        Some(ask) if asks.len() < MAX => {
+            asks.push(ask);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The client's half: appends `name state` (or `name 42%`) for the resident process. Called only after its event
@@ -244,7 +265,7 @@ pub fn write(name: &str, report: Report) -> std::io::Result<()> {
     let word = match report {
         Report::State(state) => state.word().to_owned(),
         Report::Percent(percent) => format!("{percent}%"),
-        // A question has its own writer, `write_ask`.
+        // A question goes in memory (`send`), never to disk.
         Report::Ask(..) => return Ok(()),
     };
     append(&format!("{name} {word}\n"))
@@ -280,8 +301,9 @@ fn append_in(dir: &Path, line: &str) -> std::io::Result<()> {
 /// The resident half: the reports since the last call, oldest first. Anything unreadable is dropped. A batch is
 /// bounded (`SPOOL_FILES`); when files are left it signals the Agent event again, so the next pass reads them.
 pub fn take() -> Vec<(String, Report)> {
+    let asks = std::mem::take(&mut *ASKS.lock().unwrap_or_else(PoisonError::into_inner));
     let Some(dir) = spool() else {
-        return Vec::new();
+        return asks;
     };
     static STUCK: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
     let mut stuck = STUCK.lock().unwrap_or_else(PoisonError::into_inner);
@@ -289,7 +311,7 @@ pub fn take() -> Vec<(String, Report)> {
     if more {
         let _ = crate::ipc::Command::Agent.signal();
     }
-    reports
+    asks.into_iter().chain(reports).collect()
 }
 
 /// The reports of up to `SPOOL_FILES` files, and whether more files are waiting. Only that many names are listed.
@@ -329,14 +351,16 @@ fn take_in(dir: &Path, stuck: &mut BTreeSet<PathBuf>) -> (Vec<(String, Report)>,
     (reports, over)
 }
 
+/// A question message `id name text`: `id` is the hook process, whose answer events the click will set.
+fn parse_ask(message: &str) -> Option<(String, Report)> {
+    let mut parts = message.trim_end().splitn(3, ' ');
+    let id = parts.next()?.parse().ok()?;
+    let name = clean(parts.next()?)?;
+    let text = parts.next().filter(|text| !text.is_empty())?;
+    Some((name.to_owned(), Report::Ask(id, text.to_owned())))
+}
+
 fn parse(line: &str) -> Option<(String, Report)> {
-    if let Some(ask) = line.strip_prefix("ask ") {
-        let mut parts = ask.trim_end().splitn(3, ' ');
-        let id = parts.next()?.parse().ok()?;
-        let name = clean(parts.next()?)?;
-        let text = parts.next().filter(|text| !text.is_empty())?;
-        return Some((name.to_owned(), Report::Ask(id, text.to_owned())));
-    }
     let (name, word) = line.split_once(' ')?;
     let word = word.trim();
     let report = match word.strip_suffix('%') {
@@ -373,10 +397,11 @@ pub fn ask(name: &str) {
     let Ok(events) = crate::ipc::answer_events(id) else {
         return needs_you();
     };
-    let mut written = Ok(());
-    let shown = crate::ipc::Command::Agent.signal_after(|| written = write_ask(name, id, &line));
-    // A question that never reached the spool cannot be answered: back to the terminal, and the pill says so.
-    if shown.is_err() || written.is_err() {
+    let mut sent = false;
+    let shown = crate::ipc::Command::Agent
+        .signal_after(|| sent = send(ASK_TAG, &format!("{id} {name} {line}")));
+    // A question ROQA never took cannot be answered: back to the terminal, and the pill says so.
+    if shown.is_err() || !sent {
         return needs_you();
     }
     let handles = [events[0].0, events[1].0, events[2].0];
@@ -432,7 +457,7 @@ mod tests {
         let mut stuck = BTreeSet::new();
         assert!(take_in(&dir, &mut stuck).0.is_empty(), "no folder yet");
         append_in(&dir, "codex working\n").unwrap();
-        append_in(&dir, "ask 7 claude Bash: ls\n").unwrap();
+        append_in(&dir, "build 40%\n").unwrap();
         fs::write(dir.join("0-1-1.tmp"), "codex done\n").unwrap();
         let first = take_in(&dir, &mut stuck);
         assert_eq!(
@@ -440,7 +465,7 @@ mod tests {
             (
                 vec![
                     ("codex".into(), Report::State(State::Working)),
-                    ("claude".into(), Report::Ask(7, "Bash: ls".into())),
+                    ("build".into(), Report::Percent(40)),
                 ],
                 false
             )
@@ -522,11 +547,31 @@ mod tests {
     #[test]
     fn a_question_line_carries_the_hook_and_the_words() {
         assert_eq!(
-            parse("ask 4242 claude Bash: git push\r"),
+            parse_ask("4242 claude Bash: git push\r"),
             Some(("claude".into(), Report::Ask(4242, "Bash: git push".into())))
         );
-        assert!(parse("ask x claude Bash").is_none() && parse("ask 1 claude").is_none());
-        assert!(parse("ask 1 bad!name text").is_none());
+        assert!(parse_ask("x claude Bash").is_none() && parse_ask("1 claude").is_none());
+        assert!(parse_ask("1 bad!name text").is_none());
+        // The spool never carries a question.
+        assert!(parse("ask 1 claude Bash: git push").is_none());
+    }
+
+    #[test]
+    fn questions_queue_in_memory_and_a_full_queue_refuses() {
+        assert!(!receive_ask("x claude Bash: ls"));
+        for id in 0..MAX as u32 {
+            assert!(receive_ask(&format!("{id} claude Bash: ls")));
+        }
+        assert!(
+            !receive_ask("99 claude Bash: ls"),
+            "full: the terminal asks"
+        );
+        let asks = std::mem::take(&mut *ASKS.lock().unwrap());
+        assert_eq!(asks.len(), MAX);
+        assert_eq!(
+            asks[0],
+            ("claude".into(), Report::Ask(0, "Bash: ls".into()))
+        );
     }
 
     #[test]

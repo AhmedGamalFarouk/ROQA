@@ -1385,8 +1385,6 @@ struct Desktop {
     tuck_generation: Option<u64>,
     /// Keep awake from the quick settings is on (not stored: Windows drops it when ROQA quits).
     keep_awake: bool,
-    /// The look the quick settings' theme row returns to from Light (the last non-Light theme).
-    dark_theme: crate::theme::Theme,
     /// A new song opened the notch on its own: when it closes again, and the song it showed.
     peek: Option<Instant>,
     peek_title: Option<String>,
@@ -1614,7 +1612,6 @@ impl Desktop {
             tuck_notch: dock_tuck::Tuck::top(),
             tuck_generation: None,
             keep_awake: false,
-            dark_theme: crate::theme::Theme::Classic,
             peek: None,
             peek_title: None,
             places: Vec::new(),
@@ -3500,7 +3497,7 @@ impl Desktop {
         match clips.absolute(slot) {
             Some(at) => {
                 if !clipboard_os::write(hwnd, &clips.items()[at]) {
-                    self.show_notice("Could not copy.".into(), Instant::now());
+                    self.show_notice("Couldn't copy.".into(), Instant::now());
                 }
             }
             None => self.change_clips(|clips| {
@@ -3522,7 +3519,7 @@ impl Desktop {
             } else {
                 self.shelf.removed = Some((index, entry));
                 self.show_notice(
-                    "Cannot restore. Check Shelf space and duplicates.".into(),
+                    "Can't restore. Check Shelf space and duplicates.".into(),
                     Instant::now(),
                 );
             }

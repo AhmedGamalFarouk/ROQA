@@ -104,12 +104,12 @@ pub fn pauses_media(on: bool, e: Event, playing: bool) -> bool {
     on && e.lead == 0 && playing
 }
 
-/// The notice text: "Asr" at the time, "Asr in 10 min" for a heads-up.
+/// The notice text: "Time for Asr." at the time, "Asr in 10 min." for a heads-up.
 pub fn notice(e: Event) -> String {
     if e.lead == 0 {
-        format!("Time for {}", e.prayer.name())
+        format!("Time for {}.", e.prayer.name())
     } else {
-        format!("{} in {} min", e.prayer.name(), e.lead)
+        format!("{} in {} min.", e.prayer.name(), e.lead)
     }
 }
 
@@ -667,8 +667,8 @@ mod tests {
             prayer: Prayer::Asr,
             lead: 0,
         };
-        assert_eq!(notice(e), "Time for Asr");
-        assert_eq!(notice(Event { lead: 10, ..e }), "Asr in 10 min");
+        assert_eq!(notice(e), "Time for Asr.");
+        assert_eq!(notice(Event { lead: 10, ..e }), "Asr in 10 min.");
     }
 
     #[test]

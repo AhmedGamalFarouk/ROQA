@@ -9,6 +9,64 @@ pub(super) struct Center {
     page: Option<Page>,
     wifi: Option<Vec<networks::Row>>,
     rows: Option<Vec<networks::Row>>,
+    /// The last connect attempt on the Wi-Fi page did not join.
+    refused: bool,
+}
+
+/// One network page: Back, heading, a note, the rows (saved networks connect), then the settings link.
+fn page_rows(page: Page, found: Option<&[networks::Row]>, refused: bool) -> Vec<(Item, String)> {
+    let wifi = page == Page::WiFi;
+    let mut rows = vec![
+        (Item::Quick(Quick::Back), "Back".into()),
+        (
+            Item::Label,
+            if wifi {
+                "Saved networks in range"
+            } else {
+                "Paired devices"
+            }
+            .into(),
+        ),
+    ];
+    if refused {
+        rows.push((Item::Label, "Couldn't connect.".into()));
+    }
+    match found {
+        None => rows.push((
+            Item::Label,
+            if wifi {
+                "Reading networks"
+            } else {
+                "Reading devices"
+            }
+            .into(),
+        )),
+        Some([]) => rows.push((
+            Item::Label,
+            if wifi {
+                "No saved networks nearby"
+            } else {
+                "No paired devices reported"
+            }
+            .into(),
+        )),
+        Some(found) => rows.extend(found.iter().enumerate().map(|(index, row)| {
+            if row.can_connect() {
+                (
+                    Item::Quick(Quick::Connect(index)),
+                    format!("{}  ·  {}", row.name, row.detail),
+                )
+            } else {
+                (Item::MoonDate, format!("{}\t{}", row.name, row.detail))
+            }
+        })),
+    }
+    rows.push(if wifi {
+        (Item::Quick(Quick::WifiSettings), "More networks".into())
+    } else {
+        (Item::Quick(Quick::BluetoothSettings), "Add a device".into())
+    });
+    rows
 }
 
 impl Desktop {
@@ -35,41 +93,9 @@ impl Desktop {
     pub(super) fn command_rows(&self) -> (Vec<Item>, Vec<String>) {
         let mut rows = Vec::new();
         if let Some(page) = self.center.page {
-            let heading = if page == Page::WiFi {
-                "Saved networks in range"
-            } else {
-                "Paired devices"
-            };
-            rows.push((Item::Quick(Quick::Back), "Back".into()));
-            rows.push((Item::Label, heading.into()));
-            match &self.center.rows {
-                None => rows.push((Item::Label, "Reading devices".into())),
-                Some(found) if found.is_empty() => rows.push((
-                    Item::Label,
-                    if page == Page::WiFi {
-                        "No saved networks nearby"
-                    } else {
-                        "No paired devices reported"
-                    }
-                    .into(),
-                )),
-                Some(found) => rows.extend(found.iter().enumerate().map(|(index, row)| {
-                    if row.can_connect() {
-                        (
-                            Item::Quick(Quick::Connect(index)),
-                            format!("{}  ?  {}", row.name, row.detail),
-                        )
-                    } else {
-                        (Item::MoonDate, format!("{}\t{}", row.name, row.detail))
-                    }
-                })),
-            }
-            rows.push(if page == Page::WiFi {
-                (Item::Quick(Quick::WifiSettings), "More networks".into())
-            } else {
-                (Item::Quick(Quick::BluetoothSettings), "Add a device".into())
-            });
-            return rows.into_iter().unzip();
+            return page_rows(page, self.center.rows.as_deref(), self.center.refused)
+                .into_iter()
+                .unzip();
         }
         let mut tile = |action, name, state: &str, selected, detail| {
             rows.push((
@@ -125,12 +151,12 @@ impl Desktop {
             self.keep_awake,
             false,
         );
-        let light = self.settings.theme == crate::theme::Theme::Light;
+        let theme = self.settings.theme;
         tile(
             Quick::Theme,
             "Theme",
-            if light { "Light" } else { "Dark" },
-            light,
+            theme.label(),
+            theme == crate::theme::Theme::Light,
             false,
         );
         if let Some(level) = self.audio.level() {
@@ -158,7 +184,7 @@ impl Desktop {
                 })
                 .map_or_else(
                     || mode.label().to_owned(),
-                    |battery| format!("{} ? {battery}", mode.label()),
+                    |battery| format!("{} · {battery}", mode.label()),
                 );
             rows.push((Item::Quick(Quick::Power), title));
         }
@@ -180,7 +206,7 @@ impl Desktop {
     }
 
     pub(super) fn network_answers(&mut self) {
-        let Some((page, rows)) = networks::answer() else {
+        let Some((page, rows, refused)) = networks::answer() else {
             return;
         };
         if !self.command_open() {
@@ -194,6 +220,7 @@ impl Desktop {
         }
         if self.center.page == Some(page) {
             self.center.rows = Some(rows);
+            self.center.refused = refused;
             self.refresh_quick_menu();
         } else if let Some(current) = self.center.page
             && self.center.rows.is_none()
@@ -236,6 +263,8 @@ impl Desktop {
                 };
                 self.center.page = Some(page);
                 self.center.rows = None;
+                self.center.refused = false;
+                // Refused only while another job runs; its answer re-requests this page.
                 networks::request(page, None);
             }
             Quick::Connect(index) => {
@@ -253,6 +282,7 @@ impl Desktop {
             Quick::Back => {
                 self.center.page = None;
                 self.center.rows = None;
+                self.center.refused = false;
             }
             Quick::Power => quick::next_mode(),
             Quick::KeepAwake => {
@@ -260,10 +290,10 @@ impl Desktop {
                 crate::system_os::keep_awake(self.keep_awake);
             }
             Quick::Theme => {
+                // `clamped` remembers the dark theme being left (`dark_theme`, stored).
                 let new_theme = if self.settings.theme == crate::theme::Theme::Light {
-                    self.dark_theme
+                    self.settings.dark_theme
                 } else {
-                    self.dark_theme = self.settings.theme;
                     crate::theme::Theme::Light
                 };
                 let next = Settings {
@@ -282,12 +312,48 @@ impl Desktop {
                 self.hover_popup = None;
                 if action == Quick::Lock {
                     crate::system_os::lock();
-                } else {
-                    crate::system_os::sleep();
+                } else if !crate::system_os::sleep() {
+                    self.show_notice("Windows refused to sleep.".into(), Instant::now());
                 }
                 return;
             }
         }
         self.refresh_quick_menu();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(name: &str, saved: bool) -> networks::Row {
+        networks::Row {
+            name: name.into(),
+            detail: if saved { "Saved" } else { "Connected" }.into(),
+            connected: !saved,
+            profile: saved.then(|| (windows::core::GUID::zeroed(), name.into())),
+        }
+    }
+
+    #[test]
+    fn network_page_reads_connects_and_reports_a_refusal() {
+        let reading = page_rows(Page::WiFi, None, false);
+        assert_eq!(reading[2], (Item::Label, "Reading networks".into()));
+        assert_eq!(
+            page_rows(Page::Bluetooth, None, false)[2].1,
+            "Reading devices"
+        );
+        let found = [row("Home", false), row("Cafe", true)];
+        let rows = page_rows(Page::WiFi, Some(&found), true);
+        assert_eq!(rows[2], (Item::Label, "Couldn't connect.".into()));
+        assert_eq!(rows[3], (Item::MoonDate, "Home\tConnected".into()));
+        assert_eq!(
+            rows[4],
+            (Item::Quick(Quick::Connect(1)), "Cafe  ·  Saved".into())
+        );
+        assert_eq!(
+            rows.last(),
+            Some(&(Item::Quick(Quick::WifiSettings), "More networks".into()))
+        );
     }
 }

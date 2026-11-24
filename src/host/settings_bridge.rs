@@ -35,8 +35,10 @@ impl Desktop {
             return;
         }
         if quit {
-            store::save_unsaved();
-            self.pending.written();
+            // A failed write stays pending, held for the sign-out save or the next try.
+            if store::save_unsaved().is_ok() {
+                self.pending.written();
+            }
         } else if store::save_in_background() {
             self.pending.fly();
         } else {
@@ -67,9 +69,12 @@ impl Desktop {
             },
         )
     }
-    /// Opens the settings window (or replaces an open one) on the connected monitors.
+    /// Opens the settings window on the connected monitors, or brings an open one forward without rebuilding it.
     pub(super) fn open_settings(&mut self) -> Result<()> {
-        self.settings_window.take();
+        if let Some(window) = &self.settings_window {
+            window.raise();
+            return Ok(());
+        }
         let work = self.dialog_work_area()?;
         self.settings_window = Some(SettingsWindow::create(
             &self.settings,

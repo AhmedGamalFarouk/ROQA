@@ -239,7 +239,7 @@ pub fn write(path: &Path, output: String) -> Result<()> {
         .map_err(|error| {
             Error::new(
                 E_FAIL,
-                format!("Cannot save requested diagnostics: {error}"),
+                format!("Couldn't save requested diagnostics: {error}"),
             )
         })
 }

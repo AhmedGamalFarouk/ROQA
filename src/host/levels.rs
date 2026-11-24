@@ -7,7 +7,7 @@ use crate::{
     brightness::{Brightness, Target},
     edge::{READ_LIMIT, Throttle},
 };
-use windows::Win32::{System::Threading::GetCurrentThreadId, UI::Shell::ShellExecuteW};
+use windows::Win32::System::Threading::GetCurrentThreadId;
 
 /// What a monitor's brightness is known to be.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -406,16 +406,8 @@ impl Desktop {
         }
         if let Err(error) = switched {
             eprintln!("Dock volume: switch device: {error}");
-            // SAFETY: a shell open of a fixed URI; the shell shows any failure itself.
-            unsafe {
-                ShellExecuteW(
-                    None,
-                    w!("open"),
-                    w!("ms-settings:sound"),
-                    None,
-                    None,
-                    SW_SHOWNORMAL,
-                );
+            if !dock::launch("ms-settings:sound") {
+                self.show_open_failed();
             }
         }
     }

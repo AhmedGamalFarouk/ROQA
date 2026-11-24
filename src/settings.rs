@@ -40,6 +40,8 @@ pub struct Settings {
     pub diagnostics: Option<String>,
     /// Colours of both surfaces (`theme.rs`).
     pub theme: Theme,
+    /// The last theme other than Light: the Command Center's theme tile returns to it (`clamped` keeps it current).
+    pub dark_theme: Theme,
     /// Floating (default) or attached to the bottom edge.
     pub dock_style: DockStyle,
     /// Show notification indicators inferred from window titles.
@@ -66,7 +68,7 @@ pub struct Settings {
     /// Windows notifications peek on the notch row (`toast.rs`); off removes the window hook.
     pub notifications: bool,
     /// The weather city as typed (empty is none), the opt-in device location (it wins over the city while
-    /// it works) and °C or °F. Nothing is requested until a city is set or detection is on.
+    /// it works) and Â°C or Â°F. Nothing is requested until a city is set or detection is on.
     pub city: String,
     pub detect: bool,
     pub units: Units,
@@ -136,6 +138,7 @@ impl Default for Settings {
             shelf_cap: shelf::MAX,
             diagnostics: None,
             theme: Theme::Classic,
+            dark_theme: Theme::Classic,
             dock_style: DockStyle::Floating,
             dock_badges: false,
             dock_buttons: Buttons::default(),
@@ -209,6 +212,11 @@ impl Settings {
         self.off_monitors.dedup();
         self.off_monitors.truncate(MAX_OFF);
         self.shelf_cap = self.shelf_cap.clamp(1, shelf::MAX);
+        if self.theme != Theme::Light {
+            self.dark_theme = self.theme;
+        } else if self.dark_theme == Theme::Light {
+            self.dark_theme = Theme::Classic;
+        }
         self.city = self
             .city
             .chars()
@@ -414,6 +422,9 @@ impl Settings {
                 .is_some(),
             "shelfcap" => value.parse().map(|v| self.shelf_cap = v).is_ok(),
             "theme" => Theme::from_key(value).map(|v| self.theme = v).is_some(),
+            "darktheme" => Theme::from_key(value)
+                .map(|v| self.dark_theme = v)
+                .is_some(),
             _ if Button::ALL.iter().any(|b| b.key() == key) => Button::ALL
                 .iter()
                 .find(|b| b.key() == key)
@@ -476,12 +487,13 @@ impl Settings {
         ));
         let one_line = |v: &&String| !v.contains(['\n', '\r']);
         out.push_str(&format!(
-            "dock={}\nnotch={}\nsound={}\nshelfcap={}\ntheme={}\ndesktop={}\nedgevol={}\nedgebri={}\n",
+            "dock={}\nnotch={}\nsound={}\nshelfcap={}\ntheme={}\ndarktheme={}\ndesktop={}\nedgevol={}\nedgebri={}\n",
             u8::from(self.dock),
             u8::from(self.notch),
             u8::from(self.timer_sound),
             self.shelf_cap,
             self.theme.key(),
+            self.dark_theme.key(),
             u8::from(self.desktop_only),
             u8::from(self.edge_volume),
             u8::from(self.edge_brightness)
@@ -794,6 +806,22 @@ mod tests {
         assert_eq!(wild.off_monitors, ["a", "b"]);
         assert_eq!(wild.shelf_cap, shelf::MAX);
         assert_eq!(wild.theme, Theme::Frosted);
+        assert_eq!(
+            wild.dark_theme,
+            Theme::Frosted,
+            "a dark theme is remembered"
+        );
+        let light = Settings {
+            theme: Theme::Light,
+            dark_theme: Theme::Light,
+            ..Settings::default()
+        }
+        .clamped();
+        assert_eq!(
+            light.dark_theme,
+            Theme::Classic,
+            "Light is never the dark one"
+        );
         assert!(wild.desktop_only && !wild.edge_volume && !wild.edge_brightness);
         assert_eq!(wild.diagnostics.as_deref(), Some(r"C:\logs\roqa.json"));
         assert_eq!(
@@ -1072,7 +1100,8 @@ mod tests {
             timer_sound: false,
             shelf_cap: 5,
             diagnostics: Some("C:\\a=b\\r.json".into()),
-            theme: Theme::Midnight,
+            theme: Theme::Light,
+            dark_theme: Theme::Midnight,
             dock_style: DockStyle::Attached,
             dock_buttons: Buttons::of([false, true, true, true, true, false, true]),
             desktop_only: true,
@@ -1134,6 +1163,7 @@ mod tests {
             shelf_cap: 3,
             diagnostics: Some("C:\\d\\r.json".into()),
             theme: Theme::Light,
+            dark_theme: Theme::Liquid,
             dock_style: DockStyle::Attached,
             dock_badges: true,
             dock_buttons: Buttons::of([false, false, true, false, false, true, false]),
@@ -1332,7 +1362,7 @@ mod tests {
         }
         for bad in [
             "", " ", "0", "0:00", "abc", "-1", "1.5", "1:60", "1:2:60", "1:60:00", "1:2:3:4",
-            ":30", "5:", "1441", "24:00:01", "99999999", "٣", "+5",
+            ":30", "5:", "1441", "24:00:01", "99999999", "Ù£", "+5",
         ] {
             assert_eq!(parse_timer(bad), None, "{bad:?}");
         }
