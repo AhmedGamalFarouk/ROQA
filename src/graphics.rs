@@ -1,7 +1,7 @@
 use crate::{
     audio::{BARS, Level},
     dock,
-    edge::{Layout, ListRow, MIX_PERCENT},
+    edge::{ListRow, MIX_PERCENT},
     eyes::{Frame, Mood, Pose},
     icons::IconPixels,
     layout::{self, Bounds},
@@ -302,22 +302,6 @@ pub fn dock_label_width(label: &str, dpi: u32) -> Result<i32> {
     Ok((text_width(label, &font)?.min(190.0 * scale) + 48.0 * scale).ceil() as i32)
 }
 
-/// What an edge slider's pill shows; `layout` is in surface pixels.
-pub struct SliderScene<'a> {
-    pub dpi: u32,
-    pub layout: &'a Layout,
-    pub percent: u8,
-    /// The button is down: the thumb grows.
-    pub pressed: bool,
-    pub glyph: Glyph,
-    /// Muted or unsupported: the fill and icon are dimmed (the system grey text in high contrast).
-    pub dim: bool,
-    pub caption: &'a str,
-    /// `None`: caption centred in the pill; `Some(right)`: a note beside it, on the pill's side.
-    pub note: Option<bool>,
-    /// Redraws only this part (surface pixels), keeping the mixer panel drawn beside the pill.
-    pub update: Option<RECT>,
-}
 pub struct ListScene<'a> {
     pub reveal: f32,
     pub dpi: u32,
@@ -531,74 +515,6 @@ impl Canvas {
                         context.FillRoundedRectangle(bar, &brush);
                     }
                 }
-            }
-            Ok(())
-        })
-    }
-    /// An edge slider's pill (`edge.rs`): accent level fill, icon at the bottom, caption at the top.
-    pub fn paint_slider(&self, scene: &SliderScene) -> Result<()> {
-        let p = self.palette;
-        let scale = scene.dpi as f32 / 96.0;
-        self.draw_within(scene.update, |context, rect| {
-            let at = |b: Bounds| surface_rect(rect, b);
-            let layout = scene.layout;
-            self.panel(context, at(layout.pill), layout.pill.width as f32 / 2.0)?;
-            let track = at(layout.track);
-            let thickness = track.right - track.left;
-            draw_track(context, &p, &rounded(track, thickness / 2.0), 0.40)?;
-            let filled = (track.bottom - track.top) * f32::from(scene.percent.min(100)) / 100.0;
-            if filled >= 1.0 {
-                let fill = D2D_RECT_F {
-                    top: track.bottom - filled,
-                    ..track
-                };
-                let shape = rounded(fill, (thickness / 2.0).min(filled / 2.0));
-                // SAFETY: live draw context between BeginDraw/EndDraw; the brush is scoped to this draw.
-                unsafe {
-                    let brush =
-                        context.CreateSolidColorBrush(&tint(p.accent_dim(scene.dim, 1.0)), None)?;
-                    context.FillRoundedRectangle(&shape, &brush);
-                }
-            }
-            if scene.note.is_none() {
-                // The thumb rides the fill's end and grows while pressed.
-                let r = thickness / 2.0 + (if scene.pressed { 4.0 } else { 2.0 }) * scale;
-                let (x, y) = ((track.left + track.right) / 2.0, track.bottom - filled);
-                let dot = D2D_RECT_F {
-                    left: x - r,
-                    top: y - r,
-                    right: x + r,
-                    bottom: y + r,
-                };
-                // SAFETY: live draw context between BeginDraw/EndDraw; the brush is scoped to this draw.
-                unsafe {
-                    let brush =
-                        context.CreateSolidColorBrush(&tint(p.ink_dim(scene.dim, 0.95)), None)?;
-                    context.FillRoundedRectangle(&rounded(dot, r), &brush);
-                }
-            }
-            let icon = at(layout.icon);
-            let square = pixel_square(icon.left, icon.top, icon.right - icon.left);
-            glyphs::draw(
-                context,
-                square,
-                scene.glyph,
-                tint(p.ink_dim(scene.dim, 0.90)),
-            )?;
-            if !scene.caption.is_empty() {
-                let font = Font {
-                    family: TEXT_FONT,
-                    size: 12.0 * scale,
-                    weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                    designator: 1.0,
-                    align: match scene.note {
-                        None => DWRITE_TEXT_ALIGNMENT_CENTER,
-                        Some(false) => DWRITE_TEXT_ALIGNMENT_LEADING,
-                        Some(true) => DWRITE_TEXT_ALIGNMENT_TRAILING,
-                    },
-                };
-                let ink = tint(p.ink_dim(false, 0.90));
-                draw_text(context, scene.caption, &font, at(layout.caption), ink)?;
             }
             Ok(())
         })
@@ -2597,6 +2513,8 @@ fn draw_button(
         dock::Button::Tray => Glyph::Chevron,
         dock::Button::Battery => Glyph::Battery,
         dock::Button::Limits => Glyph::Limits,
+        dock::Button::Volume => Glyph::Speaker,
+        dock::Button::Brightness => Glyph::Sun,
         dock::Button::Moon => return Ok(()), // drawn above while switched on
     };
     glyphs::draw(context, square, shape, with_alpha(p.glyph, 1.0))

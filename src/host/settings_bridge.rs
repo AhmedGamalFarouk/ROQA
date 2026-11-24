@@ -277,7 +277,6 @@ impl Desktop {
         ) {
             self.tuck_generation = None;
         }
-        self.edges_dirty = true;
         if old.hotkeys != self.settings.hotkeys {
             self.hotkeys.sync(self.settings.hotkeys);
             self.sync_settings_hotkeys();
@@ -341,7 +340,6 @@ impl Desktop {
             self.palette =
                 crate::theme::system_palette(self.settings.theme, self.effective_accent());
             self.menu = None;
-            self.edges.release();
             // Colours are fixed when a surface is created, so a new theme rebuilds the survivors (as a text-scale
             // change does); the diff's creations below then find nothing left to skip and place themselves.
             self.surfaces.clear();

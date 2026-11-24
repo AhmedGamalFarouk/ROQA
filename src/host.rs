@@ -1,4 +1,5 @@
 mod interactions;
+mod levels;
 mod menus;
 mod notch_clicks;
 mod notices;
@@ -12,8 +13,7 @@ use crate::{
     clipboard_os, clock,
     dock::{self, Button, Buttons, DockItem, Hit},
     dock_menu::{self, Event, Item},
-    dock_tuck,
-    edge::{self, Edges},
+    dock_tuck, edge,
     eyes::{self, Eyes},
     graphics::{
         COVER_DIPS, Canvas, DockScene, DockSlot, Fx, Graphics, Grip, NotchScene, RailScene,
@@ -1129,7 +1129,7 @@ impl Surface {
             layout: self.dock_buttons,
             buttons: Button::ALL
                 .into_iter()
-                .chain([Button::Battery, Button::Limits, Button::Moon])
+                .chain(Button::EXTRA)
                 .filter(|button| self.dock_buttons.on(*button))
                 .map(|button| (button, hover(Hit::Button(button))))
                 .collect(),
@@ -1471,10 +1471,9 @@ struct Desktop {
     swipe_until: Instant,
     /// Recently closed apps the dock keeps faded at its end, newest first; in memory only (`dock::with_recent`).
     recent: Vec<DockItem>,
-    /// The volume and brightness sliders on every monitor's edges, rebuilt to match the monitors and
-    /// settings whenever either changes (`edges_dirty`).
-    edges: Edges,
-    edges_dirty: bool,
+    /// The open volume or brightness popup's state, and the brightness worker it shares (`host/levels.rs`).
+    levels: Option<levels::Levels>,
+    brightness: Option<crate::brightness::Brightness>,
     /// The tabs and the mascot (features tabs-eyes).
     pages: Pages,
     /// The weather place, report and back-off, the worker channel and the locale's region (features W1).
@@ -1661,9 +1660,9 @@ impl Desktop {
             volume_wheel: 0,
             swipe: 0,
             swipe_until: Instant::now(),
-            edges: Edges::default(),
+            levels: None,
+            brightness: None,
             recent: Vec::new(),
-            edges_dirty: true,
             pages,
             weather,
             weather_io: weather_os::Io::new(),
@@ -1707,6 +1706,8 @@ impl Desktop {
             battery: true,
             limits: self.settings.tabs[Tab::Limits.index()],
             moon: self.settings.dock_moon.then(|| self.pages.moon.icon()),
+            volume: self.settings.edge_volume,
+            brightness: self.settings.edge_brightness,
             centre: if self.settings.dock_left {
                 0
             } else {
@@ -2383,48 +2384,6 @@ impl Desktop {
             .deadline()
             .map_or(INFINITE, |due| milliseconds_until(due, now))
     }
-    /// The edge sliders' pass: rebuilds them when the monitors or settings changed, then applies their
-    /// hover deadlines, brightness readings and paints. Returns the wait until the next deadline.
-    #[inline(never)]
-    fn refresh_edges(&mut self) -> u32 {
-        let now = Instant::now();
-        if std::mem::take(&mut self.edges_dirty) {
-            self.edges.reconcile(&self.monitors, &self.settings);
-        }
-        let fullscreen = &self.fullscreen;
-        let covered = |device: &str| fullscreen.iter().any(|(_, covered)| covered == device);
-        // The mixer's app icons come from the dock's icon cache, at the dock's size.
-        let size = self.icon_size();
-        let icons = &mut self.icons;
-        let mut icon = |identity: &_, sources| size.and_then(|s| icons.icon(identity, sources, s));
-        let mut due = self.edges.refresh(
-            now,
-            &self.audio,
-            &self.graphics,
-            self.palette,
-            covered,
-            &mut icon,
-        );
-        if !self.audio.active() && self.edges.wants_audio() {
-            // A volume pill just opened: load Core Audio now (nothing else wakes the next pass) and draw
-            // the pill again with the level.
-            self.audio.start();
-            self.audio.refresh();
-            due = self.edges.refresh(
-                now,
-                &self.audio,
-                &self.graphics,
-                self.palette,
-                covered,
-                &mut icon,
-            );
-        }
-        due.map_or(INFINITE, |due| milliseconds_until(due, now))
-    }
-    /// A mouse or UIA message for an edge slider's window.
-    fn edge_message(&mut self, message: &MSG) -> bool {
-        self.edges.message(message, &self.audio, Instant::now())
-    }
     /// A click on the dock ends the preview; it stays away until the pointer moves to another slot.
     fn dismiss_preview(&mut self) {
         self.popup = None;
@@ -3005,6 +2964,9 @@ impl Desktop {
         if hit == Hit::Button(Button::Moon) {
             return self.show_moon_popup(hwnd);
         }
+        if let Hit::Button(button @ (Button::Volume | Button::Brightness)) = hit {
+            return self.show_levels_popup(hwnd, button);
+        }
         // Only a folder's member list and the AI limits pop up; the dock has no tooltips.
         let Some(item) = hit
             .slot()
@@ -3164,6 +3126,19 @@ impl Desktop {
                 if let Some(member) = member {
                     self.open_item_menu(hwnd, slot, member);
                 }
+                true
+            }
+            Event::Level(row, percent) => {
+                self.set_level(row, percent);
+                true
+            }
+            Event::Mute(row) => {
+                self.mute_row(row);
+                true
+            }
+            Event::Choose(Item::Device(index, _)) => {
+                self.choose_device(index);
+                self.hover_popup = None;
                 true
             }
             Event::Choose(_) => {
@@ -3987,7 +3962,6 @@ impl Desktop {
         self.surfaces
             .retain(|surface| !release.contains(&surface.monitor));
         self.monitors = next;
-        self.edges_dirty = true;
         let mut failure = None;
         for monitor in place {
             for kind in self.shown.clone() {
@@ -4103,7 +4077,6 @@ impl Desktop {
                 self.menu = None;
                 self.hover_popup = None;
                 self.hover_spot = None;
-                self.edges.release(); // an open pill takes the new colours when it next shows
                 self.surfaces.clear();
                 for kind in self.shown.clone() {
                     self.show(kind)?;
@@ -4141,7 +4114,7 @@ impl Desktop {
             self.peek_song();
         }
         let shown = self.pages.track(&self.media).is_some();
-        if shown || self.edges.wants_audio() || self.settings.notch {
+        if shown || self.settings.notch {
             // Core Audio loads once a notch can show the level: in a media panel, on the slider, or as a pill.
             self.audio.start();
         }
@@ -4191,7 +4164,7 @@ impl Desktop {
             .min(native_wait)
             .min(self.refresh_raise())
             .min(hover_wait)
-            .min(self.refresh_edges())
+            .min(self.refresh_levels())
             .min(self.refresh_eyes())
             .min(self.refresh_ring())
             .min(self.refresh_privacy())
@@ -4225,7 +4198,6 @@ impl Desktop {
     fn lose_graphics(&mut self) {
         self.surfaces.clear();
         self.menu = None;
-        self.edges.release();
         self.rebuild.lose(Instant::now());
     }
     /// Applies a due rebuild: a new device, then every shown kind placed and painted on it. Failures
@@ -4237,7 +4209,6 @@ impl Desktop {
         // Includes any surface a topology change placed on the lost device meanwhile.
         self.surfaces.clear();
         self.menu = None;
-        self.edges.release();
         // The old device is released by this assignment, after its surfaces and before any new one.
         let rebuilt = Graphics::create().and_then(|graphics| {
             self.graphics = graphics;
@@ -4560,8 +4531,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 desktop.open_app_menu(message.hwnd, message.lParam);
                 continue;
             }
-            if desktop.edge_message(&message)
-                || desktop.tuck.message(&message, Instant::now())
+            if desktop.tuck.message(&message, Instant::now())
                 || desktop.tuck_notch.message(&message, Instant::now())
             {
                 continue;

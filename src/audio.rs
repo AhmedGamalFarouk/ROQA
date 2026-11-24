@@ -576,10 +576,6 @@ impl Audio {
             Err(error) => eprintln!("Audio: device events: {error}"),
         }
     }
-    /// Core Audio has been started (a level may still be missing without a device).
-    pub fn active(&self) -> bool {
-        self.started
-    }
     pub fn level(&self) -> Option<Level> {
         self.level
     }

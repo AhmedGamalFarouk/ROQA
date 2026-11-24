@@ -435,15 +435,10 @@ const PAGES: &[Page] = &[
                 ],
             },
             Card {
-                label: "Screen edges",
+                label: "Volume and brightness",
                 rows: &[
-                    r(EDGE_VOLUME, C, "Volume slider on the right screen edge", ""),
-                    r(
-                        EDGE_BRIGHTNESS,
-                        C,
-                        "Brightness slider on the left screen edge",
-                        "",
-                    ),
+                    r(EDGE_VOLUME, C, "Volume button on the dock", ""),
+                    r(EDGE_BRIGHTNESS, C, "Brightness button on the dock", ""),
                 ],
             },
             Card {

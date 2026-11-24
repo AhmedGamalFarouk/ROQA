@@ -95,10 +95,10 @@ impl Desktop {
         }
         Ok(())
     }
-    /// A click on the moon does what hover does: opens its popup now, or closes it and keeps it closed until
-    /// the pointer leaves the button.
-    fn toggle_moon(&mut self, hwnd: HWND) {
-        let (hit, now) = (Hit::Button(Button::Moon), Instant::now());
+    /// A click on the moon, volume or brightness does what hover does: opens its popup now, or closes it and keeps
+    /// it closed until the pointer leaves the button.
+    fn toggle_popup(&mut self, hwnd: HWND, button: Button) {
+        let (hit, now) = (Hit::Button(button), Instant::now());
         if self
             .hover_popup
             .as_ref()
@@ -679,7 +679,9 @@ impl Desktop {
         match (button, button.keys()) {
             (Button::Battery, _) => self.open_status_menu(hwnd, button),
             (Button::Limits, _) => self.start_limits(crate::limits_os::now(), true),
-            (Button::Moon, _) => self.toggle_moon(hwnd),
+            (Button::Moon | Button::Volume | Button::Brightness, _) => {
+                self.toggle_popup(hwnd, button)
+            }
             (Button::Quick, _) => self.open_quick_menu(hwnd),
             (Button::Places, _) => self.ask_places(hwnd),
             (Button::Tray, _) => self.open_flyout(hwnd, crate::anchored::Kind::Tray),
@@ -879,7 +881,7 @@ impl Desktop {
         let (dock, toggles) = (menu.dock(), toggled_by(menu.items()));
         match menu.message(message) {
             Event::Ignored => false,
-            Event::Consumed => true,
+            Event::Consumed | Event::Level(..) | Event::Mute(_) => true,
             Event::Dismiss => {
                 let hit = self
                     .dock_at(message.hwnd)
@@ -1121,7 +1123,9 @@ impl Desktop {
             | Item::Battery
             | Item::Limit(_)
             | Item::Moon(..)
-            | Item::MoonDate => {}
+            | Item::MoonDate
+            | Item::Level(..)
+            | Item::Device(..) => {}
         }
     }
     /// Ends the open menu once it no longer describes the dock (its slot changed, or a full-screen app hid

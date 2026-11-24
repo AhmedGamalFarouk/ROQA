@@ -293,8 +293,20 @@ pub enum Button {
     Limits,
     /// Today's moon phase; hover or a click shows the moon's popup. Shown by "Moon on the dock"; no button key.
     Moon,
+    /// The master volume and one brightness slider per monitor, in a hover popup. Shown by "Volume on the dock" and
+    /// "Brightness on the dock"; no button key.
+    Volume,
+    Brightness,
 }
 impl Button {
+    /// The buttons a switch elsewhere shows, after the configurable ones.
+    pub const EXTRA: [Button; 5] = [
+        Button::Battery,
+        Button::Limits,
+        Button::Moon,
+        Button::Volume,
+        Button::Brightness,
+    ];
     /// Configurable buttons; Battery is fixed and never stored.
     pub const ALL: [Button; 7] = [
         Button::Start,
@@ -327,7 +339,9 @@ impl Button {
             | Button::Tray
             | Button::Battery
             | Button::Limits
-            | Button::Moon => None,
+            | Button::Moon
+            | Button::Volume
+            | Button::Brightness => None,
         }
     }
 }
@@ -341,6 +355,9 @@ pub struct Buttons {
     /// The moon button with today's phase as its icon draws it: lit share in percent and the lit limb on the
     /// right; `None` with the switch off.
     pub moon: Option<(u8, bool)>,
+    /// The volume and brightness buttons.
+    pub volume: bool,
+    pub brightness: bool,
     /// Mirrored for a right-to-left UI language: the dock runs from the right edge, as the taskbar does.
     /// The host sets it from the system; it is not a stored setting.
     pub rtl: bool,
@@ -357,6 +374,8 @@ impl Buttons {
             battery: false,
             limits: false,
             moon: None,
+            volume: false,
+            brightness: false,
             rtl: false,
             centre: 0,
         }
@@ -366,6 +385,8 @@ impl Buttons {
             Button::Battery => self.battery,
             Button::Limits => self.limits,
             Button::Moon => self.moon.is_some(),
+            Button::Volume => self.volume,
+            Button::Brightness => self.brightness,
             _ => self.shown[button.index()],
         }
     }
@@ -391,6 +412,8 @@ impl Buttons {
             Button::Limits,
             Button::Moon,
             Button::Quick,
+            Button::Volume,
+            Button::Brightness,
             Button::Desktop,
         ]
         .into_iter()
@@ -566,7 +589,9 @@ fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
             | Button::Tray
             | Button::Battery
             | Button::Limits
-            | Button::Moon),
+            | Button::Moon
+            | Button::Volume
+            | Button::Brightness),
         ) => {
             let end = if buttons.on(Button::Desktop) {
                 STRIP_DIPS
@@ -608,7 +633,7 @@ pub fn hit_at(buttons: Buttons, x_px: i32, width_px: i32, dpi: u32, slots: usize
     let x_px = ltr_x(buttons, x_px, width_px);
     let on_button = Button::ALL
         .into_iter()
-        .chain([Button::Battery, Button::Limits, Button::Moon])
+        .chain(Button::EXTRA)
         .filter(|b| buttons.on(*b))
         .find(|b| {
             let (left, width) = ltr_span(buttons, width_px, dpi, Hit::Button(*b));
@@ -1021,6 +1046,26 @@ mod tests {
                     Some(Hit::Button(Button::Moon))
                 );
                 assert_eq!(cell_index(with, 3, Hit::Button(Button::Moon)), None);
+                // Volume and brightness each take a cell and their own hit, and are absent when off.
+                let both = Buttons {
+                    volume: true,
+                    brightness: true,
+                    ..moon
+                };
+                let width = width_px(both, 3, dpi);
+                assert_eq!(
+                    width - width_px(moon, 3, dpi),
+                    2 * px(BTN_DIPS, dpi),
+                    "two cells"
+                );
+                for button in [Button::Volume, Button::Brightness] {
+                    let (left, _) = span(both, width, dpi, Hit::Button(button));
+                    assert_eq!(
+                        hit_at(both, left + size / 2, width, dpi, 3),
+                        Some(Hit::Button(button))
+                    );
+                    assert_eq!(cell_index(moon, 3, Hit::Button(button)), None);
+                }
             }
         }
     }

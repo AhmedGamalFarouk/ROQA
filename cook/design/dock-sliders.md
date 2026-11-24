@@ -10,13 +10,14 @@ The two screen-edge sliders move into the dock as two buttons. Brightness gets o
 
 ## Interaction
 
-- **Buttons:** a Volume button (the speaker glyph for the current level, muted shows the muted glyph) and a Brightness button (sun), after Quick in the dock. Shown by the existing "Volume slider" and "Brightness slider" switches in Settings, relabelled "Volume on the dock" and "Brightness on the dock" (same stored keys `edgevol`, `edgebri`, so a stored choice is kept; default off). Brightness shows only when some monitor answers DDC/CI, else the button is hidden.
+- **Buttons:** a Volume button (the speaker glyph for the current level, muted shows the muted glyph) and a Brightness button (sun), after Quick in the dock. Shown by the existing "Volume slider" and "Brightness slider" switches in Settings, relabelled "Volume on the dock" and "Brightness on the dock" (same stored keys `edgevol`, `edgebri`, so a stored choice is kept; default off). Both buttons show whenever their switch is on; the popup says what is missing ("No sound device", "not supported"), because reading every monitor at start would cost seconds of DDC calls.
 - **Popup:** hover the button (`preview::DELAY`) or click it. It opens above the button through the shared owned placement, like the Limits and Moon popups, and closes 180 ms after the pointer leaves both the button and the popup. A click on the button toggles it. It holds the dock open while it shows (the dock never tucks under it).
 - **Rows, not a pill:** every row is the mixer row that exists today: icon, name, a capsule slider, the level at its right. No vertical pill, no hot edge strip.
   - Volume: first row is the output device (speaker glyph, device name, master slider; a click on the icon or name opens the existing device list in the same popup, a click on a device makes it default and returns). Then one row per app playing sound, as the mixer shows today, or one quiet row "Nothing is playing".
   - Brightness: one row per monitor, left to right by screen position: sun, "Screen 1", "Screen 2" (the dock's own monitor reads "This screen"), slider, level. A monitor that does not answer shows "Not supported" in place of the slider, dimmed, and is not draggable. One monitor gives one row.
 - **Input:** press or drag on a slider sets the level; the mixer icon mutes (volume rows only); the wheel over the popup or over the button moves the hovered row by 3, Shift by 1 (the existing steps). The wheel over the bare button, with the popup closed, changes the master volume (or, for brightness, the dock's own monitor) and opens the popup so the change is seen.
 - **Brightness timing:** read each monitor once when the popup opens (the existing worker, `READ_LIMIT` 2 s then "Not supported"), writes throttled to five a second per monitor, the last value wins. Nothing runs while the popup is closed: no timer, no thread, no polling.
+- **Built (2026-11-24):** the first slice. Not yet built: the wheel over the bare button, the unplug-while-open close, and a muted glyph on the button.
 - **Removed:** the edge strip windows, the vertical pill, its hover timing and its UIA hooks. Colours follow the five themes like every dock popup. Accent only on the slider fill and the selected device. No tooltips, no sounds, no new motion curve: the popup opens with the existing popup motion.
 
 ## States
@@ -25,9 +26,9 @@ The two screen-edge sliders move into the dock as two buttons. Brightness gets o
 | --- | --- |
 | Switch off | no button, nothing created |
 | Volume, device muted | muted glyph on the button, master slider dimmed at 0 |
-| Volume, no output device | button hidden |
-| Brightness, no supported monitor | button hidden |
-| Brightness, monitor slow to answer | row reads "Reading..." until it answers or 2 s, then "Not supported" |
+| Volume, no output device | one row, "No sound device" |
+| Brightness, no supported monitor | rows read "<name>: not supported" |
+| Brightness, monitor slow to answer | row reads "<name>: reading" until it answers or 2 s, then "not supported" |
 | Monitor unplugged or topology change while open | popup closes; the next open lists current monitors |
 | Full-screen app on the dock's monitor | dock hidden, so no button; unchanged |
 | Several docks (one per monitor) | each opens its own popup; both show every monitor |

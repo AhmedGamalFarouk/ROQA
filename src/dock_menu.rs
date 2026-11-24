@@ -4,7 +4,7 @@
 //! press elsewhere, losing the foreground, its slot changing or a full-screen app; closed, it costs nothing.
 use crate::{
     dock::{self, DockItem},
-    edge::{ListRow, list_layout, row_at, row_rect},
+    edge::{ListRow, list_layout, mix_percent, row_at, row_rect},
     graphics::{Canvas, Graphics, ListScene},
     icons::IconPixels,
     layout::Bounds,
@@ -22,7 +22,7 @@ use windows::{
         Foundation::{COLORREF, HANDLE, HWND, LPARAM, POINT},
         Graphics::Gdi::{CreateSolidBrush, DeleteObject, HBRUSH},
         UI::Controls::EM_SETLIMITTEXT,
-        UI::Input::KeyboardAndMouse::SetFocus,
+        UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus},
         UI::WindowsAndMessaging::{
             CreateWindowExW, ES_AUTOHSCROLL, GetCursorPos, GetWindowTextW, MSG, RemovePropW,
             SendMessageW, SetPropW, WINDOW_STYLE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
@@ -53,6 +53,11 @@ pub enum Item {
     Moon(u8, bool),
     /// A moon popup date row: `Spec::titles` holds "label\tdate".
     MoonDate,
+    /// A slider row of the volume and brightness popups: its level in percent and whether it is muted; its name
+    /// is in `Spec::titles`.
+    Level(u8, bool),
+    /// An output device row of the volume popup (an index into the host's list) and whether it is the default.
+    Device(usize, bool),
     NewInstance,
     Close(WindowKey),
     CloseAll,
@@ -136,7 +141,13 @@ impl Item {
             Item::Dissolve => "Ungroup apps",
             Item::RemoveMember => "Remove from folder",
             Item::Member(_) | Item::MemberMenu(_) => "App",
-            Item::Label | Item::Battery | Item::Limit(_) | Item::Moon(..) | Item::MoonDate => "",
+            Item::Label
+            | Item::Battery
+            | Item::Limit(_)
+            | Item::Moon(..)
+            | Item::MoonDate
+            | Item::Level(..)
+            | Item::Device(..) => "",
             Item::NewInstance => "New instance",
             Item::Close(_) => "Close window",
             Item::CloseAll => "Close all windows",
@@ -261,6 +272,10 @@ pub enum Event {
     /// Close it. A press that was on another ROQA window still goes on to that window.
     Dismiss,
     Choose(Item),
+    /// A slider row (by index) was dragged or wheeled to this percent.
+    Level(usize, u8),
+    /// A press on an app row's icon: mute it or unmute it.
+    Mute(usize),
 }
 
 /// `Spec::slot` of a menu that describes no dock item (the app menu, quick settings, places, a folder stack).
@@ -311,6 +326,8 @@ pub struct Menu {
     visible_rows: usize,
     offset: usize,
     edit: Option<HWND>,
+    /// The slider row the pointer holds, with the capture.
+    grab: Option<usize>,
     work: Bounds,
     palette: Palette,
     edit_brush: Option<HBRUSH>,
@@ -402,6 +419,7 @@ impl Menu {
             visible_rows,
             offset: 0,
             edit: None,
+            grab: None,
             work: spec.work,
             palette,
             edit_brush: None,
@@ -422,6 +440,10 @@ impl Menu {
     }
     pub fn items(&self) -> &[Item] {
         &self.items
+    }
+    /// A slider is being dragged: the host leaves the rows alone until it ends.
+    pub fn held(&self) -> bool {
+        self.grab.is_some()
     }
     pub fn hover(&mut self) {
         self.hover_popup = true;
@@ -496,7 +518,10 @@ impl Menu {
     pub fn under_pointer(&self) -> bool {
         let mut point = POINT::default();
         // SAFETY: only scalar cursor coordinates and HWND identity are read.
-        unsafe { GetCursorPos(&mut point).is_ok() && WindowFromPoint(point) == self.window.0 }
+        unsafe {
+            self.grab.is_some()
+                || GetCursorPos(&mut point).is_ok() && WindowFromPoint(point) == self.window.0
+        }
     }
     pub fn rename(&mut self, name: &str) -> Result<()> {
         self.relist(vec![Item::Label, Item::SaveName], Vec::new(), Vec::new())?;
@@ -594,10 +619,13 @@ impl Menu {
                     }
                     (_, text) => text,
                 },
-                current: false,
+                current: matches!(self.items[index], Item::Device(_, true)),
                 icon: self.icons.get(index).and_then(|icon| icon.as_deref()),
                 room: matches!(self.items[index], Item::File(_)),
-                level: None,
+                level: match self.items[index] {
+                    Item::Level(pct, muted) => Some((pct, muted)),
+                    _ => None,
+                },
                 bar: match self.items[index] {
                     Item::Limit(pct) => Some(pct),
                     _ => None,
@@ -661,7 +689,54 @@ impl Menu {
             let (x, y) = point(message.lParam);
             row_at(self.dpi, self.visible_rows, x, y).map(|row| row + self.offset)
         };
+        let is_level =
+            |row: Option<usize>| row.is_some_and(|row| matches!(self.items[row], Item::Level(..)));
+        let level = |menu: &mut Self, row: usize, x: i32| {
+            let (_, mut panel) = list_layout(menu.dpi, menu.visible_rows);
+            panel.width = menu.bounds.width - 2 * panel.x;
+            let pct = mix_percent(x, row_rect(menu.dpi, panel, row - menu.offset));
+            menu.items[row] = Item::Level(pct, false);
+            menu.drawn = None;
+            Event::Level(row, pct)
+        };
         match message.message {
+            WM_MOUSEMOVE if self.grab.is_some() => {
+                if let Some(row) = self.grab.filter(|_| message.wParam.0 & 1 != 0) {
+                    return level(self, row, point(message.lParam).0);
+                }
+                self.grab = None;
+                // SAFETY: releases this thread's own capture; harmless if it is already gone.
+                let _ = unsafe { ReleaseCapture() };
+            }
+            WM_LBUTTONDOWN if is_level(at(message)) => {
+                let row = at(message).unwrap_or_default();
+                // An app's icon mutes it; the rest of the row is its slider.
+                if self.icons.get(row).is_some_and(Option::is_some)
+                    && point(message.lParam).0 < dock::px(crate::edge::MIX_ICON, self.dpi)
+                {
+                    return Event::Mute(row);
+                }
+                self.grab = Some(row);
+                // SAFETY: captures the pointer for this thread's own live window.
+                unsafe { SetCapture(self.window.0) };
+                return level(self, row, point(message.lParam).0);
+            }
+            WM_LBUTTONUP if self.grab.take().is_some() => {
+                // SAFETY: releases this thread's own capture.
+                let _ = unsafe { ReleaseCapture() };
+            }
+            WM_MOUSEWHEEL if is_level(self.selected) => {
+                let row = self.selected.unwrap_or_default();
+                let Item::Level(pct, muted) = self.items[row] else {
+                    return Event::Consumed;
+                };
+                let up = (message.wParam.0 >> 16) as u16 as i16 > 0;
+                let step = if message.wParam.0 & 4 != 0 { 1 } else { 3 };
+                let pct = (i32::from(pct) + if up { step } else { -step }).clamp(0, 100) as u8;
+                self.items[row] = Item::Level(pct, muted && pct == 0);
+                self.drawn = None;
+                return Event::Level(row, pct);
+            }
             WM_MOUSEMOVE => {
                 self.selected = at(message).filter(|&row| {
                     !matches!(
@@ -693,7 +768,11 @@ impl Menu {
                 return at(message).map_or(Event::Consumed, |row| {
                     if matches!(
                         self.items[row],
-                        Item::Battery | Item::Limit(_) | Item::Moon(..) | Item::MoonDate
+                        Item::Battery
+                            | Item::Limit(_)
+                            | Item::Moon(..)
+                            | Item::MoonDate
+                            | Item::Level(..)
                     ) {
                         Event::Consumed
                     } else {
