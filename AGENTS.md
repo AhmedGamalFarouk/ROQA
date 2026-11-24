@@ -28,6 +28,7 @@ One folder: work on `main` in this checkout, no worktrees. Branches and PRs only
   - Shared slots (notice row, backups, hook writes): a later writer never silently replaces an earlier one; queue, merge or keep the first.
   - Never assume the primary monitor: no `MONITOR_DEFAULTTOPRIMARY` or `SPI_GETWORKAREA`; use the monitor of ROQA's own window. Which monitors show the dock and notch is the owner's choice (`off=` lines in the store; every monitor by default), never a script's.
   - Never save copied text or notifications to disk; the store holds settings and pins only.
+  - Never cut a control's shape with a window region (CreateRoundRectRgn and kin are banned in `clippy.toml`): it is stair-stepped. Draw it anti-aliased; a separate window uses `NativeWindow::present` (per-pixel alpha).
   - Never block the UI thread or poll on it (no short timers, no waits); wait on a worker or react to an event.
   - A change that makes this file, the README or a card wrong fixes it in the same commit.
 - Docs: a report, research or scratch .md file that is no longer needed is deleted once its findings are acted on or copied into AGENTS.md, cook/ROUNDS.md or FEATURES_TO_ADD.md; the owner's own notes and AGENTS.md, cook/BRAND/RUBRIC docs are never deleted. Check git status first: delete untracked ones with plain rm, tracked ones with git rm in the same commit.

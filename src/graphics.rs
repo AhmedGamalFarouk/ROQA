@@ -79,6 +79,8 @@ mod tab_art;
 use ask::wrapped;
 pub use ask::{ask_fits, ask_fits_at};
 pub use glyphs::Glyph;
+#[cfg(test)]
+pub use glyphs::sample;
 pub use media::COVER_DIPS;
 use media::{media_page, meter_rects, meter_update};
 pub use shot::ShotScene;
@@ -653,12 +655,8 @@ impl Canvas {
                 if row.icon.is_some() || row.level.is_some() || row.room {
                     let side = 20.0 * scale;
                     if let Some(pixels) = row.icon {
-                        let frame = D2D_RECT_F {
-                            left,
-                            top: middle - side / 2.0,
-                            right: left + side,
-                            bottom: middle + side / 2.0,
-                        };
+                        // Whole pixels: a bitmap drawn on a half pixel is resampled, which looks soft.
+                        let frame = pixel_square(left, middle - side / 2.0, side.round());
                         let muted = row.level.is_some_and(|(_, muted)| muted);
                         // SAFETY: live draw context between BeginDraw/EndDraw; the bitmap is scoped to this draw.
                         unsafe {
@@ -1834,12 +1832,17 @@ fn draw_slot(
     let (size, lift) = icon_metrics(slot.hover, px(dock::ICON_DIPS), dpi);
     let center_x = (cell.left + cell.right) / 2.0;
     let center_y = (cell.top + cell.bottom) / 2.0 - lift;
-    let frame = D2D_RECT_F {
+    let mut frame = D2D_RECT_F {
         left: center_x - size / 2.0,
         top: center_y - size / 2.0,
         right: center_x + size / 2.0,
         bottom: center_y + size / 2.0,
     };
+    // At rest the icon lands on whole pixels (1:1, not resampled); the hover animation stays smooth.
+    let settled = slot.hover == 0.0 || slot.hover == 1.0;
+    if settled {
+        frame = pixel_square(frame.left, frame.top, size);
+    }
     // SAFETY: context is live between surface BeginDraw/EndDraw; bitmaps and brushes are scoped to this draw.
     unsafe {
         if slot.hover > 0.0 {
@@ -1865,11 +1868,12 @@ fn draw_slot(
                 let side = size * fraction;
                 let left = frame.left + size * column;
                 let top = frame.top + size * row;
+                let whole = |v: f32| if settled { v.round() } else { v };
                 let mini = D2D_RECT_F {
-                    left,
-                    top,
-                    right: left + side,
-                    bottom: top + side,
+                    left: whole(left),
+                    top: whole(top),
+                    right: whole(left + side),
+                    bottom: whole(top + side),
                 };
                 let Some(icon) = slot.mini.get(index) else {
                     context.FillRoundedRectangle(&rounded(mini, size * 0.1), &well);

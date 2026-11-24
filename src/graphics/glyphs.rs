@@ -894,10 +894,140 @@ pub fn round_gdi(
     });
 }
 
+/// What `draw` paints onto a transparent `side` x `side` 32-bit DIB, as premultiplied BGRA pixels (alpha in
+/// the top byte), top row first. For tests that count anti-aliased edge pixels.
+#[cfg(test)]
+pub fn sample(
+    side: i32,
+    draw: impl FnOnce(windows::Win32::Graphics::Gdi::HDC, windows::Win32::Foundation::RECT),
+) -> Vec<u32> {
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
+        DeleteDC, DeleteObject, SelectObject,
+    };
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: side,
+            biHeight: -side,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // SAFETY: a memory DC and DIB made and released here; the DIB's bits are read after drawing ends and
+    // copied out before it is deleted.
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        let mut bits = std::ptr::null_mut();
+        let dib = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0).expect("dib");
+        let old = SelectObject(dc, dib.into());
+        draw(
+            dc,
+            windows::Win32::Foundation::RECT {
+                left: 0,
+                top: 0,
+                right: side,
+                bottom: side,
+            },
+        );
+        let pixels =
+            std::slice::from_raw_parts(bits as *const u32, (side * side) as usize).to_vec();
+        SelectObject(dc, old);
+        let _ = DeleteObject(dib.into());
+        let _ = DeleteDC(dc);
+        // The test thread's Direct2D objects go now: left to thread exit, their release hangs the harness.
+        DC_TARGET.with(|held| held.borrow_mut().take());
+        KIT.with(|kit| kit.borrow_mut().clear());
+        pixels
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Writes `pixels` as a 8x enlarged BMP when `ROQA_STILLS` names a folder (evidence for a review).
+    fn still(name: &str, side: i32, pixels: &[u32]) {
+        let Ok(folder) = std::env::var("ROQA_STILLS") else {
+            return;
+        };
+        let zoom = 8;
+        let out = side * zoom;
+        let mut file = Vec::new();
+        file.extend_from_slice(b"BM");
+        file.extend_from_slice(&(54 + out * out * 4).to_le_bytes());
+        file.extend_from_slice(&[0; 4]);
+        file.extend_from_slice(&54u32.to_le_bytes());
+        file.extend_from_slice(&40u32.to_le_bytes());
+        file.extend_from_slice(&out.to_le_bytes());
+        file.extend_from_slice(&(-out).to_le_bytes());
+        file.extend_from_slice(&1u16.to_le_bytes());
+        file.extend_from_slice(&32u16.to_le_bytes());
+        file.extend_from_slice(&[0; 24]);
+        for y in 0..out {
+            for x in 0..out {
+                let p = pixels[((y / zoom) * side + x / zoom) as usize];
+                let alpha = (p >> 24) as f32 / 255.0;
+                // Over mid grey, so both light and dark ink and the soft edge show.
+                let over = |c: u32| ((c & 0xff) as f32 + 128.0 * (1.0 - alpha)) as u8;
+                file.extend_from_slice(&[over(p), over(p >> 8), over(p >> 16), 255]);
+            }
+        }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test-only evidence still, written only when ROQA_STILLS names a folder; never the store"
+        )]
+        let _ = std::fs::write(format!("{folder}/{name}.bmp"), file);
+    }
+
+    /// Counts (soft, full) pixels: partly covered (anti-aliased) and fully covered.
+    fn edges(pixels: &[u32]) -> (usize, usize) {
+        let soft = pixels
+            .iter()
+            .filter(|p| matches!(*p >> 24, 1..=254))
+            .count();
+        let full = pixels.iter().filter(|p| *p >> 24 == 255).count();
+        (soft, full)
+    }
+
+    #[test]
+    fn a_diagonal_glyph_and_a_disc_are_antialiased_at_every_scale() {
+        for dips in [16, 20, 24, 32] {
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                let side = (dips as f32 * scale).round() as i32;
+                let k = side as f32 / GRID;
+                let cross = sample(side, |dc, rect| draw_gdi(dc, rect, Glyph::Close, 0xffffff));
+                still(&format!("close-{dips}dip-x{scale}"), side, &cross);
+                let (soft, full) = edges(&cross);
+                // Two 10 x 10 grid-unit diagonals: each long edge shows partly covered pixels all along it,
+                // and no stroke is built only of whole pixels.
+                let length = 2.0 * 10.0 * k * std::f32::consts::SQRT_2;
+                assert!(soft as f32 >= length, "{side}: only {soft} soft pixels");
+                // The painted area is the stroke's, to a tenth: coverage is not snapped or thresholded.
+                let area: f32 = cross.iter().map(|p| (p >> 24) as f32 / 255.0).sum();
+                let wide = stroke_pixels(side as f32);
+                let expect = wide * length + std::f32::consts::PI * wide * wide / 2.0;
+                assert!(
+                    (area - expect).abs() < 0.12 * expect,
+                    "{side}: {area} vs {expect}"
+                );
+                let _ = full;
+                let disc = sample(side, |dc, rect| {
+                    round_gdi(dc, rect, side / 2, 0xffffff, 0xffffff)
+                });
+                still(&format!("disc-{dips}dip-x{scale}"), side, &disc);
+                let (soft, _) = edges(&disc);
+                assert!(
+                    soft as i32 >= side,
+                    "{side}: a disc edge has {soft} soft pixels"
+                );
+                assert_eq!(disc[0] >> 24, 0, "the corner outside the disc stays clear");
+            }
+        }
+    }
     #[test]
     fn geometry_bounds_include_arcs_and_strokes_at_every_scale() {
         use windows::Win32::Graphics::Direct2D::{

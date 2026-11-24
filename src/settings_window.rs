@@ -1443,6 +1443,8 @@ unsafe extern "system" fn combo_proc(
                 fill(dc, rect, p.pal.card);
                 let radius = (rect.bottom - rect.top) / 2;
                 ringed(dc, rect, radius, p.pal.sel, focus_ring(hwnd), p);
+                // The field's 1 px frame (the same as the card's, `Paint::fields`) over the capsule's edge.
+                round_gdi(dc, rect, radius, u32::MAX, swap(p.pal.field));
                 let px = |v: i32| (v as f64 * p.scale).round() as i32;
                 let name = RECT {
                     left: rect.left + px(10),
@@ -3005,18 +3007,14 @@ fn clip(h: HWND, top: i32, height: i32, width: i32, view: i32) {
     }
 }
 
-/// A drop-down's visible part: its closed box (`height` tall, `top` in the client) less a 1 px border, rounded,
-/// and cut at the footer like `clip`. The dark card shows through the ring that is left.
+/// A drop-down's visible part: its closed box (`height` tall, `top` in the client), cut at the footer like
+/// `clip`. The window is taller than the box (the list drops from it), so the cut is always a straight edge;
+/// the capsule and its ring are painted anti-aliased by `combo_proc`, never cut with a rounded region.
 fn inset(h: HWND, width: i32, height: i32, top: i32, view: i32) {
     let shown = (view - top).clamp(0, height);
     // SAFETY: our own live child; the system owns a region once it is set.
     unsafe {
-        let region = if shown >= height {
-            CreateRoundRectRgn(1, 1, width - 1, height - 1, height, height)
-        } else {
-            CreateRectRgn(1, 1, width, shown.max(1))
-        };
-        SetWindowRgn(h, Some(region), true);
+        SetWindowRgn(h, Some(CreateRectRgn(0, 0, width, shown)), true);
     }
 }
 

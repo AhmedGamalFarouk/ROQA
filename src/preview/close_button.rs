@@ -1,4 +1,6 @@
-//! An owned, nonactivating overlay keeps the close control above the DWM thumbnail.
+//! An owned, nonactivating overlay keeps the close control above the DWM thumbnail. It is a per-pixel-alpha
+//! window (`NativeWindow::present`), so its circle is anti-aliased against the thumbnail; a window region
+//! would cut the edge hard.
 
 use crate::{
     dock,
@@ -7,25 +9,22 @@ use crate::{
     native_window::NativeWindow,
     theme::{Palette, Rgb},
 };
+use std::cell::Cell;
 use windows::{
     Win32::{
         Foundation::{HWND, RECT},
-        Graphics::Gdi::{
-            BeginPaint, CreateRoundRectRgn, DeleteObject, EndPaint, InvalidateRect, PAINTSTRUCT,
-            SetWindowRgn,
-        },
+        Graphics::Gdi::HDC,
         UI::{
             Controls::WM_MOUSELEAVE,
             Input::KeyboardAndMouse::{
                 ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
             },
             WindowsAndMessaging::{
-                MSG, WM_CAPTURECHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-                WindowFromPoint,
+                MSG, WM_CAPTURECHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WindowFromPoint,
             },
         },
     },
-    core::{Error, Result},
+    core::Result,
 };
 
 /// `WM_MOUSEMOVE`'s key-state bit for the left button.
@@ -35,6 +34,8 @@ pub(super) struct CloseButton {
     window: NativeWindow,
     palette: Palette,
     side: i32,
+    /// Where `place` put it; the picture is presented there.
+    at: Cell<Bounds>,
     hovered: bool,
     pressed: bool,
 }
@@ -54,33 +55,54 @@ fn color((r, g, b): Rgb) -> u32 {
     u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16)
 }
 
+/// The control's picture on `dc` (a `side` px square, transparent to start): the disc and its cross.
+fn picture(dc: HDC, side: i32, hovered: bool, palette: &Palette) {
+    let rect = RECT {
+        left: 0,
+        top: 0,
+        right: side,
+        bottom: side,
+    };
+    let body = palette.body;
+    let (fill, ink) = if hovered {
+        (palette.ink, palette.on_ink)
+    } else {
+        ((body.0, body.1, body.2), palette.ink)
+    };
+    round_gdi(dc, rect, side / 2, color(fill), color(fill));
+    let inset = (side - side * 20 / 32) / 2;
+    let glyph = RECT {
+        left: inset,
+        top: inset,
+        right: side - inset,
+        bottom: side - inset,
+    };
+    draw_settings_glyph(dc, glyph, Glyph::Close, color(ink));
+}
+
 impl CloseButton {
     pub(super) fn create(owner: HWND, dpi: u32, palette: Palette) -> Result<Self> {
-        let window = NativeWindow::create_preview("ROQA Preview Close", Some(owner))?;
+        let window = NativeWindow::create_overlay("ROQA Preview Close", Some(owner))?;
         let side = dock::px(32, dpi);
-        // SAFETY: our live HWND; successful SetWindowRgn transfers ownership of the region.
-        unsafe {
-            let region = CreateRoundRectRgn(0, 0, side + 1, side + 1, side, side);
-            if region.0.is_null() {
-                return Err(Error::from_thread());
-            }
-            if SetWindowRgn(window.0, Some(region), false) == 0 {
-                let error = Error::from_thread();
-                let _ = DeleteObject(region.into());
-                return Err(error);
-            }
-        }
         Ok(Self {
             window,
             palette,
             side,
+            at: Cell::new(Bounds {
+                x: 0,
+                y: 0,
+                width: side,
+                height: side,
+            }),
             hovered: false,
             pressed: false,
         })
     }
 
     pub(super) fn place(&self, preview: Bounds, work: Bounds) -> Result<()> {
-        self.window.resize(bounds(preview, work, self.side))
+        let at = bounds(preview, work, self.side);
+        self.at.set(at);
+        self.window.resize(at)
     }
 
     pub(super) fn hwnd(&self) -> HWND {
@@ -88,43 +110,15 @@ impl CloseButton {
     }
 
     pub(super) fn show(&self) {
+        self.repaint();
         self.window.show();
     }
 
+    /// Presents the current picture; a failed update leaves the last one on screen.
     fn repaint(&self) {
-        // SAFETY: invalidates our control only; Windows coalesces paints until the message pass.
-        let _ = unsafe { InvalidateRect(Some(self.window.0), None, false) };
-    }
-
-    fn paint(&self) {
-        let side = self.side;
-        let rect = RECT {
-            left: 0,
-            top: 0,
-            right: side,
-            bottom: side,
-        };
-        let body = self.palette.body;
-        let (fill, ink) = if self.hovered {
-            (self.palette.ink, self.palette.on_ink)
-        } else {
-            ((body.0, body.1, body.2), self.palette.ink)
-        };
-        // SAFETY: this message owns a valid paint DC; EndPaint always validates the region.
-        unsafe {
-            let mut paint = PAINTSTRUCT::default();
-            let dc = BeginPaint(self.window.0, &mut paint);
-            round_gdi(dc, rect, side / 2, color(fill), color(fill));
-            let inset = (side - side * 20 / 32) / 2;
-            let glyph = RECT {
-                left: inset,
-                top: inset,
-                right: side - inset,
-                bottom: side - inset,
-            };
-            draw_settings_glyph(dc, glyph, Glyph::Close, color(ink));
-            let _ = EndPaint(self.window.0, &paint);
-        }
+        let _ = self.window.present(self.at.get(), |dc, _| {
+            picture(dc, self.side, self.hovered, &self.palette);
+        });
     }
 
     fn point(&mut self, message: &MSG) {
@@ -153,7 +147,6 @@ impl CloseButton {
             return false;
         }
         match message.message {
-            WM_PAINT => self.paint(),
             // The release was lost: drop the press and its capture, which would take every move over ROQA.
             WM_MOUSEMOVE if self.pressed && message.wParam.0 & MK_LBUTTON == 0 => {
                 self.pressed = false;
@@ -224,11 +217,53 @@ mod tests {
         message.message = WM_LBUTTONUP;
         assert!(!close.message(&message), "a cancelled press must not close");
         assert!(!close.pressed);
+        overlay_is_soft_edged(&close);
         drop(close);
         // SAFETY: IsWindow accepts a stale handle and reads identity only.
         assert!(!unsafe { IsWindow(Some(hwnd)) }.as_bool());
     }
 
+    /// Layered, no window region (a hard, stair-stepped edge), and a soft circle edge at every scale. Run from
+    /// the test above: the window class registers once per process.
+    fn overlay_is_soft_edged(close: &CloseButton) {
+        use windows::Win32::Graphics::Gdi::{GetWindowRgnBox, RGN_ERROR};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowLongPtrW, WS_EX_LAYERED,
+        };
+        // SAFETY: scalar queries of our own live HWND.
+        unsafe {
+            assert_ne!(
+                GetWindowLongPtrW(close.hwnd(), GWL_EXSTYLE) as u32 & WS_EX_LAYERED.0,
+                0
+            );
+            // A window region is a hard, stair-stepped edge: the control must not have one.
+            assert_eq!(
+                GetWindowRgnBox(close.hwnd(), &mut RECT::default()),
+                RGN_ERROR
+            );
+        }
+        for dpi in [96, 120, 144, 192] {
+            let side = dock::px(32, dpi);
+            for hovered in [false, true] {
+                let pixels = crate::graphics::sample(side, |dc, _| {
+                    picture(dc, side, hovered, &crate::theme::Theme::Classic.palette());
+                });
+                assert_eq!(
+                    pixels[0] >> 24,
+                    0,
+                    "{side}: the corner outside the circle is clear"
+                );
+                let soft = pixels
+                    .iter()
+                    .filter(|p| matches!(*p >> 24, 1..=254))
+                    .count();
+                assert!(
+                    soft as i32 >= side,
+                    "{side}: the circle edge has only {soft} soft pixels"
+                );
+            }
+        }
+    }
     #[test]
     fn close_stays_full_size_on_tiny_sources_and_negative_monitors() {
         let work = Bounds {

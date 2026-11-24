@@ -9,13 +9,17 @@ use std::{
     sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
 };
 use windows::Win32::{
-    Foundation::{COLORREF, E_FAIL, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Foundation::{
+        COLORREF, E_FAIL, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+    },
     Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
     Graphics::Gdi::{
-        BeginPaint, DeleteObject, EndPaint, EnumDisplayMonitors, ExtCreateRegion, GetMonitorInfoW,
-        HDC, HMONITOR, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
-        MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT, RDH_RECTANGLES, RGNDATA,
-        RGNDATAHEADER, SetBkColor, SetTextColor, SetWindowRgn,
+        AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint,
+        CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint,
+        EnumDisplayMonitors, ExtCreateRegion, GetDC, GetMonitorInfoW, HDC, HMONITOR,
+        MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW,
+        MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT, RDH_RECTANGLES, RGNDATA, RGNDATAHEADER,
+        ReleaseDC, SelectObject, SetBkColor, SetTextColor, SetWindowRgn,
     },
     System::{
         LibraryLoader::GetModuleHandleW,
@@ -358,6 +362,79 @@ impl NativeWindow {
             )?;
             capture_affinity(hwnd);
             Ok(Self(hwnd, None, Vec::new()))
+        }
+    }
+    /// A hidden topmost popup that never takes focus and shows a per-pixel-alpha picture (`present`): its
+    /// edges are anti-aliased against whatever is behind it, unlike a window region, which cuts hard.
+    pub fn create_overlay(title: &str, owner: Option<HWND>) -> Result<Self> {
+        let window = Self::create_preview(title, owner)?;
+        // SAFETY: our own hidden HWND; the style change precedes the first `present`.
+        unsafe {
+            let style = GetWindowLongPtrW(window.0, GWL_EXSTYLE) as u32;
+            SetWindowLongPtrW(window.0, GWL_EXSTYLE, (style | WS_EX_LAYERED.0) as isize);
+        }
+        Ok(window)
+    }
+    /// Puts a picture of `at.width` x `at.height` pixels on an overlay at `at`. `draw` paints a fresh, fully
+    /// transparent 32-bit DC with Direct2D (premultiplied alpha); what it leaves transparent also passes input.
+    pub fn present(&self, at: Bounds, draw: impl FnOnce(HDC, RECT)) -> Result<()> {
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: at.width,
+                biHeight: -at.height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // SAFETY: the screen DC, memory DC and DIB are local and released on every path; the DIB is selected
+        // only while `draw` and the update run, and UpdateLayeredWindow copies it before returning.
+        unsafe {
+            let screen = GetDC(None);
+            let memory = CreateCompatibleDC(Some(screen));
+            let mut bits = std::ptr::null_mut();
+            let picture = CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut bits, None, 0);
+            let result = picture.and_then(|picture| {
+                let old = SelectObject(memory, picture.into());
+                draw(
+                    memory,
+                    RECT {
+                        left: 0,
+                        top: 0,
+                        right: at.width,
+                        bottom: at.height,
+                    },
+                );
+                let blend = BLENDFUNCTION {
+                    BlendOp: AC_SRC_OVER as u8,
+                    SourceConstantAlpha: 255,
+                    AlphaFormat: AC_SRC_ALPHA as u8,
+                    ..Default::default()
+                };
+                let shown = UpdateLayeredWindow(
+                    self.0,
+                    Some(screen),
+                    Some(&POINT { x: at.x, y: at.y }),
+                    Some(&SIZE {
+                        cx: at.width,
+                        cy: at.height,
+                    }),
+                    Some(memory),
+                    Some(&POINT::default()),
+                    COLORREF(0),
+                    Some(&blend),
+                    ULW_ALPHA,
+                );
+                SelectObject(memory, old);
+                let _ = DeleteObject(picture.into());
+                shown
+            });
+            let _ = DeleteDC(memory);
+            ReleaseDC(None, screen);
+            result
         }
     }
     /// A layered transparent HWND lets input reach windows in other processes, unlike HTTRANSPARENT.

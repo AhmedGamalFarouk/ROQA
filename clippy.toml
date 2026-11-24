@@ -18,4 +18,8 @@ disallowed-methods = [
     { path = "std::fs::File::create", reason = "write only through the store's atomic save (src/store.rs)" },
     { path = "std::fs::File::create_new", reason = "write only through the store's atomic save (src/store.rs)" },
     { path = "std::fs::OpenOptions::open", reason = "write only through the store's atomic save (src/store.rs)" },
+    # 6. Hard-edged window regions on controls: a region cuts to whole pixels (stair-stepped, no anti-aliasing).
+    { path = "windows::Win32::Graphics::Gdi::CreateRoundRectRgn", reason = "a rounded region has a stair-stepped edge; draw the shape anti-aliased (round_gdi, or a per-pixel-alpha overlay: NativeWindow::present) and clip with a straight CreateRectRgn only" },
+    { path = "windows::Win32::Graphics::Gdi::CreateEllipticRgn", reason = "an elliptic region has a stair-stepped edge; draw the shape anti-aliased (round_gdi, or a per-pixel-alpha overlay: NativeWindow::present)" },
+    { path = "windows::Win32::Graphics::Gdi::CreatePolygonRgn", reason = "a polygon region has a stair-stepped edge; draw the shape anti-aliased (a Direct2D path, or a per-pixel-alpha overlay: NativeWindow::present)" },
 ]
