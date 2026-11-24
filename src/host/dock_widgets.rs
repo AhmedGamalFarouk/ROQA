@@ -35,7 +35,7 @@ impl Desktop {
             return [false; 6];
         }
         let mut shown = self.settings.dock_buttons.widgets;
-        shown[5] &= self.timers.running();
+        shown[5] &= timer_chip(&self.pages, &self.timers, Instant::now()).is_some();
         let mut remaining = self.settings.widget_limit;
         for show in &mut shown {
             *show &= remaining > 0;
@@ -75,7 +75,8 @@ impl Desktop {
         if !changed && !shown.contains(&true) {
             return Ok(());
         }
-        let reads = std::array::from_fn(|index| {
+        let chip = timer_chip(&self.pages, &self.timers, Instant::now());
+        let text = std::array::from_fn(|index| {
             let button = Button::WIDGETS[index];
             if !shown[index] {
                 return String::new();
@@ -95,13 +96,16 @@ impl Desktop {
                 Button::Water => {
                     format!("{} of {}", self.water_today(), self.settings.water_cfg[0])
                 }
-                Button::Timer => self
-                    .timers
-                    .view(Instant::now())
-                    .map_or_else(String::new, |timer| timer.pill),
+                Button::Timer => chip
+                    .as_ref()
+                    .map_or_else(String::new, |view| timer::clock(view.left)),
                 _ => String::new(),
             }
         });
+        let reads = crate::graphics::Readings {
+            text,
+            timer_paused: chip.is_some_and(|view| view.paused),
+        };
         let repaint = self.pages.widget_readings != reads;
         self.pages.widget_readings = reads;
         if changed {
@@ -124,6 +128,15 @@ impl Desktop {
             self.refresh_widget_popup(button);
         }
         Ok(())
+    }
+
+    /// The Timer chip's seconds change on screen: its popup is open, or a dock that is shown (not tucked, away or
+    /// under a full-screen app) has room for it. A paused chip adds nothing: `next_wake` ticks only running ones.
+    pub(super) fn dock_timer_ticks(&self) -> bool {
+        self.widget_popup_is(Button::Timer)
+            || self.surfaces.iter().any(|dock| {
+                dock.kind() == SurfaceKind::Dock && dock.visible && dock.dock_buttons.widgets[5]
+            })
     }
 
     pub(super) fn widget_popup_is(&self, button: Button) -> bool {
@@ -208,7 +221,7 @@ impl Desktop {
                         .hours
                         .iter()
                         .take(3)
-                        .map(|hour| (Item::MoonDate, format!("{}\t{}", hour.label, hour.temp))),
+                        .map(|hour| (Item::Pair, format!("{}\t{}", hour.label, hour.temp))),
                 );
             }
             Button::Prayer => {
@@ -221,7 +234,7 @@ impl Desktop {
                             .rows
                             .iter()
                             .take(5)
-                            .map(|row| (Item::MoonDate, format!("{}\t{}", row.name, row.time))),
+                            .map(|row| (Item::Pair, format!("{}\t{}", row.name, row.time))),
                     );
                 }
             }
@@ -292,17 +305,8 @@ impl Desktop {
                 }
             }
             Button::Timer => {
-                if let Some(view) = self.timers.view(Instant::now()).filter(|view| !view.done) {
-                    let progress = view.total.saturating_sub(view.left) * 100 / view.total.max(1);
-                    rows.push((Item::Limit(progress.min(100) as u8), view.panel));
-                    rows.push((
-                        Item::Widget(dock_menu::WidgetAction::TimerPause),
-                        "Pause".into(),
-                    ));
-                    rows.push((
-                        Item::Widget(dock_menu::WidgetAction::TimerExtend),
-                        "Add 5 min".into(),
-                    ));
+                if let Some(view) = timer_chip(&self.pages, &self.timers, Instant::now()) {
+                    rows.extend(timer_rows(&view));
                 }
             }
             Button::System => {
@@ -316,7 +320,7 @@ impl Desktop {
                     )
                 };
                 rows.push((
-                    Item::MoonDate,
+                    Item::Pair,
                     format!(
                         "Processor\t{}",
                         stats
@@ -325,15 +329,12 @@ impl Desktop {
                     ),
                 ));
                 rows.push((
-                    Item::MoonDate,
+                    Item::Pair,
                     format!("Memory\t{}", meter(system.memory.as_ref())),
                 ));
+                rows.push((Item::Pair, format!("Disk\t{}", meter(system.disk.as_ref()))));
                 rows.push((
-                    Item::MoonDate,
-                    format!("Disk\t{}", meter(system.disk.as_ref())),
-                ));
-                rows.push((
-                    Item::MoonDate,
+                    Item::Pair,
                     format!(
                         "Network\t{}",
                         stats.net.map_or_else(
@@ -377,10 +378,15 @@ impl Desktop {
                 self.pages.month = Some(((next / 12) as u16, (next % 12 + 1) as u16));
                 Button::Calendar
             }
-            TimerPause | TimerExtend => {
+            TimerPause | TimerResume | TimerCancel | TimerExtend => {
                 let now = Instant::now();
-                if action == TimerPause {
-                    self.timer_press(timer::Ctl::Pause, now);
+                if let Some(control) = match action {
+                    TimerPause => Some(timer::Ctl::Pause),
+                    TimerResume => Some(timer::Ctl::Resume),
+                    TimerCancel => Some(timer::Ctl::Cancel),
+                    _ => None,
+                } {
+                    self.timer_press(control, now);
                 } else if self.timers.extend_soonest(now, timer::wall_now(), 300) {
                     self.timers
                         .write_to(&mut self.store, &mut self.pending, now);
@@ -390,5 +396,89 @@ impl Desktop {
             }
         };
         self.refresh_widget_popup(button);
+    }
+}
+
+/// The countdown the dock's Timer chip shows: a running one first, else a paused one (`Pages::timer_view`);
+/// never the stopwatch or a finished timer, whose alert is the notch's.
+fn timer_chip(pages: &Pages, timers: &Timers, now: Instant) -> Option<timer::View> {
+    pages
+        .timer_view(timers, now)
+        .filter(|view| !view.watch && !view.done)
+}
+
+/// The chip popup's rows: running `Pause` and `Add 5 min`, paused `Resume` and `Cancel`, under the same progress row
+/// and in the same kinds, so the open popup updates in place (`update_rows`).
+fn timer_rows(view: &timer::View) -> [(Item, String); 3] {
+    use dock_menu::WidgetAction::{TimerCancel, TimerExtend, TimerPause, TimerResume};
+    let progress = view.total.saturating_sub(view.left) * 100 / view.total.max(1);
+    let (bar, (second, third)) = if view.paused {
+        (
+            format!("Paused, {} left", timer::clock(view.left)),
+            ((TimerResume, "Resume"), (TimerCancel, "Cancel")),
+        )
+    } else {
+        (
+            view.panel.clone(),
+            ((TimerPause, "Pause"), (TimerExtend, "Add 5 min")),
+        )
+    };
+    [
+        (Item::Limit(progress.min(100) as u8), bar),
+        (Item::Widget(second.0), second.1.into()),
+        (Item::Widget(third.0), third.1.into()),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_timer_chip_ticks_while_running_and_stays_paused_with_resume_and_cancel() {
+        use dock_menu::WidgetAction::{TimerCancel, TimerExtend, TimerPause, TimerResume};
+        let now = Instant::now();
+        let mut pages = Pages::new(&Settings::default(), Tab::Timer);
+        let mut timers = Timers::default();
+        assert!(
+            timer_chip(&pages, &timers, now).is_none(),
+            "nothing to show"
+        );
+        pages.stopwatch.start(now);
+        assert!(
+            timer_chip(&pages, &timers, now).is_none(),
+            "the stopwatch alone"
+        );
+        pages.stopwatch.reset();
+        // A held plain timer keeps its chip, dimmed, with Resume and Cancel; it asks for no wake.
+        pages.held = Some((754, 1500));
+        let held = timer_chip(&pages, &timers, now).expect("paused chip");
+        assert!(held.paused && timer::clock(held.left) == "12:34");
+        let rows = timer_rows(&held);
+        assert_eq!(rows[0].1, "Paused, 12:34 left");
+        assert_eq!(
+            (rows[1].0, rows[2].0),
+            (Item::Widget(TimerResume), Item::Widget(TimerCancel))
+        );
+        assert_eq!(timers.next_wake(true, now), None);
+        // A running countdown wins over the held one and ticks on the next second boundary.
+        assert!(timers.start(3723, timer::wall_now(), now));
+        let running = timer_chip(&pages, &timers, now).expect("running chip");
+        assert!(!running.paused && timer::clock(running.left) == "1:02:03");
+        let rows = timer_rows(&running);
+        assert_eq!(
+            (rows[0].0, rows[1].0, rows[2].0),
+            (
+                Item::Limit(0),
+                Item::Widget(TimerPause),
+                Item::Widget(TimerExtend)
+            )
+        );
+        assert_eq!(
+            timers.next_wake(true, now),
+            Some(now + Duration::from_secs(1))
+        );
+        assert_eq!(timer::clock(59), "0:59");
+        assert_eq!(timer::clock(25 * 60), "25:00");
     }
 }

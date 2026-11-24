@@ -107,6 +107,12 @@ pub fn drive_read() -> Option<char> {
     let mask = DRIVE_MASK.swap(0, Ordering::AcqRel);
     (mask != 0).then(|| char::from(b'A' + mask.trailing_zeros() as u8))
 }
+/// The drive letters (bit 0 is A) of the volumes removed since the last `removed_read`.
+static REMOVED_MASK: AtomicU32 = AtomicU32::new(0);
+/// The drive letters removed since the last read: an arrival alert's Eject for one of them is stale.
+pub fn removed_read() -> u32 {
+    REMOVED_MASK.swap(0, Ordering::AcqRel)
+}
 const CAMERA: GUID = GUID::from_u128(0xe5323777_f976_4f5b_9b55_b94699c46e44);
 const SPEAKER: GUID = GUID::from_u128(0x65e8773e_8f56_11d0_a3b9_00a0c9223196);
 /// The arrivals since the last read; the next arrival posts again.
@@ -774,6 +780,21 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
                 && PostMessageW(None, DEVICE, WPARAM(0), LPARAM(0)).is_err()
             {
                 DEVICE_BITS.store(0, Ordering::Release);
+            }
+            return LRESULT(1);
+        }
+        if message == WM_DEVICECHANGE
+            && wparam.0 == DBT_DEVICEREMOVECOMPLETE as usize
+            && lparam.0 != 0
+        {
+            let header = &*(lparam.0 as *const DEV_BROADCAST_HDR);
+            if header.dbch_devicetype.0 == DBT_DEVTYP_VOLUME.0 {
+                let volume = &*(lparam.0 as *const DEV_BROADCAST_VOLUME);
+                // One post wakes the host; the mask is read on every pass, so a failed post loses nothing.
+                if REMOVED_MASK.fetch_or(volume.dbcv_unitmask & 0x03FF_FFFF, Ordering::AcqRel) == 0
+                {
+                    let _ = PostMessageW(None, DEVICE, WPARAM(0), LPARAM(0));
+                }
             }
             return LRESULT(1);
         }

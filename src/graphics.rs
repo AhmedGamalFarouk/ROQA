@@ -165,6 +165,13 @@ pub struct DockSlot<'a> {
     pub held: bool,
 }
 
+/// The dock widgets' readings, and whether the Timer chip's countdown is paused (drawn at 0.60 ink).
+#[derive(Default, PartialEq)]
+pub struct Readings {
+    pub text: [String; 6],
+    pub timer_paused: bool,
+}
+
 pub struct DockScene<'a> {
     /// Window x of the drop marker (reduced motion draws a Lamp capsule there instead of sliding the icons).
     pub marker: Option<f32>,
@@ -172,7 +179,7 @@ pub struct DockScene<'a> {
     /// Which taskbar buttons are on, and each enabled one's hover progress.
     pub layout: dock::Buttons,
     pub buttons: Vec<(dock::Button, f32)>,
-    pub widget_readings: &'a [String; 6],
+    pub widget_readings: &'a Readings,
     /// Pointer-inside animation progress for the bar fill; keeps the M1 hover background semantic.
     pub inside: f32,
     pub dpi: u32,
@@ -2497,7 +2504,12 @@ fn draw_button(
     let layout = scene.layout;
     let reading = button
         .widget()
-        .map(|index| scene.widget_readings[index].as_str());
+        .map(|index| scene.widget_readings.text[index].as_str());
+    let ink = if button == dock::Button::Timer && scene.widget_readings.timer_paused {
+        0.60
+    } else {
+        1.0
+    };
     if button == dock::Button::Desktop {
         return desktop_pill(context, cell, hover, layout.rtl, px, p);
     }
@@ -2547,7 +2559,7 @@ fn draw_button(
                 right: cell.right - px(5),
                 ..*cell
             },
-            tint(p.ink_dim(false, 1.0)),
+            tint(p.ink_dim(false, ink)),
         )?;
     }
     if let (dock::Button::Moon, Some((pct, right))) = (button, layout.moon) {
@@ -2575,7 +2587,7 @@ fn draw_button(
         dock::Button::Brightness => Glyph::Sun,
         dock::Button::Moon => return Ok(()), // drawn above while switched on
     };
-    glyphs::draw(context, square, shape, with_alpha(p.glyph, 1.0))
+    glyphs::draw(context, square, shape, with_alpha(p.glyph, ink))
 }
 
 /// The show-desktop capsule brightens with `hover`; the whole cell is the click target.

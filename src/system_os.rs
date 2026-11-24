@@ -231,13 +231,6 @@ fn open_volume(path: &str, access: u32) -> Option<crate::ipc::OwnedHandle> {
     .map(crate::ipc::OwnedHandle)
 }
 
-/// Ejects drive `letter` the way Safe Remove does. False when any step is refused. This path trusts the letter: it
-/// is the arrival alert's (`eject_volume` is the identity-checked one Places uses).
-pub fn eject(letter: char) -> bool {
-    open_volume(&format!(r"\\.\{letter}:"), GENERIC_READ.0 | GENERIC_WRITE.0)
-        .is_some_and(|volume| release(volume.0))
-}
-
 /// A disk as the storage stack numbers it: device type, device number, partition number.
 type Disk = (u32, u32, u32);
 
@@ -455,20 +448,41 @@ fn eject_on_worker(letter: char, job: impl FnOnce() -> Ejected + Send + 'static)
     true
 }
 
-/// The arrival alert's eject, by letter (`eject`).
-pub fn eject_in_background(letter: char) -> bool {
-    eject_on_worker(letter, move || {
-        if eject(letter) {
-            Ejected::Safe
-        } else {
-            Ejected::Refused
-        }
-    })
-}
-
-/// Places' eject, by captured identity (`eject_volume`).
+/// Places' and the arrival alert's eject, by captured identity (`eject_volume`), never by letter.
 pub fn eject_volume_in_background(volume: Volume) -> bool {
     eject_on_worker(volume.letter, move || eject_volume(&volume))
+}
+
+/// Arrived drives' identities read by `identify_in_background`, oldest first, until the host takes them: `None`
+/// when a drive is not one USB volume alone on its device. A later arrival never replaces an earlier one.
+static ARRIVED: std::sync::Mutex<Vec<Option<Volume>>> = std::sync::Mutex::new(Vec::new());
+
+/// Reads arrived drive `letter`'s identity (`usb_volume`) on a short worker, as Places does on its own; the host
+/// takes it through `arrived`. False when no worker could start.
+pub fn identify_in_background(letter: char) -> bool {
+    // SAFETY: a scalar thread id query.
+    let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    std::thread::Builder::new()
+        .name("roqa-drive".into())
+        .spawn(move || {
+            let volume = usb_volume(letter);
+            ARRIVED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(volume);
+            // A failed post is picked up on the host's next pass.
+            let _ = crate::native_window::post_wake(host, EJECTED);
+        })
+        .is_ok()
+}
+
+/// The arrived drives' identities read since the last call, oldest first.
+pub fn arrived() -> Vec<Option<Volume>> {
+    std::mem::take(
+        &mut *ARRIVED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
 }
 
 /// The finished eject's drive and how it ended, once.
@@ -589,6 +603,12 @@ mod tests {
             unique: vec![unique],
             usb,
         }
+    }
+
+    #[test]
+    fn an_eject_goes_by_identity_and_refuses_a_volume_it_cannot_prove() {
+        // The identity's volume path does not open: nothing is locked, the drive "isn't there".
+        assert_eq!(eject_volume(&Volume::for_test('E')), Ejected::Changed);
     }
 
     #[test]

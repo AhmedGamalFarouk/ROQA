@@ -23,6 +23,9 @@ const RELEASE: Duration = Duration::from_secs(2);
 /// or two is stale by then.
 const QUEUE_MIN: Duration = Duration::from_secs(3);
 
+/// Plain notices that wait for the row at most; a prayer or a notice cut short by a button row always waits.
+const QUEUE: usize = 3;
+
 /// The notice-worthy power states; a change between them (never a percentage tick) starts a notice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -145,12 +148,15 @@ pub struct Power {
     /// When the notice on the row started, and how long it was to hold.
     since: Option<Instant>,
     hold: Duration,
-    /// One plain notice the row refused, shown when the row frees (`promote`); the first one refused stays.
-    next: Option<(String, Duration, Extra)>,
+    /// Notices waiting for the row, shown in order when it frees (`promote`); a later one never replaces an
+    /// earlier one.
+    next: Vec<(String, Duration, Extra)>,
     /// The pointer is on a plain notice: its end is held until it leaves (`hover`).
     held: bool,
     /// The screenshot pill holds the row (`shots`), and whether it is hovered or dragged (held).
     shot: Option<bool>,
+    /// The row shows a battery notice (`update`): a newer state replaces it rather than waiting behind it.
+    battery: bool,
 }
 
 impl Power {
@@ -171,7 +177,12 @@ impl Power {
             return false;
         }
         self.last = Some(state);
-        self.announce(text(state, percent), now, NOTICE, Extra::None)
+        if self.battery {
+            self.clear();
+        }
+        let shown = self.announce(text(state, percent), now, NOTICE, Extra::None);
+        self.battery = shown;
+        shown
     }
 
     /// A question, an Eject or a Snooze waits for a click: nothing takes its row, and a click clears it first
@@ -191,6 +202,11 @@ impl Power {
     /// Whether `announce` with these would take the row now: a producer that must not lose its notice (a due
     /// reminder) asks first.
     pub fn admits(&self, now: Instant, hold: Duration, extra: Extra) -> bool {
+        self.takes(now, hold, extra, false)
+    }
+
+    /// `admits`, where a prayer (`prayer`) or a button or bar row has priority over a plain notice.
+    fn takes(&self, now: Instant, hold: Duration, extra: Extra, prayer: bool) -> bool {
         if self.guarded() || self.shot == Some(true) {
             return false;
         }
@@ -199,24 +215,57 @@ impl Power {
         {
             return false;
         }
-        let firm = self.notice.as_ref().is_some_and(|(_, until)| now < *until)
+        let live = self.holding() || self.notice.as_ref().is_some_and(|(_, until)| now < *until);
+        // A readable notice keeps the row to its end unless the newcomer has priority.
+        if live && self.extra.plain() && self.hold >= QUEUE_MIN {
+            return prayer || !extra.plain();
+        }
+        let firm = live
             && self
                 .since
                 .is_some_and(|since| now.saturating_duration_since(since) < FIRM);
         !(firm && extra.plain() && hold < self.hold)
     }
 
-    /// Shows `text` and its `extra` for `hold` in place of any notice (the prayer reminder reuses the row);
-    /// false, and nothing changes, when a guarded or longer notice keeps the row. A plain notice of `QUEUE_MIN`
-    /// or more that is refused waits in the one queue place.
+    /// Shows `text` and its `extra` for `hold` on the row; false, and the row keeps what it shows, when a
+    /// guarded, readable or longer notice keeps it. A refused plain notice of `QUEUE_MIN` or more waits its
+    /// turn; a readable plain notice a button row cuts short waits first with the time it had left.
     pub fn announce(&mut self, text: String, now: Instant, hold: Duration, extra: Extra) -> bool {
-        if !self.admits(now, hold, extra) {
-            if extra.plain() && hold >= QUEUE_MIN && self.next.is_none() {
-                self.next = Some((text, hold, extra));
+        self.offer(text, now, hold, extra, false)
+    }
+
+    /// A prayer's notice: it takes the row from a plain notice or a screenshot pill that is not held, and when
+    /// a button row keeps the row it waits first in line.
+    pub fn announce_prayer(&mut self, text: String, now: Instant, hold: Duration) -> bool {
+        self.yield_shot();
+        self.offer(text, now, hold, Extra::None, true)
+    }
+
+    fn offer(
+        &mut self,
+        text: String,
+        now: Instant,
+        hold: Duration,
+        extra: Extra,
+        prayer: bool,
+    ) -> bool {
+        if !self.takes(now, hold, extra, prayer) {
+            let known = self.text() == Some(text.as_str()) || self.next.iter().any(|q| q.0 == text);
+            if prayer {
+                self.next.insert(0, (text, hold, extra));
+            } else if extra.plain() && hold >= QUEUE_MIN && self.next.len() < QUEUE && !known {
+                self.next.push((text, hold, extra));
             }
             return false;
         }
+        if let Some((cut, until)) = self.notice.take() {
+            let left = until.saturating_duration_since(now);
+            if self.extra.plain() && left >= QUEUE_MIN && cut != text {
+                self.next.insert(0, (cut, left, self.extra));
+            }
+        }
         self.notice = Some((text, now + hold));
+        self.battery = false;
         self.extra = extra;
         self.since = Some(now);
         self.hold = hold;
@@ -237,12 +286,14 @@ impl Power {
 
     /// Shows the queued notice once the row is free; true when it did.
     pub fn promote(&mut self, now: Instant) -> bool {
-        if self.notice.is_some() {
-            return false;
-        }
-        let Some((text, hold, extra)) = self.next.take() else {
+        // The first in line keeps its place while the row is still taken (a screenshot pill).
+        let Some(&(_, hold, extra)) = self.next.first() else {
             return false;
         };
+        if self.notice.is_some() || !self.admits(now, hold, extra) {
+            return false;
+        }
+        let (text, ..) = self.next.remove(0);
         self.announce(text, now, hold, extra)
     }
 
@@ -438,16 +489,51 @@ mod tests {
         assert!(!power.announce("Volume 40%".into(), now + second, pill, Extra::None));
         assert!(!power.over(now + second) && !power.promote(now + second));
         assert_eq!(power.text(), Some("Prayer"));
-        // A 4 s notice is kept in the one place, and the first one refused stays.
+        // 4 s notices wait in order; none replaces another, and a repeat is not queued twice.
         assert!(!power.announce("Drive connected".into(), now + second, NOTICE, Extra::None));
         assert!(!power.announce("Camera connected".into(), now + second, NOTICE, Extra::None));
-        // After 2 s a short pill may replace it as before.
-        assert!(power.announce("Volume 41%".into(), now + 2 * second, pill, Extra::None));
-        assert!(power.over(now + 4 * second));
-        assert!(power.promote(now + 4 * second));
+        assert!(!power.announce("Drive connected".into(), now + second, NOTICE, Extra::None));
+        // A readable notice keeps the row to its end: after 2 s a plain one still waits.
+        assert!(!power.announce("Volume 41%".into(), now + 2 * second, pill, Extra::None));
+        assert!(power.over(now + long));
+        assert!(power.promote(now + long));
         assert_eq!(power.text(), Some("Drive connected"));
-        assert_eq!(power.deadline(), Some(now + 4 * second + NOTICE));
-        assert!(!power.promote(now + 4 * second), "the queue is empty now");
+        assert_eq!(power.deadline(), Some(now + long + NOTICE));
+        assert!(power.over(now + long + NOTICE) && power.promote(now + long + NOTICE));
+        assert_eq!(power.text(), Some("Camera connected"));
+        assert!(
+            power.clear() && !power.promote(now + long),
+            "the queue is empty now"
+        );
+        // A short pill may still replace another short one after its first 2 s.
+        assert!(power.announce("Volume 40%".into(), now, pill, Extra::None));
+        assert!(power.announce("Volume 41%".into(), now + 2 * second, pill, Extra::None));
+    }
+
+    #[test]
+    fn a_button_row_cuts_a_readable_notice_short_and_it_returns_with_its_time_left() {
+        let (now, sec) = (Instant::now(), Duration::from_secs);
+        let mut power = Power::default();
+        assert!(power.announce("Codex needs you".into(), now, sec(8), Extra::None));
+        assert!(power.announce("Bash: ls".into(), now + sec(2), sec(8), Extra::Ask(1)));
+        // A plain notice waits behind it; a prayer goes first in line.
+        assert!(!power.announce("Water".into(), now + sec(3), sec(8), Extra::None));
+        assert!(!power.announce_prayer("Asr".into(), now + sec(3), sec(8)));
+        assert!(power.clear());
+        for (text, hold) in [("Asr", 8), ("Codex needs you", 6), ("Water", 8)] {
+            assert!(power.promote(now + sec(4)), "{text}");
+            assert_eq!(power.text(), Some(text));
+            assert_eq!(power.deadline(), Some(now + sec(4 + hold)));
+            assert!(power.clear());
+        }
+        // A prayer takes the row from a readable plain notice, which returns after it.
+        assert!(power.announce("Mail: Hi".into(), now, sec(7), Extra::Bell));
+        assert!(power.announce_prayer("Maghrib".into(), now + sec(1), sec(8)));
+        assert!(power.clear() && power.promote(now + sec(1)));
+        assert_eq!(
+            (power.text(), power.extra()),
+            (Some("Mail: Hi"), Extra::Bell)
+        );
     }
 
     #[test]
@@ -466,7 +552,11 @@ mod tests {
             (power.text(), power.extra()),
             (Some("Asr in 5 min"), Extra::None)
         );
-        assert!(power.clear() && !power.promote(now), "only one was kept");
+        assert!(
+            power.clear() && power.promote(now),
+            "both were kept, in order"
+        );
+        assert_eq!(power.text(), Some("Fajr"));
     }
 
     #[test]

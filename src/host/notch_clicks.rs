@@ -311,7 +311,13 @@ impl Desktop {
         if let Some(letter) = self.power.eject()
             && layout::notice_button_at(width, dpi, progress, live, 0, (x, y))
         {
-            if crate::system_os::eject_in_background(letter) {
+            // By the identity read at arrival, never the letter, which may name another drive by now.
+            let volume = self
+                .arrival
+                .clone()
+                .filter(|volume| volume.letter == letter);
+            if volume.is_some_and(crate::system_os::eject_volume_in_background) {
+                self.arrival = None;
                 self.power.clear();
                 self.power.announce(
                     format!("Ejecting {letter}:"),

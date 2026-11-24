@@ -24,9 +24,11 @@ impl Desktop {
             self.media.command(crate::media::PLAY_PAUSE);
         }
         self.prayer.adhan_until = Some(now + PRAYER_NOTICE);
-        // A prayer takes the row from a screenshot pill, which returns after it.
-        self.power.yield_shot();
-        self.show_notice(prayer_tab::notice(event), now);
+        // A prayer takes the row from a plain notice or a screenshot pill, which return after it.
+        let admitted = self
+            .power
+            .announce_prayer(prayer_tab::notice(event), now, PRAYER_NOTICE);
+        self.reveal_notice(admitted, power::Extra::None);
     }
     /// Expands every notch with `text` for `PRAYER_NOTICE`; on a monitor a full-screen app covers it appears
     /// over the app (topmost, never activated) and hides again once retracted.
@@ -36,10 +38,15 @@ impl Desktop {
     /// `show_notice`, with a button or bar on its row.
     pub(super) fn show_notice_with(&mut self, text: String, now: Instant, extra: power::Extra) {
         let admitted = self.power.announce(text, now, PRAYER_NOTICE, extra);
+        self.reveal_notice(admitted, extra);
+    }
+    /// Shows the notch for a notice that took the row; one that waits shows later (`refresh_power`).
+    fn reveal_notice(&mut self, admitted: bool, extra: power::Extra) {
+        if !admitted {
+            return;
+        }
         if extra.footer() || self.power.extra().footer() {
-            if admitted {
-                self.present_notice();
-            }
+            self.present_notice();
             return;
         }
         for surface in &mut self.surfaces {
@@ -78,27 +85,75 @@ impl Desktop {
             eprintln!("{what}: {error}");
         }
     }
+    /// Device arrivals, the identities their drives were read with, and drive removals since the last pass.
+    pub(super) fn device_wakes(&mut self) {
+        let bits = native_window::device_read();
+        if bits != 0 {
+            self.show_device(bits);
+        }
+        for volume in crate::system_os::arrived() {
+            self.drive_identified(volume);
+        }
+        // A removed drive's Eject is stale: its letter may soon name another drive.
+        let gone = native_window::removed_read();
+        if let Some(volume) = self
+            .arrival
+            .take_if(|volume| drive_gone(volume.letter, gone))
+            && self.power.eject() == Some(volume.letter)
+            && self.power.clear()
+        {
+            if self.power.promote(Instant::now()) {
+                self.present_notice();
+            } else {
+                if !self.shelf.shots.showing() {
+                    self.close_retired_notice(power::Extra::Eject(volume.letter));
+                }
+                self.request_notches(Repaint::Full, |_| true);
+            }
+        }
+    }
     /// A drive, camera or speaker connected (`native_window::device_read` bits): a short peek, unlike a prayer alert it
-    /// does not show over a full-screen app; a drive carries Eject.
-    pub(super) fn show_device(&mut self, bits: u32) {
-        let text = if bits & native_window::DRIVE_BIT != 0 {
+    /// does not show over a full-screen app. A drive's notice waits for its identity, read on a worker.
+    fn show_device(&mut self, bits: u32) {
+        let drive = bits & native_window::DRIVE_BIT != 0;
+        if drive
+            && native_window::drive_read().is_some_and(crate::system_os::identify_in_background)
+        {
+            return;
+        }
+        let text = if drive {
             "Drive connected."
         } else if bits & native_window::CAMERA_BIT != 0 {
             "Camera connected."
         } else {
             "Speaker connected."
         };
-        let letter = native_window::drive_read().filter(|_| bits & native_window::DRIVE_BIT != 0);
-        let hold = if letter.is_some() {
-            DRIVE_NOTICE
-        } else {
-            DEVICE_NOTICE
-        };
-        let extra = letter.map_or(power::Extra::None, power::Extra::Eject);
-        self.power
-            .announce(text.into(), Instant::now(), hold, extra);
-        self.open_notches();
-        self.request_notches(Repaint::Full, |_| true);
+        if self.power.announce(
+            text.into(),
+            Instant::now(),
+            DEVICE_NOTICE,
+            power::Extra::None,
+        ) {
+            self.open_notches();
+            self.request_notches(Repaint::Full, |_| true);
+        }
+    }
+    /// An arrived drive's identity came back (`system_os::identify_in_background`): it carries Eject only when it
+    /// is one USB volume alone on its device, as in Places, and the click ejects by that identity, never the letter.
+    fn drive_identified(&mut self, volume: Option<crate::system_os::Volume>) {
+        let (hold, extra) = volume
+            .as_ref()
+            .map_or((DEVICE_NOTICE, power::Extra::None), |volume| {
+                (DRIVE_NOTICE, power::Extra::Eject(volume.letter))
+            });
+        if self
+            .power
+            .announce("Drive connected.".into(), Instant::now(), hold, extra)
+        {
+            self.arrival = volume;
+            self.open_notches();
+            self.request_notches(Repaint::Full, |_| true);
+        }
     }
     /// Reads what coding agents reported since the last time: the latest shows on the pill for the notice's
     /// length. With the switch off they are read and dropped.
@@ -293,8 +348,7 @@ impl Desktop {
             return;
         };
         let now = Instant::now();
-        let admitted = self.power.announce(text, now, hold, extra);
-        if admitted || (!extra.footer() && !self.power.extra().footer()) {
+        if self.power.announce(text, now, hold, extra) {
             self.present_notice();
         }
     }
@@ -528,5 +582,24 @@ impl Desktop {
         let length = self.prayer.player.play(path);
         self.prayer.sound_end = length.map(|length| now + length);
         length.is_some()
+    }
+}
+
+/// Whether drive `letter` is among the removed drives in `mask` (bit 0 is A).
+fn drive_gone(letter: char, mask: u32) -> bool {
+    (letter as u32)
+        .checked_sub('A' as u32)
+        .is_some_and(|bit| bit < 26 && mask & 1 << bit != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drive_gone;
+
+    #[test]
+    fn only_the_removed_letter_takes_the_arrival_eject_away() {
+        assert!(drive_gone('E', 1 << 4));
+        assert!(!drive_gone('E', 1 << 5) && !drive_gone('E', 0));
+        assert!(!drive_gone('?', u32::MAX), "not a drive letter");
     }
 }

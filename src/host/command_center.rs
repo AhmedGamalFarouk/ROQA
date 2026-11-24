@@ -57,7 +57,7 @@ fn page_rows(page: Page, found: Option<&[networks::Row]>, refused: bool) -> Vec<
                     format!("{}  ·  {}", row.name, row.detail),
                 )
             } else {
-                (Item::MoonDate, format!("{}\t{}", row.name, row.detail))
+                (Item::Pair, format!("{}\t{}", row.name, row.detail))
             }
         })),
     }
@@ -346,7 +346,7 @@ mod tests {
         let found = [row("Home", false), row("Cafe", true)];
         let rows = page_rows(Page::WiFi, Some(&found), true);
         assert_eq!(rows[2], (Item::Label, "Couldn't connect.".into()));
-        assert_eq!(rows[3], (Item::MoonDate, "Home\tConnected".into()));
+        assert_eq!(rows[3], (Item::Pair, "Home\tConnected".into()));
         assert_eq!(
             rows[4],
             (Item::Quick(Quick::Connect(1)), "Cafe  ·  Saved".into())

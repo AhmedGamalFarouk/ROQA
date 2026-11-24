@@ -51,8 +51,9 @@ pub enum Item {
     /// The moon popup's hero: the lit share in percent and whether the lit limb is on the right; its three
     /// lines are in `Spec::titles`. It stands `MOON_HERO` DIPs taller than a row.
     Moon(u8, bool),
-    /// A moon popup date row: `Spec::titles` holds "label\tdate".
-    MoonDate,
+    /// A read-only two-column row (moon dates, weather hours, Command Center readouts): `Spec::titles` holds
+    /// "label\tvalue".
+    Pair,
     CalendarWeek(Option<u8>),
     Widget(WidgetAction),
     /// A slider row of the volume and brightness popups: its level in percent and whether it is muted; its name
@@ -98,6 +99,8 @@ pub enum WidgetAction {
     WaterRemove,
     TimerPause,
     TimerExtend,
+    TimerResume,
+    TimerCancel,
 }
 
 /// What a quick settings row does when pressed.
@@ -168,7 +171,7 @@ impl Item {
             | Item::Battery
             | Item::Limit(_)
             | Item::Moon(..)
-            | Item::MoonDate
+            | Item::Pair
             | Item::CalendarWeek(_)
             | Item::Widget(_)
             | Item::Level(..)
@@ -727,9 +730,7 @@ impl Menu {
                     self.items[index],
                     row_label(&self.items, &self.titles, index),
                 ) {
-                    (Item::MoonDate, text) => {
-                        text.split_once('\t').map_or(text, |(label, _)| label)
-                    }
+                    (Item::Pair, text) => text.split_once('\t').map_or(text, |(label, _)| label),
                     (_, text) => text,
                 },
                 quick: match self.items[index] {
@@ -755,7 +756,7 @@ impl Menu {
                     Item::Moon(pct, right) => Some((f32::from(pct) / 100.0, right)),
                     _ => None,
                 },
-                value: (self.items[index] == Item::MoonDate)
+                value: (self.items[index] == Item::Pair)
                     .then(|| {
                         self.titles
                             .get(index)?
@@ -867,7 +868,7 @@ impl Menu {
                             | Item::Battery
                             | Item::Limit(_)
                             | Item::Moon(..)
-                            | Item::MoonDate
+                            | Item::Pair
                             | Item::CalendarWeek(_)
                     )
                 });
@@ -910,7 +911,7 @@ impl Menu {
                         Item::Battery
                             | Item::Limit(_)
                             | Item::Moon(..)
-                            | Item::MoonDate
+                            | Item::Pair
                             | Item::CalendarWeek(_)
                             | Item::Level(..)
                     ) {

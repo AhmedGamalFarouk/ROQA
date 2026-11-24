@@ -202,7 +202,7 @@ struct Pages {
     /// The System widget's last readings.
     system: crate::widgets::SystemSample,
     system_opened: Option<Instant>,
-    widget_readings: [String; 6],
+    widget_readings: crate::graphics::Readings,
     /// The Pomodoro's phase rules; its running phase is a tagged timer in `Desktop::timers`.
     pomo: pomo::Pomo,
     /// A paused plain countdown: seconds left and its full length (not stored, like a paused Pomodoro).
@@ -1050,7 +1050,7 @@ impl Surface {
         items: &[DockItem],
         icons: &[Vec<Option<Arc<IconPixels>>>],
         drag: Option<&Drag>,
-        widget_readings: &[String; 6],
+        widget_readings: &crate::graphics::Readings,
     ) -> Result<()> {
         let now = Instant::now();
         let drag = drag.filter(|drag| drag.active);
@@ -1390,6 +1390,8 @@ struct Desktop {
     peek_title: Option<String>,
     /// The Places popup's rows while it is open.
     places: Vec<crate::places::Place>,
+    /// The identity of the drive whose arrival alert offers Eject (`drive_identified`).
+    arrival: Option<crate::system_os::Volume>,
     /// The files a folder stack's popup lists while it is open.
     stack: Vec<std::path::PathBuf>,
     graphics: Graphics,
@@ -1482,8 +1484,8 @@ struct Desktop {
     pending_popup: Option<(crate::anchored::Owner, Instant)>,
     /// The dock button whose press just closed its own popup: its release ends that click (`swallow_release`).
     swallow_up: Option<(HWND, Button)>,
-    /// Wheel movement left over after the last whole notch on the volume bar, the open notch or a dock slot.
-    volume_wheel: i32,
+    /// Wheel movement left over after the last whole notch, one per control (`edge::Wheel`).
+    wheel: [i32; 3],
     /// Sideways wheel movement kept toward a track skip, and when the next skip is allowed (one skip per swipe).
     swipe: i32,
     swipe_until: Instant,
@@ -1615,6 +1617,7 @@ impl Desktop {
             peek: None,
             peek_title: None,
             places: Vec::new(),
+            arrival: None,
             stack: Vec::new(),
             graphics: Graphics::create()?,
             rebuild: Rebuild::new(Instant::now()),
@@ -1674,7 +1677,7 @@ impl Desktop {
             native_popup: Default::default(),
             pending_popup: None,
             swallow_up: None,
-            volume_wheel: 0,
+            wheel: [0; 3],
             swipe: 0,
             swipe_until: Instant::now(),
             levels: None,
@@ -1983,7 +1986,7 @@ impl Desktop {
             }
         }
         self.timers
-            .next_wake(expanded || self.widget_popup_is(Button::Timer), now)
+            .next_wake(expanded || self.dock_timer_ticks(), now)
             .into_iter()
             .chain(self.pages.stopwatch.next_tick(now).filter(|_| expanded))
             .min()
@@ -3221,13 +3224,15 @@ impl Desktop {
             let group = group && source.members.is_empty();
             let source =
                 dock::pinned_as(source, &self.pins).unwrap_or_else(|| source.identity.clone());
+            let mut full = false;
             self.change_pins(|pins| {
                 if group {
                     return pins.group(&source, &target);
                 }
                 // A running app that is not pinned pins where it is dropped (never on its own slot).
                 let added = pins.position(&source).is_none();
-                if added && (slot == drag.from || pins.add(source.clone()).is_err()) {
+                if added && (slot == drag.from || !menus::add_pin(pins, source.clone(), &mut full))
+                {
                     return false;
                 }
                 let moved = pins
@@ -3239,6 +3244,7 @@ impl Desktop {
                     .is_some_and(|(from, to)| pins.move_to(from, to));
                 added || moved
             });
+            self.say_pins_full(full);
         }
         true
     }
@@ -3769,8 +3775,7 @@ impl Desktop {
             WM_CAPTURECHANGED => surface.end_grip(),
             WM_MOUSEWHEEL if volume_ui && surface.grip.hover => {
                 let delta = i32::from((message.wParam.0 >> 16) as u16 as i16);
-                let (steps, rest) = edge::wheel_steps(self.volume_wheel, delta);
-                self.volume_wheel = rest;
+                let steps = edge::wheel_for(&mut self.wheel, edge::Wheel::Volume, delta);
                 if steps != 0
                     && let Some(level) = self.audio.level()
                 {
@@ -3783,8 +3788,7 @@ impl Desktop {
             // The open notch: the wheel flips the tabs, a sideways swipe on a live Music page skips the track.
             WM_MOUSEWHEEL if surface.expanded() => {
                 let delta = i32::from((message.wParam.0 >> 16) as u16 as i16);
-                let (steps, rest) = edge::wheel_steps(self.volume_wheel, delta);
-                self.volume_wheel = rest;
+                let steps = edge::wheel_for(&mut self.wheel, edge::Wheel::Tabs, delta);
                 if steps != 0 {
                     self.flip_tab(-steps);
                 }
@@ -3993,10 +3997,7 @@ impl Desktop {
             self.open_notches();
             self.request_notches(Repaint::Full, |_| true);
         }
-        let bits = native_window::device_read();
-        if bits != 0 {
-            self.show_device(bits);
-        }
+        self.device_wakes();
         if native_window::wake_read() {
             let now = Instant::now();
             if let Some(eyes) = &mut self.pages.eyes {

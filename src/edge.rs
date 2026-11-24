@@ -96,6 +96,21 @@ pub fn wheel_steps(acc: i32, delta: i32) -> (i32, i32) {
     (total / WHEEL_DELTA, total % WHEEL_DELTA)
 }
 
+/// A wheel control with its own remainder, so a partial scroll on one never makes another act early.
+#[derive(Clone, Copy)]
+pub enum Wheel {
+    Volume,
+    Tabs,
+    Dock,
+}
+
+/// Whole notches for `delta` on `control`, keeping that control's leftover in `rests`.
+pub fn wheel_for(rests: &mut [i32; 3], control: Wheel, delta: i32) -> i32 {
+    let (steps, rest) = wheel_steps(rests[control as usize], delta);
+    rests[control as usize] = rest;
+    steps
+}
+
 pub fn step_level(level: u8, steps: i32, fine: bool) -> u8 {
     let step = if fine { FINE_STEP } else { WHEEL_STEP };
     (i32::from(level) + steps * step).clamp(0, 100) as u8
@@ -201,6 +216,13 @@ mod tests {
         let (steps, rest) = wheel_steps(rest, 100);
         assert_eq!((steps, rest), (1, 10));
         assert_eq!(wheel_steps(-90, -60), (-1, -30));
+        // Each control keeps its own remainder: a partial volume scroll never steps the dock.
+        let mut rests = [0; 3];
+        assert_eq!(wheel_for(&mut rests, Wheel::Volume, 100), 0);
+        assert_eq!(wheel_for(&mut rests, Wheel::Dock, 100), 0);
+        assert_eq!(wheel_for(&mut rests, Wheel::Tabs, 60), 0);
+        assert_eq!(wheel_for(&mut rests, Wheel::Volume, 20), 1);
+        assert_eq!(rests, [0, 60, 100]);
         assert_eq!(
             (
                 step_level(50, 1, false),

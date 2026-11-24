@@ -168,7 +168,7 @@ impl Desktop {
                 )
                 .collect();
         let items = std::iter::once(Item::Moon(moon.pct, moon.right))
-            .chain(std::iter::repeat_n(Item::MoonDate, titles.len() - 1))
+            .chain(std::iter::repeat_n(Item::Pair, titles.len() - 1))
             .collect();
         let hit = Hit::Button(Button::Moon);
         let (left, width) = dock::span(buttons, bounds.width, dpi, hit);
@@ -423,11 +423,13 @@ impl Desktop {
             }
         });
         if folders && program.is_none() {
+            let mut full = false;
             self.change_pins(|pins| {
                 paths.iter().fold(false, |added, path| {
-                    pins.add(Identity::Executable(path.clone())).is_ok() || added
+                    add_pin(pins, Identity::Executable(path.clone()), &mut full) || added
                 })
             });
+            self.say_pins_full(full);
         } else if item.is_some() {
             self.show_notice("That app can't open files.".into(), Instant::now());
         }
@@ -465,11 +467,16 @@ impl Desktop {
             self.run_dock_action(action);
         }
     }
+    /// Says a pin was refused because the dock holds `MAX_PINS` already (`add_pin`).
+    pub(super) fn say_pins_full(&mut self, full: bool) {
+        if full {
+            self.show_notice("Dock is full. Unpin one first.".into(), Instant::now());
+        }
+    }
     /// The wheel over a dock's app slot steps through that app's windows: down to the next, up to the previous.
     pub(super) fn wheel_dock(&mut self, message: &MSG) {
         let delta = i32::from((message.wParam.0 >> 16) as u16 as i16);
-        let (steps, rest) = edge::wheel_steps(self.volume_wheel, delta);
-        self.volume_wheel = rest;
+        let steps = edge::wheel_for(&mut self.wheel, edge::Wheel::Dock, delta);
         let slots = self.dock_slots();
         let hovered = self
             .dock_at(message.hwnd)
@@ -947,7 +954,11 @@ impl Desktop {
                 }
                 Item::PinDownloads => {
                     if let Some(path) = crate::places::downloads() {
-                        self.change_pins(|pins| pins.add(Identity::Executable(path)).is_ok());
+                        let mut full = false;
+                        self.change_pins(|pins| {
+                            add_pin(pins, Identity::Executable(path), &mut full)
+                        });
+                        self.say_pins_full(full);
                     }
                 }
                 Item::Place(index) => {
@@ -1047,13 +1058,15 @@ impl Desktop {
             }
             Item::Pin | Item::Unpin => {
                 let identity = dock::pinned_as(&target, &self.pins).unwrap_or(target.identity);
+                let mut full = false;
                 self.change_pins(|pins| {
                     if item == Item::Unpin {
                         pins.remove(&identity)
                     } else {
-                        pins.add(identity).is_ok()
+                        add_pin(pins, identity, &mut full)
                     }
                 });
+                self.say_pins_full(full);
             }
             Item::Hide => self.change_pins(|pins| pins.hide(target.identity)),
             Item::Settings
@@ -1077,7 +1090,7 @@ impl Desktop {
             | Item::Battery
             | Item::Limit(_)
             | Item::Moon(..)
-            | Item::MoonDate
+            | Item::Pair
             | Item::CalendarWeek(_)
             | Item::Widget(_)
             | Item::Level(..)
@@ -1141,9 +1154,20 @@ fn toggle_press(
         })
         .map(|button| (dock, button))
 }
+/// Adds a pin at the end. A refusal at the `MAX_PINS` cap sets `full`, so the caller says so (`say_pins_full`)
+/// instead of failing silently; a duplicate or unpinnable target stays quiet.
+pub(super) fn add_pin(pins: &mut Pins, identity: Identity, full: &mut bool) -> bool {
+    match pins.add(identity) {
+        Ok(_) => true,
+        Err(error) => {
+            *full |= error == crate::pins::PinError::Full;
+            false
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
-    use super::{quote_path, toggle_press, toggled_by};
+    use super::{Identity, Pins, add_pin, quote_path, toggle_press, toggled_by};
     use crate::dock::{Button, Hit};
     use crate::dock_menu::{Item, Quick};
     use windows::Win32::Foundation::HWND;
@@ -1183,5 +1207,18 @@ mod tests {
     fn a_dropped_path_is_one_argument() {
         assert_eq!(quote_path(r"C:\a b\c.txt"), r#""C:\a b\c.txt""#);
         assert_eq!(quote_path(r"E:\"), r#""E:\\""#);
+    }
+    #[test]
+    fn a_pin_refused_at_the_cap_is_reported_and_leaves_the_pins_alone() {
+        let (mut pins, mut full) = (Pins::default(), false);
+        let app = |id: String| Identity::Application(id);
+        for id in 0..crate::pins::MAX_PINS {
+            assert!(add_pin(&mut pins, app(id.to_string()), &mut full));
+        }
+        // A duplicate stays quiet; only the cap asks for the notice.
+        assert!(!add_pin(&mut pins, app("0".into()), &mut full) && !full);
+        let before = pins.clone();
+        assert!(!add_pin(&mut pins, app("one-too-many".into()), &mut full) && full);
+        assert_eq!(pins, before);
     }
 }
