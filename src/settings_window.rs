@@ -142,6 +142,8 @@ const ASK_BTN: usize = 236;
 const NOTIFS: usize = 237;
 const CAPS_PILL: usize = 238;
 const HIDE_TASKBAR: usize = 239;
+/// "Add all" in the Agent status card: every detected agent that has no hook yet.
+const ADD_ALL: usize = 240;
 /// The five shortcut switches (`hotkeys::KEYS` order).
 const HOTKEY: usize = 222;
 /// The hidden-apps list and its "Show in dock" button.
@@ -594,6 +596,7 @@ const PAGES: &[Page] = &[
                         "Show agent status",
                         "The eyes and pill show a coding agent working",
                     ),
+                    r(ADD_ALL, Kind::Btn, "Add all", "Every detected agent"),
                     r(AGENT_BTN, Kind::Btn, "Add hook", "Claude Code"),
                     r(AGENT_BTN + 1, Kind::Btn, "Add hook", "Codex"),
                     r(AGENT_BTN + 2, Kind::Btn, "Add hook", "Gemini CLI"),
@@ -1466,6 +1469,18 @@ fn select(combo: HWND, row: Option<usize>) {
     }
 }
 /// The selected row of a drop-down list; `None` when nothing is chosen.
+/// The local date and time, for the name of an agent file's backup copy.
+fn backup_stamp() -> String {
+    let now = prayer_os::local_now();
+    let (y, m, d) = now.ymd;
+    format!(
+        "{y:04}{m:02}{d:02}-{:02}{:02}{:02}",
+        now.secs / 3600,
+        now.secs / 60 % 60,
+        now.secs % 60
+    )
+}
+
 fn chosen_row(combo: HWND) -> Option<usize> {
     // SAFETY: scalar query of our own combo box.
     usize::try_from(unsafe { SendMessageW(combo, CB_GETCURSEL, None, None) }.0).ok()
@@ -1676,6 +1691,13 @@ impl SettingsWindow {
     /// Each agent's row: whether it is installed and whether ROQA's hook is in its file.
     fn refresh_agents(&self) {
         let home = agent_hooks::home().unwrap_or_default();
+        if let Some(all) = self.items.iter().find(|item| item.id == ADD_ALL) {
+            let any = agent_hooks::AGENTS
+                .iter()
+                .any(|spec| agent_hooks::status(spec, &home) == agent_hooks::Status::Ready);
+            // SAFETY: our own live child control.
+            let _ = unsafe { EnableWindow(all.h, any) };
+        }
         for (i, spec) in agent_hooks::AGENTS.iter().enumerate() {
             let id = if i < 7 { AGENT_BTN + i } else { ASK_BTN };
             let Some(item) = self.items.iter().find(|item| item.id == id) else {
@@ -1729,14 +1751,7 @@ Other hooks stay. A copy of the file is kept.",
             )
         };
         if self.ask(spec.label, &body) {
-            let now = prayer_os::local_now();
-            let (y, m, d) = now.ymd;
-            let stamp = format!(
-                "{y:04}{m:02}{d:02}-{:02}{:02}{:02}",
-                now.secs / 3600,
-                now.secs / 60 % 60,
-                now.secs % 60
-            );
+            let stamp = backup_stamp();
             // The file may have changed while the box was open: write only the change the user was shown.
             let result = match make() {
                 Ok(again) if plan.same_as(&again) => agent_hooks::apply(&plan, &stamp),
@@ -1753,6 +1768,45 @@ Other hooks stay. A copy of the file is kept.",
         }
         self.refresh_agents();
     }
+
+    /// "Add all": one confirmation, then the hook of every detected agent that has none. Each is planned right
+    /// before it is written, so agents sharing a file (Claude Code and its questions) build on each other.
+    fn agent_add_all(&self) {
+        let (Some(home), Ok(exe)) = (agent_hooks::home(), std::env::current_exe()) else {
+            return;
+        };
+        let todo: Vec<_> = agent_hooks::AGENTS
+            .iter()
+            .filter(|spec| agent_hooks::status(spec, &home) == agent_hooks::Status::Ready)
+            .collect();
+        let labels: Vec<_> = todo.iter().map(|spec| spec.label).collect();
+        let body = format!(
+            "ROQA adds its hook to:\n\n{}\n\nA copy of each file is kept next to it.",
+            labels.join("\n")
+        );
+        if todo.is_empty() || !self.ask("Add all hooks", &body) {
+            return;
+        }
+        let stamp = backup_stamp();
+        let mut problems = Vec::new();
+        for spec in &todo {
+            let result = agent_hooks::plan(spec, &home, &exe, true)
+                .and_then(|plan| agent_hooks::apply(&plan, &stamp));
+            if let Err(message) = result {
+                problems.push(format!("{}: {message}", spec.label));
+            }
+        }
+        if !problems.is_empty() {
+            self.notify(&problems.join("\n"), MB_ICONWARNING);
+        } else if todo.iter().any(|spec| spec.id == "codex") {
+            self.notify(
+                "Added. Trust it once in Codex with /hooks.",
+                MB_ICONINFORMATION,
+            );
+        }
+        self.refresh_agents();
+    }
+
     fn ask(&self, title: &str, body: &str) -> bool {
         let (body, title) = (wide(body), wide(title));
         // SAFETY: the live settings dialog owns this confirmation; both strings are terminated.
@@ -2432,6 +2486,7 @@ Other hooks stay. A copy of the file is kept.",
                         self.agent_click(id - AGENT_BTN)
                     }
                     (ASK_BTN, _) if notification == BN_CLICKED => self.agent_click(7),
+                    (ADD_ALL, _) if notification == BN_CLICKED => self.agent_add_all(),
                     (LIMCOPY, _) if notification == BN_CLICKED => {
                         // SAFETY: select-all then copy on our own read-only edit.
                         unsafe {
