@@ -166,7 +166,8 @@ impl Desktop {
                 agent::Report::State(_) if !self.settings.agent_status => {}
                 agent::Report::State(state) => {
                     if let Some(text) = self.agents.set(&name, state, now) {
-                        self.show_notice(text, now);
+                        // The small pill of an app's notification, like a reminder: it never expands the notch.
+                        self.pill_with(Some(text), PRAYER_NOTICE, power::Extra::Bell);
                     }
                 }
             }
