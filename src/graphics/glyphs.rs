@@ -421,7 +421,7 @@ thread_local! {
     static KIT: RefCell<Vec<Kit>> = const { RefCell::new(Vec::new()) };
 }
 
-fn stroke_style(factory: &ID2D1Factory) -> Result<ID2D1StrokeStyle> {
+pub(super) fn stroke_style(factory: &ID2D1Factory) -> Result<ID2D1StrokeStyle> {
     // SAFETY: the factory is live and copies this local stroke descriptor before returning.
     unsafe {
         factory.CreateStrokeStyle(
@@ -624,7 +624,14 @@ pub(super) fn draw(
     glyph: Glyph,
     color: D2D1_COLOR_F,
 ) -> Result<()> {
-    let side = square.right - square.left;
+    // Whole pixels, centred in the square: callers hand over scaled DIP sizes (18 DIP at 125 % is 22.5), and a
+    // fractional side would snap every stroke to a grid that does not fit the glyph.
+    let (width, height) = (square.right - square.left, square.bottom - square.top);
+    let side = width.round().max(1.0);
+    let (left, top) = (
+        (square.left + (width - side) / 2.0).round(),
+        (square.top + (height - side) / 2.0).round(),
+    );
     // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is local, the cached geometry
     // and style belong to this thread's factory, and the transform is put back before returning.
     unsafe {
@@ -664,8 +671,8 @@ pub(super) fn draw(
             M12: 0.0,
             M21: 0.0,
             M22: 1.0,
-            M31: square.left.round(),
-            M32: square.top.round(),
+            M31: left,
+            M32: top,
         });
         context.DrawGeometry(&shape, &brush, stroke_pixels(side), Some(&style));
         context.SetTransform(&before);
@@ -1028,6 +1035,25 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn a_fractional_square_draws_as_its_whole_pixel_square() {
+        // 18 DIP at 125 % is 22.5 px: it snaps to 23 px, centred, so strokes keep their whole-pixel rules.
+        let at = |left: f32, top: f32, side: f32| {
+            sample(30, |dc, rect| {
+                with_dc(dc, rect, |target| {
+                    let square = D2D_RECT_F {
+                        left,
+                        top,
+                        right: left + side,
+                        bottom: top + side,
+                    };
+                    draw(target, square, Glyph::Close, bgr(0xffffff))
+                })
+            })
+        };
+        assert_eq!(at(1.4, 1.2, 22.5), at(1.0, 1.0, 23.0));
+    }
+
     #[test]
     fn geometry_bounds_include_arcs_and_strokes_at_every_scale() {
         use windows::Win32::Graphics::Direct2D::{

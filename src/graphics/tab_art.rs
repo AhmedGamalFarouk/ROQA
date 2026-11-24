@@ -8,7 +8,10 @@ use crate::{
     layout::NotchBody,
     tabs::Tab,
 };
-use windows::Win32::Graphics::Direct2D::{D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1};
+use windows::Win32::Graphics::Direct2D::{
+    Common::{D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN},
+    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1,
+};
 
 /// Draws `draw` at `opacity` (a layer), or directly at full opacity. The layer exists only for the open and
 /// close frames, where the pill and a page cross-fade.
@@ -863,12 +866,24 @@ fn sun_arc(g: &Page, view: &crate::prayer_tab::View) -> Result<()> {
             g.context.CreateSolidColorBrush(&g.accent(0.6), None)?,
             g.context.CreateSolidColorBrush(&g.ink(0.22), None)?,
         );
-        const STEPS: usize = 24;
-        for step in 0..STEPS {
-            let (a, b) = (step as f32 / STEPS as f32, (step + 1) as f32 / STEPS as f32);
-            let brush = if b <= sun { &passed } else { &ahead };
+        // One round-capped stroke per part: separate flat-capped lines notch every bend of the curve.
+        let factory = g.context.GetFactory()?;
+        let style = glyphs::stroke_style(&factory)?;
+        for (from, to, brush) in [(0.0, sun, &passed), (sun, 1.0, &ahead)] {
+            if to <= from {
+                continue;
+            }
+            let path = factory.CreatePathGeometry()?;
+            let sink = path.Open()?;
+            const STEPS: usize = 24;
+            sink.BeginFigure(point(from), D2D1_FIGURE_BEGIN_HOLLOW);
+            for step in 1..=STEPS {
+                sink.AddLine(point(from + (to - from) * step as f32 / STEPS as f32));
+            }
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            sink.Close()?;
             g.context
-                .DrawLine(point(a), point(b), brush, 2.0 * g.scale, None);
+                .DrawGeometry(&path, brush, 2.0 * g.scale, Some(&style));
         }
         for stop in 0..5 {
             let u = stop as f32 / 4.0;

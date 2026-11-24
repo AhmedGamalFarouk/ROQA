@@ -1042,7 +1042,9 @@ fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
         right: r.right,
         bottom: mid + px(11),
     };
-    let (off_at, on_at) = (pill.left + px(2), pill.right - px(20));
+    // A circle of the pill's height less the same margin all round (rounded per side, so 18 DIP is never 23 x 22 px).
+    let knob_side = 2 * px(9);
+    let (off_at, on_at) = (pill.left + px(2), pill.right - px(2) - knob_side);
     // The thumb slides 150 ms when the state changes: the control remembers (state, start tick) in a window
     // property, and while it moves the toggle invalidates itself, so nothing runs once it settles.
     let thumb = {
@@ -1086,7 +1088,7 @@ fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
         let knob = RECT {
             left: thumb,
             top: mid - px(9),
-            right: thumb + px(18),
+            right: thumb + knob_side,
             bottom: mid + px(9),
         };
         // One knob rule in every theme: the same knob on and off, only the track changes.
