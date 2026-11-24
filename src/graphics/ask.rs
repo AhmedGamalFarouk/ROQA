@@ -1,4 +1,4 @@
-//! The notice row's special cases: a permission question's two-line wrap and whether it shows whole, and the bell.
+//! The permission question's two-line wrap and whether it shows whole.
 
 use super::*;
 
@@ -103,33 +103,6 @@ pub(super) fn two_lines(text: &str, fits: impl Fn(&str) -> bool) -> [String; 2] 
         }
     }
     wrap(&around(low)).unwrap_or_else(|| [around(low).into_iter().collect(), String::new()])
-}
-
-/// The bell just before the row's text, which is centred in `rect` (the row after the bell's 18 DIP).
-pub(super) fn bell(
-    context: &ID2D1DeviceContext,
-    rect: D2D_RECT_F,
-    text: &str,
-    font: &Font,
-    colour: D2D1_COLOR_F,
-    on: bool,
-) -> Result<()> {
-    if !on {
-        return Ok(());
-    }
-    let scale = font.size / 12.0;
-    let room = rect.right - rect.left;
-    let left =
-        rect.left + (room - text_width(text, font).unwrap_or(room).min(room)) / 2.0 - 16.0 * scale;
-    let mid = (rect.top + rect.bottom) / 2.0;
-    let side = 12.0 * scale;
-    let square = D2D_RECT_F {
-        left,
-        top: mid - side / 2.0,
-        right: left + side,
-        bottom: mid + side / 2.0,
-    };
-    glyphs::draw(context, square, Glyph::Bell, colour)
 }
 
 #[cfg(test)]

@@ -1,7 +1,92 @@
 //! Clicks on the notch: its buttons, widgets, month and the pressed controls.
-//! One `impl Desktop` block moved out of `host.rs` unchanged; the methods are `pub(super)` so the host reaches them.
 
 use super::*;
+use windows::Win32::{Foundation::POINT, UI::Input::KeyboardAndMouse::GetCapture};
+
+#[derive(Clone, Copy, PartialEq)]
+struct PaintedFooter {
+    layout: layout::NoticeFooter,
+    extra: power::Extra,
+    started: Option<Instant>,
+}
+
+type NoticePress = (Instant, power::Extra, bool);
+
+impl PaintedFooter {
+    fn identity(self) -> Option<NoticePress> {
+        Some((self.started?, self.extra, self.layout.compact))
+    }
+}
+
+#[derive(Default)]
+pub(super) struct NoticeInput {
+    presentation: Option<bool>,
+    footer: Option<PaintedFooter>,
+    // A press anywhere in the notice is consumed. Only a press on its action carries an identity.
+    press: Option<Option<NoticePress>>,
+    stationary: Option<(i32, i32)>,
+    hover_dirty: bool,
+}
+
+impl NoticeInput {
+    pub(super) fn painted(
+        &mut self,
+        presentation: Option<bool>,
+        layout: Option<layout::NoticeFooter>,
+        extra: power::Extra,
+        started: Option<Instant>,
+    ) {
+        let footer = layout.map(|layout| PaintedFooter {
+            layout,
+            extra,
+            started,
+        });
+        if footer != self.footer {
+            if let Some(pressed) = &mut self.press
+                && *pressed != footer.and_then(PaintedFooter::identity)
+            {
+                *pressed = None;
+            }
+            self.hover_dirty |= [self.footer, footer]
+                .into_iter()
+                .flatten()
+                .any(|footer| footer.extra == power::Extra::Bell && footer.started.is_some());
+            self.footer = footer;
+        }
+        if presentation == Some(true) && self.presentation != presentation {
+            let mut at = POINT::default();
+            // SAFETY: reads the pointer position into a valid output buffer.
+            self.stationary = unsafe { GetCursorPos(&mut at) }.ok().map(|()| (at.x, at.y));
+        }
+        self.presentation = presentation;
+    }
+
+    pub(super) fn hide(&mut self) {
+        self.painted(None, None, power::Extra::None, None);
+        self.stationary = None;
+        self.press = None;
+    }
+}
+
+impl Surface {
+    fn notice_limits_glance(&self) -> bool {
+        self.motion.target() < 1.0 && self.notice_input.presentation.is_some()
+    }
+
+    pub(super) fn notice_hover(&mut self, over: bool, media: bool, message: &MSG) {
+        if self.notice_input.stationary == Some((message.pt.x, message.pt.y)) {
+            return;
+        }
+        self.notice_input.stationary = None;
+        let over =
+            over && (!self.notice_limits_glance() || self.notice_glance(media, message.lParam));
+        self.set_notch_hover(over);
+    }
+
+    fn notice_glance(&self, media: bool, lparam: LPARAM) -> bool {
+        layout::notice_glance_at(self.bounds.width, self.dpi, media, point(lparam))
+    }
+}
 
 impl Desktop {
     /// Media control input on a notch: a click on a control. Returns whether `message` is consumed.
@@ -13,6 +98,9 @@ impl Desktop {
         else {
             return false;
         };
+        if self.footer_input(notch, message) {
+            return true;
+        }
         self.shot_input(notch, message);
         self.notice_input(notch, message);
         if message.message == WM_LBUTTONUP {
@@ -34,10 +122,126 @@ impl Desktop {
         }
         message.message == WM_LBUTTONUP && self.click_control(notch, message.lParam)
     }
+    fn footer_input(&mut self, notch: usize, message: &MSG) -> bool {
+        let surface = &mut self.surfaces[notch];
+        let input = &mut surface.notice_input;
+        if matches!(message.message, WM_LBUTTONDOWN | WM_CAPTURECHANGED) {
+            input.press = None;
+        }
+        let footer = input.footer;
+        let at = point(message.lParam);
+        let row = footer.is_some_and(|footer| footer.layout.hit(at, false));
+        let current = footer.filter(|footer| {
+            footer.started.is_some()
+                && footer.started == self.power.started()
+                && footer.extra == self.power.extra()
+        });
+        if matches!(message.message, WM_MOUSEMOVE | WM_MOUSELEAVE)
+            && (footer.is_some() || self.power.extra().footer())
+        {
+            self.power.hover(
+                message.message == WM_MOUSEMOVE
+                    && row
+                    && current.is_some_and(|footer| {
+                        matches!(footer.extra, power::Extra::Bell | power::Extra::Snoozed)
+                    }),
+                Instant::now(),
+            );
+            return false;
+        }
+        let action = current
+            .filter(|footer| match footer.extra {
+                power::Extra::Bell | power::Extra::Snoozed => row,
+                power::Extra::Snooze => footer.layout.hit(at, true),
+                _ => false,
+            })
+            .and_then(PaintedFooter::identity);
+        let media = self.pages.track(&self.media).is_some();
+        let apron = surface.notice_limits_glance() && !surface.notice_glance(media, message.lParam);
+        match message.message {
+            WM_LBUTTONDOWN if (row || apron) && !surface.grip.drag => {
+                surface.notice_input.press = Some(action);
+                // SAFETY: captures to the owned notch during the press, including a release outside it.
+                unsafe { SetCapture(surface.window.0) };
+                true
+            }
+            WM_LBUTTONUP if surface.notice_input.press.is_some() => {
+                let pressed = surface.notice_input.press.take().flatten();
+                // SAFETY: reads the calling thread's capture HWND.
+                let captured = unsafe { GetCapture() } == surface.window.0;
+                if captured {
+                    // SAFETY: this notch still owns the capture it took on press.
+                    let _ = unsafe { ReleaseCapture() };
+                }
+                let now = Instant::now();
+                if let Some((_, extra, _)) = action.filter(|_| captured && pressed == action) {
+                    if extra == power::Extra::Snooze {
+                        self.snooze();
+                    } else if self.power.settled(now) && self.power.clear_plain() {
+                        if self.power.promote(now) {
+                            self.present_notice();
+                        } else {
+                            if !self.shelf.shots.showing() {
+                                self.close_retired_notice(extra);
+                            }
+                            self.request_notches(Repaint::Full, |_| true);
+                        }
+                    }
+                }
+                true
+            }
+            WM_LBUTTONUP => (row || apron) && !surface.grip.drag,
+            _ => false,
+        }
+    }
+
+    pub(super) fn refresh_footer_hover(&mut self) -> u32 {
+        let mut dirty = false;
+        for surface in &mut self.surfaces {
+            dirty |= std::mem::take(&mut surface.notice_input.hover_dirty);
+        }
+        if !dirty || self.power.extra() != power::Extra::Bell {
+            return INFINITE;
+        }
+        let mut at = POINT::default();
+        let mut on = false;
+        // SAFETY: `at` is a valid buffer for the screen point.
+        if unsafe { GetCursorPos(&mut at) }.is_ok() {
+            // SAFETY: hit-tests the screen point without moving the pointer.
+            let hwnd = unsafe { WindowFromPoint(at) };
+            for surface in &mut self.surfaces {
+                if surface.visible
+                    && surface.window.0 == hwnd
+                    && let Some(footer) = surface.notice_input.footer
+                    && footer.started == self.power.started()
+                {
+                    let mut bounds = Default::default();
+                    // SAFETY: reads the bounds of this owned HWND into a valid output buffer.
+                    if unsafe { GetWindowRect(hwnd, &mut bounds) }.is_ok() {
+                        on = footer
+                            .layout
+                            .hit((at.x - bounds.left, at.y - bounds.top), false);
+                        if on {
+                            let _ = surface.track_pointer();
+                        }
+                    }
+                }
+            }
+        }
+        let now = Instant::now();
+        self.power.hover(on, now);
+        self.power
+            .deadline()
+            .map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+
     /// A plain notice row: the pointer on it holds it, and a click closes it once it has settled, so a click meant
     /// for something under it is not taken. Never consumes the message.
     fn notice_input(&mut self, notch: usize, message: &MSG) {
         let surface = &self.surfaces[notch];
+        if self.power.extra().footer() || surface.notice_input.footer.is_some() {
+            return;
+        }
         let now = Instant::now();
         let media = self.pages.track(&self.media).is_some();
         let on = self.power.text().is_some()
@@ -80,8 +284,11 @@ impl Desktop {
         let closed = &mut self.surfaces[notch];
         if motion::click_to_open()
             && closed.motion.target() < 1.0
-            && let Role::Notch { intent, .. } = &mut closed.role
+            && let Role::Notch {
+                intent, engaged, ..
+            } = &mut closed.role
         {
+            *engaged = true;
             open_notch(intent, &mut closed.motion);
             closed.live = true;
             return true;
@@ -147,12 +354,6 @@ impl Desktop {
             self.request_notches(Repaint::Full, |_| true);
             return true;
         }
-        if self.power.extra() == power::Extra::Snooze
-            && layout::notice_button_at(width, dpi, progress, live, 0, (x, y))
-        {
-            self.snooze();
-            return true;
-        }
         if layout::gear_at(width, dpi, progress, live, x, y) {
             if let Err(error) = self.open_settings() {
                 eprintln!("Settings: {error}");
@@ -177,7 +378,7 @@ impl Desktop {
         if page == Tab::Media
             && self.pages.tabs.on(Tab::Media)
             && !live
-            && self.power.text().is_none()
+            && (self.power.text().is_none() || self.power.extra().footer())
             && self.media.view().status().is_none()
             && layout::glance_at(width, dpi, progress, (x, y))
         {

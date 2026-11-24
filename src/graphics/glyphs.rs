@@ -76,6 +76,7 @@ pub enum Glyph {
     RepeatOne,
     /// The notice row's mark for an app's notification.
     Bell,
+    Clock,
     WiFi,
     Bluetooth,
     Airplane,
@@ -83,7 +84,7 @@ pub enum Glyph {
     MoonTheme,
     Sliders,
 }
-const ALL: [Glyph; 51] = [
+const ALL: [Glyph; 52] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -129,6 +130,7 @@ const ALL: [Glyph; 51] = [
     Glyph::Repeat,
     Glyph::RepeatOne,
     Glyph::Bell,
+    Glyph::Clock,
     Glyph::WiFi,
     Glyph::Bluetooth,
     Glyph::Airplane,
@@ -241,6 +243,7 @@ impl Glyph {
                 "M10 9h8a2 2 0 0 1 2 2v5.5a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2V11a2 2 0 0 1 2-2zM5 14.5V8a2 2 0 0 1 2-2h8"
             }
             Glyph::Bell => "M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15zM10 20.5a2 2 0 0 0 4 0",
+            Glyph::Clock => "M12 3a9 9 0 1 1 0 18a9 9 0 1 1 0-18zM12 7v5l4 2",
             Glyph::Chevron => "M6 15l6-6 6 6",
             Glyph::Expand => "M6 9l6 6 6-6",
             Glyph::Back => "M15 6l-6 6 6 6",

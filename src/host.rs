@@ -111,7 +111,7 @@ impl Drop for Apartment {
 }
 
 struct NotchShadow {
-    painted: Cell<Option<(f32, bool)>>,
+    painted: Cell<Option<(f32, bool, f32)>>,
     canvas: Canvas,
     window: NativeWindow,
 }
@@ -126,10 +126,15 @@ impl NotchShadow {
         })
     }
     fn paint(&self, scene: &NotchScene, notch: HWND) -> Result<()> {
-        let frame = if motion::smooth(scene.progress) == 0.0 {
-            (0.0, false)
+        let notice = if scene.extra.footer() {
+            scene.fx.notice
         } else {
-            (scene.progress, scene.track.is_some())
+            0.0
+        };
+        let frame = if motion::smooth(scene.progress) == 0.0 && notice == 0.0 {
+            (0.0, false, 0.0)
+        } else {
+            (scene.progress, scene.track.is_some(), notice)
         };
         if self.painted.get() == Some(frame) {
             return Ok(());
@@ -414,6 +419,8 @@ struct Surface {
     /// The page a switch left, while its slide runs, and the last notice text (it fades out after it ends).
     page_from: Option<Tab>,
     last_notice: String,
+    last_notice_extra: power::Extra,
+    notice_input: notch_clicks::NoticeInput,
     page_dir: f32,
     page_fx: Tween,
     notice_fx: Tween,
@@ -530,9 +537,11 @@ impl Surface {
             page_at: 0,
             page_from: None,
             last_notice: String::new(),
+            last_notice_extra: power::Extra::None,
+            notice_input: notch_clicks::NoticeInput::default(),
             page_dir: 1.0,
             page_fx: Tween::rest(1.0),
-            notice_fx: Tween::rest(1.0),
+            notice_fx: Tween::rest(0.0),
             notice_on: false,
             hover_unpainted: false,
             overlay: false,
@@ -599,6 +608,7 @@ impl Surface {
             self.live = true;
         }
         if !visible {
+            self.notice_input.hide();
             // A hidden window gets no leave notification and needs no frames: settle at rest now.
             (self.hovered, self.live, self.motion) = (false, false, Tween::rest(0.0));
             self.slide = Tween::rest(0.0);
@@ -721,6 +731,7 @@ impl Surface {
         layout::set_page_height(layout::reminders_height(reminders.len()));
         let progress = self.motion.value(now);
         let notice = power.text();
+        let extra = power.extra();
         // The screenshot pill holds the row while no notice shows; its row eases in and out like one.
         let shot_on = shelf.shots.showing() && notice.is_none();
         if shot_on {
@@ -742,6 +753,10 @@ impl Surface {
         {
             self.last_notice = text.to_owned();
         }
+        let prior_extra = self.last_notice_extra;
+        if notice.is_some() || shot_on {
+            self.last_notice_extra = extra;
+        }
         if (notice.is_some() || shot_on) != self.notice_on {
             self.notice_on = !self.notice_on;
             if self.visible {
@@ -751,7 +766,9 @@ impl Surface {
                 } else {
                     (0.0, 1.0)
                 };
-                self.notice_fx = Tween::rest(from);
+                if !prior_extra.footer() && !extra.footer() {
+                    self.notice_fx = Tween::rest(from);
+                }
                 self.notice_fx
                     .retarget(to, motion::PAGE_TIME, motion::SLIDE);
                 self.live = true;
@@ -764,6 +781,13 @@ impl Surface {
         }
         let fading_out = notice.is_none() && self.notice_fx.running(now);
         let notice = notice.or((shot_on || fading_out).then_some(self.last_notice.as_str()));
+        let extra = if fading_out && self.last_notice_extra.footer() {
+            self.last_notice_extra
+        } else {
+            extra
+        };
+        let shown = self.notice_fx.value(now);
+        layout::set_notice_footer(page, track.is_some(), notice.is_some() && extra.footer());
         // The plain panel makes room for the notice's row as it eases in, and gives it back as it leaves.
         if power.text().is_some() {
             layout::set_notice_ask(matches!(power.extra(), power::Extra::Ask(_)));
@@ -772,11 +796,14 @@ impl Surface {
             layout::set_notice_ask(false);
             layout::set_notice_shot(true);
         }
-        layout::set_notice_shown(if notice.is_some() {
-            self.notice_fx.value(now)
-        } else {
-            0.0
-        });
+        layout::set_notice_shown(if notice.is_some() { shown } else { 0.0 });
+        let footer = layout::NoticeFooter::current(
+            self.bounds.width,
+            self.dpi,
+            progress,
+            track.is_some(),
+            shown,
+        );
         let level = audio.level().map_or(0.0, |level| f32::from(level.percent));
         if self.grip.drag {
             self.volume_fill = Tween::rest(level); // the thumb follows the pointer without lag
@@ -895,7 +922,8 @@ impl Surface {
             timer: timer.as_ref(),
             reminders: &reminders,
             notice,
-            extra: power.extra(),
+            extra,
+            footer,
             shot: shots::scene(&shelf.shots, shot_on, now),
             shelf: &slots,
             shelf_undo: shelf.removed.is_some() && !copied,
@@ -936,7 +964,12 @@ impl Surface {
         let status = track.is_none().then(|| media.view().status()).flatten();
         let status = status.or(glance.as_ref().map(|(text, _)| text.as_str()));
         self.canvas
-            .paint_notch(&scene, status.filter(|_| pages.tabs.on(Tab::Media)))
+            .paint_notch(&scene, status.filter(|_| pages.tabs.on(Tab::Media)))?;
+        let presentation = (extra.footer() && notice.is_some() && shown > 0.0)
+            .then(|| motion::reveal(progress) == 0.0);
+        self.notice_input
+            .painted(presentation, footer, extra, power.started());
+        Ok(())
     }
     /// Repaints only the visualizer slot with the new bar heights.
     fn paint_meter(&mut self, peaks: [f32; audio::BARS]) -> Result<()> {
@@ -2257,6 +2290,18 @@ impl Desktop {
     }
     /// Opens every visible notch; a notch hidden by a full-screen app stays hidden.
     fn open_notches(&mut self) {
+        self.peek_tucked_notches();
+        for surface in &mut self.surfaces {
+            if surface.visible
+                && let Role::Notch { intent, linger, .. } = &mut surface.role
+            {
+                linger.clear();
+                open_notch(intent, &mut surface.motion);
+                surface.live = true;
+            }
+        }
+    }
+    fn peek_tucked_notches(&mut self) {
         // An alert or a new song shows a tucked notch for a while, like Bloom's peek.
         let now = Instant::now();
         let hidden: Vec<_> = self
@@ -2273,15 +2318,6 @@ impl Desktop {
         if peeked {
             // A paint failure leaves the notch hidden; the next pass retries.
             let _ = self.apply_visibility();
-        }
-        for surface in &mut self.surfaces {
-            if surface.visible
-                && let Role::Notch { intent, linger, .. } = &mut surface.role
-            {
-                linger.clear();
-                open_notch(intent, &mut surface.motion);
-                surface.live = true;
-            }
         }
     }
     /// Shows a delayed DWM thumbnail, held through pointer transfer and popup interaction.
@@ -3658,7 +3694,7 @@ impl Desktop {
                     let over = layout::notch_hit(width, surface.dpi, progress, media, rail, x, y);
                     // While a menu is open the notch does not open under it.
                     let was = matches!(surface.role, Role::Notch { engaged: true, .. });
-                    surface.set_notch_hover(over && self.menu.is_none());
+                    surface.notice_hover(over && self.menu.is_none(), media, message);
                     if over
                         && !was
                         && progress < 0.1
@@ -4123,7 +4159,9 @@ impl Desktop {
         {
             self.settings_window.take();
         }
-        Ok((wait, self.animate()?))
+        let running = self.animate()?;
+        let wait = wait.min(self.refresh_footer_hover());
+        Ok((wait, running))
     }
     /// A device loss schedules a rebuild and yields `fallback`; any other failure still ends the host.
     fn survive<T>(&mut self, result: Result<T>, fallback: T) -> Result<T> {

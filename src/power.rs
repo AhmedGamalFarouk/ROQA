@@ -118,6 +118,8 @@ pub enum Extra {
     Progress(u8),
     /// A Snooze button (a due reminder).
     Snooze,
+    /// Plain confirmation shown in the same place as the reminder it replaces.
+    Snoozed,
     /// Deny and Allow buttons for the permission question of this hook process.
     Ask(u32),
     /// A bell before the text: an app's notification or a script's line. Otherwise a plain notice.
@@ -125,9 +127,13 @@ pub enum Extra {
 }
 
 impl Extra {
+    pub fn footer(self) -> bool {
+        matches!(self, Self::Bell | Self::Snooze | Self::Snoozed)
+    }
+
     /// No button or bar: the notice may wait in the queue and may be cut short or dismissed.
     fn plain(self) -> bool {
-        matches!(self, Extra::None | Extra::Bell)
+        matches!(self, Extra::None | Extra::Bell | Extra::Snoozed)
     }
 }
 
@@ -285,6 +291,11 @@ impl Power {
 
     pub fn text(&self) -> Option<&str> {
         self.notice.as_ref().map(|(text, _)| text.as_str())
+    }
+
+    pub fn started(&self) -> Option<Instant> {
+        self.text()?;
+        self.since
     }
 
     /// True once when the notice has run its course.

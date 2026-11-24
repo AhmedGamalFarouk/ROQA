@@ -149,12 +149,13 @@ impl Desktop {
         }
         let surfaces = &self.surfaces;
         let owners = self.interaction_owners();
+        let notice = self.power.extra().footer();
         let popup = |s: &Surface| owners.contains(&Some(s.window.0));
         changed |= self.tuck_notch.tick(now, |device| {
             surfaces.iter().any(|s| {
                 s.kind() == SurfaceKind::Notch
                     && s.monitor == device
-                    && (s.hovered || s.motion.target() > 0.0 || popup(s))
+                    && (s.hovered || s.motion.target() > 0.0 || (notice && s.visible) || popup(s))
             })
         });
         changed |= self.tuck.tick(now, |device| {
@@ -219,6 +220,9 @@ pub(super) struct Linger {
     held: bool,
 }
 impl Linger {
+    pub(super) fn waiting(&self) -> bool {
+        self.held || self.due.is_some()
+    }
     pub(super) fn clear(&mut self) {
         self.due = None;
     }

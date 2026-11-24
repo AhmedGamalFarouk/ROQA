@@ -72,6 +72,7 @@ mod moon;
 pub use glyphs::{draw_gdi as draw_settings_glyph, round_gdi};
 mod ask;
 mod limit_row;
+mod notice_footer;
 mod shot;
 mod tab_art;
 use ask::wrapped;
@@ -224,6 +225,7 @@ pub struct NotchScene<'a> {
     pub notice: Option<&'a str>,
     /// What the notice row carries besides its text: an Eject button or a progress bar.
     pub extra: Extra,
+    pub footer: Option<layout::NoticeFooter>,
     /// The screenshot pill on the notice row while it shows (no notice then).
     pub shot: Option<ShotScene<'a>>,
     /// The file shelf's visible entries (S6, PROVISIONAL); empty draws nothing.
@@ -379,7 +381,7 @@ impl Canvas {
                 right: rect.left + (pixels.left + pixels.width) as f32,
                 bottom: rect.top + pixels.height as f32,
             };
-            let open = motion::smooth(scene.progress);
+            let open = notice_footer::shadow_strength(scene);
             if open > 0.0 && p.shadow > 0.0 {
                 notch_shadow(context, &body, shape.radius * scale, scale, open * p.shadow)?;
             }
@@ -461,6 +463,7 @@ impl Canvas {
             // SAFETY: balances the PushAxisAlignedClip above on the same live context.
             unsafe { context.PopAxisAlignedClip() };
             drawn?;
+            notice_footer::draw(context, scene, &body, &outline, &p)?;
             // The handle hangs below the body, so it is drawn outside the body's clip.
             match &scene.rail {
                 Some(handle) => tab_art::rail(context, scene, handle, rect, &p),
@@ -1002,18 +1005,19 @@ fn notch_text(
 ) -> Result<()> {
     timer_text(context, scene, body, scale, p)?;
     notice_text(context, scene, body, scale, p)?;
+    let glance = notice_footer::glance_body(scene, *body, scale);
     if let Some(frame) = scene.eyes {
-        tab_art::draw_eyes(context, scene, frame, body, scale, p)?;
+        tab_art::draw_eyes(context, scene, frame, &glance, scale, p)?;
     }
-    tab_art::draw_privacy(context, scene, body, scale, p)?;
-    tab_art::draw_low(context, scene, body, scale, p)?;
+    tab_art::draw_privacy(context, scene, &glance, scale, p)?;
+    tab_art::draw_low(context, scene, &glance, scale, p)?;
     if scene.tab == Tab::Media {
-        media_page(context, scene, body, scale, art, status, p)?;
+        media_page(context, scene, &glance, scale, art, status, p)?;
     } else {
         // Another page: the pill's content fades out as the page fades in.
         let reveal = motion::reveal(scene.progress);
         tab_art::faded(context, 1.0 - reveal, || {
-            media_page(context, scene, body, scale, art, status, p)
+            media_page(context, scene, &glance, scale, art, status, p)
         })?;
         if let Some(old) = scene.leaving.filter(|&old| old != Tab::Media) {
             tab_art::faded(context, 1.0 - scene.fx.page, || {
@@ -1086,9 +1090,7 @@ fn media_page(
     } else {
         0.0
     };
-    let status = scene
-        .notice
-        .is_none()
+    let status = (scene.notice.is_none() || scene.extra.footer())
         .then(|| status.unwrap_or("Nothing playing"));
     if let Some(track) = scene.track {
         let font = media_clock(motion::smooth(scene.progress), scale);
@@ -1301,6 +1303,9 @@ fn notice_text(
     scale: f32,
     p: &Palette,
 ) -> Result<()> {
+    if scene.extra.footer() {
+        return Ok(());
+    }
     let reveal = motion::reveal(scene.progress);
     let Some(text) = scene.notice.filter(|_| reveal > 0.0) else {
         return Ok(());
@@ -1309,7 +1314,6 @@ fn notice_text(
     // Buttons from the right: the first is the alert's one primary action, a solid accent capsule; a second is quiet.
     let labels: &[&str] = match scene.extra {
         Extra::Eject(_) => &["Eject"],
-        Extra::Snooze => &["Snooze"],
         // Deny is the primary (accent) button, rightmost; Allow is quiet.
         Extra::Ask(_) => &["Deny", "Allow"],
         _ => &[],
@@ -1330,7 +1334,6 @@ fn notice_text(
         designator: 1.0,
         align: DWRITE_TEXT_ALIGNMENT_CENTER,
     };
-    let bell = 18.0 * scale * f32::from(scene.extra == Extra::Bell);
     // The text gives the button its place at the row's right.
     let right = bar_left.unwrap_or_else(|| {
         button.map_or(slot.width as f32, |button| {
@@ -1338,14 +1341,13 @@ fn notice_text(
         })
     });
     let rect = D2D_RECT_F {
-        left: left + bell,
+        left,
         top,
         right: left + right,
         bottom: top + slot.height as f32,
     };
     let alpha = reveal * scene.fx.notice;
     let colour = with_alpha(p.ink, p.ink_alpha(0.85 * alpha));
-    ask::bell(context, rect, text, &font, colour, bell > 0.0)?;
     let width = rect.right - rect.left;
     let lines = if ask {
         wrapped(text, width, |line| {
@@ -2283,6 +2285,15 @@ fn draw_text(
     color: D2D1_COLOR_F,
 ) -> Result<()> {
     let layout = text_layout(text, font, rect.right - rect.left, rect.bottom - rect.top)?;
+    draw_layout(context, &layout, rect, color)
+}
+
+fn draw_layout(
+    context: &ID2D1DeviceContext,
+    layout: &IDWriteTextLayout,
+    rect: D2D_RECT_F,
+    color: D2D1_COLOR_F,
+) -> Result<()> {
     // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is scoped to this draw.
     unsafe {
         let brush = context.CreateSolidColorBrush(&color, None)?;
@@ -2291,7 +2302,7 @@ fn draw_text(
                 X: rect.left,
                 Y: rect.top,
             },
-            &layout,
+            layout,
             &brush,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
         );
@@ -3200,6 +3211,7 @@ mod media_tests {
             reminders: &[],
             notice: None,
             extra: Extra::None,
+            footer: None,
             shot: None,
             shelf: &[],
             shelf_undo: false,
@@ -3246,6 +3258,7 @@ mod media_tests {
                 reminders: &[],
                 notice: None,
                 extra: Extra::None,
+                footer: None,
                 shot: None,
                 shelf: &[],
                 shelf_undo: false,
@@ -3493,6 +3506,7 @@ mod media_tests {
                 reminders: &[],
                 notice: None,
                 extra: Extra::None,
+                footer: None,
                 shot: None,
                 shelf: &[],
                 shelf_undo: false,
@@ -3561,6 +3575,7 @@ mod media_tests {
                     reminders: &[],
                     notice: None,
                     extra: Extra::None,
+                    footer: None,
                     shot: None,
                     shelf: &[],
                     shelf_undo: false,
@@ -3617,6 +3632,7 @@ mod media_tests {
             reminders: &[],
             notice: None,
             extra: Extra::None,
+            footer: None,
             shot: None,
             shelf: &[],
             shelf_undo: false,

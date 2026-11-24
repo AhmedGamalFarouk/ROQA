@@ -5,6 +5,9 @@ use crate::{
 };
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering::Relaxed};
 
+mod notice_footer;
+pub use notice_footer::{NoticeFooter, notice_glance_at, set_notice_footer};
+
 /// Notch outline in DIPs: body size, bottom corner radius and the concave "ear" fillets that
 /// blend the top corners into the screen edge.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -51,8 +54,8 @@ pub const TILE_RADIUS: f32 = 14.0;
 pub const WIDE_W: f32 = 420.0;
 /// The notch HWND never moves or resizes: the media panel and ears plus room for the open
 /// overshoot and the soft shadow, keeping the plain panel's 40 DIP of side and 44 DIP of bottom
-/// shadow room (the window is 208 DIP tall so a tall page, its notice row and the rail below fit). `notch_region` bounds body input; a separate transparent HWND draws the shadow.
-pub const NOTCH_WINDOW: (i32, i32) = (440, 216);
+/// shadow room. The height fits a tall page, its notice footer and the rail at open overshoot.
+pub const NOTCH_WINDOW: (i32, i32) = (440, 256);
 /// Pointer slop around the drawn body that still counts as hovering it.
 const NOTCH_HOVER_SLOP: f32 = 4.0;
 
@@ -123,7 +126,9 @@ fn tall(shape: NotchShape, notice_row: bool) -> NotchShape {
     let page = f32::from(PAGE_HEIGHT.load(Relaxed));
     let shown = f32::from(NOTICE_SHOWN.load(Relaxed)) / 1000.0;
     NotchShape {
-        height: if notice_row || page > 0.0 {
+        height: if let Some(height) = notice_footer::grown_height(shape.height.max(page), shown) {
+            height
+        } else if notice_row || page > 0.0 {
             with_notice(shape.height.max(page), shown) + ask_room(shown)
         } else {
             shape.height + MEDIA_NOTICE_ROOM * shown + ask_room(shown)
@@ -159,6 +164,10 @@ fn pill(from: NotchShape, to: NotchShape, percent: u16) -> NotchShape {
 /// Shape at an animation progress, for the media or the plain clock notch: size follows the
 /// spring's overshoot; corners and ears never overshoot.
 pub fn notch_shape(progress: f32, media: bool) -> NotchShape {
+    notch_shape_with_notice(progress, media, true)
+}
+
+pub fn notch_shape_with_notice(progress: f32, media: bool, compact: bool) -> NotchShape {
     let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let settled = progress.clamp(0.0, 1.0);
     let (from, to) = if media {
@@ -167,6 +176,12 @@ pub fn notch_shape(progress: f32, media: bool) -> NotchShape {
         (NOTCH, tall(NOTCH_EXPANDED, true))
     };
     let from = pill(from, to, PILL_PERCENT.load(Relaxed));
+    let shown = f32::from(NOTICE_SHOWN.load(Relaxed)) / 1000.0;
+    let from = if compact {
+        notice_footer::grow_glance(from, shown)
+    } else {
+        from
+    };
     NotchShape {
         width: lerp(from.width, to.width, progress).min(if wide_page() {
             WIDE_W
@@ -471,7 +486,14 @@ pub fn gear(dpi: u32, media: bool) -> Bounds {
     scaled_bounds(
         (
             shape.width - 16.0 - GEAR_SIZE,
-            shape.height - 18.0 - GEAR_SIZE,
+            if notice_footer::active() {
+                MEDIA_EXPANDED
+                    .height
+                    .max(f32::from(PAGE_HEIGHT.load(Relaxed)))
+            } else {
+                shape.height
+            } - 18.0
+                - GEAR_SIZE,
             GEAR_SIZE,
             GEAR_SIZE,
         ),
@@ -785,7 +807,7 @@ fn notice_slot(media: bool, page: u16, ask: bool, dpi: u32) -> Bounds {
 }
 
 /// A button on the notice row, counted from the right (0 is the last): 52 DIPs wide, 14 high and 6 apart, in pixels
-/// from the body's left and top edges, centred in a two-line row. Eject, Snooze, and Deny with Allow use it.
+/// from the body's left and top edges, centred in a two-line row. Eject and Deny with Allow use it.
 pub fn notice_button(media: bool, dpi: u32, from_right: usize) -> Bounds {
     let slot = power_notice(media, dpi);
     let (width, height) = (scaled(52.0, dpi), scaled(14.0, dpi));
@@ -1486,7 +1508,7 @@ mod tests {
                 x: 1480,
                 y: 0,
                 width: 880,
-                height: 432
+                height: 512
             }
         );
     }
@@ -1501,9 +1523,9 @@ mod tests {
         };
         // (dpi, window, media pill, media panel) in physical pixels.
         for (dpi, window, pill, panel) in [
-            (96, (440, 216), (262, 30), (360, 128)),
-            (144, (660, 324), (393, 45), (540, 192)),
-            (192, (880, 432), (524, 60), (720, 256)),
+            (96, (440, 256), (262, 30), (360, 128)),
+            (144, (660, 384), (393, 45), (540, 192)),
+            (192, (880, 512), (524, 60), (720, 256)),
         ] {
             let bounds = placement(work, dpi, SurfaceKind::Notch, 0);
             assert_eq!((bounds.width, bounds.height), window);

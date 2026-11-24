@@ -35,7 +35,13 @@ impl Desktop {
     }
     /// `show_notice`, with a button or bar on its row.
     pub(super) fn show_notice_with(&mut self, text: String, now: Instant, extra: power::Extra) {
-        self.power.announce(text, now, PRAYER_NOTICE, extra);
+        let admitted = self.power.announce(text, now, PRAYER_NOTICE, extra);
+        if extra.footer() || self.power.extra().footer() {
+            if admitted {
+                self.present_notice();
+            }
+            return;
+        }
         for surface in &mut self.surfaces {
             if surface.kind() == SurfaceKind::Notch && !surface.visible {
                 // Painted before it shows, as when a full-screen app ends.
@@ -181,7 +187,12 @@ impl Desktop {
             if self.settings.reminder_plays() {
                 chime();
             }
-            self.show_notice_with(remind::shown(&label), now, power::Extra::Snooze);
+            let copy = if label.is_empty() {
+                String::new()
+            } else {
+                remind::shown(&label)
+            };
+            self.show_notice_with(copy, now, power::Extra::Snooze);
             self.last_reminder = label;
         }
         // A zero wait is a reminder the row cannot show yet: the row's own deadline and the click wake the host.
@@ -282,8 +293,17 @@ impl Desktop {
             return;
         };
         let now = Instant::now();
-        self.power.announce(text, now, hold, extra);
-        self.open_notches();
+        let admitted = self.power.announce(text, now, hold, extra);
+        if admitted || (!extra.footer() && !self.power.extra().footer()) {
+            self.present_notice();
+        }
+    }
+    pub(super) fn present_notice(&mut self) {
+        if self.power.extra().footer() {
+            self.peek_tucked_notches();
+        } else {
+            self.open_notches();
+        }
         self.request_notches(Repaint::Full, |_| true);
     }
     /// The Snooze button on a due reminder: the same words again in ten minutes, or, with the list full, the
@@ -310,7 +330,7 @@ impl Desktop {
                 "Snoozed for 10 min".into(),
                 now,
                 DEVICE_NOTICE,
-                power::Extra::None,
+                power::Extra::Snoozed,
             );
         }
         self.request_notches(Repaint::Full, |_| true);
@@ -443,15 +463,16 @@ impl Desktop {
     #[inline(never)]
     pub(super) fn refresh_power(&mut self) -> u32 {
         let now = Instant::now();
+        let retiring = self.power.extra();
         let ended = self.power.over(now);
         // The screenshot pill takes a freed row first; the notice that waited for the row shows after it.
         let shot = self.sync_shots(now);
         let promoted = self.power.promote(now);
         if ended || shot || promoted {
             if self.power.text().is_none() && !self.shelf.shots.showing() {
-                self.surfaces.iter_mut().for_each(Surface::close_alert);
+                self.close_retired_notice(retiring);
             } else if shot || promoted {
-                self.open_notches();
+                self.present_notice();
             }
             self.request_notches(Repaint::Full, |_| true);
         }
@@ -462,6 +483,17 @@ impl Desktop {
             .chain(shot_due)
             .min()
             .map_or(INFINITE, |due| milliseconds_until(due, now))
+    }
+    pub(super) fn close_retired_notice(&mut self, extra: power::Extra) {
+        let owners = self.interaction_owners();
+        for surface in &mut self.surfaces {
+            if !extra.footer()
+                || (!owners.contains(&Some(surface.window.0))
+                    && matches!(&surface.role, Role::Notch { linger, .. } if !linger.waiting()))
+            {
+                surface.close_alert();
+            }
+        }
     }
     pub(super) fn water_today(&self) -> u8 {
         water::today(

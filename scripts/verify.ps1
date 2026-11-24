@@ -41,5 +41,8 @@ foreach ($command in @(@{ Name = 'checks'; Script = 'check.ps1'; Arguments = '' 
     } finally { $child.Dispose() }
 }
 # Size is reported, not gated (owner decision 2026-11-16).
-$size = (Get-Item -LiteralPath (Join-Path $projectRoot 'target/release/roqa.exe')).Length
+$target = $env:CARGO_TARGET_DIR
+if (!$target) { $target = 'target' }
+if (![IO.Path]::IsPathRooted($target)) { $target = Join-Path $projectRoot $target }
+$size = (Get-Item -LiteralPath (Join-Path $target 'release/roqa.exe')).Length
 Write-Host "size: $size B (reported, no limit)."

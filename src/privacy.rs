@@ -3,7 +3,7 @@
 //! `LastUsedTimeStop` 0 means in use). One `RegNotifyChangeKeyValue` handle sits in the event loop's wait set:
 //! no thread, no polling, one registry read at start and one per signal. App names are never kept or logged.
 
-use crate::ipc::OwnedHandle;
+use crate::{ipc::OwnedHandle, motion};
 use std::time::{Duration, Instant};
 use windows::{
     Win32::{
@@ -27,7 +27,8 @@ pub fn in_use(start: u64, stop: u64) -> bool {
 
 /// The mic dot's centre in a notch window `width` wide, in pixels: the same place `draw_privacy` paints it.
 pub fn mic_dot(width: i32, dpi: u32, progress: f32, media: bool) -> (i32, i32) {
-    let shape = crate::layout::notch_shape(progress, media);
+    let shape =
+        crate::layout::notch_shape_with_notice(progress, media, motion::reveal(progress) > 0.0);
     let body = crate::layout::notch_body(width, dpi, shape);
     let scale = dpi as f32 / 96.0;
     let middle = (shape.height / 2.0).min(15.0);
