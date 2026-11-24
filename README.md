@@ -42,6 +42,7 @@
   Coverage depends on drivers exposing `System.Devices.BatteryLife` on the device or its Windows container. Receivers that expose only a USB receiver cannot identify or report each wireless peripheral; vendor protocols and direct Bluetooth GATT reads are not implemented. A receiver remaining plugged in may still be reported connected after its peripheral switches off. No hardware coverage is claimed until tested on that hardware.
 - **Dock Context Menu:** Clean right-click menu with options to launch new instances, pin/unpin apps, and close windows.
 - **Windows quick links:** Right-click the dock Windows icon for Windows settings, installed apps, system, network, power, File Explorer, and Task Manager. The menu stays above that icon on its monitor. Left-click Start and physical Win+X keep their Windows behavior.
+- **Volume and brightness:** Two optional dock buttons (Settings, Volume and brightness). Hover or click opens capsule sliders above the button: master volume, each app playing sound and the output devices, or one brightness slider per monitor that answers DDC/CI.
 - **Notification Badges:** Real-time unread counter and status indicator dots on application icons.
 - **Desktop Strip:** Quick show-desktop strip.
 
@@ -127,7 +128,7 @@ roqa --quit              # Gracefully shut down ROQA and persist settings
 ROQA includes automated native verification scripts:
 
 ```powershell
-# Comprehensive suite (checks, clippy, unit tests, release build, size ratchet)
+# Comprehensive suite (checks, clippy, unit tests, release build, size report)
 ./scripts/verify.ps1
 
 # Interactive native smoke test (tests surface composition, DPI, focus preservation)
