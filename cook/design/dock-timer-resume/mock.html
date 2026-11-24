@@ -1,0 +1,80 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Dock timer resume</title>
+<style>
+*{box-sizing:border-box;margin:0}
+body{background:#5F636B;font-family:"Segoe UI Variable Text","Segoe UI",sans-serif;color:#fff;padding:24px;font-size:13px;width:max-content}
+.title{font:600 15px "Segoe UI Variable Display";color:#fff;margin-bottom:14px}
+.cap{font:500 10.5px "Segoe UI Variable Text";color:#ECEEF2;margin-top:8px;max-width:300px;line-height:1.35}
+.row{display:flex;gap:26px;align-items:flex-end}
+.col{display:flex;flex-direction:column;gap:18px}
+.stage{padding:28px 24px;border-radius:24px;background:#6B6E75}
+.classic{--body:#000;--ink:#fff;--acc:#FFB454;--f:rgba(255,255,255,.14);--trk:rgba(255,255,255,.18)}
+.midnight{--body:#0B1020;--ink:#E8EEFF;--acc:#FFB454;--f:rgba(232,238,255,.15);--trk:rgba(232,238,255,.18)}
+.light{--body:#ECEEF2;--ink:#14161A;--acc:#9A5200;--f:rgba(20,22,26,.12);--trk:rgba(20,22,26,.30)}
+.frosted{--body:rgba(16,20,32,.74);--ink:#fff;--acc:#FFB454;--f:rgba(255,255,255,.14);--trk:rgba(255,255,255,.18)}
+.liquid{--body:linear-gradient(rgba(24,32,56,.78),rgba(14,20,38,.74));--ink:#fff;--acc:#FFB454;--f:rgba(255,255,255,.15);--trk:rgba(255,255,255,.18)}
+.surf{background:var(--body);color:var(--ink);box-shadow:0 8px 24px rgba(0,0,0,.35)}
+svg.g{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
+/* dock: cell 86 wide for the timer, hover chip 36 high = cell minus 4, glyph 20 at x 9, text 13 at glyph+5 */
+.dock{display:inline-flex;align-items:center;height:56px;padding:0 12px;border-radius:28px;gap:0}
+.app{width:36px;height:36px;border-radius:18px;background:var(--f);margin:0 4px}
+.cell{width:86px;height:44px;display:flex;align-items:center;justify-content:center;position:relative}
+.cell.w44{width:44px}
+.chip{position:absolute;left:2px;right:2px;top:4px;bottom:4px;border-radius:18px}
+.chip.hov{background:color-mix(in srgb,var(--acc) 18%,transparent)}
+.wt{position:absolute;left:9px;top:0;bottom:0;display:flex;align-items:center;gap:5px;font:400 13px "Segoe UI Variable Text";font-variant-numeric:tabular-nums;white-space:nowrap}
+.wt.paused{opacity:.6}
+.hit{position:absolute;left:2px;right:2px;top:4px;bottom:4px;border-radius:18px;outline:1.5px dashed #FF5FA8;outline-offset:0}
+/* popup = existing dock_menu hover list */
+.wp{width:236px;padding:8px;border-radius:26px}
+.lim{padding:8px 12px 10px}
+.lim .t{display:flex;justify-content:space-between;font-variant-numeric:tabular-nums;font-weight:500;margin-bottom:8px}
+.bar{height:6px;border-radius:3px;background:var(--trk);position:relative}
+.bar i{position:absolute;left:0;top:0;height:6px;border-radius:3px;background:var(--acc)}
+.it{height:34px;border-radius:17px;display:flex;align-items:center;padding:0 12px}
+.it.hov{background:var(--f)}
+.mk{display:inline-block;font:500 10.5px "Segoe UI Variable Text";color:#14161A;background:#ECEEF2;border-radius:6px;padding:1px 6px;margin-top:6px}
+.arrow{font:600 18px "Segoe UI Variable Display";color:#ECEEF2;align-self:center}
+</style></head><body>
+<script>
+const timer='<path d="M12 7.5a7 7 0 1 0 0 14a7 7 0 1 0 0-14zM12 11v4l2.5 1.5M9.5 3h5"/>';
+const cloud='<path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 7 11a3.5 3.5 0 0 0 0 7z"/>';
+const cal='<rect x="4" y="5.5" width="16" height="14" rx="3"/><path d="M4 10h16M8.5 3.5v3M15.5 3.5v3"/>';
+const g=p=>`<svg class="g" viewBox="0 0 24 24">${p}</svg>`;
+function chip(text,{paused=false,hover=false,hit=false}={}){
+ return `<div class="cell">${hover?'<div class="chip hov"></div>':''}<div class="wt${paused?' paused':''}">${g(timer)}<span>${text}</span></div>${hit?'<div class="hit"></div>':''}</div>`}
+function dock(t,c){return `<div class="dock surf ${t}">${'<div class="app"></div>'.repeat(3)}<div class="cell" style="width:64px"><div class="wt" style="left:9px">${g(cloud)}<span>29°</span></div></div><div class="cell" style="width:86px"><div class="wt">${g(cal)}<span>Tue 24</span></div></div>${c}</div>`}
+function pop(t,{head,pct,rows,hov=-1}){
+ return `<div class="wp surf ${t}"><div class="lim"><div class="t"><span>${head}</span></div><div class="bar"><i style="width:${pct}%"></i></div></div>${rows.map((r,i)=>`<div class="it${i===hov?' hov':''}">${r}</div>`).join('')}</div>`}
+const cap=t=>`<div class="cap">${t}</div>`;
+const view=new URLSearchParams(location.search).get('view')||'states';
+const THEMES=[['classic','Classic'],['midnight','Midnight'],['light','Light'],['frosted','Frosted tint'],['liquid','Liquid glass']];
+let h='';
+if(view==='states'){
+ h=`<div class="title">Timer chip states (Classic, 2x)</div><div class="stage col">
+ <div>${dock('classic',chip('24:59'))}${cap('Running: m:ss of the soonest countdown, full ink. Changes on every second boundary.')}</div>
+ <div>${dock('classic',chip('24:58'))}${cap('One second later. Tabular digits: the text never shifts.')}</div>
+ <div>${dock('classic',chip('1:02:03'))}${cap('An hour or more: h:mm:ss, still inside the 86 DIP cell.')}</div>
+ <div>${dock('classic',chip('12:34',{paused:true}))}${cap('Paused: the chip stays in its slot. Frozen time, glyph and text at 0.60 ink. No tick, no wake.')}</div>
+ <div>${dock('classic',chip('12:34',{paused:true,hover:true,hit:true}))}${cap('Paused, hovered: the existing 18% Lamp hover capsule. Dashed line is the hit target (cell minus 2 DIP each side, 82 x 36), not drawn.')}</div>
+ </div>`}
+if(view==='popup'){
+ h=`<div class="title">Timer popup: running and paused (Classic, 2x)</div><div class="stage"><div class="row">
+ <div>${pop('classic',{head:'24:59',pct:17,rows:['Pause','Add 5 min'],hov:0})}${cap('Running (unchanged): progress row, Pause, Add 5 min.')}</div>
+ <div class="arrow">→</div>
+ <div>${pop('classic',{head:'Paused, 12:34 left',pct:50,rows:['Resume','Cancel'],hov:0})}${cap('Paused: same three rows, swapped in place under the pointer. Resume sits where Pause was. Bar frozen.')}</div>
+ <div>${pop('classic',{head:'Paused, 18:20 left',pct:27,rows:['Resume','Cancel']})}${cap('A paused Pomodoro phase: same rows, same copy.')}</div>
+ <div>${pop('classic',{head:'4:10 +1',pct:72,rows:['Pause','Add 5 min']})}${cap('Two running: panel text keeps its +N here; the chip shows the soonest only.')}</div>
+ </div></div>`}
+if(view==='flow'){
+ h=`<div class="title">Pause and resume from the dock (Classic, 2x)</div><div class="stage col">
+ <div class="row"><div>${dock('classic',chip('24:59',{hover:true}))}${cap('1. Hover or click the chip: the popup opens, as today.')}</div></div>
+ <div class="row"><div>${pop('classic',{head:'24:59',pct:17,rows:['Pause','Add 5 min'],hov:0})}${cap('2. Click Pause.')}</div><div class="arrow">→</div>
+ <div>${pop('classic',{head:'Paused, 24:59 left',pct:17,rows:['Resume','Cancel'],hov:0})}${cap('3. Rows swap in place; the pointer is now on Resume. Notice row says "Timer paused."')}</div></div>
+ <div class="row"><div>${dock('classic',chip('24:59',{paused:true}))}${cap('4. Popup closed: the paused chip stays. Nothing moves in the dock.')}</div></div>
+ <div class="row"><div>${dock('classic',chip('24:58'))}${cap('5. Resume: full ink, ticking again from the next second. Cancel instead: the chip leaves, as a finished timer does today.')}</div></div>
+ </div>`}
+if(view==='themes'){
+ h=`<div class="title">Paused chip and popup, five themes (2x)</div><div class="stage"><div class="row">${THEMES.map(([t,n])=>`<div class="col" style="gap:10px"><div class="dock surf ${t}" style="padding:0 6px">${chip('12:34',{paused:true})}${chip('24:59')}</div>${pop(t,{head:'Paused, 12:34 left',pct:50,rows:['Resume','Cancel']})}${cap(n+': paused chip left, running chip right')}</div>`).join('')}</div></div>`}
+document.body.innerHTML=h;
+</script></body></html>
