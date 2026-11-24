@@ -11,6 +11,8 @@ pub(crate) const ACTION: u32 = WM_APP + 40;
 pub(crate) const RELAYOUT: u32 = WM_APP + 41;
 pub(crate) const SCROLL: u32 = WM_APP + 64;
 pub(crate) const CLOSE: usize = 2;
+/// The `SCROLL` code of a wheel turn (its units ride in `lParam`).
+pub(crate) const WHEEL: usize = 0;
 pub(crate) const DIALOG_STYLE: u32 = WS_POPUP.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_BORDER.0;
 
 #[repr(C, align(4))]
@@ -94,23 +96,16 @@ pub(crate) unsafe extern "system" fn dialog_proc(
     wparam: WPARAM,
     _: LPARAM,
 ) -> isize {
-    let (kind, argument) = match message {
-        WM_COMMAND => (ACTION, wparam),
-        WM_CLOSE => (ACTION, WPARAM(CLOSE)),
-        WM_DPICHANGED | WM_SETTINGCHANGE => (RELAYOUT, WPARAM(0)),
-        WM_VSCROLL => (SCROLL, wparam),
-        WM_MOUSEWHEEL => (
-            SCROLL,
-            WPARAM(if (wparam.0 >> 16) as i16 > 0 {
-                SB_LINEUP.0 as usize
-            } else {
-                SB_LINEDOWN.0 as usize
-            }),
-        ),
+    let (kind, argument, extra) = match message {
+        WM_COMMAND => (ACTION, wparam, 0),
+        WM_CLOSE => (ACTION, WPARAM(CLOSE), 0),
+        WM_DPICHANGED | WM_SETTINGCHANGE => (RELAYOUT, WPARAM(0), 0),
+        // The wheel's turn in units (120 a notch, negative is down): a fine wheel scrolls in proportion.
+        WM_MOUSEWHEEL => (SCROLL, WPARAM(WHEEL), (wparam.0 >> 16) as i16 as isize),
         _ => return 0,
     };
     // SAFETY: no Rust pointers/callback state. All mutation happens later in the outer loop, never reentrantly.
-    if unsafe { PostMessageW(Some(hwnd), kind, argument, LPARAM(0)) }.is_err() {
+    if unsafe { PostMessageW(Some(hwnd), kind, argument, LPARAM(extra)) }.is_err() {
         // SAFETY: orderly failure on the owning UI thread.
         unsafe {
             PostQuitMessage(71);

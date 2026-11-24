@@ -112,39 +112,7 @@ impl SettingsWindow {
         }
         let view = client.bottom - px(FOOT);
         let shift = into_view(r.top - origin.y, r.bottom - origin.y, view, px(12));
-        self.scroll_to(self.scroll + shift)
-    }
-
-    fn scroll_to(&mut self, next: i32) -> Result<()> {
-        let next = next.clamp(0, self.scroll_max);
-        if next != self.scroll {
-            self.scroll = next;
-            self.layout()?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn scroll_message(&mut self, action: usize) -> Result<()> {
-        let mut scroll = SCROLLINFO {
-            cbSize: size_of::<SCROLLINFO>() as u32,
-            fMask: SIF_ALL,
-            ..Default::default()
-        };
-        // SAFETY: queries our own scroll bar; no callbacks into Rust state.
-        let next = unsafe {
-            GetScrollInfo(self.window, SB_VERT, &mut scroll)?;
-            match action as i32 {
-                0 => self.scroll - 48,
-                1 => self.scroll + 48,
-                2 => self.scroll - scroll.nPage as i32,
-                3 => self.scroll + scroll.nPage as i32,
-                4 | 5 => scroll.nTrackPos,
-                6 => 0,
-                7 => self.scroll_max,
-                _ => return Ok(()),
-            }
-        };
-        self.scroll_to(next)
+        self.jump(self.scroll + shift)
     }
 
     /// Every control is a Tab stop, in creation order: the sidebar, the rows top to bottom, Close.

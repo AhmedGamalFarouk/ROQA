@@ -4157,7 +4157,14 @@ impl Desktop {
         {
             self.settings_window.take();
         }
-        let running = self.animate()?;
+        // The Settings wheel glide takes the same frames as the surfaces, and none once it lands.
+        let scrolling = self.settings_window.as_mut().is_some_and(|window| {
+            window.glide_frame(Instant::now()).unwrap_or_else(|error| {
+                eprintln!("Settings scroll: {error}");
+                false
+            })
+        });
+        let running = self.animate()? || scrolling;
         let wait = wait.min(self.refresh_footer_hover());
         Ok((wait, running))
     }

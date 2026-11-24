@@ -1,6 +1,6 @@
 //! The settings window: a sidebar of pages and a card pane, built from the `PAGES` table (one loop creates the controls, one lays them out, `commit`/`show` read and write them by id).
 //! Standard child controls give mouse use and text scaling (screen readers are deliberately not supported; keyboard use is `keyboard.rs`); only the background, cards and sidebar are drawn here, in GDI with stock objects.
-//! It owns no timer or thread: it exists only while open and does work only in the message loop turns its own controls cause.
+//! It owns no timer or thread: it exists only while open and does work only in the message loop turns its own controls cause (and, while a wheel glide runs, the host's frames: `scroll.rs`).
 //! A change goes to the host (`take_change`) which applies it live; a timer request likewise (`take_start`).
 
 use crate::{
@@ -12,6 +12,7 @@ use crate::{
     graphics::{Glyph, draw_settings_glyph, round_gdi},
     hotkeys,
     layout::{Bounds, DockStyle},
+    motion,
     picker_font::PickerFont,
     pomo,
     prayer::Method,
@@ -697,6 +698,27 @@ struct Item {
     cap: HWND,
 }
 
+/// The scroll bar's width: the system's, as the old bar had.
+fn gutter() -> i32 {
+    // SAFETY: a plain system-metric query.
+    #[expect(clippy::disallowed_methods, reason = "a scrollbar width")]
+    unsafe {
+        GetSystemMetrics(SM_CXVSCROLL)
+    }
+}
+
+/// A control as `place` put it (client pixels, scrolled), and how it is cut at the footer: `boxed` is a
+/// drop-down, whose window is taller than its box (`cut` tall) and always keeps a region.
+struct Move {
+    h: HWND,
+    x: i32,
+    y: i32,
+    w: i32,
+    ht: i32,
+    cut: i32,
+    boxed: bool,
+}
+
 pub struct SettingsWindow {
     window: HWND,
     side: HWND,
@@ -720,6 +742,10 @@ pub struct SettingsWindow {
     factor: f64,
     scroll: i32,
     scroll_max: i32,
+    /// The wheel's and the track's glide to a position (one motion clock; at rest it is the position).
+    glide: motion::Tween,
+    /// Where `place` last put each control of the page, for a scroll step to move without measuring again.
+    moves: RefCell<Vec<Move>>,
     /// What the host last got; a change is a difference from this.
     current: Settings,
     change: Option<Settings>,
@@ -767,6 +793,8 @@ struct Paint {
     cards: Vec<RECT>,
     /// The edits' and drop-downs' boxes, which the parent frames.
     fields: Vec<RECT>,
+    /// The scroll bar in the right gutter, painted with the page.
+    bar: scroll::Bar,
 }
 thread_local! {
     static PAINT: RefCell<Option<Paint>> = const { RefCell::new(None) };
@@ -944,6 +972,7 @@ fn paint(dc: HDC, window: HWND, p: &Paint) {
         for field in &p.fields {
             round(dc, *field, px(14), p.pal.card, p.pal.field);
         }
+        scroll::draw_thumb(dc, &p.bar, p.pal.off);
         // The footer is its own strip: scrolled paint never reaches it, and a divider marks its edge.
         let foot = RECT {
             left: px(SIDE_W),
@@ -1073,7 +1102,7 @@ fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
             let _ = unsafe { InvalidateRect(Some(h), None, false) };
         }
         let (from, to) = if on { (off_at, on_at) } else { (on_at, off_at) };
-        from + ((to - from) as f32 * crate::motion::smooth(t)).round() as i32
+        from + ((to - from) as f32 * motion::smooth(t)).round() as i32
     };
     let title = RECT {
         right: pill.left - px(8),
@@ -1275,6 +1304,8 @@ unsafe extern "system" fn settings_proc(
                 paint(HDC(wparam.0 as *mut _), hwnd, p);
                 Some(1)
             }
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_MOUSEMOVE | WM_LBUTTONUP | WM_CANCELMODE
+            | WM_CAPTURECHANGED => scroll::mouse(hwnd, message, lparam, &p.bar).then_some(1),
             WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
                 let dc = HDC(wparam.0 as *mut _);
                 // SAFETY: the DC is the one this message carries; the child is live.
@@ -1351,74 +1382,6 @@ unsafe extern "system" fn settings_proc(
         // SAFETY: forwards the same arguments to the shared dialog procedure.
         None => unsafe { dialog_proc(hwnd, message, wparam, lparam) },
     }
-}
-
-/// Draw after the default window procedure has finished its native nonclient paint.
-unsafe extern "system" fn frame_proc(
-    hwnd: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-    _: usize,
-    _: usize,
-) -> LRESULT {
-    // SAFETY: owned dialog's subclass chain retains all native input and caption behavior.
-    let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
-    if matches!(
-        message,
-        WM_NCPAINT
-            | WM_NCACTIVATE
-            | WM_PAINT
-            | WM_VSCROLL
-            | WM_NCMOUSEMOVE
-            | WM_NCMOUSELEAVE
-            | WM_NCLBUTTONDOWN
-            | WM_NCLBUTTONUP
-    ) {
-        PAINT.with(|cell| {
-            let guard = cell.borrow();
-            let Some(p) = guard.as_ref() else {
-                return;
-            };
-            // SAFETY: live dialog, local scrollbar geometry and a window DC released below.
-            unsafe {
-                let mut bar = SCROLLBARINFO {
-                    cbSize: size_of::<SCROLLBARINFO>() as u32,
-                    ..Default::default()
-                };
-                if GetScrollBarInfo(hwnd, OBJID_VSCROLL, &mut bar).is_ok()
-                    && bar.rgstate[0] & 0x8000 == 0
-                {
-                    let mut window = RECT::default();
-                    let _ = GetWindowRect(hwnd, &mut window);
-                    let dc = GetWindowDC(Some(hwnd));
-                    let track = RECT {
-                        left: bar.rcScrollBar.left - window.left,
-                        right: bar.rcScrollBar.right - window.left,
-                        top: bar.rcScrollBar.top - window.top,
-                        bottom: bar.rcScrollBar.bottom - window.top,
-                    };
-                    fill(dc, track, p.pal.content);
-                    let inset = ((track.right - track.left) / 3).max(2);
-                    let thumb = RECT {
-                        left: track.left + inset,
-                        right: track.right - inset,
-                        top: track.top + bar.xyThumbTop,
-                        bottom: track.top + bar.xyThumbBottom,
-                    };
-                    round(
-                        dc,
-                        thumb,
-                        (thumb.right - thumb.left) / 2,
-                        p.pal.off,
-                        p.pal.off,
-                    );
-                    ReleaseDC(Some(hwnd), dc);
-                }
-            }
-        });
-    }
-    result
 }
 
 /// Paint only the closed native combo; Windows retains its list, selection and mouse behavior.
@@ -1663,6 +1626,8 @@ impl SettingsWindow {
             factor,
             scroll: 0,
             scroll_max: 0,
+            glide: motion::Tween::rest(0.0),
+            moves: RefCell::new(Vec::new()),
             current: current.clone(),
             change: None,
             start: None,
@@ -1672,10 +1637,6 @@ impl SettingsWindow {
             closed: false,
             work,
         };
-        // SAFETY: the owned dialog keeps this subclass until its HWND is destroyed.
-        unsafe {
-            let _ = SetWindowSubclass(window, Some(frame_proc), 1, 0);
-        }
         this.set_monitors(monitors);
         this.build()?;
         this.fill_sounds(&current.prayer_sound);
@@ -2165,6 +2126,7 @@ Other hooks stay. A copy of the file is kept.",
     fn show_page(&mut self, page: usize) -> Result<()> {
         self.page = page.min(PAGES.len() - 1);
         self.scroll = 0;
+        self.glide = motion::Tween::rest(0.0);
         // A message belongs to the page where its action happened.
         self.say("")?;
         for item in &self.items {
@@ -2518,7 +2480,7 @@ Other hooks stay. A copy of the file is kept.",
                 }
             }
             RELAYOUT => self.relayout()?,
-            SCROLL => self.scroll_message(message.wParam.0 & 0xffff)?,
+            SCROLL => self.scroll_message(message.wParam.0, message.lParam.0 as i32)?,
             _ => return Ok(false),
         }
         Ok(true)
@@ -2601,7 +2563,7 @@ Other hooks stay. A copy of the file is kept.",
         self.font = Some(font);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let mut frame = RECT {
-            right: px(654),
+            right: px(654) + gutter(),
             bottom: px(556),
             ..Default::default()
         };
@@ -2609,7 +2571,7 @@ Other hooks stay. A copy of the file is kept.",
         unsafe {
             AdjustWindowRectExForDpi(
                 &mut frame,
-                WINDOW_STYLE(DIALOG_STYLE | WS_VSCROLL.0),
+                WINDOW_STYLE(DIALOG_STYLE),
                 false,
                 WINDOW_EX_STYLE(0),
                 dpi,
@@ -2617,11 +2579,7 @@ Other hooks stay. A copy of the file is kept.",
             let width = (frame.right - frame.left).min(work.width);
             let height = (frame.bottom - frame.top).min(work.height);
             let style = GetWindowLongPtrW(self.window, GWL_STYLE);
-            SetWindowLongPtrW(
-                self.window,
-                GWL_STYLE,
-                style | (WS_VSCROLL.0 | WS_CLIPCHILDREN.0) as isize,
-            );
+            SetWindowLongPtrW(self.window, GWL_STYLE, style | WS_CLIPCHILDREN.0 as isize);
             SetWindowPos(
                 self.window,
                 None,
@@ -2667,39 +2625,24 @@ Other hooks stay. A copy of the file is kept.",
         let mut client = RECT::default();
         // SAFETY: our own live window.
         unsafe { GetClientRect(self.window, &mut client)? };
-        // The bar's width stays reserved (content and Close never move between pages); a page that does not
-        // scroll hides the bar itself, leaving an empty gutter instead of a greyed track.
-        // SAFETY: a plain system-metric query.
-        #[expect(clippy::disallowed_methods, reason = "a scrollbar width")]
-        let bar = unsafe { GetSystemMetrics(SM_CXVSCROLL) };
-        let beside = |client: RECT, scrolls: bool| RECT {
-            right: client.right - if scrolls { 0 } else { bar },
+        // The scroll bar's gutter is the window's right edge, always reserved (content and Close never move
+        // between pages); a page that does not scroll leaves it empty.
+        let bar = gutter();
+        let beside = RECT {
+            right: client.right - bar,
             ..client
         };
-        let before = beside(client, self.scroll_max > 0).right;
-        let (mut geometry, content) =
-            self.place(scale, beside(client, self.scroll_max > 0), handle)?;
+        let (mut geometry, content) = self.place(scale, beside, handle)?;
         let view = (client.bottom - px(FOOT)).max(1);
         self.scroll_max = (content - view).max(0);
         let clamped = self.scroll.clamp(0, self.scroll_max);
-        let info = SCROLLINFO {
-            cbSize: size_of::<SCROLLINFO>() as u32,
-            fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
-            nMin: 0,
-            nMax: content - 1,
-            nPage: view as u32,
-            nPos: clamped,
-            ..Default::default()
-        };
         // SAFETY: our own live window and children.
         unsafe {
-            SetScrollInfo(self.window, SB_VERT, &info, true);
-            GetClientRect(self.window, &mut client)?;
-            client = beside(client, self.scroll_max > 0);
-            // A scroll bar appearing or a clamped position changes the geometry once more.
-            if client.right != before || clamped != self.scroll {
+            // A clamped position changes the geometry once more.
+            if clamped != self.scroll {
                 self.scroll = clamped;
-                geometry = self.place(scale, client, handle)?.0;
+                self.glide = motion::Tween::rest(clamped as f32);
+                geometry = self.place(scale, beside, handle)?.0;
             }
             let side = px(SIDE_W);
             let list = &[
@@ -2709,12 +2652,12 @@ Other hooks stay. A copy of the file is kept.",
                     self.status,
                     side + px(GUTTER),
                     client.bottom - px(FOOT) + px(6),
-                    (client.right - side - px(GUTTER * 2 + 108)).max(1),
+                    (beside.right - side - px(GUTTER * 2 + 108)).max(1),
                     px(FOOT - 12),
                 ),
                 (
                     self.close,
-                    client.right - px(GUTTER + 100),
+                    beside.right - px(GUTTER + 100),
                     client.bottom - px(FOOT) + px((FOOT - 28) / 2),
                     px(100),
                     px(28),
@@ -2761,6 +2704,18 @@ Other hooks stay. A copy of the file is kept.",
                     labels: geometry.labels,
                     cards: geometry.cards,
                     fields: geometry.fields,
+                    bar: scroll::Bar::new(
+                        RECT {
+                            left: client.right - bar,
+                            top: 0,
+                            right: client.right,
+                            bottom: view,
+                        },
+                        content,
+                        view,
+                        self.scroll,
+                        scale,
+                    ),
                 }))
             });
         }
@@ -2789,6 +2744,7 @@ Other hooks stay. A copy of the file is kept.",
             px(SIDE_W + GUTTER),
             (client.right - px(GUTTER)).max(px(SIDE_W + GUTTER + 100)),
         );
+        self.moves.borrow_mut().clear();
         let mut geometry = Geometry {
             title: (RECT::default(), PAGES[self.page].name),
             labels: Vec::new(),
@@ -2860,6 +2816,15 @@ Other hooks stay. A copy of the file is kept.",
                 )?;
                 clip(h, top, tile.height, tile.width, view);
             }
+            self.moves.borrow_mut().push(Move {
+                h,
+                x: a + tile.x,
+                y: top,
+                w: tile.width,
+                ht: tile.height,
+                cut: tile.height,
+                boxed: false,
+            });
         }
         Ok(px(MAP_H + 20))
     }
@@ -2906,6 +2871,15 @@ Other hooks stay. A copy of the file is kept.",
                 )?;
                 clip(h, y, ht, w.max(1), view);
             }
+            self.moves.borrow_mut().push(Move {
+                h,
+                x,
+                y,
+                w: w.max(1),
+                ht,
+                cut: ht,
+                boxed: false,
+            });
             Ok(())
         };
         match item.kind {
@@ -2963,6 +2937,9 @@ Other hooks stay. A copy of the file is kept.",
                 } else {
                     put(item.h, b - w, boxed.top, w, drop)?;
                     inset(item.h, w, px(28), boxed.top, view);
+                    if let Some(moved) = self.moves.borrow_mut().last_mut() {
+                        (moved.cut, moved.boxed) = (px(28), true);
+                    }
                 }
                 let top = if c > 0 {
                     y + px(8)
@@ -3078,6 +3055,7 @@ fn footer_status(
 }
 
 mod keyboard;
+mod scroll;
 
 #[cfg(test)]
 mod tests {
