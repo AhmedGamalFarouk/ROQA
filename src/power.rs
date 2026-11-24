@@ -16,6 +16,9 @@ const SETTLE: Duration = Duration::from_millis(500);
 /// A plain notice that holds for less does not cut a longer one short in its first moments.
 const FIRM: Duration = Duration::from_secs(2);
 
+/// After the pointer leaves a notice it held, the notice stays this long, not its whole hold again.
+const RELEASE: Duration = Duration::from_secs(2);
+
 /// A plain notice the row refuses waits for it only when it would show at least this long; a pill of a second
 /// or two is stale by then.
 const QUEUE_MIN: Duration = Duration::from_secs(3);
@@ -117,6 +120,15 @@ pub enum Extra {
     Snooze,
     /// Deny and Allow buttons for the permission question of this hook process.
     Ask(u32),
+    /// A bell before the text: an app's notification or a script's line. Otherwise a plain notice.
+    Bell,
+}
+
+impl Extra {
+    /// No button or bar: the notice may wait in the queue and may be cut short or dismissed.
+    fn plain(self) -> bool {
+        matches!(self, Extra::None | Extra::Bell)
+    }
 }
 
 #[derive(Default)]
@@ -128,7 +140,9 @@ pub struct Power {
     since: Option<Instant>,
     hold: Duration,
     /// One plain notice the row refused, shown when the row frees (`promote`); the first one refused stays.
-    next: Option<(String, Duration)>,
+    next: Option<(String, Duration, Extra)>,
+    /// The pointer is on a plain notice: its end is held until it leaves (`hover`).
+    held: bool,
     /// The screenshot pill holds the row (`shots`), and whether it is hovered or dragged (held).
     shot: Option<bool>,
 }
@@ -163,6 +177,11 @@ impl Power {
         )
     }
 
+    /// A hovered plain notice does not end; a question that arrived over it is not held.
+    fn holding(&self) -> bool {
+        self.held && !self.guarded()
+    }
+
     /// Whether `announce` with these would take the row now: a producer that must not lose its notice (a due
     /// reminder) asks first.
     pub fn admits(&self, now: Instant, hold: Duration, extra: Extra) -> bool {
@@ -178,7 +197,7 @@ impl Power {
             && self
                 .since
                 .is_some_and(|since| now.saturating_duration_since(since) < FIRM);
-        !(firm && extra == Extra::None && hold < self.hold)
+        !(firm && extra.plain() && hold < self.hold)
     }
 
     /// Shows `text` and its `extra` for `hold` in place of any notice (the prayer reminder reuses the row);
@@ -186,8 +205,8 @@ impl Power {
     /// or more that is refused waits in the one queue place.
     pub fn announce(&mut self, text: String, now: Instant, hold: Duration, extra: Extra) -> bool {
         if !self.admits(now, hold, extra) {
-            if extra == Extra::None && hold >= QUEUE_MIN && self.next.is_none() {
-                self.next = Some((text, hold));
+            if extra.plain() && hold >= QUEUE_MIN && self.next.is_none() {
+                self.next = Some((text, hold, extra));
             }
             return false;
         }
@@ -215,16 +234,29 @@ impl Power {
         if self.notice.is_some() {
             return false;
         }
-        let Some((text, hold)) = self.next.take() else {
+        let Some((text, hold, extra)) = self.next.take() else {
             return false;
         };
-        self.announce(text, now, hold, Extra::None)
+        self.announce(text, now, hold, extra)
     }
 
     /// Whether a question has shown long enough (`SETTLE`) for a click to mean it.
     pub fn settled(&self, now: Instant) -> bool {
         self.since
             .is_none_or(|since| now.duration_since(since) >= SETTLE)
+    }
+
+    /// The pointer is on a plain notice (`on`) or left it. While on, the notice does not end; on leaving it ends
+    /// `RELEASE` later. A question, Eject or Snooze row keeps its own wait and is not held.
+    pub fn hover(&mut self, on: bool, now: Instant) {
+        let on = on && self.notice.is_some() && !self.guarded();
+        if self.held
+            && !on
+            && let Some((_, until)) = &mut self.notice
+        {
+            *until = now + RELEASE;
+        }
+        self.held = on;
     }
 
     /// The extra of the notice that shows now.
@@ -242,6 +274,7 @@ impl Power {
 
     /// Drops the notice at once (a state change that makes it stale); true if one was showing.
     pub fn clear(&mut self) -> bool {
+        self.held = false;
         self.notice.take().is_some()
     }
 
@@ -256,7 +289,7 @@ impl Power {
 
     /// True once when the notice has run its course.
     pub fn over(&mut self, now: Instant) -> bool {
-        let over = self.notice.as_ref().is_some_and(|(_, until)| now >= *until);
+        let over = !self.holding() && self.notice.as_ref().is_some_and(|(_, until)| now >= *until);
         if over {
             self.notice = None;
         }
@@ -265,7 +298,10 @@ impl Power {
 
     /// The one instant the host must wake for: the notice's end. `None` adds no deadline.
     pub fn deadline(&self) -> Option<Instant> {
-        self.notice.as_ref().map(|(_, until)| *until)
+        self.notice
+            .as_ref()
+            .filter(|_| !self.holding())
+            .map(|(_, until)| *until)
     }
 }
 
@@ -463,5 +499,38 @@ mod tests {
         let mut power = Power::new(raw(1, 128, 255));
         assert!(!power.update(raw(1, 128, 255), Instant::now()));
         assert_eq!(power.deadline(), None);
+    }
+
+    #[test]
+    fn a_hovered_notice_stays_and_ends_two_seconds_after_the_pointer_leaves() {
+        let (mut power, now) = (Power::default(), Instant::now());
+        let sec = Duration::from_secs;
+        assert!(power.announce("Mail: Hi".into(), now, sec(4), Extra::Bell));
+        power.hover(true, now + sec(1));
+        assert!(
+            !power.over(now + sec(60)),
+            "held while the pointer is on it"
+        );
+        assert_eq!(power.deadline(), None);
+        power.hover(false, now + sec(60));
+        assert!(!power.over(now + sec(61)));
+        assert_eq!(power.deadline(), Some(now + sec(62)));
+        assert!(power.over(now + sec(62)));
+        // A question is not held, and a hover with nothing showing is nothing.
+        power.hover(true, now);
+        assert!(power.announce("Run it?".into(), now, sec(4), Extra::Ask(1)));
+        assert!(power.over(now + sec(4)));
+        power.hover(false, now);
+    }
+
+    #[test]
+    fn a_bell_notice_waits_its_turn_like_a_plain_one_and_keeps_its_bell() {
+        let (mut power, now) = (Power::default(), Instant::now());
+        let sec = Duration::from_secs;
+        assert!(power.announce("Run it?".into(), now, sec(8), Extra::Ask(1)));
+        assert!(!power.announce("Mail: Hi".into(), now, sec(4), Extra::Bell));
+        power.clear();
+        assert!(power.promote(now));
+        assert_eq!(power.extra(), Extra::Bell);
     }
 }

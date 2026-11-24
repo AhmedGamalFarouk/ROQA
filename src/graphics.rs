@@ -1402,6 +1402,7 @@ fn notice_text(
         designator: 1.0,
         align: DWRITE_TEXT_ALIGNMENT_CENTER,
     };
+    let bell = 18.0 * scale * f32::from(scene.extra == Extra::Bell);
     // The text gives the button its place at the row's right.
     let right = bar_left.unwrap_or_else(|| {
         button.map_or(slot.width as f32, |button| {
@@ -1409,13 +1410,14 @@ fn notice_text(
         })
     });
     let rect = D2D_RECT_F {
-        left,
+        left: left + bell,
         top,
         right: left + right,
         bottom: top + slot.height as f32,
     };
     let alpha = reveal * scene.fx.notice;
     let colour = with_alpha(p.ink, p.ink_alpha(0.85 * alpha));
+    ask::bell(context, rect, text, &font, colour, bell > 0.0)?;
     let width = rect.right - rect.left;
     let lines = if ask {
         wrapped(text, width, |line| {

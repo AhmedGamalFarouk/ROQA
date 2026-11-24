@@ -866,6 +866,24 @@ pub fn notice_button_at(
     .is_some()
 }
 
+/// Whether a window point is on the notice row at `progress`; none while the row is not drawn.
+pub fn notice_row_at(
+    window_width: i32,
+    dpi: u32,
+    progress: f32,
+    media: bool,
+    (x, y): (i32, i32),
+) -> bool {
+    panel_offset(
+        window_width,
+        dpi,
+        progress,
+        power_notice(media, dpi),
+        (x, y),
+    )
+    .is_some()
+}
+
 /// The plain Media page's status line under the eyes (`graphics::media_page`), 24 high so the 11 DIP line is
 /// easy to click: it opens the tab its glance came from.
 pub fn glance_at(window_width: i32, dpi: u32, progress: f32, (x, y): (i32, i32)) -> bool {

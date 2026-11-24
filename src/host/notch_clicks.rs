@@ -14,6 +14,7 @@ impl Desktop {
             return false;
         };
         self.shot_input(notch, message);
+        self.notice_input(notch, message);
         if message.message == WM_LBUTTONUP {
             self.pages.touch();
             let surface = &mut self.surfaces[notch];
@@ -32,6 +33,33 @@ impl Desktop {
             return true;
         }
         message.message == WM_LBUTTONUP && self.click_control(notch, message.lParam)
+    }
+    /// A plain notice row: the pointer on it holds it, and a click closes it once it has settled, so a click meant
+    /// for something under it is not taken. Never consumes the message.
+    fn notice_input(&mut self, notch: usize, message: &MSG) {
+        let surface = &self.surfaces[notch];
+        let now = Instant::now();
+        let media = self.pages.track(&self.media).is_some();
+        let on = self.power.text().is_some()
+            && layout::notice_row_at(
+                surface.bounds.width,
+                surface.dpi,
+                surface.motion.value(now),
+                media,
+                point(message.lParam),
+            );
+        match message.message {
+            WM_MOUSEMOVE => self.power.hover(on, now),
+            WM_MOUSELEAVE => self.power.hover(false, now),
+            WM_LBUTTONUP if on && self.power.settled(now) && self.power.clear_plain() => {
+                self.power.promote(now);
+                if self.power.text().is_none() && !self.shelf.shots.showing() {
+                    self.surfaces.iter_mut().for_each(Surface::close_alert);
+                }
+                self.request_notches(Repaint::Full, |_| true);
+            }
+            _ => {}
+        }
     }
     /// A click on a drawn media control sends its command, one on the progress bar seeks, and one
     /// on the volume bar sets the volume; the notch stays nonactivating.

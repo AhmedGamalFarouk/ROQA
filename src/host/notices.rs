@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// A notification over this many characters stays `NOTIFICATION_READ`, long enough to read.
+const NOTIFICATION_LONG: usize = 40;
+const NOTIFICATION_READ: Duration = Duration::from_secs(7);
+
 impl Desktop {
     /// A reminder is due: the sound plays unless Reminder sounds is off. The notch expands with the prayer's name; on a monitor a
     /// full-screen app covers it appears over the app (topmost, never activated) and hides again once retracted.
@@ -234,9 +238,20 @@ impl Desktop {
     }
     /// A Windows notification's line (`toast.rs`) on the notice row, a short peek like a device alert.
     pub(super) fn notification_peek(&mut self) {
-        self.pill(toast::take(), DEVICE_NOTICE);
-        // A script's `roqa.exe notify` line, the same kind of short peek.
-        self.pill(native_window::notify_take(), DEVICE_NOTICE);
+        let hold = |text: &str| {
+            if text.chars().count() > NOTIFICATION_LONG {
+                NOTIFICATION_READ
+            } else {
+                DEVICE_NOTICE
+            }
+        };
+        // A script's `roqa.exe notify` line shows the same way.
+        for text in [toast::take(), native_window::notify_take()]
+            .into_iter()
+            .flatten()
+        {
+            self.pill_with(Some(text.clone()), hold(&text), power::Extra::Bell);
+        }
     }
     /// On the minute clock: a short pill when the fetched forecast turns wet next hour, once per such hour.
     pub(super) fn rain_soon(&mut self, hour: u8, minute: u8) {
@@ -260,11 +275,14 @@ impl Desktop {
         self.key_pill(Some(crate::mic::toggle_text(muted).into()));
     }
     pub(super) fn pill(&mut self, text: Option<String>, hold: Duration) {
+        self.pill_with(text, hold, power::Extra::None);
+    }
+    fn pill_with(&mut self, text: Option<String>, hold: Duration, extra: power::Extra) {
         let Some(text) = text else {
             return;
         };
         let now = Instant::now();
-        self.power.announce(text, now, hold, power::Extra::None);
+        self.power.announce(text, now, hold, extra);
         self.open_notches();
         self.request_notches(Repaint::Full, |_| true);
     }
