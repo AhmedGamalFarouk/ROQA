@@ -291,9 +291,6 @@ impl Desktop {
             }
             return false;
         }
-        if page == Tab::Widgets {
-            return self.click_widgets(notch, (x, y));
-        }
         if page != Tab::Media || !live {
             return false;
         }
@@ -322,47 +319,6 @@ impl Desktop {
             return false;
         }
         true
-    }
-    /// A click on the Widgets page: the calendar tile opens its month grid; there, an arrow steps the month and
-    /// anywhere else goes back to the tiles.
-    pub(super) fn click_widgets(&mut self, notch: usize, (x, y): (i32, i32)) -> bool {
-        let surface = &self.surfaces[notch];
-        let (width, dpi) = (surface.bounds.width, surface.dpi);
-        let progress = surface.motion.value(Instant::now());
-        let Some((year, month)) = self.pages.month else {
-            let cell = layout::widget_at(width, dpi, progress, self.pages.widgets.tall(), x, y);
-            if cell.and_then(|cell| self.pages.widgets.cells()[cell])
-                != Some(crate::widgets::WidgetKind::WeekCalendar)
-            {
-                return false;
-            }
-            let (year, month, _) = prayer_os::local_now().ymd;
-            self.show_month(notch, Some((year as u16, month as u16)), 1.0);
-            return true;
-        };
-        match layout::month_arrow_at(width, dpi, progress, x, y) {
-            None => self.show_month(notch, None, -1.0),
-            Some(arrow) => {
-                let index =
-                    i32::from(year) * 12 + i32::from(month) - 1 + if arrow == 0 { -1 } else { 1 };
-                // Years 1601 to 9999: before that the calendar helpers have nothing to say.
-                if (1601 * 12..10_000 * 12).contains(&index) {
-                    let next = ((index / 12) as u16, (index % 12) as u16 + 1);
-                    self.show_month(notch, Some(next), if arrow == 0 { -1.0 } else { 1.0 });
-                }
-            }
-        }
-        true
-    }
-    /// Shows a month grid or the tiles again; the page eases in on the pop curve from the side `dir` points to.
-    pub(super) fn show_month(&mut self, notch: usize, month: Option<(u16, u16)>, dir: f32) {
-        self.pages.month = month;
-        let surface = &mut self.surfaces[notch];
-        surface.page_dir = dir;
-        surface.page_fx = Tween::rest(0.0);
-        surface.page_fx.retarget(1.0, motion::POP_TIME, motion::POP);
-        surface.live = true;
-        self.request_notches(Repaint::Full, |_| true);
     }
     /// Presses a shown media control or the mute toggle.
     pub(super) fn press(&mut self, control: usize) {

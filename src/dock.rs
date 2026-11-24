@@ -297,8 +297,26 @@ pub enum Button {
     /// "Brightness on the dock"; no button key.
     Volume,
     Brightness,
+    Weather,
+    Prayer,
+    Calendar,
+    Water,
+    System,
+    Timer,
 }
 impl Button {
+    pub const WIDGETS: [Self; 6] = [
+        Self::Weather,
+        Self::Prayer,
+        Self::Calendar,
+        Self::Water,
+        Self::System,
+        Self::Timer,
+    ];
+
+    pub fn widget(self) -> Option<usize> {
+        self.index().checked_sub(Self::Weather.index())
+    }
     /// The buttons a switch elsewhere shows, after the configurable ones.
     pub const EXTRA: [Button; 5] = [
         Button::Battery,
@@ -341,7 +359,13 @@ impl Button {
             | Button::Limits
             | Button::Moon
             | Button::Volume
-            | Button::Brightness => None,
+            | Button::Brightness
+            | Button::Weather
+            | Button::Prayer
+            | Button::Calendar
+            | Button::Water
+            | Button::System
+            | Button::Timer => None,
         }
     }
 }
@@ -358,6 +382,7 @@ pub struct Buttons {
     /// The volume and brightness buttons.
     pub volume: bool,
     pub brightness: bool,
+    pub widgets: [bool; 6],
     /// Mirrored for a right-to-left UI language: the dock runs from the right edge, as the taskbar does.
     /// The host sets it from the system; it is not a stored setting.
     pub rtl: bool,
@@ -376,11 +401,25 @@ impl Buttons {
             moon: None,
             volume: false,
             brightness: false,
+            widgets: [false; 6],
             rtl: false,
             centre: 0,
         }
     }
+    pub fn fit_widgets(mut self, width: i32, dpi: u32) -> Self {
+        for index in (0..self.widgets.len()).rev() {
+            if width_px(self, 1, dpi) <= width {
+                break;
+            }
+            self.widgets[index] = false;
+        }
+        self
+    }
+
     pub fn on(self, button: Button) -> bool {
+        if let Some(index) = button.widget() {
+            return self.widgets[index];
+        }
         match button {
             Button::Battery => self.battery,
             Button::Limits => self.limits,
@@ -406,18 +445,17 @@ impl Buttons {
     }
     /// The hidden-icons chevron, device batteries, AI limits, the moon, quick settings, then the pill.
     fn tail(self) -> impl Iterator<Item = Button> {
-        [
-            Button::Tray,
-            Button::Battery,
-            Button::Limits,
-            Button::Moon,
-            Button::Quick,
-            Button::Volume,
-            Button::Brightness,
-            Button::Desktop,
-        ]
-        .into_iter()
-        .filter(move |b| self.on(*b))
+        let before = [Button::Tray, Button::Battery, Button::Limits, Button::Moon];
+        before
+            .into_iter()
+            .chain(Button::WIDGETS)
+            .chain([
+                Button::Quick,
+                Button::Volume,
+                Button::Brightness,
+                Button::Desktop,
+            ])
+            .filter(move |b| self.on(*b))
     }
 }
 impl Default for Buttons {
@@ -520,8 +558,11 @@ fn tail_px(buttons: Buttons, dpi: u32) -> i32 {
         return px(PAD_DIPS, dpi);
     }
     px(SEP_DIPS, dpi)
-        + (buttons.tail().count() as i32 - i32::from(buttons.on(Button::Desktop)))
-            * px(BTN_DIPS, dpi)
+        + buttons
+            .tail()
+            .filter(|button| *button != Button::Desktop)
+            .map(|button| button_width(button, dpi))
+            .sum::<i32>()
         + px(
             if buttons.on(Button::Desktop) {
                 STRIP_DIPS
@@ -574,6 +615,17 @@ fn ltr_x(buttons: Buttons, x_px: i32, width_px: i32) -> i32 {
 
 /// `span` of the left-to-right layout; the others mirror it.
 #[inline(never)]
+fn button_width(button: Button, dpi: u32) -> i32 {
+    px(
+        match button {
+            Button::Weather | Button::Calendar | Button::Water | Button::Timer => 86,
+            Button::Prayer => 108,
+            _ => BTN_DIPS,
+        },
+        dpi,
+    )
+}
+
 fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
     let (btn, strip) = (px(BTN_DIPS, dpi), px(STRIP_DIPS, dpi));
     match hit {
@@ -584,15 +636,7 @@ fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
             px(SLOT_DIPS, dpi),
         ),
         Hit::Button(Button::Desktop) => (width_px - strip, strip),
-        Hit::Button(
-            button @ (Button::Quick
-            | Button::Tray
-            | Button::Battery
-            | Button::Limits
-            | Button::Moon
-            | Button::Volume
-            | Button::Brightness),
-        ) => {
+        Hit::Button(button) if buttons.tail().any(|tail| tail == button) => {
             let end = if buttons.on(Button::Desktop) {
                 STRIP_DIPS
             } else {
@@ -604,8 +648,10 @@ fn ltr_span(buttons: Buttons, width_px: i32, dpi: u32, hit: Hit) -> (i32, i32) {
                 .skip_while(|b| *b != button)
                 .skip(1)
                 .filter(|b| *b != Button::Desktop)
-                .count() as i32;
-            (width_px - px(end, dpi) - btn - beside * btn, btn)
+                .map(|next| button_width(next, dpi))
+                .sum::<i32>();
+            let width = button_width(button, dpi);
+            (width_px - px(end, dpi) - width - beside, width)
         }
         Hit::Button(button) => {
             let at = buttons.lead().position(|b| b == button).unwrap_or(0) as i32;
@@ -634,6 +680,7 @@ pub fn hit_at(buttons: Buttons, x_px: i32, width_px: i32, dpi: u32, slots: usize
     let on_button = Button::ALL
         .into_iter()
         .chain(Button::EXTRA)
+        .chain(Button::WIDGETS)
         .filter(|b| buttons.on(*b))
         .find(|b| {
             let (left, width) = ltr_span(buttons, width_px, dpi, Hit::Button(*b));
@@ -1759,6 +1806,32 @@ mod tests {
                 }
                 assert!(end <= width);
                 assert_eq!(cell(b, slots, cell_count(b, slots)), None);
+            }
+        }
+    }
+
+    #[test]
+    fn widgets_fit_in_order_and_hit_the_same_cells_in_both_directions() {
+        for rtl in [false, true] {
+            for dpi in [96, 144, 192] {
+                let all = Buttons {
+                    widgets: [true; 6],
+                    rtl,
+                    ..Buttons::NONE
+                };
+                let first = Buttons {
+                    widgets: [true, true, false, false, false, false],
+                    ..all
+                };
+                let width = width_px(first, 1, dpi);
+                let fitted = all.fit_widgets(width, dpi);
+                assert_eq!(fitted, first);
+                for button in [Button::Weather, Button::Prayer] {
+                    let hit = Hit::Button(button);
+                    let (left, span) = super::span(fitted, width, dpi, hit);
+                    assert_eq!(hit_at(fitted, left + span / 2, width, dpi, 1), Some(hit));
+                }
+                assert_eq!(visible_slots(fitted, width, dpi, 1), 1);
             }
         }
     }

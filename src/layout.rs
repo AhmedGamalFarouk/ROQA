@@ -423,57 +423,6 @@ pub fn media_cover_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32
     panel_offset(window_width, dpi, progress, cover, (x, y)).is_some()
 }
 
-/// A Widgets tile in DIPs: 190 x 72, or 190 x 52 when a lower slot is filled; two across, `GUTTER` apart.
-pub const WIDGET_TILE: (f32, f32) = (190.0, 72.0);
-pub const WIDGET_COMPACT: (f32, f32) = (190.0, 52.0);
-/// The month page's back and forward arrows, under the month's name: x, y, width, height in the body's frame.
-pub const MONTH_ARROWS: [(f32, f32, f32, f32); 2] = [
-    (PAD + 14.0, BODY_Y + 76.0, 40.0, 24.0),
-    (PAD + 60.0, BODY_Y + 76.0, 40.0, 24.0),
-];
-
-/// The Widgets cell (0..4, reading order) under a window point; none while the panel rows are not drawn.
-pub fn widget_at(
-    window_width: i32,
-    dpi: u32,
-    progress: f32,
-    tall: bool,
-    x: i32,
-    y: i32,
-) -> Option<usize> {
-    let (w, h) = if tall { WIDGET_COMPACT } else { WIDGET_TILE };
-    (0..4).find(|&cell| {
-        let tile = (
-            PAD + (w + GUTTER) * (cell % 2) as f32,
-            BODY_Y + (h + GUTTER) * (cell / 2) as f32,
-            w,
-            h,
-        );
-        panel_offset(
-            window_width,
-            dpi,
-            progress,
-            scaled_bounds(tile, dpi),
-            (x, y),
-        )
-        .is_some()
-    })
-}
-
-/// The month arrow under a window point: 0 back, 1 forward.
-pub fn month_arrow_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32) -> Option<usize> {
-    MONTH_ARROWS.iter().position(|&arrow| {
-        panel_offset(
-            window_width,
-            dpi,
-            progress,
-            scaled_bounds(arrow, dpi),
-            (x, y),
-        )
-        .is_some()
-    })
-}
-
 /// The volume a click at a window point sets: 0 at the bar's first pixel to 1 at its last; none
 /// outside the bar or while the row is not drawn.
 pub fn volume_at(window_width: i32, dpi: u32, progress: f32, x: i32, y: i32) -> Option<f32> {

@@ -60,6 +60,9 @@ unsafe extern "system" fn changed(
 ) {
     if event < EVENT_OBJECT_CREATE || (object == 0 && child == 0) {
         crate::anchored::event(event, hwnd, time);
+        if event == EVENT_OBJECT_SHOW && !crate::anchored::tray_opening() {
+            crate::taskbar::shown(hwnd);
+        }
     }
     if event >= EVENT_OBJECT_CREATE && (object != 0 || child != 0) {
         return;

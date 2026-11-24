@@ -294,6 +294,22 @@ impl Timers {
         }
     }
 
+    pub fn extend_soonest(&mut self, now: Instant, wall: u64, extra: u64) -> bool {
+        let Some(first) = self.list.first_mut().filter(|first| first.deadline > now) else {
+            return false;
+        };
+        let left = secs_left(first.deadline, now);
+        let extra = extra.min(MAX_SECONDS.saturating_sub(left));
+        if extra == 0 {
+            return false;
+        }
+        first.deadline += Duration::from_secs(extra);
+        first.expiry = wall.saturating_add(left).saturating_add(extra);
+        first.total = first.total.saturating_add(extra);
+        crate::sort::by(&mut self.list, |a, b| a.deadline.cmp(&b.deadline));
+        true
+    }
+
     /// A countdown is running (the mascot leans towards it).
     pub fn running(&self) -> bool {
         !self.list.is_empty()

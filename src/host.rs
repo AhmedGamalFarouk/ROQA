@@ -1,3 +1,5 @@
+mod command_center;
+mod dock_widgets;
 mod interactions;
 mod levels;
 mod menus;
@@ -189,13 +191,13 @@ struct Pages {
     limits: limits::View,
     limits_key: Option<(u32, bool, String)>,
     moon: prayer_tab::MoonDay,
-    widgets: crate::widgets::WidgetConfig,
-    /// The Widgets page's month grid: the (year, month) shown, `None` for the tiles.
+    pill_low: bool,
+    /// The month selected in the Calendar popup, or today's month.
     month: Option<(u16, u16)>,
-    /// The Water tile's source: the stored (day, glasses) and the daily goal.
-    water: ((i64, u8), u8),
-    /// The system tiles' last readings; sampled only while an open notch shows them (`refresh_stats`).
-    stats: crate::widgets::Stats,
+    /// The System widget's last readings.
+    system: crate::widgets::SystemSample,
+    system_opened: Option<Instant>,
+    widget_readings: [String; 6],
     /// The Pomodoro's phase rules; its running phase is a tagged timer in `Desktop::timers`.
     pomo: pomo::Pomo,
     /// A paused plain countdown: seconds left and its full length (not stored, like a paused Pomodoro).
@@ -227,10 +229,11 @@ impl Pages {
             limits: limits::View::default(),
             limits_key: None,
             moon: prayer_tab::moon_day(prayer_os::local_now().ymd, false, &prayer_os::hijri),
-            widgets: settings.widgets,
+            pill_low: settings.widgets.pill_low,
             month: None,
-            water: ((0, 0), 0),
-            stats: crate::widgets::Stats::default(),
+            system: Default::default(),
+            system_opened: None,
+            widget_readings: Default::default(),
             pomo: pomo::Pomo::default(),
             held: None,
             stopwatch: Stopwatch::default(),
@@ -715,15 +718,7 @@ impl Surface {
         } else {
             Vec::new()
         };
-        layout::set_page_height(if page == Tab::Widgets {
-            if pages.widgets.tall() || pages.month.is_some() {
-                layout::WIDGETS_TALL
-            } else {
-                layout::WIDGETS_PAGE
-            }
-        } else {
-            layout::reminders_height(reminders.len())
-        });
+        layout::set_page_height(layout::reminders_height(reminders.len()));
         let progress = self.motion.value(now);
         let notice = power.text();
         // The screenshot pill holds the row while no notice shows; its row eases in and out like one.
@@ -907,18 +902,7 @@ impl Surface {
             shelf_hover: self.hovered,
             clips: copied,
             tab: page,
-            widgets: pages.widgets,
-            month: pages.month,
-            glance: crate::widgets::Glance {
-                water: (page == Tab::Widgets
-                    && pages.widgets.uses(crate::widgets::WidgetKind::Water))
-                .then(|| {
-                    let day = prayer_tab::day_number(prayer_os::local_now().ymd);
-                    (water::today(pages.water.0, day), pages.water.1)
-                }),
-                low: pages.widgets.pill_low && power::Raw::read().is_some_and(power::Raw::low),
-            },
-            stats: (pages.stats.cpu, pages.stats.net),
+            low_battery: pages.pill_low && power::Raw::read().is_some_and(power::Raw::low),
             rail: rail.map(|layout| RailScene {
                 layout,
                 tabs: visible.as_slice(),
@@ -933,11 +917,11 @@ impl Surface {
             volume_fill,
             weather: [Some(page), self.page_from]
                 .iter()
-                .any(|p| matches!(p, Some(Tab::Weather | Tab::Widgets)))
+                .any(|p| matches!(p, Some(Tab::Weather)))
                 .then_some(&pages.weather),
             prayer: [Some(page), self.page_from]
                 .iter()
-                .any(|p| matches!(p, Some(Tab::Prayer | Tab::Widgets)))
+                .any(|p| matches!(p, Some(Tab::Prayer)))
                 .then_some(&pages.prayer),
             leaving: self.page_from,
             fx: Fx {
@@ -1033,6 +1017,7 @@ impl Surface {
         items: &[DockItem],
         icons: &[Vec<Option<Arc<IconPixels>>>],
         drag: Option<&Drag>,
+        widget_readings: &[String; 6],
     ) -> Result<()> {
         let now = Instant::now();
         let drag = drag.filter(|drag| drag.active);
@@ -1127,9 +1112,11 @@ impl Surface {
             marker,
             slots,
             layout: self.dock_buttons,
+            widget_readings,
             buttons: Button::ALL
                 .into_iter()
                 .chain(Button::EXTRA)
+                .chain(Button::WIDGETS)
                 .filter(|button| self.dock_buttons.on(*button))
                 .map(|button| (button, hover(Hit::Button(button))))
                 .collect(),
@@ -1473,6 +1460,7 @@ struct Desktop {
     recent: Vec<DockItem>,
     /// The open volume or brightness popup's state, and the brightness worker it shares (`host/levels.rs`).
     levels: Option<levels::Levels>,
+    center: command_center::Center,
     brightness: Option<crate::brightness::Brightness>,
     /// The tabs and the mascot (features tabs-eyes).
     pages: Pages,
@@ -1554,7 +1542,6 @@ impl Desktop {
         }
         let clips = Clips::default();
         let mut pages = Pages::new(&settings, store.last_tab);
-        pages.water = (store.water, settings.water_cfg[0] as u8);
         let weather = Feed::new(store.place.clone(), store.report.clone(), settings.detect);
         let timers = Timers::restore(&store.timers, timer::wall_now(), now);
         // One that came due while ROQA was not running shows at the first pass.
@@ -1661,6 +1648,7 @@ impl Desktop {
             swipe: 0,
             swipe_until: Instant::now(),
             levels: None,
+            center: Default::default(),
             brightness: None,
             recent: Vec::new(),
             pages,
@@ -1708,6 +1696,7 @@ impl Desktop {
             moon: self.settings.dock_moon.then(|| self.pages.moon.icon()),
             volume: self.settings.edge_volume,
             brightness: self.settings.edge_brightness,
+            widgets: self.visible_dock_widgets(),
             centre: if self.settings.dock_left {
                 0
             } else {
@@ -1751,7 +1740,8 @@ impl Desktop {
             &self.drops,
             self.palette,
             self.settings.dock_style,
-            self.dock_buttons(),
+            self.dock_buttons()
+                .fit_widgets(monitor.dock_room(self.settings.dock_style).width, dpi),
         )?;
         if kind == SurfaceKind::Notch {
             // Advances every existing notch first, so all monitors show the same minute.
@@ -1773,7 +1763,12 @@ impl Desktop {
             // Sized after the push: icons are extracted once, for the densest dock.
             let icons = self.dock_icons();
             let last = self.surfaces.len() - 1;
-            self.surfaces[last].paint_dock(&self.dock_items, &icons, self.drag.as_ref())?;
+            self.surfaces[last].paint_dock(
+                &self.dock_items,
+                &icons,
+                self.drag.as_ref(),
+                &self.pages.widget_readings,
+            )?;
         }
         // Shown after its first paint, and never on the monitor a full-screen app covers.
         let visible = !self
@@ -1924,7 +1919,7 @@ impl Desktop {
     /// and no alert it does nothing and returns `INFINITE`: no wake, and collapsed notches get no tick.
     #[inline(never)]
     fn refresh_timers(&mut self) -> u32 {
-        if !self.pages.tabs.on(Tab::Timer) {
+        if !self.pages.tabs.on(Tab::Timer) && !self.settings.dock_buttons.widgets[5] {
             return INFINITE; // switched off: no deadline, no alert, nothing to tick
         }
         let now = Instant::now();
@@ -1958,7 +1953,7 @@ impl Desktop {
             }
         }
         self.timers
-            .next_wake(expanded, now)
+            .next_wake(expanded || self.widget_popup_is(Button::Timer), now)
             .into_iter()
             .chain(self.pages.stopwatch.next_tick(now).filter(|_| expanded))
             .min()
@@ -1995,7 +1990,6 @@ impl Desktop {
         if !self.pages.tabs.select(tab, live) {
             return;
         }
-        self.pages.month = None;
         if self.store.last_tab != tab {
             self.store.last_tab = tab;
             self.pending.mark(Instant::now());
@@ -2017,15 +2011,13 @@ impl Desktop {
         }
         self.weather.expire(now);
         let (on, prayer) = (
-            self.pages.tabs.on(Tab::Weather),
-            self.pages.tabs.on(Tab::Prayer),
+            self.pages.tabs.on(Tab::Weather) || self.visible_dock_widgets()[0],
+            self.pages.tabs.on(Tab::Prayer) || self.visible_dock_widgets()[1],
         );
         if !weather::feed_wanted(on, prayer, self.weather.place.is_some()) {
             return; // no fetch, no worker, no page
         }
-        let shown = self.page() == Tab::Weather
-            || (self.page() == Tab::Widgets
-                && self.pages.widgets.uses(crate::widgets::WidgetKind::Weather));
+        let shown = self.page() == Tab::Weather || self.visible_dock_widgets()[0];
         let (detect, configured) = (
             self.settings.detect,
             weather::configured(self.settings.detect, &self.settings.city),
@@ -2033,11 +2025,11 @@ impl Desktop {
         let ctx = weather::Ctx {
             enabled: true,
             configured,
-            visible: self
-                .surfaces
-                .iter()
-                .any(|s| s.visible && s.kind() == SurfaceKind::Notch),
-            open: shown && self.surfaces.iter().any(Surface::expanded),
+            visible: self.surfaces.iter().any(|s| {
+                s.visible && (s.kind() == SurfaceKind::Notch || self.visible_dock_widgets()[0])
+            }),
+            open: shown
+                && (self.surfaces.iter().any(Surface::expanded) || self.visible_dock_widgets()[0]),
             wall: timer::wall_now(),
         };
         let idle = || weather_os::idle_secs() >= weather_os::IDLE_AFTER_SECS;
@@ -2236,26 +2228,6 @@ impl Desktop {
             self.request_notches(Repaint::Full, |_| true);
         }
     }
-    /// The memory, disk, processor and network tiles: while an open notch shows the Widgets page with one of
-    /// them, read and repainted every `STATS_STEP`; otherwise no wait, and the readings are dropped.
-    #[inline(never)]
-    fn refresh_stats(&mut self) -> u32 {
-        let now = Instant::now();
-        let shown = self.pages.widgets.live()
-            && self.page() == Tab::Widgets
-            && self.surfaces.iter().any(Surface::expanded);
-        if !shown {
-            self.pages.stats = crate::widgets::Stats::default();
-            return INFINITE;
-        }
-        if self.pages.stats.sample(now, self.pages.widgets) {
-            self.request_notches(Repaint::Full, Surface::expanded);
-        }
-        self.pages
-            .stats
-            .deadline()
-            .map_or(INFINITE, |due| milliseconds_until(due, now))
-    }
     /// A new song while every notch is closed opens them for `PEEK_TIME`; the first song after start does not.
     fn peek_song(&mut self) {
         let Some(title) = self
@@ -2439,9 +2411,12 @@ impl Desktop {
                         &self.shelf,
                         &self.pages,
                     )?,
-                    SurfaceKind::Dock => {
-                        surface.paint_dock(&self.dock_items, &icons, self.drag.as_ref())?
-                    }
+                    SurfaceKind::Dock => surface.paint_dock(
+                        &self.dock_items,
+                        &icons,
+                        self.drag.as_ref(),
+                        &self.pages.widget_readings,
+                    )?,
                 }
                 surface.live = surface.motion.running(now)
                     || surface.volume_fill.running(now)
@@ -2667,6 +2642,7 @@ impl Desktop {
             else {
                 continue;
             };
+            let buttons = buttons.fit_widgets(monitor.dock_room(style).width, dock.dpi);
             (*hover, *tweens) = (
                 None,
                 vec![Tween::rest(0.0); dock::cell_count(buttons, slots)],
@@ -2682,7 +2658,12 @@ impl Desktop {
             );
             dock.window.resize(dock.bounds)?;
             dock.canvas.resize(dock.bounds)?;
-            dock.paint_dock(&self.dock_items, &icons, self.drag.as_ref())?;
+            dock.paint_dock(
+                &self.dock_items,
+                &icons,
+                self.drag.as_ref(),
+                &self.pages.widget_readings,
+            )?;
         }
         Ok(())
     }
@@ -2759,7 +2740,11 @@ impl Desktop {
             }
             if changed {
                 // A slider popup is about the system, not a dock slot: a changing app list leaves it open.
-                if !self.levels_popup() {
+                if self
+                    .hover_popup
+                    .as_ref()
+                    .is_some_and(|popup| matches!(popup.hover_hit, Some(Hit::Slot(_))))
+                {
                     self.hover_popup = None;
                 }
                 let shelf = self.shelf.shelf.entries();
@@ -2782,7 +2767,12 @@ impl Desktop {
             .iter_mut()
             .filter(|s| s.kind() == SurfaceKind::Dock && s.visible)
         {
-            dock.paint_dock(&self.dock_items, &icons, self.drag.as_ref())?;
+            dock.paint_dock(
+                &self.dock_items,
+                &icons,
+                self.drag.as_ref(),
+                &self.pages.widget_readings,
+            )?;
         }
         Ok(())
     }
@@ -2961,6 +2951,14 @@ impl Desktop {
     }
 
     fn show_hover_popup(&mut self, hwnd: HWND, hit: Hit) {
+        if hit == Hit::Button(Button::Quick) {
+            return self.show_command_center(hwnd);
+        }
+        if let Hit::Button(button) = hit
+            && button.widget().is_some()
+        {
+            return self.show_widget_popup(hwnd, button);
+        }
         if hit == Hit::Button(Button::Limits) {
             return self.show_limits_popup(hwnd);
         }
@@ -3094,63 +3092,6 @@ impl Desktop {
         }
     }
 
-    fn hover_popup_message(&mut self, message: &MSG) -> bool {
-        let Some(popup) = &mut self.hover_popup else {
-            return false;
-        };
-        let slot = popup.slot;
-        let hwnd = popup.dock();
-        match popup.message(message) {
-            Event::Ignored => false,
-            Event::Consumed => true,
-            Event::Dismiss => {
-                self.hover_popup = None;
-                false
-            }
-            Event::Choose(Item::Member(index)) => {
-                let member = self
-                    .dock_items
-                    .get(slot)
-                    .and_then(|tile| tile.members.get(index))
-                    .cloned();
-                self.hover_popup = None;
-                if let Some(member) = member {
-                    self.open_member(&member);
-                }
-                true
-            }
-            Event::Choose(Item::MemberMenu(index)) => {
-                let member = self
-                    .dock_items
-                    .get(slot)
-                    .and_then(|tile| tile.members.get(index))
-                    .cloned();
-                self.hover_popup = None;
-                if let Some(member) = member {
-                    self.open_item_menu(hwnd, slot, member);
-                }
-                true
-            }
-            Event::Level(row, percent) => {
-                self.set_level(row, percent);
-                true
-            }
-            Event::Mute(row) => {
-                self.mute_row(row);
-                true
-            }
-            // The slider popups stay open: a device choice or a click on a note row does not close them.
-            Event::Choose(Item::Device(index, _)) => {
-                self.choose_device(index);
-                true
-            }
-            Event::Choose(Item::Label) if self.levels_popup() => true,
-            Event::Choose(_) => {
-                self.hover_popup = None;
-                true
-            }
-        }
-    }
     /// A global shortcut (`hotkeys.rs`) fired; a message queued just before its switch went off is ignored.
     fn hotkey(&mut self, id: usize) -> Result<()> {
         let Some((group, index)) =
@@ -3923,9 +3864,12 @@ impl Desktop {
                         &self.shelf,
                         &self.pages,
                     )?,
-                    SurfaceKind::Dock => {
-                        surface.paint_dock(&self.dock_items, &icons, self.drag.as_ref())?
-                    }
+                    SurfaceKind::Dock => surface.paint_dock(
+                        &self.dock_items,
+                        &icons,
+                        self.drag.as_ref(),
+                        &self.pages.widget_readings,
+                    )?,
                 }
             }
             surface.overlay = false;
@@ -4012,13 +3956,9 @@ impl Desktop {
             self.capture_clip();
         }
         self.take_shots();
-        if native_window::power_read() {
-            if self.power.update(power::Raw::read(), Instant::now()) {
-                self.open_notches();
-                self.request_notches(Repaint::Full, |_| true);
-            } else if self.page() == Tab::Widgets {
-                self.request_notches(Repaint::Full, |s| s.expanded());
-            }
+        if native_window::power_read() && self.power.update(power::Raw::read(), Instant::now()) {
+            self.open_notches();
+            self.request_notches(Repaint::Full, |_| true);
         }
         let bits = native_window::device_read();
         if bits != 0 {
@@ -4031,12 +3971,8 @@ impl Desktop {
                 self.request_notches(Repaint::Full, |s| !s.live && s.motion.value(now) < 0.1);
             }
         }
-        if let Some((letter, safe)) = crate::system_os::ejected() {
-            let text = if safe {
-                format!("{letter}: safe to remove")
-            } else {
-                format!("{letter}: still in use")
-            };
+        if let Some((letter, answer)) = crate::system_os::ejected() {
+            let text = answer.notice(letter);
             self.power
                 .announce(text, Instant::now(), DEVICE_NOTICE, power::Extra::None);
             self.open_notches();
@@ -4090,9 +4026,8 @@ impl Desktop {
         if self.text.take_changed() {
             self.rescale_text()?;
         }
-        // A pick made during one open, and the month grid, end once every notch has closed: the next open
-        // starts on the tiles.
-        if self.pages.tabs.choice.is_some() || self.pages.month.is_some() {
+        // A temporary tab choice ends once every notch has closed.
+        if self.pages.tabs.choice.is_some() {
             let now = Instant::now();
             if self
                 .surfaces
@@ -4101,7 +4036,6 @@ impl Desktop {
                 .all(|s| s.collapsed(now))
             {
                 self.pages.tabs.choice = None;
-                self.pages.month = None;
             }
         }
         let media_on = self.pages.tabs.on(Tab::Media);
@@ -4123,6 +4057,9 @@ impl Desktop {
             self.audio.start();
         }
         let volume = self.audio.refresh();
+        if volume {
+            self.refresh_quick_menu();
+        }
         if self.mic.refresh() && self.pages.dots.set_muted(self.mic.muted(), Instant::now()) {
             self.request_notches(Repaint::Full, |_| true);
         }
@@ -4177,6 +4114,7 @@ impl Desktop {
             .min(self.refresh_reminders())
             .min(close_wait)
             .min(self.refresh_stats());
+        self.refresh_widget_readings()?;
         self.paint_requested()?;
         if self
             .settings_window
@@ -4482,7 +4420,7 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
                 desktop.dismiss_preview();
                 continue;
             }
-            if desktop.hover_popup_message(&message) || desktop.menu_message(&message, catalog) {
+            if desktop.hover_popup_message(&message, catalog) || desktop.menu_message(&message) {
                 continue;
             }
             if matches!(
@@ -4868,16 +4806,16 @@ mod clock_wait_tests {
         // Enabled tabs show a handle, on Media while a session lives, else on the last tab used.
         let pages = Pages::new(&settings, Tab::Shelf);
         let rail = |pages: &Pages, live| pages.rail(live).map(|r| (r.count, r.active));
-        assert_eq!(rail(&pages, true), Some((6, 0)));
-        assert_eq!(rail(&pages, false), Some((6, 4)));
+        assert_eq!(rail(&pages, true), Some((5, 0)));
+        assert_eq!(rail(&pages, false), Some((5, 4)));
         assert_eq!(pages.page(false), Tab::Shelf);
         // A pick during one open wins until it ends.
         settings.tabs[Tab::Timer.index()] = false;
         settings.tabs[Tab::Weather.index()] = false;
         let mut pages = Pages::new(&settings, Tab::Media);
-        assert_eq!(rail(&pages, false), Some((4, 0)));
+        assert_eq!(rail(&pages, false), Some((3, 0)));
         assert!(pages.tabs.select(Tab::Shelf, true));
-        assert_eq!(rail(&pages, true), Some((4, 2)));
+        assert_eq!(rail(&pages, true), Some((3, 2)));
         // One tab: no handle. None: the plain clock panel is the Media page.
         settings.tabs = [true, false, false, false, false, false, false];
         assert_eq!(rail(&Pages::new(&settings, Tab::Media), true), None);

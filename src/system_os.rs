@@ -5,9 +5,7 @@ use std::{ffi::OsStr, path::Path, path::PathBuf};
 
 use windows::{
     Win32::{
-        Foundation::{
-            CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE,
-        },
+        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE},
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         },
@@ -173,52 +171,234 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-/// Ejects drive `letter` the way Safe Remove does: lock (it fails while a file is open, so nothing is lost),
-/// dismount, allow removal, eject. False when any step is refused.
-pub fn eject(letter: char) -> bool {
+/// Lock (it fails while a file is open, so nothing is lost), dismount, allow removal, eject: Safe Remove's steps on an
+/// open volume handle. False when any step is refused.
+fn release(volume: HANDLE) -> bool {
     const LOCK: u32 = 0x0009_0018;
     const DISMOUNT: u32 = 0x0009_0020;
     const ALLOW_REMOVAL: u32 = 0x002D_4804;
     const EJECT: u32 = 0x002D_4808;
-    let path = HSTRING::from(format!(r"\\.\{letter}:"));
-    // SAFETY: a volume handle closed below; each call passes a live buffer of the length it states.
+    let step = |code: u32, input: &[u8]| control(volume, code, input, &mut []).is_some();
+    step(LOCK, &[]) && step(DISMOUNT, &[]) && step(ALLOW_REMOVAL, &[0]) && step(EJECT, &[])
+}
+
+/// One `DeviceIoControl` on `handle`: the bytes written to `output`, or `None` when Windows refused.
+fn control(handle: HANDLE, code: u32, input: &[u8], output: &mut [u8]) -> Option<usize> {
+    let mut returned = 0;
+    // SAFETY: both buffers are live slices and the call passes the lengths they state; the call is synchronous.
+    let done = unsafe {
+        DeviceIoControl(
+            handle,
+            code,
+            input.as_ptr(),
+            input.len() as u32,
+            output.as_mut_ptr(),
+            output.len() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    (done != 0).then_some(returned as usize)
+}
+
+/// Opens a volume (`\\.\E:` or `\\?\Volume{GUID}` with no trailing backslash) for `access` (0: queries only).
+fn open_volume(path: &str, access: u32) -> Option<crate::ipc::OwnedHandle> {
+    // SAFETY: the path outlives the call; the handle is owned (closed on drop).
     unsafe {
-        let Ok(volume) = CreateFileW(
-            &path,
-            GENERIC_READ.0 | GENERIC_WRITE.0,
+        CreateFileW(
+            &HSTRING::from(path),
+            access,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
             None,
-        ) else {
-            return false;
-        };
-        let mut returned = 0;
-        let mut control = |code: u32, input: &[u8]| {
-            DeviceIoControl(
-                volume,
-                code,
-                input.as_ptr(),
-                input.len() as u32,
-                std::ptr::null_mut(),
-                0,
-                &mut returned,
-                std::ptr::null_mut(),
-            ) != 0
-        };
-        let done = control(LOCK, &[])
-            && control(DISMOUNT, &[])
-            && control(ALLOW_REMOVAL, &[0])
-            && control(EJECT, &[]);
-        let _ = CloseHandle(volume);
-        done
+        )
+    }
+    .ok()
+    .map(crate::ipc::OwnedHandle)
+}
+
+/// Ejects drive `letter` the way Safe Remove does. False when any step is refused. This path trusts the letter: it
+/// is the arrival alert's (`eject_volume` is the identity-checked one Places uses).
+pub fn eject(letter: char) -> bool {
+    open_volume(&format!(r"\\.\{letter}:"), GENERIC_READ.0 | GENERIC_WRITE.0)
+        .is_some_and(|volume| release(volume.0))
+}
+
+/// A disk as the storage stack numbers it: device type, device number, partition number.
+type Disk = (u32, u32, u32);
+
+/// What one volume handle says about itself, read with the handle open for queries only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Probe {
+    disk: Disk,
+    /// The mount manager's unique id for the volume (disk signature and offset, or the partition GUID).
+    unique: Vec<u8>,
+    usb: bool,
+}
+
+/// `STORAGE_BUS_TYPE` `BusTypeUsb`.
+const BUS_USB: u32 = 7;
+
+fn probe(handle: HANDLE) -> Option<Probe> {
+    const GET_DEVICE_NUMBER: u32 = 0x002D_1080;
+    const QUERY_PROPERTY: u32 = 0x002D_1400;
+    const QUERY_UNIQUE_ID: u32 = 0x004D_0000;
+    let word =
+        |bytes: &[u8], at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+    let mut number = [0u8; 12];
+    (control(handle, GET_DEVICE_NUMBER, &[], &mut number)? == number.len()).then_some(())?;
+    // STORAGE_PROPERTY_QUERY: StorageDeviceProperty (0), PropertyStandardQuery (0), one spare byte, padded to 12.
+    let mut descriptor = [0u8; 1024];
+    let written = control(handle, QUERY_PROPERTY, &[0; 12], &mut descriptor)?;
+    // STORAGE_DEVICE_DESCRIPTOR.BusType sits at byte 28.
+    let bus = word(descriptor.get(..written)?, 28)?;
+    let mut unique = [0u8; 256];
+    let written = control(handle, QUERY_UNIQUE_ID, &[], &mut unique)?;
+    let length = usize::from(u16::from_le_bytes([unique[0], unique[1]]));
+    (length > 0 && written >= 2 + length).then_some(())?;
+    Some(Probe {
+        disk: (word(&number, 0)?, word(&number, 4)?, word(&number, 8)?),
+        unique: unique[2..2 + length].to_vec(),
+        usb: bus == BUS_USB,
+    })
+}
+
+/// A USB volume's stable identity, captured while Places lists drives. The letter is display text only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Volume {
+    pub letter: char,
+    /// `\\?\Volume{GUID}`, no trailing backslash: what the eject opens.
+    guid: String,
+    probe: Probe,
+}
+
+#[cfg(test)]
+impl Volume {
+    /// A made-up identity for tests that never touch hardware.
+    pub fn for_test(letter: char) -> Self {
+        Self {
+            letter,
+            guid: String::new(),
+            probe: Probe {
+                disk: (7, 0, 1),
+                unique: vec![1],
+                usb: true,
+            },
+        }
+    }
+}
+
+/// The volume at `now` is the captured one: still USB, the same disk slot and the same mount manager id. Nothing
+/// readable means not the same.
+fn unchanged(was: &Probe, now: Option<&Probe>) -> bool {
+    now.is_some_and(|now| now.usb && now == was)
+}
+
+/// Whether `mine` is the only volume on its physical device among `volumes` (every volume Windows lists, lettered
+/// or not). A volume that could not be read might be on this device, so it rules the device out.
+fn sole_volume(mine: Disk, volumes: &[Option<Disk>]) -> bool {
+    volumes.iter().all(Option::is_some)
+        && volumes
+            .iter()
+            .flatten()
+            .filter(|disk| disk.0 == mine.0 && disk.1 == mine.1)
+            .count()
+            == 1
+}
+
+/// Every volume's disk, from the volume list Windows keeps (lettered, unlettered and folder-mounted), read with
+/// query-only handles. `None` when the list cannot be walked to its end.
+fn all_volumes() -> Option<Vec<Option<Disk>>> {
+    use windows::Win32::{
+        Foundation::ERROR_NO_MORE_FILES,
+        Storage::FileSystem::{FindFirstVolumeW, FindNextVolumeW, FindVolumeClose},
+    };
+    let mut name = [0u16; 64];
+    // SAFETY: `name` is a live, sized buffer for each call; the find handle is closed once below.
+    let find = unsafe { FindFirstVolumeW(&mut name) }.ok()?;
+    let mut disks = Vec::new();
+    let complete = loop {
+        let end = name.iter().position(|c| *c == 0).unwrap_or(0);
+        let path = String::from_utf16_lossy(&name[..end]);
+        disks.push(
+            open_volume(path.trim_end_matches('\\'), 0)
+                .and_then(|volume| probe(volume.0).map(|probe| probe.disk)),
+        );
+        // SAFETY: as above.
+        if let Err(error) = unsafe { FindNextVolumeW(find, &mut name) } {
+            break error.code() == ERROR_NO_MORE_FILES.to_hresult();
+        }
+    };
+    // SAFETY: the handle came from FindFirstVolumeW and is closed once.
+    let _ = unsafe { FindVolumeClose(find) };
+    complete.then_some(disks)
+}
+
+/// The identity of drive `letter` when it can be proven to be one USB volume alone on its device, else `None` (no
+/// Eject row). Blocking disk calls: run on the Places worker.
+pub fn usb_volume(letter: char) -> Option<Volume> {
+    use windows::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+    let mut name = [0u16; 64];
+    // SAFETY: the root string and the sized buffer outlive the call.
+    unsafe { GetVolumeNameForVolumeMountPointW(&HSTRING::from(format!("{letter}:\\")), &mut name) }
+        .ok()?;
+    let end = name.iter().position(|c| *c == 0)?;
+    let guid = String::from_utf16_lossy(&name[..end])
+        .trim_end_matches('\\')
+        .to_owned();
+    let probe = probe(open_volume(&guid, 0)?.0).filter(|probe| probe.usb)?;
+    sole_volume(probe.disk, &all_volumes()?).then_some(Volume {
+        letter,
+        guid,
+        probe,
+    })
+}
+
+/// How an eject ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ejected {
+    /// A step was refused (a file is open).
+    Refused,
+    Safe,
+    /// The volume is gone, replaced or no longer alone on its USB device: nothing was locked or dismounted.
+    Changed,
+}
+
+impl Ejected {
+    /// The notice row's text for drive `letter`.
+    pub fn notice(self, letter: char) -> String {
+        match self {
+            Self::Safe => format!("{letter}: safe to remove"),
+            Self::Refused => format!("{letter}: still in use"),
+            Self::Changed => "That drive isn't there now".into(),
+        }
+    }
+}
+
+/// Ejects the volume `volume` names. The GUID is opened (never the letter), and on that very handle the identity is
+/// compared with what was captured before any lock; the single-volume rule is read again too.
+fn eject_volume(volume: &Volume) -> Ejected {
+    let Some(handle) = open_volume(&volume.guid, GENERIC_READ.0 | GENERIC_WRITE.0) else {
+        return Ejected::Changed;
+    };
+    let now = probe(handle.0);
+    if !unchanged(&volume.probe, now.as_ref())
+        || !all_volumes().is_some_and(|all| sole_volume(volume.probe.disk, &all))
+    {
+        return Ejected::Changed;
+    }
+    if release(handle.0) {
+        Ejected::Safe
+    } else {
+        Ejected::Refused
     }
 }
 
 /// The one eject slot: 0 free, `BUSY` while a worker runs, otherwise a finished answer waiting to be read
-/// (`letter << 8 | 2` refused, `| 3` safe to remove). A new eject starts only from 0, so an unread answer is never
-/// replaced and each answer names its drive.
+/// (`letter << 8 | 2` refused, `| 3` safe to remove, `| 4` changed). A new eject starts only from 0, so an unread
+/// answer is never replaced and each answer names its drive.
 static EJECT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 const BUSY: u32 = 1;
 /// Posted to the host thread when an eject finished; it only wakes the loop, `ejected` carries the answer.
@@ -229,17 +409,22 @@ fn eject_begin() -> bool {
     EJECT.compare_exchange(0, BUSY, AcqRel, Acquire).is_ok()
 }
 
-fn eject_finish(letter: char, safe: bool) {
+fn eject_finish(letter: char, answer: Ejected) {
+    let code = match answer {
+        Ejected::Refused => 2,
+        Ejected::Safe => 3,
+        Ejected::Changed => 4,
+    };
     EJECT.store(
-        (letter as u32) << 8 | if safe { 3 } else { 2 },
+        (letter as u32) << 8 | code,
         std::sync::atomic::Ordering::Release,
     );
 }
 
-/// `eject` on a short worker: locking and dismounting flush the drive, which can take seconds on a slow stick and
+/// `job` on a short worker: locking and dismounting flush the drive, which can take seconds on a slow stick and
 /// must not stop the dock and notch. The answer comes back through `ejected`. False, and nothing starts, while an
 /// earlier eject is out or its answer is unread.
-pub fn eject_in_background(letter: char) -> bool {
+fn eject_on_worker(letter: char, job: impl FnOnce() -> Ejected + Send + 'static) -> bool {
     if !eject_begin() {
         return false;
     }
@@ -248,23 +433,44 @@ pub fn eject_in_background(letter: char) -> bool {
     let spawned = std::thread::Builder::new()
         .name("roqa-eject".into())
         .spawn(move || {
-            eject_finish(letter, eject(letter));
+            eject_finish(letter, job());
             // A failed post is picked up on the host's next pass.
             let _ = crate::native_window::post_wake(host, EJECTED);
         });
     if spawned.is_err() {
-        eject_finish(letter, false);
+        eject_finish(letter, Ejected::Refused);
     }
     true
 }
 
-/// The finished eject's drive and answer, once: `true` when the drive is safe to remove.
-pub fn ejected() -> Option<(char, bool)> {
+/// The arrival alert's eject, by letter (`eject`).
+pub fn eject_in_background(letter: char) -> bool {
+    eject_on_worker(letter, move || {
+        if eject(letter) {
+            Ejected::Safe
+        } else {
+            Ejected::Refused
+        }
+    })
+}
+
+/// Places' eject, by captured identity (`eject_volume`).
+pub fn eject_volume_in_background(volume: Volume) -> bool {
+    eject_on_worker(volume.letter, move || eject_volume(&volume))
+}
+
+/// The finished eject's drive and how it ended, once.
+pub fn ejected() -> Option<(char, Ejected)> {
     use std::sync::atomic::Ordering::{AcqRel, Acquire};
     let done = EJECT
         .fetch_update(AcqRel, Acquire, |state| (state > BUSY).then_some(0))
         .ok()?;
-    Some((char::from_u32(done >> 8)?, done & 0xFF == 3))
+    let answer = match done & 0xFF {
+        3 => Ejected::Safe,
+        4 => Ejected::Changed,
+        _ => Ejected::Refused,
+    };
+    Some((char::from_u32(done >> 8)?, answer))
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
@@ -323,12 +529,56 @@ mod tests {
         assert!(eject_begin());
         assert!(!eject_begin(), "busy while the worker runs");
         assert_eq!(ejected(), None, "nothing to read yet");
-        eject_finish('E', true);
+        eject_finish('E', Ejected::Safe);
         assert!(!eject_begin(), "an unread answer is never replaced");
-        assert_eq!(ejected(), Some(('E', true)));
+        assert_eq!(ejected(), Some(('E', Ejected::Safe)));
         assert_eq!(ejected(), None, "read once");
         assert!(eject_begin());
-        eject_finish('F', false);
-        assert_eq!(ejected(), Some(('F', false)));
+        eject_finish('F', Ejected::Refused);
+        assert_eq!(ejected(), Some(('F', Ejected::Refused)));
+        assert!(eject_begin());
+        eject_finish('G', Ejected::Changed);
+        assert_eq!(ejected(), Some(('G', Ejected::Changed)));
+    }
+
+    fn probe_of(unique: u8, number: u32, usb: bool) -> Probe {
+        Probe {
+            disk: (7, number, 1),
+            unique: vec![unique],
+            usb,
+        }
+    }
+
+    #[test]
+    fn only_the_very_volume_captured_may_be_ejected() {
+        let was = probe_of(1, 3, true);
+        assert!(unchanged(&was, Some(&was.clone())));
+        assert!(!unchanged(&was, None), "gone or unreadable");
+        assert!(
+            !unchanged(&was, Some(&probe_of(2, 3, true))),
+            "another volume"
+        );
+        assert!(
+            !unchanged(&was, Some(&probe_of(1, 4, true))),
+            "disk slot reused"
+        );
+        assert!(
+            !unchanged(&was, Some(&probe_of(1, 3, false))),
+            "not USB now"
+        );
+    }
+
+    #[test]
+    fn a_device_must_carry_exactly_one_readable_volume() {
+        let mine = (7, 3, 1);
+        let other = Some((7, 0, 1));
+        assert!(sole_volume(mine, &[other, Some(mine), Some((4, 3, 0))]));
+        assert!(
+            !sole_volume(mine, &[Some(mine), Some((7, 3, 2))]),
+            "sibling"
+        );
+        assert!(!sole_volume(mine, &[Some(mine), None]), "unreadable volume");
+        assert!(!sole_volume(mine, &[other]), "the volume itself is missing");
+        assert!(!sole_volume(mine, &[]));
     }
 }

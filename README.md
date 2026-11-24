@@ -24,7 +24,8 @@
 ### Dynamic Notch Island & Shelf
 - **Interactive Top Capsule:** Displays time and date, expanding on hover to reveal rich modular tabs and tools.
 - **Media Island:** Full Windows Global System Media Transport Controls (GSMTC) integration with album artwork, title/artist display, playback controls, scrubbable progress bar, and volume slider with quick audio device switcher.
-- **Modular Widgets:** Week calendar view, live battery status pill, and power notifications.
+- **Dock widgets:** Choose Weather, Prayer, Calendar, Water, System, and Timer in Settings, and set how many can appear. The dock also shows connected device batteries.
+- **Command center:** Wi-Fi, Bluetooth, airplane mode, hotspot settings, volume, brightness, and power controls, from the dock.
 - **Live Weather:** Real-time conditions, temperature, and hourly forecast powered by Open-Meteo with automatic geolocation or manual city search.
 - **Astronomical Prayer Times:** High-precision prayer calculations (Fajr, Dhuhr, Asr, Maghrib, Isha) supporting major calculation authorities (Egyptian General Authority, ISNA, MWL, Umm al-Qura, Karachi), juristic methods (Shafi'i/Hanafi), and audio alerts.
 - **Pomodoro & Quick Timers:** Preset countdowns (25m, 15m, 5m) or custom durations with visual progress and completion chime.

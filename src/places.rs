@@ -2,6 +2,7 @@
 //! (`ask_places`), since a sleeping drive can stall the call.
 //! Network drives are left out (a stat on one can hang the host thread) and nothing is kept or polled.
 //! A pinned folder's stack (its newest files) is read here too, once per click, on the same worker (`ask`).
+use crate::dock_menu::Item;
 use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 use windows::{
@@ -220,6 +221,8 @@ const DRIVE_FIXED: u32 = 3;
 pub struct Place {
     pub text: String,
     pub target: String,
+    /// The USB drive's identity when an Eject row may follow this row (`system_os::usb_volume`).
+    pub eject: Option<crate::system_os::Volume>,
 }
 
 /// The Recycle Bin's row text: how many items it holds.
@@ -237,6 +240,20 @@ fn drive_text(label: &str, letter: char) -> String {
     format!("{name} ({letter}:)")
 }
 
+/// The popup's rows: every place, with an Eject row directly after each place that carries an identity.
+pub fn rows(places: &[Place]) -> (Vec<Item>, Vec<String>) {
+    let mut rows = (Vec::new(), Vec::new());
+    for (index, place) in places.iter().enumerate() {
+        rows.0.push(Item::Place(index));
+        rows.1.push(place.text.clone());
+        if let Some(volume) = &place.eject {
+            rows.0.push(Item::Eject(index));
+            rows.1.push(format!("Eject {}:", volume.letter));
+        }
+    }
+    rows
+}
+
 pub fn list() -> Vec<Place> {
     let mut info = SHQUERYRBINFO {
         cbSize: size_of::<SHQUERYRBINFO>() as u32,
@@ -248,6 +265,7 @@ pub fn list() -> Vec<Place> {
     let mut places = vec![Place {
         text: bin_text(items),
         target: "shell:RecycleBinFolder".into(),
+        eject: None,
     }];
     // SAFETY: a scalar query of the logical drive bitmask.
     let mask = unsafe { GetLogicalDrives() };
@@ -273,6 +291,7 @@ pub fn list() -> Vec<Place> {
         places.push(Place {
             text: drive_text(&label, letter),
             target: root.to_string(),
+            eject: crate::system_os::usb_volume(letter),
         });
     }
     places
@@ -403,6 +422,43 @@ mod tests {
         for folder in [r"C:\Users\me\Downloads", r"\nas\share", r"D:\v2.1"] {
             assert!(may_be_folder(folder), "{folder}");
         }
+    }
+    #[test]
+    fn an_eject_row_follows_only_its_own_drive() {
+        let place = |text: &str, eject| Place {
+            text: text.into(),
+            target: String::new(),
+            eject,
+        };
+        let plain = [place("Bin", None), place("Data (D:)", None)];
+        let (items, titles) = rows(&plain);
+        assert_eq!(
+            items,
+            [Item::Place(0), Item::Place(1)],
+            "no USB: today's popup"
+        );
+        assert_eq!(titles, ["Bin", "Data (D:)"]);
+        let stick = crate::system_os::Volume::for_test('E');
+        let mixed = [
+            place("Bin", None),
+            place("Stick (E:)", Some(stick.clone())),
+            place("Data (D:)", None),
+            place("Other (F:)", Some(stick)),
+        ];
+        let (items, titles) = rows(&mixed);
+        assert_eq!(
+            items,
+            [
+                Item::Place(0),
+                Item::Place(1),
+                Item::Eject(1),
+                Item::Place(2),
+                Item::Place(3),
+                Item::Eject(3)
+            ]
+        );
+        assert_eq!(titles.len(), items.len(), "one title per row");
+        assert_eq!(titles[2], "Eject E:");
     }
     #[test]
     fn the_bin_comes_first() {

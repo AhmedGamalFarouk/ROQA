@@ -14,9 +14,9 @@ powershell -File cook\tools\run-capture.ps1 -Round rNN -DryRun
 
 The available passes are `matrix`, `dock`, `eyes`, and `extra`. The matrix pass includes all seven tabs, Settings samples, and five themes. A real capture quits ROQA with `--quit`, closes Nusa, shows the gray backdrop, and captures the same filenames as the r10 scripts. Its `finally` block closes the backdrop and restarts ROQA with `scripts\run.ps1 start` and Nusa.
 
-`-DryRun` validates the round and pass selection and reports the current exe size, SHA256, and git HEAD. It does not stop or start applications. Before a real capture, the tool checks existing `cook\stills\r*\provenance.json` records and skips when both `gitHead` and `exeSha256` match. New rounds receive an `INDEX.md` and `provenance.json` with git HEAD, exe SHA256, byte size, and UTC capture time.
+`-DryRun` validates the round and pass selection and reports the current exe size, SHA256, and git HEAD. It does not stop or start applications. A real capture reuses an existing round only when git HEAD, exe SHA256 and all requested phases match. Older records without phases are not reused. Use a new round number to capture missing phases without overwriting an earlier round. New rounds receive an `INDEX.md` and `provenance.json` with git HEAD, exe SHA256, byte size, UTC capture time, and the completed phases.
 
-All captures run on the second (non-primary) monitor (owner decision 2026-11-18); `scripts\monitor.ps1` picks it. With one monitor the tools warn and use the primary; `ROQA_TEST_MONITOR=primary` forces the primary. Pass and tool coordinates are local to that monitor (1920x1080 at its origin), the backdrop covers only it, Settings is centred on it, and ROQA is kept off the other monitors with `off=` lines in the capture store.
+Captures use the second (non-primary) monitor when available; `scripts\monitor.ps1` picks it. With one monitor the tools warn and use the primary. Pass and tool coordinates are local to that monitor (1920x1080 at its origin), the backdrop covers only it, Settings is centred on it, and ROQA is kept off the other monitors with `off=` lines in the capture store.
 
 A still that is only the gray backdrop (ROQA was not on screen) fails the pass at once.
 

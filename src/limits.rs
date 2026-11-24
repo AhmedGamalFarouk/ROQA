@@ -533,7 +533,7 @@ pub struct RowView {
     pub name: &'static str,
     pub h5: Line,
     pub wk: Line,
-    /// "as of 16:56", or the age once stale ("23 min ago").
+    /// "as of 4:56 pm", or the age once stale ("23 min ago").
     pub as_of: String,
     pub stale: bool,
     /// Why there is no reading.
@@ -546,6 +546,12 @@ pub struct View {
 }
 
 const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+fn time_label(hour: u8, minute: u8) -> String {
+    let period = if hour < 12 { "am" } else { "pm" };
+    let hour = (hour + 11) % 12 + 1;
+    format!("{hour}:{minute:02} {period}")
+}
 
 /// Weekday (0 is Sunday), hour and minute at Unix second `t` for a UTC offset in minutes.
 pub fn clock(offset_min: i32) -> impl Fn(i64) -> (u8, u8, u8) {
@@ -565,11 +571,11 @@ pub fn view(
 ) -> View {
     let hm = |t| {
         let (_, h, m) = clock(t);
-        format!("{h:02}:{m:02}")
+        time_label(h, m)
     };
     let day = |t| {
         let (d, h, m) = clock(t);
-        format!("{} {h:02}:{m:02}", DAYS[usize::from(d) % 7])
+        format!("{} {}", DAYS[usize::from(d) % 7], time_label(h, m))
     };
     let line = |win: Option<Win>, weekly: bool| match win {
         None => Line::Hidden,
@@ -643,7 +649,7 @@ pub fn popup_rows(view: &View) -> Vec<(String, Option<u8>)> {
                 Line::Used { pct, reset } => {
                     rows.push((format!("{label}, resets {reset}"), Some(*pct)));
                 }
-                Line::Reset { reset } => rows.push((format!("{label}, reset at {reset}"), Some(0))),
+                Line::Reset { reset } => rows.push((format!("{label}, reset {reset}"), Some(0))),
                 Line::Hidden => {}
             }
         }
@@ -951,7 +957,6 @@ mod tests {
 
     #[test]
     fn a_row_carries_the_used_percent_and_the_reset_time_in_local_time() {
-        // 2026-11-12 16:50 UTC is a Thursday; at UTC+2 the five-hour reset reads 18:50.
         let reset = parse_iso("2026-11-12T16:50:00Z").unwrap();
         let now = reset - 3600;
         let weekly = parse_iso("2026-11-15T05:00:00Z").unwrap();
@@ -965,15 +970,28 @@ mod tests {
             None,
         ];
         let v = view(&rows, now, &clock(120), false);
-        assert_eq!(v.rows[0].as_of, "as of 17:48");
+        assert_eq!(v.rows[0].as_of, "as of 5:48 pm");
         assert_eq!(v.rows[2].why, Some(WAITING));
         assert_eq!(
             v.rows[0].h5,
             Line::Used {
                 pct: 48,
-                reset: "18:50".into()
+                reset: "6:50 pm".into()
             }
         );
+        assert_eq!(
+            v.rows[0].wk,
+            Line::Used {
+                pct: 10,
+                reset: "Sun 7:00 am".into()
+            }
+        );
+    }
+
+    #[test]
+    fn noon_and_midnight_both_use_hour_twelve() {
+        assert_eq!(time_label(0, 5), "12:05 am");
+        assert_eq!(time_label(12, 0), "12:00 pm");
     }
 
     #[test]
@@ -1112,13 +1130,12 @@ mod tests {
 
     #[test]
     fn the_popup_lists_each_tool_then_its_windows_as_bars() {
-        let at = |h: u8, m: u8| format!("{h:02}:{m:02}");
         let row = |name, h5, wk, why: Option<&'static str>| RowView {
             name,
             h5,
             wk,
             as_of: if why.is_none() {
-                at(16, 56)
+                "as of 4:56 pm".into()
             } else {
                 String::new()
             },
@@ -1131,10 +1148,10 @@ mod tests {
                     "Claude",
                     Line::Used {
                         pct: 42,
-                        reset: at(18, 0),
+                        reset: "6:00 pm".into(),
                     },
                     Line::Reset {
-                        reset: "Sun 08:59".into(),
+                        reset: "Sun 8:59 am".into(),
                     },
                     None,
                 ),
@@ -1145,9 +1162,9 @@ mod tests {
         assert_eq!(
             popup_rows(&view),
             [
-                ("Claude, 16:56".to_owned(), None),
-                ("5h, resets 18:00".to_owned(), Some(42)),
-                ("Week, reset at Sun 08:59".to_owned(), Some(0)),
+                ("Claude, as of 4:56 pm".to_owned(), None),
+                ("5h, resets 6:00 pm".to_owned(), Some(42)),
+                ("Week, reset Sun 8:59 am".to_owned(), Some(0)),
                 ("Codex".to_owned(), None),
                 (OFF_CODEX.to_owned(), None),
             ]

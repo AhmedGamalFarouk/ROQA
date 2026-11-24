@@ -40,17 +40,19 @@ $existing = Get-ChildItem -LiteralPath (Join-Path $root 'cook\stills') -Director
         # A record without these fields (an older format) never matches.
         try {
             $record = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
-            if ($record.exeSha256 -eq $hash -and $record.gitHead -eq $head) { $_ }
+            if ($record.exeSha256 -eq $hash -and $record.gitHead -eq $head -and
+                @($selected | Where-Object { $_ -notin $record.phases }).Count -eq 0) { $_ }
         } catch { return }
     }
 }
 if ($existing) {
-    Write-Host "Existing round $($existing[0].Name) has this git HEAD and exe SHA256; skipping capture."
+    Write-Host "Existing round $($existing[0].Name) has this git HEAD, exe SHA256 and all requested phases; skipping capture."
     exit 0
 }
+if (Test-Path -LiteralPath $outDir) { throw "Round $Round already exists without matching evidence for this request. Choose a new round number." }
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-$prov = [ordered]@{ gitHead = $head; exeSha256 = $hash; bytes = $bytes; capturedUtc = [DateTime]::UtcNow.ToString('o') }
+$prov = [ordered]@{ gitHead = $head; exeSha256 = $hash; bytes = $bytes; capturedUtc = [DateTime]::UtcNow.ToString('o'); phases = $selected }
 $backdrop = $null
 $oldPhase = $env:ROQA_CAPTURE_PHASE
 $oldDir = $env:ROQA_CAPTURE_DIR

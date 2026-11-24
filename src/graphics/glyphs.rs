@@ -76,8 +76,14 @@ pub enum Glyph {
     RepeatOne,
     /// The notice row's mark for an app's notification.
     Bell,
+    WiFi,
+    Bluetooth,
+    Airplane,
+    Hotspot,
+    MoonTheme,
+    Sliders,
 }
-const ALL: [Glyph; 45] = [
+const ALL: [Glyph; 51] = [
     Glyph::Play,
     Glyph::Pause,
     Glyph::Previous,
@@ -123,6 +129,12 @@ const ALL: [Glyph; 45] = [
     Glyph::Repeat,
     Glyph::RepeatOne,
     Glyph::Bell,
+    Glyph::WiFi,
+    Glyph::Bluetooth,
+    Glyph::Airplane,
+    Glyph::Hotspot,
+    Glyph::MoonTheme,
+    Glyph::Sliders,
 ];
 /// Grid size and stroke, in grid units.
 const GRID: f32 = 24.0;
@@ -232,6 +244,16 @@ impl Glyph {
             Glyph::Chevron => "M6 15l6-6 6 6",
             Glyph::Expand => "M6 9l6 6 6-6",
             Glyph::Back => "M15 6l-6 6 6 6",
+            Glyph::WiFi => {
+                "M3 8a14 14 0 0 1 18 0M6 12a9 9 0 0 1 12 0M9 16a4.5 4.5 0 0 1 6 0M12 20h.01"
+            }
+            Glyph::Bluetooth => "M12 3v18l5-5-10-8M7 16l10-8-5-5",
+            Glyph::Airplane => "M12 3v18M4 14l8-5 8 5M9 21l3-2 3 2",
+            Glyph::Hotspot => {
+                "M6 6a9 9 0 0 0 0 12m12-12a9 9 0 0 1 0 12M9 9a4 4 0 0 0 0 6m6-6a4 4 0 0 1 0 6m-3-3h.01"
+            }
+            Glyph::MoonTheme => "M20 16a8 8 0 0 1-12-11 8 8 0 1 0 12 11z",
+            Glyph::Sliders => "M4 8h16M4 16h16M9 5v6m6 2v6",
             Glyph::Forward => "M9 6l6 6-6 6",
             Glyph::Shuffle => "M4 7h3l10 10h3M17 14l3 3l-3 3M4 17h3l3-3M14 10l3-3h3M17 4l3 3l-3 3",
             Glyph::Repeat => {

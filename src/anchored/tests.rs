@@ -33,6 +33,37 @@ fn event_at(kind: u32, window: usize, time: u32) -> Event {
         time,
     }
 }
+
+#[test]
+fn tray_open_timeout_resumes_taskbar_suppression() {
+    let now = Instant::now();
+    let mut native = Native::default();
+    let mut tray = request(11, now);
+    tray.kind = Kind::Tray;
+    assert!(native.begin(tray));
+    assert!(tray_opening());
+    native.refresh(now + OPEN_WAIT);
+    assert!(!tray_opening());
+}
+
+#[test]
+fn ending_the_tray_opening_pause_keeps_dismissal_events() {
+    let now = Instant::now();
+    let mut native = Native::default();
+    let mut tray = request(11, now);
+    tray.kind = Kind::Tray;
+    tray.window = Some(key(50));
+    tray.due = None;
+    assert!(native.begin(tray));
+
+    set_capture(Capture::Listening);
+    assert!(!tray_opening());
+    assert_eq!(native.owner(), Some(Owner(hwnd(11))));
+    event(EVENT_OBJECT_HIDE, hwnd(50), 110);
+    native.refresh(now);
+    assert_eq!(native.owner(), None);
+}
+
 #[test]
 fn native_popup_keeps_the_origin_through_pending_visible_and_exact_dismissal() {
     for surface in [SurfaceKind::Dock, SurfaceKind::Notch] {
@@ -77,7 +108,7 @@ fn pending_timeout_and_failed_input_release_the_owner() {
     assert!(native.begin(request(12, now)));
     native.cancel(); // The same path as SendInput refusal.
     assert_eq!(native.owner(), None);
-    assert!(!ACTIVE.get());
+    assert!(CAPTURE.get() == Capture::Off);
 }
 #[test]
 fn concurrent_requests_keep_the_first_and_old_events_cannot_attach_to_the_next() {

@@ -13,7 +13,7 @@ use crate::{
     theme::Theme,
     timer, water,
     weather::{MAX_CITY, Units},
-    widgets::{WidgetConfig, WidgetKind},
+    widgets::WidgetPreferences,
 };
 
 const KINDS: [SurfaceKind; 2] = [SurfaceKind::Notch, SurfaceKind::Dock];
@@ -53,7 +53,8 @@ pub struct Settings {
     pub edge_brightness: bool,
     /// One switch per notch tab (`Tab::ALL` order). A switched-off tab leaves the bar and stops its work.
     pub tabs: Flags,
-    pub widgets: WidgetConfig,
+    pub widgets: WidgetPreferences,
+    pub widget_limit: usize,
     /// The mascot eyes in the pill; off removes their state, deadlines and drawing.
     pub eyes: bool,
     /// A coding agent's reports (`roqa.exe agent`) show on the eyes and the pill; off ignores them.
@@ -143,7 +144,8 @@ impl Default for Settings {
             edge_volume: false,
             edge_brightness: false,
             tabs: Tab::DEFAULT,
-            widgets: WidgetConfig::default(),
+            widgets: WidgetPreferences::default(),
+            widget_limit: 3,
             eyes: true,
             agent_status: false,
             privacy: true,
@@ -362,25 +364,21 @@ impl Settings {
                 true
             }
             "units" => Units::from_key(value).map(|v| self.units = v).is_some(),
-            "widgetleft" => WidgetKind::from_key(value)
-                .map(|kind| self.widgets.slot_left = kind)
+            "dockwidgetlimit" => value
+                .parse()
+                .ok()
+                .filter(|limit| (1..=6).contains(limit))
+                .map(|limit| self.widget_limit = limit)
                 .is_some(),
-            "widgetright" => WidgetKind::from_key(value)
-                .map(|kind| self.widgets.slot_right = kind)
-                .is_some(),
-            "widgetleft2" | "widgetright2" => {
-                let kind = match value {
-                    "none" => Some(None),
-                    _ => WidgetKind::from_key(value).map(Some),
+            "dockwidgets" => {
+                let Ok(mask) = value.parse::<u8>() else {
+                    return false;
                 };
-                kind.map(|kind| {
-                    if key == "widgetleft2" {
-                        self.widgets.slot_left2 = kind;
-                    } else {
-                        self.widgets.slot_right2 = kind;
-                    }
-                })
-                .is_some()
+                if mask >= 64 {
+                    return false;
+                }
+                self.dock_buttons.widgets = std::array::from_fn(|index| mask & (1 << index) != 0);
+                true
             }
             "netbits" => flag(value).map(|v| self.widgets.net_bits = v).is_some(),
             "weeksun" => flag(value).map(|v| self.widgets.week_sunday = v).is_some(),
@@ -439,14 +437,21 @@ impl Settings {
 
     /// Appends the lines `set` reads. Values that cannot be one line are dropped (`clamped` removes them too).
     pub fn write_lines(&self, out: &mut String) {
-        let w = &self.widgets;
-        let slot = |kind: Option<WidgetKind>| kind.map_or("none", WidgetKind::key);
+        let mask = self
+            .dock_buttons
+            .widgets
+            .iter()
+            .enumerate()
+            .fold(0u8, |mask, (index, shown)| {
+                mask | (u8::from(*shown) << index)
+            });
         out.push_str(&format!(
-            "widgetleft={}\nwidgetright={}\nwidgetleft2={}\nwidgetright2={}\nnetbits={}\nweeksun={}\npilllow={}\nlowat={}\n",
-            w.slot_left.key(),
-            w.slot_right.key(),
-            slot(w.slot_left2),
-            slot(w.slot_right2),
+            "dockwidgets={mask}\ndockwidgetlimit={}\n",
+            self.widget_limit
+        ));
+        let w = &self.widgets;
+        out.push_str(&format!(
+            "netbits={}\nweeksun={}\npilllow={}\nlowat={}\n",
             u8::from(w.net_bits),
             u8::from(w.week_sunday),
             u8::from(w.pill_low),
@@ -638,12 +643,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn widget_slots_round_trip_and_reject_unknown_values() {
+    fn dock_widgets_round_trip_and_ignore_retired_slots() {
         let mut settings = Settings::default();
-        assert!(settings.set("widgetleft", "battery"));
-        assert!(settings.set("widgetright", "week"));
-        assert!(!settings.set("widgetleft", "unknown"));
-        assert!(settings.set("widgetleft2", "water") && settings.set("diskdrive", "D"));
+        assert!(settings.set("dockwidgets", "21") && settings.set("dockwidgetlimit", "4"));
+        assert!(!settings.set("dockwidgets", "64") && !settings.set("dockwidgetlimit", "0"));
+        assert!(!settings.set("widgetleft", "battery"));
+        assert!(settings.set("diskdrive", "D"));
         assert!(settings.set("netbits", "1") && settings.set("lowat", "30"));
         assert!(!settings.set("diskdrive", "dd") && !settings.set("lowat", "99"));
         let mut lines = String::new();
@@ -655,6 +660,11 @@ mod tests {
             }
         }
         assert_eq!(restored.widgets, settings.widgets);
+        assert_eq!(
+            restored.dock_buttons.widgets,
+            [true, false, true, false, true, false]
+        );
+        assert_eq!(restored.widget_limit, 4);
     }
 
     #[test]
@@ -1131,11 +1141,8 @@ mod tests {
             edge_volume: true,
             edge_brightness: true,
             tabs: [false, true, false, true, false, true, true],
-            widgets: WidgetConfig {
-                slot_left: WidgetKind::Memory,
-                slot_right: WidgetKind::Cpu,
-                slot_left2: Some(WidgetKind::Water),
-                slot_right2: Some(WidgetKind::Weather),
+            widget_limit: 5,
+            widgets: WidgetPreferences {
                 net_bits: true,
                 disk_drive: Some(b'D'),
                 low_at: 35,
@@ -1256,7 +1263,7 @@ mod tests {
         // Each switch is its own line, so one tab can be off without touching the others.
         let mut off = Settings::default();
         assert!(off.set("tabtimer", "0") && off.set("tabweather", "0"));
-        assert_eq!(off.tabs, [true, false, true, false, true, false, true]);
+        assert_eq!(off.tabs, [true, false, true, false, true, false, false]);
         let mut text = String::new();
         off.write_lines(&mut text);
         for line in [

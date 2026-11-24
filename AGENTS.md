@@ -16,7 +16,7 @@ One folder: work on `main` in this checkout, no worktrees. Branches and PRs only
 - ROQA ignores Windows' Animation effects switch, and the dock and notch have no Narrator or UI Automation support (owner decision 2026-11-19). Do not add either.
 - The dock has no tooltips (owner decision 2026-11-20).
 - No size limit (owner decision 2026-11-16): `verify.ps1` reports the exe size; put the byte delta in every report. Performance rules above still hold.
-- Live tests and screenshots happen on the second (non-primary) monitor only, so the owner's main screen is left alone (owner decision 2026-11-18). Never place ROQA, Settings, a backdrop or the mouse on the primary monitor for a test.
+- Live tests and screenshots use the second (non-primary) monitor when available, so the owner's main screen is left alone. The primary monitor is allowed as a fallback when it is the only one (owner decision 2026-11-24).
 - Answers to the owner are concise (owner decision 2026-11-18): short plain lines with only what changed, what is left and what they must decide; no recaps, no detail they did not ask for.
 - Never touch, delete or rebuild anything under `.tools`. Never run rustup or `scripts/bootstrap.ps1`.
 - Pushing `main` to origin needs no approval (owner decision 2026-11-16): push after a commit that passes `verify.ps1`. Never force-push, rewrite pushed history, publish releases or delete remote things. Only the Chief commits unless the brief says otherwise.
@@ -38,7 +38,7 @@ One folder: work on `main` in this checkout, no worktrees. Branches and PRs only
 - Lints: `clippy.toml` (`disallowed-methods`, each with a `reason` that names the right approach) and `[lints]` in `Cargo.toml`; `verify.ps1` also fails a src file over 2,500 lines (four files have a no-growth ceiling there, keyed by path under `src`; owner decision 2026-11-23: a ceiling may be raised when a feature needs it, say so in the report). An existing correct use gets `#[expect(clippy::disallowed_methods, reason = "...")]` at the narrowest spot, never a blanket allow.
 - Run: `scripts\run.ps1 start` (builds, then launches the owner's ROQA on their own settings) and `scripts\run.ps1 quit`. A live test uses `scripts\run.ps1 start -Test` (test monitor only, private copy of the store).
 - Captures: `cook\tools\run-capture.ps1 -Round rNN`, compare with `cook\tools\compare.ps1`. See `cook\tools\README.md`. Never write a new capture script. A full run takes about 6 minutes and returns on its own; run it in the background. If a pass fails with "Settings not found", ROQA crashed: check `Get-WinEvent` Application id 1000 before blaming the tool. Capture stores use fixed sample data (weather shows 3 hours, 29 degrees): that is the fixture, not a bug. ROQA and Nusa both draw at top-centre: the tool quits both, shows a gray backdrop and restarts both.
-- Reuse a round's stills when `git rev-parse HEAD` and the exe SHA256 match its `provenance.json`.
+- Reuse a round's stills when `git rev-parse HEAD`, the exe SHA256 and all requested phases match its `provenance.json`.
 
 ## Reading code (token rule)
 - The `graft` command is not installed in agent shells (checked 2026-11-16): do not try it. Read the per-file card `graft/src/<file>.md` for the symbol list, then grep the symbol for its real line. Cards are not regenerated, so their line numbers drift; trust the names, not the numbers.

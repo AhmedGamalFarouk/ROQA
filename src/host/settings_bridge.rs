@@ -282,9 +282,7 @@ impl Desktop {
             self.sync_settings_hotkeys();
         }
         let widgets_changed = old.widgets != self.settings.widgets;
-        self.pages.widgets = self.settings.widgets;
-        self.pages.month = None;
-        self.pages.water.1 = self.settings.water_cfg[0] as u8;
+        self.pages.pill_low = self.settings.widgets.pill_low;
         let tabs_changed = old.tabs != self.settings.tabs;
         if tabs_changed {
             self.pages.tabs.flags = self.settings.tabs;
@@ -318,6 +316,7 @@ impl Desktop {
             || old.dock_left != self.settings.dock_left
             || old.tabs[Tab::Limits.index()] != self.settings.tabs[Tab::Limits.index()]
             || old.dock_moon != self.settings.dock_moon
+            || old.widget_limit != self.settings.widget_limit
         {
             self.relayout_docks()?;
         }

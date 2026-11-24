@@ -1,5 +1,5 @@
 //! Native shell popups share the host's WinEvent stream; only requested, identified windows hold a surface.
-use crate::{dock, layout::Bounds, window_model::WindowKey, window_source};
+use crate::{dock, layout::Bounds, taskbar, window_model::WindowKey, window_source};
 use std::{
     cell::{Cell, RefCell},
     time::{Duration, Instant},
@@ -55,14 +55,20 @@ struct Event {
     window: HWND,
     time: u32,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Capture {
+    Off,
+    Listening,
+    OpeningTray,
+}
 thread_local! {
-    static ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static CAPTURE: Cell<Capture> = const { Cell::new(Capture::Off) };
     static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
     static OVERFLOW: Cell<bool> = const { Cell::new(false) };
 }
 /// Called by the existing catalog hook on the UI thread. No window queries inside the callback.
 pub fn event(kind: u32, window: HWND, time: u32) {
-    if ACTIVE.get() {
+    if CAPTURE.get() != Capture::Off {
         EVENTS.with_borrow_mut(|events| {
             if events.len() < 256 {
                 events.push(Event { kind, window, time });
@@ -72,6 +78,17 @@ pub fn event(kind: u32, window: HWND, time: u32) {
         });
     }
 }
+
+pub(crate) fn tray_opening() -> bool {
+    CAPTURE.get() == Capture::OpeningTray
+}
+
+fn set_capture(next: Capture) {
+    if CAPTURE.replace(next) == Capture::OpeningTray && next != Capture::OpeningTray {
+        taskbar::hide_again();
+    }
+}
+
 struct Request {
     owner: Owner,
     kind: Kind,
@@ -166,8 +183,12 @@ impl Native {
         }
         EVENTS.with_borrow_mut(Vec::clear);
         OVERFLOW.set(false);
+        set_capture(if request.kind == Kind::Tray {
+            Capture::OpeningTray
+        } else {
+            Capture::Listening
+        });
         self.request = Some(request);
-        ACTIVE.set(true);
         true
     }
     pub fn owner(&self) -> Option<Owner> {
@@ -197,8 +218,8 @@ impl Native {
     pub fn cancel(&mut self) {
         self.request = None;
         self.location = None;
-        ACTIVE.set(false);
         EVENTS.with_borrow_mut(Vec::clear);
+        set_capture(Capture::Off);
     }
     pub fn refresh(&mut self, now: Instant) -> Option<Instant> {
         let events = EVENTS.with_borrow_mut(std::mem::take);
@@ -229,11 +250,7 @@ impl Native {
         };
         // SAFETY: scalar foreground query; Enter is sent only while the real taskbar owns focus.
         let foreground = unsafe { GetForegroundWindow() };
-        if matches!(
-            class_of(foreground).as_str(),
-            "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
-        ) && explorer_window(foreground)
-        {
+        if taskbar::is_taskbar(foreground) {
             r.tray_entered = true;
             if !dock::send_keys(&[VK_RETURN]) {
                 self.cancel();
@@ -261,6 +278,7 @@ impl Native {
                 if let Some(key) = r.window {
                     place_tray(key, r.anchor, r.work);
                 }
+                set_capture(Capture::Listening);
             }
             Transition::Moved if r.kind == Kind::Tray => {
                 if let Some(key) = r.window {
@@ -294,7 +312,7 @@ fn identify(window: HWND, kind: Kind) -> Option<WindowKey> {
         }
         GetWindowThreadProcessId(window, Some(&mut process));
     }
-    if kind == Kind::Tray && !explorer_window(window) {
+    if kind == Kind::Tray && !taskbar::explorer_window(window) {
         return None;
     }
     let executable = window_source::process_executable(process)?;
@@ -303,15 +321,6 @@ fn identify(window: HWND, kind: Kind) -> Option<WindowKey> {
             handle: window.0 as usize,
             process,
         })
-}
-fn explorer_window(window: HWND) -> bool {
-    let (mut shell, mut candidate) = (0, 0);
-    // SAFETY: scalar process-id queries; a missing shell cannot be a source.
-    unsafe {
-        GetWindowThreadProcessId(GetShellWindow(), Some(&mut shell));
-        GetWindowThreadProcessId(window, Some(&mut candidate));
-    }
-    shell != 0 && shell == candidate
 }
 fn place_tray(key: WindowKey, anchor: (i32, i32), work: Bounds) {
     let window = HWND(key.handle as *mut _);

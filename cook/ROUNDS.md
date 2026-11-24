@@ -21,4 +21,7 @@ Full r07/r09 detail: `cook/archive/ROUNDS-r07-r09.md`. One row per round below; 
 Running-app previews (privacy), second monitor, populated Shelf, FPS. (Settings pages after Notch first captured in r13, after the crash fix.)
 
 ## Not yet confirmed on screen by the owner
-Dock folders drag-create, Shelf Copied on a real clipboard, dot-rail hover.
+Dock folders drag-create, Shelf Copied on a real clipboard, tab-glyph rail hover.
+
+## Open live checks
+Start, Search and Tray toggle behavior; Settings and notch glyphs at 125% and 150% scaling. The r18 images are a pre-redesign baseline. Historical frame counts describe the original runs, not the retained stills.

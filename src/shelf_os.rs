@@ -425,23 +425,48 @@ pub fn network_failed() -> bool {
 /// Starts `file` through the shell on the one network worker, never on the host thread. False when one is still
 /// running or no worker could start; a failure on the worker is read with `network_failed`.
 pub fn open_network(file: &str, parameters: Option<&str>) -> bool {
+    start_open(file, parameters, None)
+}
+
+/// Selects the app's `.exe` in Explorer on that same worker (the dock's Open file location). The file is checked
+/// there, never on the host: it must still be a plain file on a fixed or removable drive, else it counts as failed.
+pub fn reveal_local(exe: &str) -> bool {
+    start_open(
+        "explorer.exe",
+        Some(&format!("/select,\"{exe}\"")),
+        Some(exe),
+    )
+}
+
+/// A regular file (not a link) on a fixed or removable drive; anything else, including an unknown drive, fails closed.
+fn is_local_file(path: &str) -> bool {
+    matches!(
+        drive_type(path),
+        2 | 3 /* DRIVE_REMOVABLE, DRIVE_FIXED */
+    ) && !path.contains('"')
+        && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file())
+}
+
+fn start_open(file: &str, parameters: Option<&str>, local: Option<&str>) -> bool {
     let Some(permit) = NetworkPermit::acquire() else {
         return false;
     };
     // SAFETY: a scalar thread id query.
     let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
     let (file, parameters) = (file.to_owned(), parameters.map(str::to_owned));
+    let local = local.map(str::to_owned);
     let spawned = std::thread::Builder::new()
         .name("roqa-shelf-open".into())
         .spawn(move || {
             let _permit = permit; // released on completion or unwind; failed spawn drops the closure.
-            let opened = match Sta::enter() {
-                Ok(_sta) => dock::shell(&file, parameters.as_deref(), true),
-                Err(error) => {
-                    eprintln!("Shelf network COM initialization: {error}");
-                    false
-                }
-            };
+            let opened = local.as_deref().is_none_or(is_local_file)
+                && match Sta::enter() {
+                    Ok(_sta) => dock::shell(&file, parameters.as_deref(), true),
+                    Err(error) => {
+                        eprintln!("Shelf network COM initialization: {error}");
+                        false
+                    }
+                };
             if !opened {
                 eprintln!("Shelf network shell launch failed");
                 NETWORK_FAILED.store(true, std::sync::atomic::Ordering::Release);

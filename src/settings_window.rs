@@ -22,7 +22,6 @@ use crate::{
     topology::{self, Monitor},
     water,
     weather::{MAX_CITY, Units},
-    widgets::WidgetKind,
     window_model::WindowKey,
 };
 use keyboard::{focus_ring, ringed};
@@ -113,8 +112,8 @@ const PSTART: usize = 192;
 const PSKIP: usize = 193;
 /// The Limits page's "Copy" button for the statusline command.
 const LIMCOPY: usize = 194;
-const WLEFT: usize = 195;
-const WRIGHT: usize = 196;
+const WIDGET_LIMIT: usize = 310;
+const WIDGET_FIRST: usize = 311;
 const MATCH_ACCENT: usize = 199;
 const DOCK_BADGES: usize = 202;
 const CLIP: usize = 203;
@@ -128,8 +127,6 @@ const REVEAL: usize = 232;
 const HIDE: usize = 233;
 /// The Widgets card's extra rows: the two lower slots, network units, the disk, the low-battery level, the
 /// week's first day and the closed pill's low-battery bolt.
-const WLEFT2: usize = 207;
-const WRIGHT2: usize = 208;
 const NETU: usize = 209;
 const DISKD: usize = 210;
 const LOWAT: usize = 211;
@@ -345,16 +342,11 @@ const PAGES: &[Page] = &[
                     r(TAB + 2, C, "Prayer tab", ""),
                     r(TAB + 3, C, "Timer tab", ""),
                     r(TAB + 4, C, "Shelf tab", ""),
-                    r(TAB + 6, C, "Widgets tab", ""),
                 ],
             },
             Card {
-                label: "Widgets",
+                label: "Calendar, system and battery",
                 rows: &[
-                    r(WLEFT, Kind::Combo(160), "Left slot", ""),
-                    r(WRIGHT, Kind::Combo(160), "Right slot", ""),
-                    r(WLEFT2, Kind::Combo(160), "Lower left slot", ""),
-                    r(WRIGHT2, Kind::Combo(160), "Lower right slot", ""),
                     r(NETU, Kind::Combo(160), "Network speed", ""),
                     r(DISKD, Kind::Combo(160), "Disk tile", ""),
                     r(WEEK1, Kind::Combo(160), "Week starts on", ""),
@@ -429,9 +421,26 @@ const PAGES: &[Page] = &[
                     r(DBTN + 1, C, "Search button", ""),
                     r(DBTN + 2, C, "Task View button", ""),
                     r(DBTN + 3, C, "Show desktop pill", ""),
-                    r(DBTN + 4, C, "Quick settings button", ""),
+                    r(DBTN + 4, C, "Command center button", ""),
                     r(DBTN + 5, C, "Drives and Recycle Bin button", ""),
                     r(DBTN + 6, C, "Hidden icons button", ""),
+                ],
+            },
+            Card {
+                label: "Dock widgets",
+                rows: &[
+                    r(
+                        WIDGET_LIMIT,
+                        Kind::Combo(120),
+                        "Maximum visible widgets",
+                        "In order, up to this many",
+                    ),
+                    r(WIDGET_FIRST, C, "Weather", ""),
+                    r(WIDGET_FIRST + 1, C, "Prayer", ""),
+                    r(WIDGET_FIRST + 2, C, "Calendar", ""),
+                    r(WIDGET_FIRST + 3, C, "Water", ""),
+                    r(WIDGET_FIRST + 4, C, "System", ""),
+                    r(WIDGET_FIRST + 5, C, "Timer", "While a countdown runs"),
                 ],
             },
             Card {
@@ -1547,10 +1556,11 @@ fn flag(s: &mut Settings, id: usize) -> Option<&mut bool> {
         DOCK_HIDE => &mut s.dock_hide,
         NOTCH_HIDE => &mut s.notch_hide,
         DOCK_LEFT => &mut s.dock_left,
+        311..=316 => &mut s.dock_buttons.widgets[id - WIDGET_FIRST],
         PILLLOW => &mut s.widgets.pill_low,
         AGENT_ON => &mut s.agent_status,
         HOTKEY..=226 => &mut s.hotkeys[id - HOTKEY],
-        TAB..=159 if id - TAB < 7 => &mut s.tabs[id - TAB],
+        TAB..=159 if id - TAB < 6 => &mut s.tabs[id - TAB],
         DBTN..=136 => &mut s.dock_buttons.shown[id - DBTN],
         _ => return None,
     })
@@ -1572,37 +1582,6 @@ const LEAD_ROWS: [&str; 4] = [
     "10 minutes before",
     "15 minutes before",
 ];
-/// The widget kinds' names, in `WidgetKind::ALL` order.
-const SLOT_NAMES: [&str; 9] = [
-    "Week calendar",
-    "Battery",
-    "Memory",
-    "Disk",
-    "Processor",
-    "Network",
-    "Next prayer",
-    "Water",
-    "Weather",
-];
-/// The slot lists: every kind, with "Empty" first for a lower slot.
-fn fill_slots(h: HWND, lower: bool) {
-    if lower {
-        add_row(h, "Empty");
-    }
-    SLOT_NAMES.iter().for_each(|name| add_row(h, name));
-}
-/// A lower slot's row: 0 is empty, then the kinds in order.
-fn lower_row(slot: Option<WidgetKind>) -> usize {
-    slot.map_or(0, |kind| 1 + row_of(&WidgetKind::ALL, &kind))
-}
-fn lower_pick(slot: &mut Option<WidgetKind>, row: Option<usize>) {
-    if let Some(row) = row {
-        *slot = row
-            .checked_sub(1)
-            .and_then(|i| WidgetKind::ALL.get(i).copied());
-    }
-}
-/// The disk rows: "System drive", then each fixed drive's letter.
 fn disk_row(drive: Option<u8>) -> usize {
     drive
         .and_then(|d| crate::widgets::fixed_drives().iter().position(|x| *x == d))
@@ -1626,8 +1605,7 @@ fn fill_combo(h: HWND, id: usize) {
         PMETHOD => return Method::ALL.iter().for_each(|m| add_row(h, m.label())),
         PLEAD => &LEAD_ROWS,
         LIMGROUP => &["Gemini models", "Claude and GPT models"],
-        WLEFT | WRIGHT => return fill_slots(h, false),
-        WLEFT2 | WRIGHT2 => return fill_slots(h, true),
+        WIDGET_LIMIT => &["1", "2", "3", "4", "5", "6"],
         NETU => &["Bytes per second", "Bits per second"],
         WEEK1 => &["Monday", "Sunday"],
         LOWAT => &["Windows decides", "10%", "20%", "30%"],
@@ -2213,10 +2191,7 @@ Other hooks stay. A copy of the file is kept.",
                         PMETHOD => row_of(&Method::ALL, &settings.prayer_method),
                         PLEAD => row_of(&LEADS, &settings.prayer_lead),
                         LIMGROUP => usize::from(settings.limits_group),
-                        WLEFT => row_of(&WidgetKind::ALL, &settings.widgets.slot_left),
-                        WRIGHT => row_of(&WidgetKind::ALL, &settings.widgets.slot_right),
-                        WLEFT2 => lower_row(settings.widgets.slot_left2),
-                        WRIGHT2 => lower_row(settings.widgets.slot_right2),
+                        WIDGET_LIMIT => settings.widget_limit - 1,
                         NETU => usize::from(settings.widgets.net_bits),
                         WEEK1 => usize::from(settings.widgets.week_sunday),
                         LOWAT => row_of(&LOW_ROWS, &settings.widgets.low_at),
@@ -2324,10 +2299,11 @@ Other hooks stay. A copy of the file is kept.",
                 Kind::Combo(_) => {
                     let row = chosen_row(h);
                     match item.id {
-                        WLEFT => pick(&WidgetKind::ALL, &mut next.widgets.slot_left, row),
-                        WRIGHT => pick(&WidgetKind::ALL, &mut next.widgets.slot_right, row),
-                        WLEFT2 => lower_pick(&mut next.widgets.slot_left2, row),
-                        WRIGHT2 => lower_pick(&mut next.widgets.slot_right2, row),
+                        WIDGET_LIMIT => {
+                            if let Some(row) = row {
+                                next.widget_limit = row + 1;
+                            }
+                        }
                         NETU => {
                             next.widgets.net_bits = row.map_or(next.widgets.net_bits, |r| r == 1)
                         }
@@ -3162,7 +3138,7 @@ mod tests {
     fn every_tab_button_and_toggle_is_a_row_with_a_setting() {
         let ids: Vec<usize> = rows().iter().map(|r| r.id).collect();
         let mut s = Settings::default();
-        for tab in Tab::ALL {
+        for tab in Tab::ALL.into_iter().filter(|tab| *tab != Tab::Widgets) {
             assert!(
                 ids.contains(&(TAB + tab.index())) && flag(&mut s, TAB + tab.index()).is_some()
             );

@@ -1,11 +1,11 @@
 //! Settings "Hide Windows taskbar": while ROQA runs, every taskbar (the main one and one per extra monitor) is hidden
-//! and set to auto-hide, so its reserved space goes back to apps. The owner's own auto-hide choice is read first and
-//! put back exactly when ROQA quits, signs out or turns the switch off. A crash or a kill cannot run that code, so a
-//! watcher (this exe again, `--taskbar <pid> <state>`) waits on ROQA's process handle, puts the taskbar back and ends.
+//! and set to auto-hide, so its reserved space goes back to apps. Explorer show events re-hide the exact taskbar.
+//! ROQA restores the owner's auto-hide choice when it quits, signs out or turns the switch off. If ROQA crashes
+//! or is killed, the watcher (`--taskbar <pid> <state>`) restores it after the process exits.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use windows::Win32::{
-    Foundation::{CloseHandle, LPARAM},
+    Foundation::{CloseHandle, HWND, LPARAM},
     System::Threading::{
         CreateProcessW, GetCurrentProcess, INFINITE, OpenProcess, PROCESS_CREATION_FLAGS,
         PROCESS_INFORMATION, PROCESS_SYNCHRONIZE, STARTUPINFOW, SetProcessWorkingSetSize,
@@ -13,7 +13,10 @@ use windows::Win32::{
     },
     UI::{
         Shell::{ABM_GETSTATE, ABM_SETSTATE, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage},
-        WindowsAndMessaging::{FindWindowExW, SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow},
+        WindowsAndMessaging::{
+            FindWindowExW, GetClassNameW, GetShellWindow, GetWindowThreadProcessId,
+            IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, ShowWindowAsync,
+        },
     },
 };
 use windows::core::{PCWSTR, PWSTR, w};
@@ -21,6 +24,7 @@ use windows::core::{PCWSTR, PWSTR, w};
 /// ROQA has the taskbar hidden now; the owner's appbar state to put back is `SAVED`.
 static HIDDEN: AtomicBool = AtomicBool::new(false);
 static SAVED: AtomicU32 = AtomicU32::new(0);
+const TRAY_CLASSES: [PCWSTR; 2] = [w!("Shell_TrayWnd"), w!("Shell_SecondaryTrayWnd")];
 
 fn appbar(message: u32, state: u32) -> u32 {
     let mut data = APPBARDATA {
@@ -34,13 +38,50 @@ fn appbar(message: u32, state: u32) -> u32 {
 
 /// Shows or hides every taskbar window.
 fn show_all(show: bool) {
-    for class in [w!("Shell_TrayWnd"), w!("Shell_SecondaryTrayWnd")] {
+    for class in TRAY_CLASSES {
         let mut after = None;
         // SAFETY: a top-level window search and show by class; a window that vanished meanwhile only fails the call.
         while let Ok(window) = unsafe { FindWindowExW(None, after, class, None) } {
             // SAFETY: as above; showing or hiding another process's window is a plain posted request.
-            let _ = unsafe { ShowWindow(window, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
+            let _ =
+                unsafe { ShowWindowAsync(window, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
             after = Some(window);
+        }
+    }
+}
+
+pub(crate) fn explorer_window(window: HWND) -> bool {
+    let (mut shell, mut candidate) = (0, 0);
+    // SAFETY: scalar process-id queries; a missing shell cannot be a source.
+    unsafe {
+        GetWindowThreadProcessId(GetShellWindow(), Some(&mut shell));
+        GetWindowThreadProcessId(window, Some(&mut candidate));
+    }
+    shell != 0 && shell == candidate
+}
+
+fn is_taskbar_class(class: &[u16]) -> bool {
+    // SAFETY: TRAY_CLASSES contains only static NUL-terminated strings.
+    TRAY_CLASSES
+        .iter()
+        .any(|name| class == unsafe { name.as_wide() })
+}
+
+pub(crate) fn is_taskbar(window: HWND) -> bool {
+    let mut class = [0u16; 32];
+    // SAFETY: writes only into the supplied buffer; an invalid window returns zero.
+    let length = unsafe { GetClassNameW(window, &mut class) }.max(0) as usize;
+    is_taskbar_class(&class[..length]) && explorer_window(window)
+}
+
+pub(crate) fn shown(window: HWND) {
+    if !hidden() || !is_taskbar(window) {
+        return;
+    }
+    // SAFETY: visibility query and asynchronous hide work on foreign windows without waiting on Explorer.
+    unsafe {
+        if IsWindowVisible(window).as_bool() {
+            let _ = ShowWindowAsync(window, SW_HIDE);
         }
     }
 }
@@ -50,7 +91,7 @@ fn hiding(state: u32) -> u32 {
     state | ABS_AUTOHIDE
 }
 
-/// True while ROQA hides the taskbar: it never slides in, so nothing has to stay clear of it.
+/// True while ROQA suppresses the Windows taskbar, so nothing has to reserve space for it.
 pub fn hidden() -> bool {
     HIDDEN.load(Relaxed)
 }
@@ -167,6 +208,23 @@ pub fn watch(pid: &str, state: &str) -> windows::core::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_primary_and_secondary_taskbar_classes_are_suppressed() {
+        for (name, expected) in [
+            ("Shell_TrayWnd", true),
+            ("Shell_SecondaryTrayWnd", true),
+            ("NotifyIconOverflowWindow", false),
+            ("Shell_TrayWndExtra", false),
+            ("", false),
+        ] {
+            assert_eq!(
+                is_taskbar_class(&name.encode_utf16().collect::<Vec<_>>()),
+                expected,
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn hiding_adds_auto_hide_and_keeps_the_rest() {

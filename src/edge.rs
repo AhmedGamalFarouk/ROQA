@@ -29,6 +29,8 @@ const WHEEL_DELTA: i32 = 120;
 /// One row of the device list, in window pixels.
 pub struct ListRow<'a> {
     pub name: &'a str,
+    pub quick: Option<(crate::dock_menu::Quick, bool, bool)>,
+    pub calendar: Option<Option<u8>>,
     pub current: bool,
     /// An icon drawn before the name (a folder stack's files, the folder members); none for plain rows.
     pub icon: Option<&'a crate::icons::IconPixels>,
@@ -68,11 +70,13 @@ pub fn row_rect(dpi: u32, panel: Bounds, index: usize) -> Bounds {
 }
 
 /// The row under window point `(x, y)`.
-pub fn row_at(dpi: u32, rows: usize, x: i32, y: i32) -> Option<usize> {
+#[cfg(test)]
+fn row_at(dpi: u32, rows: usize, x: i32, y: i32) -> Option<usize> {
     row_in(dpi, list_layout(dpi, rows).1, rows, x, y)
 }
 
 /// The row of `panel` under window point `(x, y)`.
+#[cfg(test)]
 fn row_in(dpi: u32, panel: Bounds, rows: usize, x: i32, y: i32) -> Option<usize> {
     (0..rows).find(|&index| {
         let row = row_rect(dpi, panel, index);

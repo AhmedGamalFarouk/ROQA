@@ -1,11 +1,8 @@
-# Owner decision 2026-11-18: live tests and screenshots use the second (non-primary) monitor.
-# Dot-source this file. ROQA_TEST_MONITOR=primary picks the primary monitor instead; a PC with one monitor
-# falls back to it with a warning.
+# Live tests and screenshots use a non-primary monitor when available.
 function Get-TestScreen {
     Add-Type -AssemblyName System.Windows.Forms
     $screens = [Windows.Forms.Screen]::AllScreens
     $primary = $screens | Where-Object Primary | Select-Object -First 1
-    if ($env:ROQA_TEST_MONITOR -eq 'primary') { return $primary }
     $second = $screens | Where-Object { -not $_.Primary } | Sort-Object DeviceName | Select-Object -First 1
     if ($second) { return $second }
     Write-Warning 'Only one monitor found: testing on the primary monitor.'

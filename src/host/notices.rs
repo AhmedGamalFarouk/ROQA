@@ -330,16 +330,12 @@ impl Desktop {
             .prayer
             .sound_end
             .map_or(INFINITE, |end| milliseconds_until(end, now));
-        if !self.pages.tabs.on(Tab::Prayer) {
+        if !self.pages.tabs.on(Tab::Prayer) && !self.visible_dock_widgets()[1] {
             return sound_wait;
         }
         // The plain Media page's glance (`tabs::glance`) reads the page's next prayer too.
-        let shown = matches!(self.page(), Tab::Prayer | Tab::Media)
-            || (self.page() == Tab::Widgets
-                && self
-                    .pages
-                    .widgets
-                    .uses(crate::widgets::WidgetKind::NextPrayer));
+        let shown =
+            matches!(self.page(), Tab::Prayer | Tab::Media) || self.visible_dock_widgets()[1];
         let remind = self.settings.prayer_remind;
         if !shown && !remind {
             return sound_wait;
@@ -477,7 +473,6 @@ impl Desktop {
     pub(super) fn water_drink(&mut self) {
         let day = prayer_tab::day_number(prayer_os::local_now().ymd);
         self.store.water = (day, self.water_today().saturating_add(1));
-        self.pages.water.0 = self.store.water;
         self.pending.mark(Instant::now());
     }
     pub(super) fn sync_water(&self) {

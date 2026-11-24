@@ -17,6 +17,9 @@ use windows_future::{AsyncStatus, IAsyncOperation};
 
 /// How long a radio call may take before the worker gives up on it. Local radio calls answer in a few
 /// milliseconds; a stuck driver must not hold the worker for ever.
+mod airplane;
+pub mod networks;
+
 const WAIT: Duration = Duration::from_millis(700);
 
 fn wait<T: windows::core::RuntimeType + 'static>(operation: &IAsyncOperation<T>) -> Result<T> {
@@ -41,12 +44,14 @@ fn wait<T: windows::core::RuntimeType + 'static>(operation: &IAsyncOperation<T>)
 pub enum Kind {
     WiFi,
     Bluetooth,
+    Airplane,
 }
 impl Kind {
     fn radio(self) -> RadioKind {
         match self {
             Kind::WiFi => RadioKind::WiFi,
             Kind::Bluetooth => RadioKind::Bluetooth,
+            Kind::Airplane => unreachable!(),
         }
     }
 }
@@ -61,10 +66,17 @@ const READY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 65;
 
 /// Whether the radio was on at the last read; `None` when unknown or the machine has no such radio.
 pub fn radio_on(kind: Kind) -> Option<bool> {
+    if kind == Kind::Airplane {
+        return airplane::state();
+    }
     LAST.lock().unwrap_or_else(PoisonError::into_inner)[kind as usize]
 }
 
 /// Whether a worker stored new radio states since the last call.
+pub fn airplane_fallback() -> bool {
+    airplane::fallback()
+}
+
 pub fn changed() -> bool {
     CHANGED.swap(false, Ordering::AcqRel)
 }
@@ -77,6 +89,7 @@ fn take_pending() -> Option<Kind> {
     match PENDING.swap(0, Ordering::SeqCst) {
         1 => Some(Kind::WiFi),
         2 => Some(Kind::Bluetooth),
+        3 => Some(Kind::Airplane),
         _ => None,
     }
 }
@@ -119,6 +132,7 @@ pub fn refresh(flip: Option<Kind>) -> bool {
             // SAFETY: a new worker; the guard below balances it on this thread.
             let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
             let done = Done(com);
+            airplane::refresh(flip == Some(Kind::Airplane));
             match read(flip) {
                 Ok(states) => *LAST.lock().unwrap_or_else(PoisonError::into_inner) = states,
                 Err(error) => eprintln!("Quick settings: radio: {error}"),

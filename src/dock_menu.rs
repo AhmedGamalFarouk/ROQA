@@ -4,7 +4,7 @@
 //! press elsewhere, losing the foreground, its slot changing or a full-screen app; closed, it costs nothing.
 use crate::{
     dock::{self, DockItem},
-    edge::{ListRow, list_layout, mix_percent, row_at, row_rect},
+    edge::{ListRow, list_layout, mix_percent, row_rect},
     graphics::{Canvas, Graphics, ListScene},
     icons::IconPixels,
     layout::Bounds,
@@ -53,12 +53,16 @@ pub enum Item {
     Moon(u8, bool),
     /// A moon popup date row: `Spec::titles` holds "label\tdate".
     MoonDate,
+    CalendarWeek(Option<u8>),
+    Widget(WidgetAction),
     /// A slider row of the volume and brightness popups: its level in percent and whether it is muted; its name
     /// is in `Spec::titles`.
     Level(u8, bool),
     /// An output device row of the volume popup (an index into the host's list) and whether it is the default.
     Device(usize, bool),
     NewInstance,
+    /// Select the app's executable in File Explorer.
+    OpenFileLocation,
     Close(WindowKey),
     CloseAll,
     /// Keep the one window above the others, or let it go (which one is offered follows its state).
@@ -75,20 +79,39 @@ pub enum Item {
     Quit,
     /// A row of the quick settings popup; its text is the setting's state (`Spec::titles`).
     Quick(Quick),
+    QuickTile(Quick, bool, bool),
     WindowsLink(WindowsLink),
     /// A row of the Places popup (an index into the host's list); its text is in `Spec::titles`.
     Place(usize),
+    /// The Eject row under a USB drive's Place row (the same index); its text is in `Spec::titles`.
+    Eject(usize),
     /// A row of a folder stack (an index into the host's list of files); its text is in `Spec::titles`.
     File(usize),
     /// Pin the Downloads folder to the dock (offered in the app menu until it is pinned).
     PinDownloads,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WidgetAction {
+    MonthBack,
+    MonthNext,
+    WaterAdd,
+    WaterRemove,
+    TimerPause,
+    TimerExtend,
+}
+
 /// What a quick settings row does when pressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Quick {
     Mute,
-    VolumeUp,
-    VolumeDown,
+    Airplane,
+    Hotspot,
+    WifiPage,
+    BluetoothPage,
+    WifiSettings,
+    BluetoothSettings,
+    Connect(usize),
+    Back,
     WiFi,
     Bluetooth,
     Power,
@@ -146,9 +169,12 @@ impl Item {
             | Item::Limit(_)
             | Item::Moon(..)
             | Item::MoonDate
+            | Item::CalendarWeek(_)
+            | Item::Widget(_)
             | Item::Level(..)
             | Item::Device(..) => "",
             Item::NewInstance => "New instance",
+            Item::OpenFileLocation => "Open file location",
             Item::Close(_) => "Close window",
             Item::CloseAll => "Close all windows",
             Item::OnTop(_) => "Keep on top",
@@ -160,13 +186,25 @@ impl Item {
             Item::UndoShelf => "Undo removal",
             Item::Settings => "Settings",
             Item::Quit => "Quit ROQA",
-            Item::Quick(_) => "Setting",
+            Item::Quick(_) | Item::QuickTile(..) => "Setting",
             Item::WindowsLink(link) => link.details().0,
             Item::Place(_) => "Place",
+            Item::Eject(_) => "Eject",
             Item::File(_) => "File",
             Item::PinDownloads => "Pin Downloads",
         }
     }
+}
+
+/// The `.exe` that Open file location selects: an absolute drive-letter path only, so a packaged app, a relative
+/// path and a UNC path never qualify. Whether it is still a local file is checked on activation (`shelf_os::reveal_local`).
+pub fn file_location(identity: &Identity) -> Option<String> {
+    let path = pins::launch_target(identity)?;
+    let bytes = path.as_bytes();
+    (bytes.get(1) == Some(&b':')
+        && bytes.get(2) == Some(&b'\\')
+        && path.to_lowercase().ends_with(".exe"))
+    .then_some(path)
 }
 
 /// The actions that apply to a dock slot: New instance when the app can be launched, Close window only
@@ -176,9 +214,16 @@ pub fn items(item: &DockItem, pins: &Pins) -> Vec<Item> {
         return vec![Item::OpenFolder, Item::Rename, Item::Dissolve];
     }
     let launchable = pins::launch_target(&item.identity).is_some();
-    let mut list = Vec::with_capacity(3);
+    let pin = dock::pinned_as(item, pins);
+    let mut list = Vec::with_capacity(4);
     if launchable {
         list.push(Item::NewInstance);
+        // Not for a folder member: its menu keeps the folder actions only.
+        if file_location(&item.identity).is_some()
+            && pin.as_ref().is_none_or(|pin| pins.folder(pin).is_none())
+        {
+            list.push(Item::OpenFileLocation);
+        }
     }
     match item.windows.as_slice() {
         [] => {}
@@ -192,7 +237,7 @@ pub fn items(item: &DockItem, pins: &Pins) -> Vec<Item> {
         }
         _ => list.push(Item::CloseAll),
     }
-    if let Some(pin) = dock::pinned_as(item, pins) {
+    if let Some(pin) = pin {
         list.push(Item::Unpin);
         if pins.folder(&pin).is_some() {
             list.push(Item::RemoveMember);
@@ -329,6 +374,7 @@ pub struct Menu {
     /// The slider row the pointer holds, with the capture.
     grab: Option<usize>,
     work: Bounds,
+    anchor: (i32, Bounds, Option<i32>),
     palette: Palette,
     edit_brush: Option<HBRUSH>,
     edit_font: Option<PickerFont>,
@@ -362,6 +408,54 @@ fn visible_rows(dpi: u32, work: Bounds, count: usize) -> usize {
     count.min(((work.height - dock::px(48, dpi)) / dock::px(34, dpi)).max(1) as usize)
 }
 
+fn popup_layout(dpi: u32, visible: usize, items: &[Item]) -> ((i32, i32), Bounds, usize) {
+    let (mut size, mut panel) = list_layout(dpi, visible);
+    let quick = matches!(
+        items.first(),
+        Some(Item::QuickTile(..) | Item::Quick(Quick::Back))
+    );
+    let grid = if visible == items.len() {
+        items
+            .iter()
+            .take_while(|item| matches!(item, Item::QuickTile(..)))
+            .count()
+    } else {
+        0
+    };
+    if quick {
+        let width = dock::px(308, dpi);
+        size.0 += width - panel.width;
+        panel.width = width;
+    }
+    let extra = hero(items, dpi) + grid.div_ceil(2) as i32 * dock::px(52, dpi)
+        - grid as i32 * dock::px(34, dpi);
+    size.1 += extra;
+    panel.height += extra;
+    (size, panel, grid)
+}
+
+fn popup_row(dpi: u32, panel: Bounds, index: usize, grid: usize, hero: i32) -> Bounds {
+    if index < grid {
+        let gap = dock::px(4, dpi);
+        let inset = gap * 2;
+        let width = (panel.width - 2 * inset - gap) / 2;
+        return Bounds {
+            x: panel.x + inset + (index % 2) as i32 * (width + gap),
+            y: panel.y + dock::px(6, dpi) + (index / 2) as i32 * dock::px(52, dpi),
+            width,
+            height: dock::px(48, dpi),
+        };
+    }
+    let mut row = row_rect(dpi, panel, index - grid);
+    row.y += grid.div_ceil(2) as i32 * dock::px(52, dpi);
+    if index == 0 {
+        row.height += hero;
+    } else {
+        row.y += hero;
+    }
+    row
+}
+
 impl Menu {
     /// Creates, paints and shows the popup (not yet the foreground: the host asks for that).
     pub fn open(graphics: &Graphics, palette: Palette, spec: Spec) -> Result<Self> {
@@ -374,9 +468,8 @@ impl Menu {
     fn create(graphics: &Graphics, palette: Palette, spec: Spec, hover: bool) -> Result<Self> {
         let dpi = spec.dpi;
         let visible_rows = visible_rows(dpi, spec.work, spec.items.len());
-        let (mut size, _) = list_layout(dpi, visible_rows);
-        size.1 += hero(&spec.items, dpi);
-        if hover && spec.items == [Item::Label] {
+        let (mut size, _, _) = popup_layout(dpi, visible_rows, &spec.items);
+        if hover && spec.items == [Item::Label] && !spec.app.is_empty() {
             size.0 = crate::graphics::dock_label_width(&spec.app, dpi)? + dock::px(6, dpi);
         }
         let slot_x = spec.x;
@@ -384,7 +477,7 @@ impl Menu {
             Some(bottom) => place_below(slot_x, bottom, spec.work, size),
             None => place(slot_x, spec.dock_bounds, spec.work, size),
         };
-        if hover && spec.below.is_none() && spec.items == [Item::Label] {
+        if hover && spec.below.is_none() && spec.items == [Item::Label] && !spec.app.is_empty() {
             // The hover label sits close over its icon, not a whole menu gap above the bar.
             bounds.y += dock::px(6, dpi);
         }
@@ -421,6 +514,7 @@ impl Menu {
             edit: None,
             grab: None,
             work: spec.work,
+            anchor: (spec.x, spec.dock_bounds, spec.below),
             palette,
             edit_brush: None,
             edit_font: None,
@@ -475,18 +569,17 @@ impl Menu {
         self.titles = titles;
         self.icons = icons;
         self.visible_rows = visible_rows(self.dpi, self.work, self.items.len());
-        let (size, _) = list_layout(self.dpi, self.visible_rows);
-        self.bounds = place(
-            self.bounds.x + self.bounds.width / 2,
-            Bounds {
-                y: self.bounds.y + self.bounds.height,
-                ..self.bounds
-            },
-            self.work,
-            size,
-        );
-        self.window.resize(self.bounds)?;
-        self.canvas.resize(self.bounds)?;
+        let (size, _, _) = popup_layout(self.dpi, self.visible_rows, &self.items);
+        let (x, dock, below) = self.anchor;
+        let bounds = match below {
+            Some(bottom) => place_below(x, bottom, self.work, size),
+            None => place(x, dock, self.work, size),
+        };
+        if self.bounds != bounds {
+            self.bounds = bounds;
+            self.window.resize(bounds)?;
+            self.canvas.resize(bounds)?;
+        }
         self.offset = 0;
         self.selected = None;
         self.drawn = None;
@@ -594,15 +687,35 @@ impl Menu {
         String::from_utf16_lossy(&text[..length])
     }
     /// Repaints only when the highlighted row changed.
+    pub fn update_rows(&mut self, items: Vec<Item>, titles: Vec<String>) -> Result<()> {
+        if self.items == items && self.titles == titles {
+            return Ok(());
+        }
+        if self.items.len() == items.len()
+            && self
+                .items
+                .iter()
+                .zip(&items)
+                .all(|(old, new)| std::mem::discriminant(old) == std::mem::discriminant(new))
+        {
+            if !self.held() {
+                self.items = items;
+                self.titles = titles;
+                self.drawn = None;
+            }
+            return Ok(());
+        }
+        self.relist(items, titles, Vec::new())
+    }
+
     pub fn paint(&mut self) -> Result<()> {
         let now = Instant::now();
         if self.drawn == Some(self.selected) && !self.reveal.running(now) {
             return Ok(());
         }
-        let (_, mut panel) = list_layout(self.dpi, self.visible_rows);
+        let (_, mut panel, grid) = popup_layout(self.dpi, self.visible_rows, &self.items);
         panel.width = self.bounds.width - 2 * panel.x;
         let hero = hero(&self.items, self.dpi);
-        panel.height += hero;
         let rows: Vec<ListRow> = self
             .items
             .iter()
@@ -618,6 +731,14 @@ impl Menu {
                         text.split_once('\t').map_or(text, |(label, _)| label)
                     }
                     (_, text) => text,
+                },
+                quick: match self.items[index] {
+                    Item::QuickTile(action, on, details) => Some((action, on, details)),
+                    _ => None,
+                },
+                calendar: match self.items[index] {
+                    Item::CalendarWeek(today) => Some(today),
+                    _ => None,
                 },
                 current: matches!(self.items[index], Item::Device(_, true)),
                 icon: self.icons.get(index).and_then(|icon| icon.as_deref()),
@@ -642,16 +763,7 @@ impl Menu {
                             .map(|(_, date)| date)
                     })
                     .flatten(),
-                rect: {
-                    let mut rect = row_rect(self.dpi, panel, index - self.offset);
-                    // The hero takes the extra height; the rows under it move down by as much.
-                    if index == 0 {
-                        rect.height += hero;
-                    } else {
-                        rect.y += hero;
-                    }
-                    rect
-                },
+                rect: popup_row(self.dpi, panel, index - self.offset, grid, hero),
             })
             .collect();
         self.canvas.paint_list(&ListScene {
@@ -685,16 +797,26 @@ impl Menu {
                 Event::Ignored
             };
         }
+        let (_, mut panel, grid) = popup_layout(self.dpi, self.visible_rows, &self.items);
+        panel.width = self.bounds.width - 2 * panel.x;
+        let extra = hero(&self.items, self.dpi);
         let at = |message: &MSG| {
             let (x, y) = point(message.lParam);
-            row_at(self.dpi, self.visible_rows, x, y).map(|row| row + self.offset)
+            (0..self.visible_rows)
+                .find(|&index| {
+                    let row = popup_row(self.dpi, panel, index, grid, extra);
+                    (row.x..row.x + row.width).contains(&x)
+                        && (row.y..row.y + row.height).contains(&y)
+                })
+                .map(|index| index + self.offset)
         };
         let is_level =
             |row: Option<usize>| row.is_some_and(|row| matches!(self.items[row], Item::Level(..)));
         let level = |menu: &mut Self, row: usize, x: i32| {
-            let (_, mut panel) = list_layout(menu.dpi, menu.visible_rows);
-            panel.width = menu.bounds.width - 2 * panel.x;
-            let pct = mix_percent(x, row_rect(menu.dpi, panel, row - menu.offset));
+            let pct = mix_percent(
+                x,
+                popup_row(menu.dpi, panel, row - menu.offset, grid, extra),
+            );
             menu.items[row] = Item::Level(pct, false);
             menu.drawn = None;
             Event::Level(row, pct)
@@ -746,6 +868,7 @@ impl Menu {
                             | Item::Limit(_)
                             | Item::Moon(..)
                             | Item::MoonDate
+                            | Item::CalendarWeek(_)
                     )
                 });
                 if self.hover_popup {
@@ -766,12 +889,29 @@ impl Menu {
             windows::Win32::UI::Controls::WM_MOUSELEAVE => self.selected = None,
             WM_LBUTTONUP => {
                 return at(message).map_or(Event::Consumed, |row| {
+                    if let Item::QuickTile(action, _, details) = self.items[row] {
+                        let rect = popup_row(self.dpi, panel, row - self.offset, grid, extra);
+                        let action = if details
+                            && point(message.lParam).0
+                                >= rect.x + rect.width - dock::px(32, self.dpi)
+                        {
+                            match action {
+                                Quick::WiFi => Quick::WifiPage,
+                                Quick::Bluetooth => Quick::BluetoothPage,
+                                _ => action,
+                            }
+                        } else {
+                            action
+                        };
+                        return Event::Choose(Item::Quick(action));
+                    }
                     if matches!(
                         self.items[row],
                         Item::Battery
                             | Item::Limit(_)
                             | Item::Moon(..)
                             | Item::MoonDate
+                            | Item::CalendarWeek(_)
                             | Item::Level(..)
                     ) {
                         Event::Consumed
@@ -935,6 +1075,7 @@ mod tests {
             items(&running2, &none),
             [
                 Item::NewInstance,
+                Item::OpenFileLocation,
                 Item::CloseAll,
                 Item::Pin,
                 Item::Hide,
@@ -947,6 +1088,7 @@ mod tests {
             items(&running1, &none),
             [
                 Item::NewInstance,
+                Item::OpenFileLocation,
                 Item::Close(key_of(1)),
                 Item::OnTop(key_of(1)),
                 Item::Pin,
@@ -957,13 +1099,24 @@ mod tests {
         // Running (2 windows) and pinned: Unpin replaces Pin.
         assert_eq!(
             items(&running2, &pinned(&app)),
-            [Item::NewInstance, Item::CloseAll, Item::Unpin, Item::Group]
+            [
+                Item::NewInstance,
+                Item::OpenFileLocation,
+                Item::CloseAll,
+                Item::Unpin,
+                Item::Group
+            ]
         );
         // A pinned app that is not running has no window to close.
         let idle = dock_item(app.clone(), &[]);
         assert_eq!(
             items(&idle, &pinned(&app)),
-            [Item::NewInstance, Item::Unpin, Item::Group]
+            [
+                Item::NewInstance,
+                Item::OpenFileLocation,
+                Item::Unpin,
+                Item::Group
+            ]
         );
         // A packaged app launches through its AUMID; one with no usable identity can only close.
         let packaged = dock_item(Identity::Application("Contoso.Mail!App".into()), &[3]);
@@ -983,6 +1136,23 @@ mod tests {
             items(&unknown, &none),
             [Item::Close(key_of(9)), Item::OnTop(key_of(9))]
         );
+    }
+
+    #[test]
+    fn file_location_only_for_absolute_local_looking_exes() {
+        let yes = |identity: Identity| file_location(&identity).is_some();
+        assert!(yes(exe(r"C:\Tools\Edit.EXE")));
+        assert!(!yes(exe(r"\\server\share\a.exe")));
+        assert!(!yes(exe(r"tools\a.exe")));
+        assert!(!yes(exe(r"c:\tools\readme.txt")));
+        assert!(!yes(Identity::Application("Contoso.Mail!App".into())));
+        assert!(!yes(Identity::Unavailable(4)));
+        // A folder member keeps the folder actions only: no file location.
+        let first = exe(r"c:\first.exe");
+        let mut pins = Pins::default();
+        pins.group(&first, &exe(r"c:\second.exe"));
+        let member = dock_item(first, &[1]);
+        assert!(!items(&member, &pins).contains(&Item::OpenFileLocation));
     }
 
     #[test]
@@ -1160,6 +1330,27 @@ mod tests {
             Some(&original),
             &pins
         ));
+    }
+
+    #[test]
+    fn command_tiles_share_the_grid_without_overlapping_the_footer() {
+        let items = [
+            Item::QuickTile(Quick::WiFi, true, true),
+            Item::QuickTile(Quick::Bluetooth, false, false),
+            Item::QuickTile(Quick::Airplane, false, false),
+            Item::Quick(Quick::Sleep),
+        ];
+        for dpi in [96, 144, 192] {
+            let (_, panel, grid) = popup_layout(dpi, items.len(), &items);
+            assert_eq!(grid, 3);
+            let [left, right, next, footer] =
+                std::array::from_fn(|index| popup_row(dpi, panel, index, grid, 0));
+            assert!(left.x + left.width < right.x);
+            assert_eq!(left.y, right.y);
+            assert!(left.y + left.height < next.y);
+            assert!(next.y + next.height <= footer.y);
+            assert!(footer.y + footer.height <= panel.y + panel.height);
+        }
     }
 
     #[test]

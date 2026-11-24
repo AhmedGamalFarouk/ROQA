@@ -185,15 +185,58 @@ impl Desktop {
             Err(error) => eprintln!("Dock levels: {error}"),
         }
     }
-    /// Whether the open hover popup is the volume or brightness one.
-    pub(super) fn levels_popup(&self) -> bool {
-        self.hover_popup.as_ref().is_some_and(|popup| {
-            matches!(
-                popup.hover_hit,
-                Some(Hit::Button(Button::Volume | Button::Brightness))
-            )
-        })
+    pub(super) fn prepare_command_brightness(&mut self, hwnd: HWND) {
+        let Some(target) = self
+            .dock_at(hwnd)
+            .and_then(|dock| {
+                self.monitors
+                    .iter()
+                    .find(|monitor| monitor.device == dock.monitor)
+            })
+            .map(|monitor| {
+                (
+                    monitor.work.x + monitor.work.width / 2,
+                    monitor.work.y + monitor.work.height / 2,
+                )
+            })
+        else {
+            return;
+        };
+        let know = if let Some(worker) = self.brightness_worker() {
+            worker.read(target);
+            Know::Pending
+        } else {
+            Know::Unsupported
+        };
+        self.levels = Some(Levels {
+            button: Button::Quick,
+            apps: Vec::new(),
+            apps_read: None,
+            devices: Vec::new(),
+            screens: vec![Screen {
+                target,
+                name: "Brightness".into(),
+                know,
+                throttle: Throttle::default(),
+            }],
+            read_due: Some(Instant::now() + READ_LIMIT),
+        });
     }
+
+    pub(super) fn command_brightness(&self) -> (Item, String) {
+        match self
+            .levels
+            .as_ref()
+            .filter(|levels| levels.button == Button::Quick)
+            .and_then(|levels| levels.screens.first())
+            .map(|screen| screen.know)
+        {
+            Some(Know::Level(percent)) => (Item::Level(percent, false), "Brightness".into()),
+            Some(Know::Pending) => (Item::Label, "Reading brightness".into()),
+            _ => (Item::Label, "Brightness unavailable".into()),
+        }
+    }
+
     /// The brightness worker, started on first need.
     fn brightness_worker(&mut self) -> Option<&Brightness> {
         if self.brightness.is_none() {
@@ -231,13 +274,16 @@ impl Desktop {
             .hover_popup
             .as_ref()
             .is_some_and(|popup| popup.hover_hit == Some(Hit::Button(levels.button)));
+        let mut brightness_changed = false;
         for reading in readings {
             for screen in levels
                 .screens
                 .iter_mut()
                 .filter(|screen| screen.target == reading.target)
             {
-                screen.know = reading.percent.map_or(Know::Unsupported, Know::Level);
+                let know = reading.percent.map_or(Know::Unsupported, Know::Level);
+                brightness_changed |= screen.know != know;
+                screen.know = know;
             }
         }
         if levels.read_due.is_some_and(|due| now >= due) {
@@ -248,6 +294,7 @@ impl Desktop {
                 .filter(|screen| screen.know == Know::Pending)
             {
                 screen.know = Know::Unsupported;
+                brightness_changed = true;
             }
         }
         let writes: Vec<(Target, u8)> = levels
@@ -274,7 +321,10 @@ impl Desktop {
             }
             icons_changed |= self.fetch_icons(&mut levels);
         }
-        if mine && let Some(popup) = &mut self.hover_popup {
+        if mine
+            && levels.button != Button::Quick
+            && let Some(popup) = &mut self.hover_popup
+        {
             let (items, titles, icons) = levels.rows(&self.audio);
             if !popup.held() && (popup.items() != items || icons_changed) {
                 let _ = popup.relist(items, titles, icons);
@@ -292,8 +342,12 @@ impl Desktop {
             .filter_map(|screen| screen.throttle.deadline(now))
             .chain(levels.read_due.filter(|_| pending))
             .min();
+        let command = mine && levels.button == Button::Quick;
         if mine || due.is_some() {
             self.levels = Some(levels);
+        }
+        if command && brightness_changed {
+            self.refresh_quick_menu();
         }
         due.map_or(INFINITE, |due| milliseconds_until(due, now))
     }
@@ -302,7 +356,20 @@ impl Desktop {
         let Some(levels) = &mut self.levels else {
             return;
         };
-        if levels.button == Button::Brightness {
+        if levels.button == Button::Quick {
+            if let Some(popup) = &self.hover_popup {
+                let first_level = popup
+                    .items()
+                    .iter()
+                    .position(|item| matches!(item, Item::Level(..)));
+                if first_level == Some(row) && self.audio.level().is_some() {
+                    self.audio.set(f32::from(percent) / 100.0);
+                } else if let Some(screen) = levels.screens.first_mut() {
+                    screen.know = Know::Level(percent);
+                    screen.throttle.push(percent);
+                }
+            }
+        } else if levels.button == Button::Brightness {
             if let Some(screen) = levels.screens.get_mut(row) {
                 screen.know = Know::Level(percent);
                 screen.throttle.push(percent);

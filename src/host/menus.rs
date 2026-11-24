@@ -4,57 +4,89 @@
 use super::*;
 
 impl Desktop {
-    /// The quick settings rows right now: what Windows reports on this machine, each row's text being the
-    /// setting's state. Volume steps are 10 points; Core Audio loads on first use.
-    pub(super) fn quick_rows(&mut self) -> (Vec<Item>, Vec<String>) {
-        use dock_menu::Quick;
-        self.audio.start();
-        self.audio.refresh();
-        let mut rows = Vec::new();
-        if let Some(level) = self.audio.level() {
-            rows.push((
-                Quick::Mute,
-                if level.muted {
-                    "Sound muted".to_owned()
-                } else {
-                    format!("Sound on, {}%", level.percent)
-                },
-            ));
-            rows.push((Quick::VolumeUp, "Volume up".to_owned()));
-            rows.push((Quick::VolumeDown, "Volume down".to_owned()));
-        }
-        for (row, kind, name) in [
-            (Quick::WiFi, quick::Kind::WiFi, "Wi-Fi"),
-            (Quick::Bluetooth, quick::Kind::Bluetooth, "Bluetooth"),
-        ] {
-            if let Some(on) = quick::radio_on(kind) {
-                rows.push((row, format!("{name} {}", if on { "on" } else { "off" })));
+    pub(super) fn hover_popup_message(&mut self, message: &MSG, catalog: &mut Catalog) -> bool {
+        let Some(popup) = &mut self.hover_popup else {
+            return false;
+        };
+        let slot = popup.slot;
+        let hwnd = popup.dock();
+        let origin = popup.hover_hit;
+        match popup.message(message) {
+            Event::Ignored => false,
+            Event::Consumed => true,
+            Event::Dismiss => {
+                if message.message == WM_LBUTTONDOWN
+                    && message.hwnd == hwnd
+                    && let Some(Hit::Button(button)) = origin
+                    && (button.widget().is_some()
+                        || button == Button::Quick
+                        || matches!(button, Button::Moon | Button::Volume | Button::Brightness))
+                    && self
+                        .dock_at(hwnd)
+                        .and_then(|surface| surface.dock_hit(message.lParam, self.dock_slots()))
+                        == origin
+                {
+                    self.swallow_up = Some((hwnd, button));
+                    self.hover_spot = Some((
+                        hwnd.0 as usize,
+                        Hit::Button(button),
+                        Instant::now() + Duration::from_secs(86_400),
+                    ));
+                }
+                self.hover_popup = None;
+                false
+            }
+            Event::Choose(Item::Member(index)) => {
+                let member = self
+                    .dock_items
+                    .get(slot)
+                    .and_then(|tile| tile.members.get(index))
+                    .cloned();
+                self.hover_popup = None;
+                if let Some(member) = member {
+                    self.open_member(&member);
+                }
+                true
+            }
+            Event::Choose(Item::MemberMenu(index)) => {
+                let member = self
+                    .dock_items
+                    .get(slot)
+                    .and_then(|tile| tile.members.get(index))
+                    .cloned();
+                self.hover_popup = None;
+                if let Some(member) = member {
+                    self.open_item_menu(hwnd, slot, member);
+                }
+                true
+            }
+            Event::Level(row, percent) => {
+                self.set_level(row, percent);
+                true
+            }
+            Event::Mute(row) => {
+                self.mute_row(row);
+                true
+            }
+            // The slider popups stay open: a device choice or a click on a note row does not close them.
+            Event::Choose(Item::Device(index, _)) => {
+                self.choose_device(index);
+                true
+            }
+            Event::Choose(Item::Quick(action)) => {
+                self.press_command(action, catalog);
+                true
+            }
+            Event::Choose(Item::Widget(action)) => {
+                self.press_widget(action);
+                true
+            }
+            Event::Choose(Item::Label) => true,
+            Event::Choose(_) => {
+                self.hover_popup = None;
+                true
             }
         }
-        if let Some(mode) = quick::mode() {
-            let battery = power::Raw::read().and_then(power::Raw::summary);
-            rows.push((
-                Quick::Power,
-                battery.map_or_else(
-                    || mode.label().to_owned(),
-                    |battery| format!("{}, {}", mode.label(), battery.to_lowercase()),
-                ),
-            ));
-        }
-        rows.push((
-            Quick::KeepAwake,
-            format!("Keep awake {}", if self.keep_awake { "on" } else { "off" }),
-        ));
-        let light = self.settings.theme == crate::theme::Theme::Light;
-        rows.push((
-            Quick::Theme,
-            format!("Theme {}", if light { "light" } else { "dark" }),
-        ));
-        rows.push((Quick::Lock, "Lock".to_owned()));
-        rows.push((Quick::Sleep, "Sleep".to_owned()));
-        rows.into_iter()
-            .map(|(row, text)| (Item::Quick(row), text))
-            .unzip()
     }
     fn refresh_battery_menu(&mut self) {
         let Some(mut menu) = self.menu.take() else {
@@ -164,10 +196,6 @@ impl Desktop {
             Err(error) => eprintln!("Dock moon: {error}"),
         }
     }
-    /// The sliders button's popup, refreshed in place as worker results arrive.
-    pub(super) fn open_quick_menu(&mut self, hwnd: HWND) {
-        self.open_status_menu(hwnd, Button::Quick);
-    }
     pub(super) fn open_windows_links(&mut self, hwnd: HWND) {
         self.hover_popup = None;
         self.hover_spot = None;
@@ -194,10 +222,6 @@ impl Desktop {
         else {
             return;
         };
-        // The radios are read on a worker; their rows join the open popup when it answers (`refresh_quick_menu`).
-        if button == Button::Quick {
-            quick::refresh(None);
-        }
         let (items, titles) = match button {
             Button::Start => (
                 dock_menu::WindowsLink::ALL
@@ -210,7 +234,7 @@ impl Desktop {
                 let titles = crate::device_battery::titles();
                 (vec![Item::Battery; titles.len()], titles)
             }
-            _ => self.quick_rows(),
+            _ => return,
         };
         if items.is_empty() {
             return;
@@ -228,7 +252,7 @@ impl Desktop {
             app: match button {
                 Button::Start => "Quick links",
                 Button::Battery => "Device batteries",
-                _ => "Quick settings",
+                _ => "Dock",
             }
             .into(),
             titles,
@@ -287,17 +311,18 @@ impl Desktop {
             return;
         };
         let (left, width) = dock::span(buttons, bounds.width, dpi, Hit::Button(Button::Places));
+        let (items, titles) = crate::places::rows(&places);
         let spec = dock_menu::Spec {
             dock: hwnd,
             slot: dock_menu::APP,
             windows: Vec::new(),
             identity: Identity::Unavailable(0),
-            items: (0..places.len()).map(Item::Place).collect(),
+            items,
             dock_bounds: bounds,
             work,
             dpi,
             app: "Places".into(),
-            titles: places.iter().map(|place| place.text.clone()).collect(),
+            titles,
             icons: Vec::new(),
             x: bounds.x + left + width / 2,
             below: None,
@@ -574,85 +599,6 @@ impl Desktop {
         }
     }
     /// Applies one quick setting, then shows the new state in the same popup.
-    pub(super) fn run_quick(
-        &mut self,
-        mut menu: dock_menu::Menu,
-        row: dock_menu::Quick,
-        catalog: &mut Catalog,
-    ) {
-        use dock_menu::Quick;
-        let step = |level: Option<audio::Level>, up: bool| {
-            level.map(|level| {
-                let percent = i32::from(level.percent) + if up { 10 } else { -10 };
-                percent.clamp(0, 100) as f32 / 100.0
-            })
-        };
-        match row {
-            Quick::Mute => self.audio.toggle_mute(),
-            Quick::VolumeUp | Quick::VolumeDown => {
-                if let Some(volume) = step(self.audio.level(), row == Quick::VolumeUp) {
-                    self.audio.set(volume);
-                }
-            }
-            Quick::WiFi | Quick::Bluetooth => {
-                let kind = if row == Quick::WiFi {
-                    quick::Kind::WiFi
-                } else {
-                    quick::Kind::Bluetooth
-                };
-                // A flip waits for a run in flight; only a second one, or no worker, is refused.
-                if !quick::refresh(Some(kind)) {
-                    self.show_notice("Still busy. Try again.".into(), Instant::now());
-                }
-            }
-            Quick::Power => quick::next_mode(),
-            Quick::KeepAwake => {
-                self.keep_awake = !self.keep_awake;
-                crate::system_os::keep_awake(self.keep_awake);
-            }
-            Quick::Theme => {
-                use crate::theme::Theme;
-                let theme = if self.settings.theme == Theme::Light {
-                    self.dark_theme
-                } else {
-                    self.dark_theme = self.settings.theme;
-                    Theme::Light
-                };
-                let next = Settings {
-                    theme,
-                    ..self.settings.clone()
-                };
-                // A new theme rebuilds every surface, popup included, so nothing is listed again.
-                dock::restore_foreground(menu.hwnd(), menu.return_to);
-                if let Err(error) = self.apply_settings(next, catalog) {
-                    eprintln!("Theme: {error}");
-                }
-                // An open Settings window shows the theme it last knew.
-                if let Some(window) = &mut self.settings_window
-                    && let Err(error) = window.set_theme(self.settings.theme)
-                {
-                    eprintln!("Settings theme: {error}");
-                }
-                return;
-            }
-            Quick::Lock | Quick::Sleep => {
-                if row == Quick::Lock {
-                    crate::system_os::lock();
-                } else {
-                    crate::system_os::sleep();
-                }
-                // Nothing to show after it: the popup closes instead of listing the new state.
-                dock::restore_foreground(menu.hwnd(), menu.return_to);
-                return;
-            }
-        }
-        let (items, titles) = self.quick_rows();
-        if menu.relist(items, titles, Vec::new()).is_ok() {
-            self.menu = Some(menu);
-        } else {
-            dock::restore_foreground(menu.hwnd(), menu.return_to);
-        }
-    }
     /// What the short workers left for the host (read on every pass): a folder or the Places rows (`places`), new radio
     /// states for an open quick settings popup in place (`quick::refresh`), and a failed network launch.
     pub(super) fn worker_answers(&mut self) {
@@ -662,7 +608,14 @@ impl Desktop {
         if let Some(answer) = crate::places::answer() {
             self.stack_ready(answer);
         }
+        self.network_answers();
         if quick::changed() {
+            if quick::airplane_fallback() {
+                self.hover_popup = None;
+                self.run_dock_action(dock::Action::Launch(
+                    "ms-settings:network-airplanemode".into(),
+                ));
+            }
             self.refresh_quick_menu();
             quick::run_waiting();
         }
@@ -682,7 +635,8 @@ impl Desktop {
             (Button::Moon | Button::Volume | Button::Brightness, _) => {
                 self.toggle_popup(hwnd, button)
             }
-            (Button::Quick, _) => self.open_quick_menu(hwnd),
+            (button, _) if button.widget().is_some() => self.toggle_popup(hwnd, button),
+            (Button::Quick, _) => self.toggle_popup(hwnd, button),
             (Button::Places, _) => self.ask_places(hwnd),
             (Button::Tray, _) => self.open_flyout(hwnd, crate::anchored::Kind::Tray),
             (Button::Start, _) => self.open_flyout(hwnd, crate::anchored::Kind::Start),
@@ -693,25 +647,6 @@ impl Desktop {
                 }
             }
             (_, None) => {}
-        }
-    }
-    fn refresh_quick_menu(&mut self) {
-        let Some(mut menu) = self.menu.take() else {
-            return;
-        };
-        if !menu
-            .items()
-            .iter()
-            .any(|item| matches!(item, Item::Quick(_)))
-        {
-            self.menu = Some(menu);
-            return;
-        }
-        let (items, titles) = self.quick_rows();
-        if menu.relist(items, titles, Vec::new()).is_ok() {
-            self.menu = Some(menu);
-        } else {
-            dock::restore_foreground(menu.hwnd(), menu.return_to);
         }
     }
     /// Middle-click on a dock slot launches a new instance when the app can be launched.
@@ -873,7 +808,7 @@ impl Desktop {
         }
     }
     /// Input for the open menu. Returns true when the message is consumed.
-    pub(super) fn menu_message(&mut self, message: &MSG, catalog: &mut Catalog) -> bool {
+    pub(super) fn menu_message(&mut self, message: &MSG) -> bool {
         let Some(menu) = &mut self.menu else {
             return false;
         };
@@ -891,7 +826,7 @@ impl Desktop {
                 own // a press on another ROQA window still reaches it
             }
             Event::Choose(item) => {
-                self.run_menu(item, catalog);
+                self.run_menu(item);
                 true
             }
         }
@@ -904,14 +839,10 @@ impl Desktop {
     }
     /// Does the chosen action on the slot's app, if the slot still holds it. A new instance leaves the
     /// foreground to the app it starts; the rest return it to the window the menu came from.
-    pub(super) fn run_menu(&mut self, item: Item, catalog: &mut Catalog) {
+    pub(super) fn run_menu(&mut self, item: Item) {
         let Some(mut menu) = self.menu.take() else {
             return;
         };
-        if let Item::Quick(row) = item {
-            self.run_quick(menu, row, catalog);
-            return;
-        }
         if item == Item::Rename {
             let name = self
                 .pins
@@ -988,8 +919,8 @@ impl Desktop {
             dock::restore_foreground(menu.hwnd(), menu.return_to);
             return;
         }
-        // A new instance takes the foreground itself.
-        if !matches!(item, Item::NewInstance) {
+        // A new instance and Explorer take the foreground themselves.
+        if !matches!(item, Item::NewInstance | Item::OpenFileLocation) {
             dock::restore_foreground(menu.hwnd(), menu.return_to);
         }
         if menu.slot == dock_menu::APP {
@@ -1025,6 +956,20 @@ impl Desktop {
                     {
                         eprintln!("Places: the shell did not open {}", place.target);
                         self.show_open_failed();
+                    }
+                }
+                Item::Eject(index) => {
+                    // A row that no longer matches the listed places does nothing; the worker checks the identity itself.
+                    if let Some(volume) =
+                        self.places.get(index).and_then(|place| place.eject.clone())
+                    {
+                        let letter = volume.letter;
+                        let text = if crate::system_os::eject_volume_in_background(volume) {
+                            format!("Ejecting {letter}:")
+                        } else {
+                            "Still ejecting another drive".into()
+                        };
+                        self.show_notice(text, Instant::now());
                     }
                 }
                 Item::RemoveShelf => {
@@ -1093,6 +1038,13 @@ impl Desktop {
                     self.run_dock_action(dock::Action::Launch(launch));
                 }
             }
+            Item::OpenFileLocation => {
+                if !dock_menu::file_location(&target.identity)
+                    .is_some_and(|exe| crate::shelf_os::reveal_local(&exe))
+                {
+                    self.show_open_failed();
+                }
+            }
             Item::Pin | Item::Unpin => {
                 let identity = dock::pinned_as(&target, &self.pins).unwrap_or(target.identity);
                 self.change_pins(|pins| {
@@ -1107,8 +1059,10 @@ impl Desktop {
             Item::Settings
             | Item::Quit
             | Item::Quick(_)
+            | Item::QuickTile(..)
             | Item::WindowsLink(_)
             | Item::Place(_)
+            | Item::Eject(_)
             | Item::File(_)
             | Item::PinDownloads
             | Item::RemoveShelf
@@ -1124,6 +1078,8 @@ impl Desktop {
             | Item::Limit(_)
             | Item::Moon(..)
             | Item::MoonDate
+            | Item::CalendarWeek(_)
+            | Item::Widget(_)
             | Item::Level(..)
             | Item::Device(..) => {}
         }

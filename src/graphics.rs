@@ -1,3 +1,4 @@
+mod dock_art;
 use crate::{
     audio::{BARS, Level},
     dock,
@@ -170,6 +171,7 @@ pub struct DockScene<'a> {
     /// Which taskbar buttons are on, and each enabled one's hover progress.
     pub layout: dock::Buttons,
     pub buttons: Vec<(dock::Button, f32)>,
+    pub widget_readings: &'a [String; 6],
     /// Pointer-inside animation progress for the bar fill; keeps the M1 hover background semantic.
     pub inside: f32,
     pub dpi: u32,
@@ -232,13 +234,7 @@ pub struct NotchScene<'a> {
     pub clips: bool,
     /// The page the open panel shows. Media is the media and clock panel; the others draw their own content.
     pub tab: Tab,
-    pub widgets: crate::widgets::WidgetConfig,
-    /// The Widgets page shows this (year, month) as a grid instead of its tiles.
-    pub month: Option<(u16, u16)>,
-    pub glance: crate::widgets::Glance,
-    /// The Processor tile's percent and the Network tile's bytes per second down and up (`widgets::Stats`).
-    pub stats: (Option<u32>, Option<(u64, u64)>),
-    /// The hanging tab handle; `None` draws none (fewer than two tabs).
+    pub low_battery: bool,
     pub rail: Option<RailScene<'a>>,
     /// The mascot's frame (`None` with the setting off); alpha 0 at rest, when the pill shows only the time.
     pub eyes: Option<Frame>,
@@ -558,6 +554,22 @@ impl Canvas {
                 let cell = surface_rect(rect, row.rect);
                 if let Some((lit, right)) = row.moon {
                     moon::hero(context, cell, lit, right, row.name, scale, &p)?;
+                    continue;
+                }
+                if let Some((action, on, details)) = row.quick {
+                    dock_art::quick_tile(
+                        context,
+                        cell,
+                        row.name,
+                        (action, on, details),
+                        scene.hover == Some(index),
+                        scale,
+                        &p,
+                    )?;
+                    continue;
+                }
+                if let Some(today) = row.calendar {
+                    dock_art::calendar_week(context, cell, row.name, today, &font, &p)?;
                     continue;
                 }
                 if let Some(value) = row.value {
@@ -2422,7 +2434,7 @@ fn paint_slots(
             &cell(dock::Hit::Button(button)),
             button,
             hover,
-            scene.layout,
+            scene,
             px,
             p,
         )?;
@@ -2467,10 +2479,14 @@ fn draw_button(
     cell: &D2D_RECT_F,
     button: dock::Button,
     hover: f32,
-    layout: dock::Buttons,
+    scene: &DockScene,
     px: &dyn Fn(i32) -> f32,
     p: &Palette,
 ) -> Result<()> {
+    let layout = scene.layout;
+    let reading = button
+        .widget()
+        .map(|index| scene.widget_readings[index].as_str());
     if button == dock::Button::Desktop {
         return desktop_pill(context, cell, hover, layout.rtl, px, p);
     }
@@ -2496,8 +2512,33 @@ fn draw_button(
     if button == dock::Button::Start {
         return windows_logo(context, centre, px);
     }
-    let side = px(DOCK_GLYPH);
-    let square = pixel_square(centre.0 - side / 2.0, centre.1 - side / 2.0, side);
+    let has_reading = reading.is_some_and(|text| !text.is_empty());
+    let side = px(if reading.is_some() { 20 } else { DOCK_GLYPH });
+    let left = if has_reading {
+        cell.left + px(9)
+    } else {
+        centre.0 - side / 2.0
+    };
+    let square = pixel_square(left, centre.1 - side / 2.0, side);
+    if let Some(text) = reading.filter(|_| has_reading) {
+        draw_text(
+            context,
+            text,
+            &Font {
+                family: windows::core::w!("Segoe UI Variable"),
+                size: px(13),
+                weight: DWRITE_FONT_WEIGHT_NORMAL,
+                designator: 1.0,
+                align: DWRITE_TEXT_ALIGNMENT_LEADING,
+            },
+            D2D_RECT_F {
+                left: square.right + px(5),
+                right: cell.right - px(5),
+                ..*cell
+            },
+            tint(p.ink_dim(false, 1.0)),
+        )?;
+    }
     if let (dock::Button::Moon, Some((pct, right))) = (button, layout.moon) {
         let crate::theme::Rgba(r, g, b, _) = p.body;
         let ink = glyphs::moon_icon(p.glyph, with_alpha((r, g, b), 1.0), side);
@@ -2508,7 +2549,13 @@ fn draw_button(
         dock::Button::Search => Glyph::Search,
         dock::Button::TaskView => Glyph::TaskView,
         dock::Button::Desktop => unreachable!("drawn above"),
-        dock::Button::Quick => Glyph::Gear,
+        dock::Button::Quick => Glyph::Sliders,
+        dock::Button::Weather => Glyph::PartlyCloudy,
+        dock::Button::Prayer => Glyph::Prayer,
+        dock::Button::Calendar => Glyph::Widgets,
+        dock::Button::Water => Glyph::Drizzle,
+        dock::Button::System => Glyph::Drive,
+        dock::Button::Timer => Glyph::Timer,
         dock::Button::Places => Glyph::Drive,
         dock::Button::Tray => Glyph::Chevron,
         dock::Button::Battery => Glyph::Battery,
@@ -3158,10 +3205,7 @@ mod media_tests {
             shelf_undo: false,
             shelf_hover: false,
             clips: false,
-            widgets: crate::widgets::WidgetConfig::default(),
-            month: None,
-            glance: Default::default(),
-            stats: (None, None),
+            low_battery: false,
             tab: Tab::Media,
             rail: None,
             eyes: None,
@@ -3207,10 +3251,7 @@ mod media_tests {
                 shelf_undo: false,
                 shelf_hover: false,
                 clips: false,
-                widgets: crate::widgets::WidgetConfig::default(),
-                month: None,
-                glance: Default::default(),
-                stats: (None, None),
+                low_battery: false,
                 tab: Tab::Media,
                 rail: None,
                 eyes: None,
@@ -3457,10 +3498,7 @@ mod media_tests {
                 shelf_undo: false,
                 shelf_hover: false,
                 clips: false,
-                widgets: crate::widgets::WidgetConfig::default(),
-                month: None,
-                glance: Default::default(),
-                stats: (None, None),
+                low_battery: false,
                 tab: Tab::Media,
                 rail: None,
                 eyes: None,
@@ -3528,10 +3566,7 @@ mod media_tests {
                     shelf_undo: false,
                     shelf_hover: false,
                     clips: false,
-                    widgets: crate::widgets::WidgetConfig::default(),
-                    month: None,
-                    glance: Default::default(),
-                    stats: (None, None),
+                    low_battery: false,
                     tab: Tab::Media,
                     rail: None,
                     eyes: None,
@@ -3587,10 +3622,7 @@ mod media_tests {
             shelf_undo: false,
             shelf_hover: false,
             clips: false,
-            widgets: crate::widgets::WidgetConfig::default(),
-            month: None,
-            glance: Default::default(),
-            stats: (None, None),
+            low_battery: false,
             tab: Tab::Media,
             rail: None,
             eyes: None,

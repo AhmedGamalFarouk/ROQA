@@ -1,75 +1,14 @@
-//! Configuration for the two expanded-notch widget slots, and the readings of the system tiles.
-use std::time::{Duration, Instant};
+//! Dock widget readings and preferences.
+use std::{
+    sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WidgetKind {
-    WeekCalendar,
-    Battery,
-    /// Memory in use.
-    Memory,
-    /// The system drive's space in use.
-    Disk,
-    /// Processor in use.
-    Cpu,
-    /// Download and upload speed.
-    Network,
-    /// The next prayer and the wait for it (the Prayer tab's reading).
-    NextPrayer,
-    /// Glasses of water drunk today.
-    Water,
-    /// The temperature and condition (the Weather tab's reading).
-    Weather,
-}
-
-impl WidgetKind {
-    pub const ALL: [Self; 9] = [
-        Self::WeekCalendar,
-        Self::Battery,
-        Self::Memory,
-        Self::Disk,
-        Self::Cpu,
-        Self::Network,
-        Self::NextPrayer,
-        Self::Water,
-        Self::Weather,
-    ];
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::WeekCalendar => "week",
-            Self::Battery => "battery",
-            Self::Memory => "memory",
-            Self::Disk => "disk",
-            Self::Cpu => "cpu",
-            Self::Network => "network",
-            Self::NextPrayer => "prayer",
-            Self::Water => "water",
-            Self::Weather => "weather",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<Self> {
-        match key {
-            "week" => Some(Self::WeekCalendar),
-            "battery" => Some(Self::Battery),
-            "memory" => Some(Self::Memory),
-            "disk" => Some(Self::Disk),
-            "cpu" => Some(Self::Cpu),
-            "network" => Some(Self::Network),
-            "prayer" => Some(Self::NextPrayer),
-            "water" => Some(Self::Water),
-            "weather" => Some(Self::Weather),
-            _ => None,
-        }
-    }
-}
-
-/// The Widgets page's choices: two tiles, or four when a lower slot is filled (`None` is empty).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WidgetConfig {
-    pub slot_left: WidgetKind,
-    pub slot_right: WidgetKind,
-    pub slot_left2: Option<WidgetKind>,
-    pub slot_right2: Option<WidgetKind>,
+pub struct WidgetPreferences {
     /// Network speed in bits per second.
     pub net_bits: bool,
     /// The Disk tile's drive letter (upper case); `None` is the system drive.
@@ -82,13 +21,9 @@ pub struct WidgetConfig {
     pub pill_low: bool,
 }
 
-impl Default for WidgetConfig {
+impl Default for WidgetPreferences {
     fn default() -> Self {
         Self {
-            slot_left: WidgetKind::WeekCalendar,
-            slot_right: WidgetKind::Battery,
-            slot_left2: None,
-            slot_right2: None,
             net_bits: false,
             disk_drive: None,
             low_at: 20,
@@ -98,52 +33,12 @@ impl Default for WidgetConfig {
     }
 }
 
-impl WidgetConfig {
-    /// The filled slots in page order: top left, top right, then the lower two.
-    pub fn slots(self) -> impl Iterator<Item = WidgetKind> {
-        self.cells().into_iter().flatten()
-    }
-    /// The four cells in grid order (left, right, lower left, lower right); `None` draws nothing.
-    pub fn cells(self) -> [Option<WidgetKind>; 4] {
-        [
-            Some(self.slot_left),
-            Some(self.slot_right),
-            self.slot_left2,
-            self.slot_right2,
-        ]
-    }
-    /// True when a lower slot is filled: the page is two rows of compact tiles.
-    pub fn tall(self) -> bool {
-        self.slot_left2.is_some() || self.slot_right2.is_some()
-    }
-    pub fn uses(self, kind: WidgetKind) -> bool {
-        self.slots().any(|k| k == kind)
-    }
-    /// True when a tile shows a reading that changes by itself (memory, disk, CPU, network).
-    pub fn live(self) -> bool {
-        self.slots().any(|kind| {
-            matches!(
-                kind,
-                WidgetKind::Memory | WidgetKind::Disk | WidgetKind::Cpu | WidgetKind::Network
-            )
-        })
-    }
-}
-
-/// What the notch draws beyond the page's own data: today's water as (drunk, goal), and whether the closed pill
-/// carries the low-battery bolt.
-#[derive(Clone, Copy, Default)]
-pub struct Glance {
-    pub water: Option<(u8, u8)>,
-    pub low: bool,
-}
-
 /// How often the system tiles are read while they show.
 pub const STATS_STEP: Duration = Duration::from_secs(1);
 
 /// CPU in use and network speed: differences between two samples `STATS_STEP` apart, taken only while an
-/// open notch shows the tiles (`Desktop::refresh_stats`); dropped when it closes.
-#[derive(Default)]
+/// open dock popup shows the tiles (`Desktop::refresh_stats`); dropped when it closes.
+#[derive(Clone, Copy, Default)]
 pub struct Stats {
     last: Option<Sample>,
     pub cpu: Option<u32>,
@@ -161,15 +56,15 @@ struct Sample {
 }
 
 impl Stats {
-    /// Reads once the step is due; true when it did (the tiles repaint). Only the counters a shown tile uses.
-    pub fn sample(&mut self, now: Instant, shown: WidgetConfig) -> bool {
+    /// Reads once the step is due; true when it did (the tiles repaint).
+    pub fn sample(&mut self, now: Instant) -> bool {
         if self.deadline().is_some_and(|due| now < due) {
             return false;
         }
         let next = Sample {
             at: now,
-            cpu: shown.uses(WidgetKind::Cpu).then(cpu_times).flatten(),
-            net: shown.uses(WidgetKind::Network).then(net_bytes).flatten(),
+            cpu: cpu_times(),
+            net: net_bytes(),
         };
         if let Some(last) = self.last {
             (self.cpu, self.net) = rates(last, next);
@@ -180,6 +75,51 @@ impl Stats {
     pub fn deadline(&self) -> Option<Instant> {
         self.last.map(|sample| sample.at + STATS_STEP)
     }
+}
+
+#[derive(Default)]
+pub struct SystemSample {
+    pub counters: Stats,
+    pub memory: Option<Usage>,
+    pub disk: Option<Usage>,
+}
+
+type Answer = (Instant, SystemSample);
+static SYSTEM_ANSWER: Mutex<Option<Answer>> = Mutex::new(None);
+static SYSTEM_BUSY: AtomicBool = AtomicBool::new(false);
+const SYSTEM_READY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 121;
+
+pub fn request_system(opened: Instant, mut counters: Stats, drive: Option<u8>) -> bool {
+    if SYSTEM_BUSY.swap(true, Ordering::AcqRel) {
+        return true;
+    }
+    // SAFETY: reads the host thread ID without pointers.
+    let host = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    let sent = std::thread::Builder::new()
+        .name("roqa-system-reading".into())
+        .spawn(move || {
+            counters.sample(Instant::now());
+            let sample = SystemSample {
+                counters,
+                memory: memory(),
+                disk: disk(drive),
+            };
+            *SYSTEM_ANSWER.lock().unwrap_or_else(PoisonError::into_inner) = Some((opened, sample));
+            SYSTEM_BUSY.store(false, Ordering::Release);
+            let _ = crate::native_window::post_wake(host, SYSTEM_READY);
+        })
+        .is_ok();
+    if !sent {
+        SYSTEM_BUSY.store(false, Ordering::Release);
+    }
+    sent
+}
+
+pub fn system_answer() -> Option<Answer> {
+    SYSTEM_ANSWER
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
 }
 
 fn rates(a: Sample, b: Sample) -> (Option<u32>, Option<(u64, u64)>) {
@@ -386,12 +326,6 @@ mod tests {
         );
         assert!(usage(0, 0).is_none());
         assert_eq!(usage(20, 10).unwrap().percent, 100);
-        assert_eq!(WidgetKind::from_key("memory"), Some(WidgetKind::Memory));
-        assert!(
-            WidgetKind::ALL
-                .iter()
-                .all(|k| WidgetKind::from_key(k.key()) == Some(*k))
-        );
     }
 
     #[test]
@@ -436,30 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn configuration_defaults_and_keys() {
-        let config = WidgetConfig::default();
-        assert_eq!(config.slot_left, WidgetKind::WeekCalendar);
-        assert_eq!(config.slot_right, WidgetKind::Battery);
-        for kind in [WidgetKind::WeekCalendar, WidgetKind::Battery] {
-            assert_eq!(WidgetKind::from_key(kind.key()), Some(kind));
-        }
-        assert_eq!(WidgetKind::from_key("unknown"), None);
-        assert!(!config.live());
-        let stats = WidgetConfig {
-            slot_right: WidgetKind::Network,
-            ..config
-        };
-        assert!(stats.live() && !stats.tall());
-        // A lower slot makes the page tall and counts for live tiles and for what a page must read.
-        let lower = WidgetConfig {
-            slot_left2: Some(WidgetKind::Cpu),
-            ..config
-        };
-        assert!(lower.tall() && lower.live() && lower.uses(WidgetKind::Cpu));
-        assert_eq!(lower.slots().count(), 3);
-    }
-
-    #[test]
     fn stats_read_rates_between_two_samples() {
         let at = Instant::now();
         let a = Sample {
@@ -491,8 +401,8 @@ mod tests {
         assert_eq!(speed(125_000, true), "1.0 Mb/s");
         // Due once a step has passed; the first sample has no rates yet.
         let mut stats = Stats::default();
-        assert!(stats.sample(at, WidgetConfig::default()) && stats.cpu.is_none());
-        assert!(!stats.sample(at + Duration::from_millis(500), WidgetConfig::default()));
+        assert!(stats.sample(at) && stats.cpu.is_none());
+        assert!(!stats.sample(at + Duration::from_millis(500)));
         assert_eq!(stats.deadline(), Some(at + STATS_STEP));
     }
 }
