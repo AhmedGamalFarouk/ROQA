@@ -15,6 +15,7 @@ One folder: work on `main` in this checkout, no worktrees. Branches and PRs only
 ## Hard rules (owner decisions, do not reopen)
 - ROQA ignores Windows' Animation effects switch, and the dock and notch have no Narrator or UI Automation support (owner decision 2026-11-19). Do not add either.
 - The dock has no tooltips (owner decision 2026-11-20).
+- The tray icon's right-click menu is the plain Windows menu (`src/tray.rs`, owner decision 2026-11-25), the one modal `TrackPopupMenu` in ROQA; every other menu stays ROQA's own.
 - No size limit (owner decision 2026-11-16): `verify.ps1` reports the exe size; put the byte delta in every report. Performance rules above still hold.
 - Live tests and screenshots use the second (non-primary) monitor when available, so the owner's main screen is left alone. The primary monitor is allowed as a fallback when it is the only one (owner decision 2026-11-24).
 - Answers to the owner are concise (owner decision 2026-11-18): short plain lines with only what changed, what is left and what they must decide; no recaps, no detail they did not ask for.

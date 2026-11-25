@@ -1,9 +1,32 @@
-//! The dock's menus and popups: quick settings, Places, stacks, item and app menus, and what a row does.
+//! The dock's menus and popups: quick settings, Places, stacks, item and app menus, and what a row does;
+//! also the tray icon's menu.
 //! One `impl Desktop` block moved out of `host.rs` unchanged; the methods are `pub(super)` so the host reaches them.
 
 use super::*;
 
 impl Desktop {
+    /// Shows the tray icon's menu and does what was picked.
+    pub(super) fn tray_menu(&mut self) -> Result<()> {
+        use crate::tray::Choice;
+        let Some(choice) = self.tray.as_ref().and_then(|tray| tray.menu(self.hidden)) else {
+            return Ok(());
+        };
+        match choice {
+            Choice::Settings => self.open_settings()?,
+            Choice::Hide => {
+                self.hidden = !self.hidden;
+                self.apply_visibility()?;
+            }
+            Choice::Restart | Choice::Quit => {
+                if choice == Choice::Restart {
+                    crate::tray::ask_restart();
+                }
+                // SAFETY: a scalar quit request to this thread's own message loop.
+                unsafe { PostQuitMessage(0) };
+            }
+        }
+        Ok(())
+    }
     pub(super) fn hover_popup_message(&mut self, message: &MSG, catalog: &mut Catalog) -> bool {
         let Some(popup) = &mut self.hover_popup else {
             return false;

@@ -914,6 +914,13 @@ fn dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
             }
             return LRESULT(1);
         }
+        if message == crate::tray::CALLBACK {
+            // The shell may send this past the host loop: post it there, where the menu can reach the host.
+            if crate::tray::wants_menu(lparam) {
+                let _ = PostMessageW(Some(hwnd), crate::tray::MENU, WPARAM(0), LPARAM(0));
+            }
+            return LRESULT(0);
+        }
         if message == WM_ENDSESSION && wparam.0 != 0 {
             // Signing out or shutting down: the process may end as soon as this returns.
             let _ = crate::store::save_unsaved();

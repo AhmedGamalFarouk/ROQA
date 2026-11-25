@@ -70,6 +70,7 @@ mod theme;
 mod timer;
 mod toast;
 mod topology;
+mod tray;
 mod water;
 mod weather;
 mod weather_os;
@@ -88,6 +89,7 @@ fn main() {
         error_log::startup_failure(error.code().0);
         std::process::exit(1);
     }
+    tray::restart_if_asked();
 }
 
 fn run() -> Result<()> {

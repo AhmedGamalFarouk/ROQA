@@ -101,6 +101,8 @@ To run Cargo commands through the pinned local toolchain:
 
 ## CLI & IPC Controls
 
+While ROQA runs, its icon sits in the notification area (hidden icons). Right-click it for Settings, Hide or show dock and notch, Restart ROQA and Quit ROQA.
+
 When ROQA is running, you can control its surfaces and features via command-line arguments:
 
 ```powershell

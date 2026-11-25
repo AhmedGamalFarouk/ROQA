@@ -432,6 +432,17 @@ fn meter_bars_sit_right_of_the_controls_bottom_aligned_and_fade_in_with_them() {
             leaving: None,
             fx: Fx::REST,
         };
+        if progress == 0.0 {
+            // The collapsed pill's bars follow the same live level: 3 DIP flat to 12 DIP full.
+            let clock = clock_width("9:50 pm", 0.0, 96);
+            let plan = media_plan(&scene, scene.track.unwrap(), &body(96, 0.0), clock);
+            let heights = plan
+                .pill_meter
+                .unwrap()
+                .0
+                .map(|bar| bar.rect.bottom - bar.rect.top);
+            assert_eq!(heights, [3.0, 12.0, 8.0, 5.0, 3.0]);
+        }
         meter_bars(&scene, &body(96, progress))
     };
     let body = body(96, 1.0);

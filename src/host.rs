@@ -1226,7 +1226,7 @@ const GRAPHICS_SETTLED: Duration = Duration::from_secs(60);
 /// Visualizer samples are at least this far apart: at most 15 a second, even after a late wake.
 const METER_PERIOD: Duration = Duration::from_millis(67);
 
-/// When the visualizer samples next: never unless a visible notch is open or opening (`open`), the
+/// When the visualizer samples next: never unless a visible notch shows bars (`open`: the Media panel or the pill), the
 /// track plays and the endpoint has a meter; otherwise `METER_PERIOD` after the last sample, or at
 /// once. The last sample outlives a stop, so stopping and restarting never samples faster.
 fn meter_due(
@@ -1421,6 +1421,10 @@ struct Desktop {
     flashing: Vec<usize>,
     /// The registered `SHELLHOOK` message, 0 when the shell would not take the hook window.
     shell_hook: u32,
+    /// The notification-area icon on the wake window; declared first so it is removed before that window goes.
+    tray: Option<crate::tray::Tray>,
+    /// The tray menu put the dock and notch away until it shows them (or a show command) again.
+    hidden: bool,
     /// The hidden window the workers' wakes and the Caps Lock hotkey go to, so a message box or menu loop dispatches them
     /// instead of dropping them (`native_window::post_wake`); it also takes the shell hook.
     wake: NativeWindow,
@@ -1596,6 +1600,7 @@ impl Desktop {
             w!("ROQA Wake"),
         )?;
         native_window::set_wake_window(wake.0);
+        let tray = crate::tray::Tray::add(wake.0);
         let mut desktop = Self {
             surfaces: Vec::new(),
             monitors,
@@ -1637,6 +1642,8 @@ impl Desktop {
             dock_generation: None,
             flashing: Vec::new(),
             shell_hook: 0,
+            tray,
+            hidden: false,
             wake,
             pins: Pins::from_store(&store),
             shelf: ShelfView {
@@ -1804,10 +1811,11 @@ impl Desktop {
             )?;
         }
         // Shown after its first paint, and never on the monitor a full-screen app covers.
-        let visible = !self
-            .fullscreen
-            .iter()
-            .any(|(_, device)| device == &monitor.device)
+        let visible = !self.hidden
+            && !self
+                .fullscreen
+                .iter()
+                .any(|(_, device)| device == &monitor.device)
             && match kind {
                 SurfaceKind::Dock => self.tuck.shown(&monitor.device),
                 SurfaceKind::Notch => self.tuck_notch.shown(&monitor.device),
@@ -1918,9 +1926,13 @@ impl Desktop {
         let now = Instant::now();
         let track = self.pages.track(&self.media);
         let (shown, playing) = (track.is_some(), track.is_some_and(|track| track.playing));
-        // Only the Media page draws the visualizer; any other page, or no Media tab, makes no meter call.
-        // The collapsed pill's bars are still (no sampling, no frames while it only sits there).
-        let open = self.page() == Tab::Media && self.surfaces.iter().any(Surface::expanded);
+        // The open panel draws the visualizer on the Media page only; a visible collapsed pill shows
+        // the playing track's level bars on any page.
+        let media_page = self.page() == Tab::Media;
+        let open = self
+            .surfaces
+            .iter()
+            .any(|s| s.visible && s.kind() == SurfaceKind::Notch && (media_page || !s.expanded()));
         let due = meter_due(open, playing, self.audio.metered(), self.sampled, now);
         match due {
             None => self.audio.stop(),
@@ -1936,13 +1948,17 @@ impl Desktop {
             .iter_mut()
             .filter(|s| s.visible && s.kind() == SurfaceKind::Notch)
         {
-            // A running animation paints every frame already; the pill's bars are still and has no slot to patch.
+            // A running animation paints every frame already. The pill has no slot to patch: it repaints whole.
             if shown
                 && !notch.live
-                && notch.expanded()
+                && (media_page || !notch.expanded())
                 && notch.bars != layout::meter_heights(peaks, notch.dpi)
             {
-                notch.request(Repaint::Meter);
+                notch.request(if notch.expanded() {
+                    Repaint::Meter
+                } else {
+                    Repaint::Full
+                });
             }
         }
         Ok(due.map_or(INFINITE, |_| milliseconds_until(now + METER_PERIOD, now)))
@@ -3553,7 +3569,8 @@ impl Desktop {
         if matches!(command, Command::ShowNotch | Command::ShowDock) {
             // Also recovers monitors whose earlier placement ran out of retries.
             self.request_topology();
-            // A dock or notch auto-hidden behind a window (or put away by its hotkey) comes back for a while.
+            // A dock or notch auto-hidden behind a window (or put away by its hotkey or the tray) comes back for a while.
+            self.hidden = false;
             let now = Instant::now();
             if command == Command::ShowDock {
                 self.dock_away = false;
@@ -3587,6 +3604,11 @@ impl Desktop {
             // one coalesced read serves them all.
             self.request_topology();
             crate::taskbar::hide_again(); // a restarted Explorer or a new monitor shows a new taskbar
+            if message.wParam.0 != 0
+                && let Some(tray) = &self.tray
+            {
+                tray.show(); // a new taskbar (or a resume) lost or kept the icon; adding again is safe
+            }
             // A clock, time-zone or locale change, or a resume, can alter the text before the deadline.
             self.clock_due = Instant::now();
             self.prayer.key = None; // the day's times are computed again
@@ -3875,10 +3897,11 @@ impl Desktop {
         let owners = self.interaction_owners();
         for surface in &mut self.surfaces {
             let held = owners.contains(&Some(surface.window.0));
-            let visible = !self
-                .fullscreen
-                .iter()
-                .any(|(_, device)| device == &surface.monitor)
+            let visible = !self.hidden
+                && !self
+                    .fullscreen
+                    .iter()
+                    .any(|(_, device)| device == &surface.monitor)
                 && match surface.kind() {
                     SurfaceKind::Dock => {
                         (self.tuck.shown(&surface.monitor) || held) && !self.dock_away
@@ -4447,6 +4470,11 @@ fn drain_messages(desktop: &mut Desktop, catalog: &mut Catalog) -> Result<bool> 
             }
             if message.message == toast::SHOWN || message.message == keys::LOOK {
                 continue; // only wakes: `read_wakes` reads the line and the flag
+            }
+            if message.message == crate::tray::MENU {
+                let picked = desktop.tray_menu();
+                desktop.recover(picked, "Tray");
+                continue;
             }
             if desktop.shell_hook != 0 && message.message == desktop.shell_hook {
                 desktop.note_shell_event(message.wParam.0, message.lParam.0 as usize);
