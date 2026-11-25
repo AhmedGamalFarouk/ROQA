@@ -6,10 +6,11 @@
 use crate::{
     agent_hooks,
     dialog::{
-        ACTION, CLOSE, DIALOG_STYLE, RELAYOUT, SCROLL, control, dialog_proc, empty_dialog, wide,
+        ACTION, CLOSE, DIALOG_STYLE, RELAYOUT, SCROLL, WHEEL, control, dialog_proc, empty_dialog,
+        wide,
     },
     dock::{foreground_key, restore_foreground},
-    graphics::{Glyph, draw_settings_glyph, round_gdi},
+    graphics::{GdiBatch, Glyph, batch_gdi},
     hotkeys,
     layout::{Bounds, DockStyle},
     motion,
@@ -20,13 +21,13 @@ use crate::{
     prayer_tab::{self, LEADS, SILENT},
     settings::{MAX_OFF, MAX_PATH, MAX_SHIFT, NOTCH_SIZES, Settings, parse_timer},
     theme::Theme,
-    topology::{self, Monitor},
+    topology::Monitor,
     water,
     weather::{MAX_CITY, Units},
     window_model::WindowKey,
 };
-use keyboard::{focus_ring, ringed};
-use std::cell::RefCell;
+use keyboard::{focus_ring, ringed, ringed_in};
+use std::cell::{Cell, RefCell};
 use windows::{
     Win32::{
         Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM},
@@ -42,7 +43,7 @@ use windows::{
             Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
             Controls::*,
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow},
-            Input::KeyboardAndMouse::{EnableWindow, SetFocus},
+            Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus},
             Shell::{DefSubclassProc, SetWindowSubclass},
             WindowsAndMessaging::*,
         },
@@ -75,10 +76,8 @@ const DOCKSTYLE: usize = 117;
 const PMOON: usize = 118;
 const CAPTION: usize = 119;
 const MONITOR: usize = 120;
-/// The "Displays" card (index in page 0): the monitor tiles are drawn on a map instead of in rows.
-const MAP_CARD: usize = 1;
-/// DIPs: the map's height.
-const MAP_H: i32 = 120;
+/// The "Displays" card (index in page 0): one switch row per display.
+const DISPLAYS_CARD: usize = 1;
 /// One checkbox per dock button (`dock::Button::ALL` order).
 const DBTN: usize = 130;
 /// One checkbox per notch tab (`Tab::ALL` order), then the mascot eyes and the privacy dots.
@@ -150,15 +149,19 @@ const HOTKEY: usize = 222;
 const HIDDEN: usize = 230;
 const SHOW: usize = 231;
 const SIDE: usize = 98;
+/// The compact layout's category picker, and the local tabs (one radio button per page, `TABBTN + page`).
+const NAV: usize = 97;
+const TABBTN: usize = 330;
 const OK: usize = 1;
 /// `SS_NOTIFY`: the footer message takes clicks, so scrolled rows cannot be hit under it.
 const SS_NOTIFY: u32 = 0x100;
 /// Timer length shown when the window opens.
 const FIRST_TIMER: &str = "5";
-/// DIPs: sidebar width, content gutter, footer strip, design client size.
-const SIDE_W: i32 = 192;
-const GUTTER: i32 = 22;
-const FOOT: i32 = 52;
+/// The footer's line when nothing needs saying.
+const DEFAULT_STATUS: &str = "Changes apply as you go.";
+/// DIPs: the window's preferred client size.
+const DESIGN_W: i32 = 880;
+const DESIGN_H: i32 = 680;
 
 /// What the Settings window asks the host to do with the prayer sound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,575 +170,47 @@ pub enum SoundAction {
     Test,
 }
 
-/// How a row's control looks: the title is the checkbox text, or the label before the control.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Check,
-    /// A drop-down list of this many DIPs wide.
-    Combo(i32),
-    Edit(i32),
-    /// A push button; the row caption is the text on its left.
-    Btn,
-    /// Text only.
-    Note,
-}
-struct Row {
-    id: usize,
-    kind: Kind,
-    title: &'static str,
-    caption: &'static str,
-}
-struct Card {
-    label: &'static str,
-    rows: &'static [Row],
-}
-struct Page {
-    name: &'static str,
-    cards: &'static [Card],
-}
-const fn r(id: usize, kind: Kind, title: &'static str, caption: &'static str) -> Row {
-    Row {
-        id,
-        kind,
-        title,
-        caption,
-    }
-}
-const C: Kind = Kind::Check;
-
-/// Every setting appears once, in page order. Monitors are added at runtime after `NOTCH`.
-const PAGES: &[Page] = &[
-    Page {
-        name: "General",
-        cards: &[
-            Card {
-                label: "Show ROQA",
-                rows: &[
-                    r(DOCK, C, "Show the dock", ""),
-                    r(NOTCH, C, "Show the notch", ""),
-                ],
-            },
-            Card {
-                label: "Displays",
-                rows: &[],
-            },
-            Card {
-                label: "Behaviour",
-                rows: &[
-                    r(
-                        AUTOSTART,
-                        C,
-                        "Start with Windows",
-                        "Open ROQA when you sign in",
-                    ),
-                    r(DESKTOP, C, "Show only windows on this desktop", ""),
-                    r(HIDE_TASKBAR, C, "Hide Windows taskbar", ""),
-                    r(
-                        HIDE_CAPTURE,
-                        C,
-                        "Hide from screen sharing",
-                        "Recordings and shared screens skip ROQA",
-                    ),
-                    r(
-                        FSHIDE,
-                        C,
-                        "Hide in full screen",
-                        "Hide the dock and notch over a full-screen app",
-                    ),
-                    r(
-                        RSOUNDS,
-                        C,
-                        "Reminder sounds",
-                        "Master switch for the timer and prayer sounds",
-                    ),
-                ],
-            },
-        ],
-    },
-    Page {
-        name: "Appearance",
-        cards: &[
-            Card {
-                label: "Colours",
-                rows: &[
-                    r(THEME, Kind::Combo(170), "Theme", ""),
-                    r(
-                        MATCH_ACCENT,
-                        C,
-                        "Match Windows accent colour",
-                        "Tint progress bars and active tabs with the system accent",
-                    ),
-                ],
-            },
-            Card {
-                label: "Notch",
-                rows: &[
-                    r(
-                        NSIZE,
-                        Kind::Combo(120),
-                        "Notch size",
-                        "Auto is the designed size",
-                    ),
-                    r(
-                        NOPEN,
-                        Kind::Combo(120),
-                        "Open the notch",
-                        "By hovering or by a click",
-                    ),
-                    r(
-                        NOTCH_HIDE,
-                        C,
-                        "Hide behind windows",
-                        "Rest the pointer at the top edge to bring it back",
-                    ),
-                    r(ANIM, Kind::Combo(120), "Animation speed", ""),
-                ],
-            },
-            Card {
-                label: "Dock",
-                rows: &[
-                    r(DOCKSTYLE, Kind::Combo(170), "Dock style", ""),
-                    r(
-                        DOCK_BADGES,
-                        C,
-                        "Show estimated notification badges",
-                        "Counts are inferred from window titles",
-                    ),
-                    r(
-                        DOCK_HIDE,
-                        C,
-                        "Hide behind windows",
-                        "Rest the pointer at the bottom edge to bring it back",
-                    ),
-                    r(
-                        DOCK_LEFT,
-                        C,
-                        "Icons at the start",
-                        "Instead of the middle of a full-width dock",
-                    ),
-                ],
-            },
-            Card {
-                label: "Hiding",
-                rows: &[
-                    r(
-                        REVEAL,
-                        Kind::Combo(120),
-                        "Reveal delay",
-                        "How long to rest at the edge",
-                    ),
-                    r(
-                        HIDE,
-                        Kind::Combo(120),
-                        "Hide delay",
-                        "How long before it slides away",
-                    ),
-                ],
-            },
-        ],
-    },
-    Page {
-        name: "Notch",
-        cards: &[
-            Card {
-                label: "Tabs",
-                rows: &[
-                    r(TAB, C, "Media tab", ""),
-                    r(TAB + 1, C, "Weather tab", ""),
-                    r(TAB + 2, C, "Prayer tab", ""),
-                    r(TAB + 3, C, "Timer tab", ""),
-                    r(TAB + 4, C, "Shelf tab", ""),
-                ],
-            },
-            Card {
-                label: "Calendar, system and battery",
-                rows: &[
-                    r(NETU, Kind::Combo(160), "Network speed", ""),
-                    r(DISKD, Kind::Combo(160), "Disk tile", ""),
-                    r(WEEK1, Kind::Combo(160), "Week starts on", ""),
-                    r(LOWAT, Kind::Combo(160), "Low battery at", ""),
-                    r(PILLLOW, C, "Low battery bolt in the pill", ""),
-                ],
-            },
-            Card {
-                label: "In the notch",
-                rows: &[
-                    r(EYES, C, "Mascot eyes", ""),
-                    r(PRIVACY, C, "Privacy indicator", ""),
-                    r(CLIP, C, "Keep copied text on the Shelf", ""),
-                    r(NOTIFS, C, "Show Windows notifications", ""),
-                    r(CAPS_PILL, C, "Caps Lock pill", ""),
-                ],
-            },
-            Card {
-                label: "Timer",
-                rows: &[
-                    r(SOUND, C, "Play a sound when a timer finishes", ""),
-                    r(
-                        TIMER,
-                        Kind::Edit(120),
-                        "Timer length",
-                        "Minutes, m:ss or h:mm:ss",
-                    ),
-                    r(START, Kind::Btn, "Start timer", ""),
-                ],
-            },
-            Card {
-                label: "Water",
-                rows: &[
-                    r(
-                        WATER,
-                        C,
-                        "Water reminders",
-                        "A reminder to drink during the active hours",
-                    ),
-                    r(WCFG, Kind::Edit(70), water::LABELS[0], ""),
-                    r(WCFG + 1, Kind::Edit(70), water::LABELS[1], ""),
-                    r(WCFG + 2, Kind::Edit(70), water::LABELS[2], ""),
-                    r(WCFG + 3, Kind::Edit(70), water::LABELS[3], ""),
-                    r(WCFG + 4, Kind::Edit(70), water::LABELS[4], ""),
-                    r(WDRANK, Kind::Btn, "I drank a glass", "Today"),
-                ],
-            },
-            Card {
-                label: "Pomodoro",
-                rows: &[
-                    r(PCFG, Kind::Edit(70), pomo::LABELS[0], ""),
-                    r(PCFG + 1, Kind::Edit(70), pomo::LABELS[1], ""),
-                    r(PCFG + 2, Kind::Edit(70), pomo::LABELS[2], ""),
-                    r(PCFG + 3, Kind::Edit(70), pomo::LABELS[3], ""),
-                    r(PSTART, Kind::Btn, "Start / pause", "Pomodoro"),
-                    r(PSKIP, Kind::Btn, "Skip", "Skip to the next phase"),
-                ],
-            },
-            Card {
-                label: "Shelf",
-                rows: &[r(SHELF, Kind::Edit(70), "Shelf size", "Entries kept")],
-            },
-        ],
-    },
-    Page {
-        name: "Dock & edges",
-        cards: &[
-            Card {
-                label: "Dock buttons",
-                rows: &[
-                    r(DBTN, C, "Start button", ""),
-                    r(DBTN + 1, C, "Search button", ""),
-                    r(DBTN + 2, C, "Task View button", ""),
-                    r(DBTN + 3, C, "Show desktop pill", ""),
-                    r(DBTN + 4, C, "Command center button", ""),
-                    r(DBTN + 5, C, "Drives and Recycle Bin button", ""),
-                    r(DBTN + 6, C, "Hidden icons button", ""),
-                ],
-            },
-            Card {
-                label: "Dock widgets",
-                rows: &[
-                    r(
-                        WIDGET_LIMIT,
-                        Kind::Combo(120),
-                        "Maximum visible widgets",
-                        "In order, up to this many",
-                    ),
-                    r(WIDGET_FIRST, C, "Weather", ""),
-                    r(WIDGET_FIRST + 1, C, "Prayer", ""),
-                    r(WIDGET_FIRST + 2, C, "Calendar", ""),
-                    r(WIDGET_FIRST + 3, C, "Water", ""),
-                    r(WIDGET_FIRST + 4, C, "System", ""),
-                    r(WIDGET_FIRST + 5, C, "Timer", "While a countdown runs"),
-                ],
-            },
-            Card {
-                label: "Volume and brightness",
-                rows: &[
-                    r(EDGE_VOLUME, C, "Volume button on the dock", ""),
-                    r(EDGE_BRIGHTNESS, C, "Brightness button on the dock", ""),
-                ],
-            },
-            Card {
-                label: "Pinned apps",
-                rows: &[
-                    r(PIN, Kind::Combo(200), "Pin to move", ""),
-                    r(EARLIER, Kind::Btn, "Move pin earlier", ""),
-                    r(LATER, Kind::Btn, "Move pin later", ""),
-                ],
-            },
-            Card {
-                label: "Hidden apps",
-                rows: &[
-                    r(HIDDEN, Kind::Combo(200), "Hidden app", ""),
-                    r(SHOW, Kind::Btn, "Show in dock", ""),
-                ],
-            },
-        ],
-    },
-    Page {
-        name: "Weather",
-        cards: &[
-            Card {
-                label: "Location",
-                rows: &[
-                    r(DETECT, C, "Detect location automatically", ""),
-                    r(
-                        CITY,
-                        Kind::Edit(200),
-                        "Weather city",
-                        "Leave empty for no weather",
-                    ),
-                ],
-            },
-            Card {
-                label: "Units",
-                rows: &[r(UNITS, Kind::Combo(170), "Temperature units", "")],
-            },
-        ],
-    },
-    Page {
-        name: "Prayer",
-        cards: &[
-            Card {
-                label: "Reminders",
-                rows: &[
-                    r(PRAYER, C, "Prayer reminders", ""),
-                    r(PMETHOD, Kind::Combo(240), "Prayer method", ""),
-                    r(PLEAD, Kind::Combo(170), "Heads-up before the prayer", ""),
-                    r(
-                        PPAUSE,
-                        C,
-                        "Pause media at prayer time",
-                        "Pauses a playing player (Media tab on), never resumes",
-                    ),
-                ],
-            },
-            Card {
-                label: "Dock",
-                rows: &[r(PMOON, C, "Moon on the dock", "")],
-            },
-            Card {
-                label: "Fine-tune",
-                rows: &[
-                    r(PSHIFT, Kind::Edit(70), "Fajr shift", "Minutes, -30 to 30"),
-                    r(
-                        PSHIFT + 1,
-                        Kind::Edit(70),
-                        "Dhuhr shift",
-                        "Minutes, -30 to 30",
-                    ),
-                    r(
-                        PSHIFT + 2,
-                        Kind::Edit(70),
-                        "Asr shift",
-                        "Minutes, -30 to 30",
-                    ),
-                    r(
-                        PSHIFT + 3,
-                        Kind::Edit(70),
-                        "Maghrib shift",
-                        "Minutes, -30 to 30",
-                    ),
-                    r(
-                        PSHIFT + 4,
-                        Kind::Edit(70),
-                        "Isha shift",
-                        "Minutes, -30 to 30",
-                    ),
-                ],
-            },
-            Card {
-                label: "Sound",
-                rows: &[
-                    r(PSOUND, Kind::Combo(230), "Prayer sound", ""),
-                    r(PBROWSE, Kind::Btn, "Browse...", "Choose a sound file"),
-                    r(
-                        PTEST,
-                        Kind::Btn,
-                        "Test sound",
-                        "Plays even when Reminder sounds is off",
-                    ),
-                ],
-            },
-        ],
-    },
-    Page {
-        name: "Limits",
-        cards: &[
-            Card {
-                label: "Dock",
-                rows: &[r(TAB + 5, C, "Show AI limits in the dock", "")],
-            },
-            Card {
-                label: "Permissions",
-                rows: &[
-                    r(LIMCODEX, C, "Run Codex on refresh", ""),
-                    r(LIMAGY, C, "Run Antigravity on refresh", ""),
-                ],
-            },
-            Card {
-                label: "Display",
-                rows: &[r(LIMGROUP, Kind::Combo(240), "Antigravity models", "")],
-            },
-            Card {
-                label: "Claude Code",
-                rows: &[
-                    r(
-                        LIMSNIP,
-                        Kind::Edit(220),
-                        "Statusline command",
-                        "Optional: copy into settings.json",
-                    ),
-                    r(LIMCOPY, Kind::Btn, "Copy", "Copy the whole command"),
-                ],
-            },
-            Card {
-                label: "Agent status",
-                rows: &[
-                    r(
-                        AGENT_ON,
-                        C,
-                        "Show agent status",
-                        "The eyes and pill show a coding agent working",
-                    ),
-                    r(ADD_ALL, Kind::Btn, "Add all", "Every detected agent"),
-                    r(AGENT_BTN, Kind::Btn, "Add hook", "Claude Code"),
-                    r(AGENT_BTN + 1, Kind::Btn, "Add hook", "Codex"),
-                    r(AGENT_BTN + 2, Kind::Btn, "Add hook", "Gemini CLI"),
-                    r(AGENT_BTN + 3, Kind::Btn, "Add hook", "Antigravity"),
-                    r(AGENT_BTN + 4, Kind::Btn, "Add hook", "Cursor"),
-                    r(AGENT_BTN + 5, Kind::Btn, "Add hook", "Copilot CLI"),
-                    r(AGENT_BTN + 6, Kind::Btn, "Add hook", "opencode"),
-                    r(
-                        ASK_BTN,
-                        Kind::Btn,
-                        "Add hook",
-                        "Allow or deny Claude's questions in the notch",
-                    ),
-                ],
-            },
-        ],
-    },
-    Page {
-        name: "Hotkeys",
-        cards: &[
-            Card {
-                label: "Shortcuts",
-                rows: &[
-                    r(HOTKEY, C, "Open or close the notch", "Ctrl+Alt+N"),
-                    r(HOTKEY + 1, C, "Open dock apps by number", "Ctrl+Alt+1 to 9"),
-                    r(HOTKEY + 2, C, "Hide or show the dock", "Ctrl+Alt+D"),
-                    r(HOTKEY + 3, C, "Open hidden icons", "Ctrl+Alt+B"),
-                    r(HOTKEY + 4, C, "Mute the microphone", "Ctrl+Alt+M"),
-                ],
-            },
-            Card {
-                label: "Why Ctrl and Alt",
-                rows: &[r(
-                    LABEL,
-                    Kind::Note,
-                    "Windows keeps Win+number, so these use Ctrl+Alt.",
-                    "",
-                )],
-            },
-        ],
-    },
-    Page {
-        name: "About",
-        cards: &[
-            Card {
-                label: "Diagnostics",
-                rows: &[r(
-                    DIAGNOSTICS,
-                    Kind::Edit(220),
-                    "Report file",
-                    "Leave empty to turn off",
-                )],
-            },
-            Card {
-                label: "Reset",
-                rows: &[r(
-                    RESET,
-                    Kind::Btn,
-                    "Reset to defaults",
-                    "Every setting returns to its default",
-                )],
-            },
-            Card {
-                label: "ROQA",
-                rows: &[r(
-                    LABEL,
-                    Kind::Note,
-                    concat!(
-                        "ROQA ",
-                        env!("CARGO_PKG_VERSION"),
-                        " (",
-                        env!("ROQA_COMMIT"),
-                        ")"
-                    ),
-                    "",
-                )],
-            },
-        ],
-    },
-];
-/// The sidebar uses the same outline family as the notch, with accent only on selection.
-const TILES: [Glyph; 9] = [
-    Glyph::Gear,
-    Glyph::Sun,
-    Glyph::Notch,
-    Glyph::TaskView,
-    Glyph::PartlyCloudy,
-    Glyph::Prayer,
-    Glyph::Limits,
-    Glyph::Keys,
-    Glyph::Info,
-];
-
 struct Item {
     id: usize,
     kind: Kind,
+    /// The page it is on (an index into `PAGES`).
     page: u8,
     card: u8,
     /// The control, its label and its caption: a null handle is absent.
     h: HWND,
     label: HWND,
     cap: HWND,
-}
-
-/// The scroll bar's width: the system's, as the old bar had.
-fn gutter() -> i32 {
-    // SAFETY: a plain system-metric query.
-    #[expect(clippy::disallowed_methods, reason = "a scrollbar width")]
-    unsafe {
-        GetSystemMetrics(SM_CXVSCROLL)
-    }
-}
-
-/// A control as `place` put it (client pixels, scrolled), and how it is cut at the footer: `boxed` is a
-/// drop-down, whose window is taller than its box (`cut` tall) and always keeps a region.
-struct Move {
-    h: HWND,
-    x: i32,
-    y: i32,
-    w: i32,
-    ht: i32,
-    cut: i32,
-    boxed: bool,
+    /// The row's top and bottom in its page, as `place` last put it (for focus to reveal the whole row).
+    row: Cell<(i32, i32)>,
 }
 
 pub struct SettingsWindow {
     window: HWND,
+    /// The rail (a list of destinations), the compact layout's picker in its place, the clipped viewport, one
+    /// content window per page (the parent of that page's controls) and one local tab button per page.
     side: HWND,
+    nav: HWND,
+    search: search::Search,
+    viewport: HWND,
+    contents: Vec<HWND>,
+    tabs: Vec<HWND>,
     status: HWND,
     close: HWND,
     items: Vec<Item>,
+    /// The page shown (an index into `PAGES`), its destination, and the page last shown on each destination.
     page: usize,
+    route: usize,
+    last_page: [usize; ROUTES.len()],
+    /// The scroll position each page was left at, for this window's life only (nothing is stored).
+    offsets: Vec<i32>,
+    frame: view::Frame,
     move_pin: Option<(usize, bool)>,
     show_hidden: Option<usize>,
     /// The work area it opens in: the monitor ROQA is used on.
     work: Bounds,
     /// The connected monitors' GDI devices (at most `MAX_OFF`); monitor `n` is the checkbox `MONITOR + n`.
     devices: Vec<String>,
-    /// The same monitors with their size and place, for the map.
+    /// The same monitors with their size and place.
     monitors: Vec<Monitor>,
     /// The audio files found (and the chosen one if it is elsewhere), full paths.
     sounds: Vec<String>,
@@ -745,10 +220,8 @@ pub struct SettingsWindow {
     factor: f64,
     scroll: i32,
     scroll_max: i32,
-    /// The wheel's and the track's glide to a position (one motion clock; at rest it is the position).
-    glide: motion::Tween,
-    /// Where `place` last put each control of the page, for a scroll step to move without measuring again.
-    moves: RefCell<Vec<Move>>,
+    /// Carried sub-pixel remainder for fine wheel / touchpad deltas (in 120ths of a pixel).
+    wheel_remainder: i32,
     /// What the host last got; a change is a difference from this.
     current: Settings,
     change: Option<Settings>,
@@ -769,6 +242,8 @@ struct Pal {
     line: u32,
     /// The 1 px frame round an edit or a drop-down: a step above the card, never the theme's bright border.
     field: u32,
+    /// What an edit's box is filled with (the window colour in high contrast, where `sel` is the highlight).
+    well: u32,
     sel: u32,
     text: u32,
     dim: u32,
@@ -780,23 +255,27 @@ struct Pal {
     on_accent: u32,
     seltext: u32,
     dark: bool,
+    contrast: bool,
 }
 
-/// What `WM_ERASEBKGND` draws: the page title, section labels and cards, in client coordinates.
+/// What the window's own erase handlers draw: the fixed frame on the dialog, the page on its content window.
 struct Paint {
     pal: Pal,
     scale: f64,
     font: HFONT,
     title_font: HFONT,
-    /// The body font in semibold (a display card's name).
+    /// The body font in semibold (group headings, the name beside the eyes).
     bold: HFONT,
-    title: (RECT, &'static str),
-    labels: Vec<(RECT, &'static str)>,
-    /// A card and the y of each divider inside it.
-    cards: Vec<RECT>,
-    /// The edits' and drop-downs' boxes, which the parent frames.
-    fields: Vec<RECT>,
-    /// The scroll bar in the right gutter, painted with the page.
+    display_meta: HFONT,
+    display_number: HFONT,
+    /// The destination's name and caption, under the eyes' rail.
+    title: &'static str,
+    caption: &'static str,
+    frame: view::Frame,
+    /// The page's headings, panels and field boxes, in its content window's coordinates.
+    geometry: Geometry,
+    results: Option<search::Results>,
+    /// The scroll bar in the right gutter, painted with the frame.
     bar: scroll::Bar,
 }
 thread_local! {
@@ -845,6 +324,7 @@ fn palette(settings: &Settings) -> Pal {
             card: window,
             line: text,
             field: text,
+            well: window,
             sel: select,
             text,
             dim: system(COLOR_GRAYTEXT),
@@ -854,6 +334,7 @@ fn palette(settings: &Settings) -> Pal {
             on_accent: system(COLOR_HIGHLIGHTTEXT),
             seltext: system(COLOR_HIGHLIGHTTEXT),
             dark: false,
+            contrast: true,
         };
     }
     let tokens = crate::theme::system_palette(
@@ -889,6 +370,7 @@ fn palette(settings: &Settings) -> Pal {
         )),
         line: tile,
         field: tile,
+        well: tile,
         sel: tile,
         text: pack(tokens.ink),
         dim: pack(tokens.glyph),
@@ -898,13 +380,14 @@ fn palette(settings: &Settings) -> Pal {
         on_accent: if dark { body } else { 0xffffff },
         seltext: pack(tokens.ink),
         dark,
+        contrast: false,
     }
 }
 
 /// A capsule or card in one fill and one outline colour (the same colour means no outline).
 unsafe fn round(dc: HDC, r: RECT, radius: i32, fill: u32, line: u32) {
     // Anti-aliased by Direct2D on this DC (the colours are COLORREFs).
-    round_gdi(dc, r, radius, swap(fill), swap(line));
+    batch_gdi(dc, r, |b| b.round(r, radius, swap(fill), swap(line)));
 }
 
 unsafe fn fill(dc: HDC, r: RECT, colour: u32) {
@@ -940,511 +423,10 @@ unsafe fn write(dc: HDC, text: &str, mut r: RECT, colour: u32, flags: DRAW_TEXT_
     }
 }
 
-fn paint(dc: HDC, window: HWND, p: &Paint) {
-    let px = |v: i32| (v as f64 * p.scale).round() as i32;
-    let mut client = RECT::default();
-    // SAFETY: our own live window and the DC Windows gave this message.
-    unsafe {
-        let _ = GetClientRect(window, &mut client);
-        fill(dc, client, p.pal.content);
-        fill(
-            dc,
-            RECT {
-                right: px(SIDE_W),
-                ..client
-            },
-            p.pal.side,
-        );
-        SetBkMode(dc, TRANSPARENT);
-        SelectObject(dc, p.title_font.into());
-        write(dc, p.title.1, p.title.0, p.pal.text, DT_LEFT | DT_NOPREFIX);
-        SelectObject(dc, p.font.into());
-        for (rect, text) in &p.labels {
-            write(dc, text, *rect, p.pal.dim, DT_LEFT | DT_NOPREFIX);
-        }
-        for rect in &p.cards {
-            // A tile of the window (radius 14); separated by fill, with an edge only where the fills are close.
-            round(
-                dc,
-                *rect,
-                px(14),
-                p.pal.card,
-                if p.pal.dark { p.pal.card } else { p.pal.line },
-            );
-        }
-        for field in &p.fields {
-            round(dc, *field, px(14), p.pal.card, p.pal.field);
-        }
-        scroll::draw_thumb(dc, &p.bar, p.pal.off);
-        // The footer is its own strip: scrolled paint never reaches it, and a divider marks its edge.
-        let foot = RECT {
-            left: px(SIDE_W),
-            top: client.bottom - px(FOOT),
-            ..client
-        };
-        fill(dc, foot, p.pal.content);
-        fill(
-            dc,
-            RECT {
-                bottom: foot.top + 1,
-                ..foot
-            },
-            p.pal.line,
-        );
-    }
-}
-
-/// A sidebar row: the selected one is a lighter rounded fill, each page has a glyph in one ink (the accent when selected).
-fn draw_side(item: &DRAWITEMSTRUCT, p: &Paint) {
-    let px = |v: i32| (v as f64 * p.scale).round() as i32;
-    let Some(page) = PAGES.get(item.itemID as usize) else {
-        return;
-    };
-    let (dc, row) = (item.hDC, item.rcItem);
-    let cell = RECT {
-        left: row.left + px(8),
-        top: row.top + px(2),
-        right: row.right - px(8),
-        bottom: row.bottom - px(2),
-    };
-    let tile = RECT {
-        left: cell.left + px(8),
-        top: cell.top + (cell.bottom - cell.top - px(20)) / 2,
-        right: cell.left + px(28),
-        bottom: cell.top + (cell.bottom - cell.top - px(20)) / 2 + px(20),
-    };
-    // SAFETY: the DC and rectangle come from this owner-draw message.
-    unsafe {
-        fill(dc, row, p.pal.side);
-        if item.itemState.0 & ODS_SELECTED.0 != 0 {
-            let focused = focus_ring(item.hwndItem);
-            ringed(
-                dc,
-                cell,
-                (cell.bottom - cell.top) / 2,
-                p.pal.sel,
-                focused,
-                p,
-            );
-        }
-        let glyph = TILES[item.itemID as usize % TILES.len()];
-        let ink = if item.itemState.0 & ODS_SELECTED.0 != 0 {
-            p.pal.accent
-        } else {
-            p.pal.text
-        };
-        draw_settings_glyph(dc, tile, glyph, swap(ink));
-        SelectObject(dc, p.font.into());
-        let name = RECT {
-            left: tile.right + px(12),
-            right: cell.right,
-            ..cell
-        };
-        let colour = if item.itemState.0 & ODS_SELECTED.0 != 0 {
-            p.pal.seltext
-        } else {
-            p.pal.text
-        };
-        write(dc, page.name, name, colour, DT_LEFT | DT_NOPREFIX);
-    }
-}
-
-fn is_toggle(h: HWND) -> bool {
-    // SAFETY: scalar query of a live child.
-    (unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32) & 0xf == BS_AUTOCHECKBOX as u32
-}
-
-/// A checkbox drawn as a switch (the control stays a native checkbox for its state and clicks): the title on
-/// the left, a pill with a thumb on the right.
-fn draw_toggle(note: &NMCUSTOMDRAW, p: &Paint) {
-    let px = |v: i32| (v as f64 * p.scale).round() as i32;
-    let (dc, r, h) = (note.hdc, note.rc, note.hdr.hwndFrom);
-    // SAFETY: scalar query of a live child.
-    let style = unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32;
-    let tall = style & 0xc00 == BS_TOP as u32;
-    let on = checked(h);
-    let mid = if tall {
-        r.top + px(14)
-    } else {
-        (r.top + r.bottom) / 2
-    };
-    let pill = RECT {
-        left: r.right - px(38),
-        top: mid - px(11),
-        right: r.right,
-        bottom: mid + px(11),
-    };
-    // A circle of the pill's height less the same margin all round (rounded per side, so 18 DIP is never 23 x 22 px).
-    let knob_side = 2 * px(9);
-    let (off_at, on_at) = (pill.left + px(2), pill.right - px(2) - knob_side);
-    // The thumb slides 150 ms when the state changes: the control remembers (state, start tick) in a window
-    // property, and while it moves the toggle invalidates itself, so nothing runs once it settles.
-    let thumb = {
-        let key = w!("roqa.slide");
-        // SAFETY: a property of this live child and the tick count; no pointers are involved.
-        let (state, now) = (unsafe { GetPropW(h, key) }.0 as u64, unsafe {
-            GetTickCount64()
-        });
-        let (first, raw) = (state == 0, state.wrapping_sub(2));
-        let (mut since, flipped) = (raw >> 1, !first && (raw & 1 == 1) != on);
-        if first || flipped {
-            // First sight settles at once (since 0); a flip starts now. Stored plus 2 so it is never 0.
-            since = if first { 0 } else { now };
-            // SAFETY: the value is a plain number stored as the property handle.
-            let _ = unsafe {
-                SetPropW(
-                    h,
-                    key,
-                    Some(HANDLE((((since << 1) | u64::from(on)) + 2) as *mut _)),
-                )
-            };
-        }
-        let t = (now.saturating_sub(since) as f32 / 150.0).min(1.0);
-        if t < 1.0 {
-            // SAFETY: the child repaints itself once more.
-            let _ = unsafe { InvalidateRect(Some(h), None, false) };
-        }
-        let (from, to) = if on { (off_at, on_at) } else { (on_at, off_at) };
-        from + ((to - from) as f32 * motion::smooth(t)).round() as i32
-    };
-    let title = RECT {
-        right: pill.left - px(8),
-        bottom: if tall { r.top + px(28) } else { r.bottom },
-        ..r
-    };
-    // SAFETY: the DC and rectangle come from this custom-draw notification.
-    unsafe {
-        fill(dc, r, p.pal.card);
-        let track = if on { p.pal.accent } else { p.pal.off };
-        ringed(dc, pill, px(11), track, focus_ring(h), p);
-        let knob = RECT {
-            left: thumb,
-            top: mid - px(9),
-            right: thumb + knob_side,
-            bottom: mid + px(9),
-        };
-        // One knob rule in every theme: the same knob on and off, only the track changes.
-        round(dc, knob, px(9), p.pal.thumb, p.pal.thumb);
-        SetBkMode(dc, TRANSPARENT);
-        SelectObject(dc, p.font.into());
-        write(dc, &text(h, 256), title, p.pal.text, DT_LEFT);
-    }
-}
-
-/// A drop-down row, owner-drawn: the closed field and the list rows on the card, the row under the pointer a
-/// solid accent capsule with dark ink.
-fn draw_combo(item: &DRAWITEMSTRUCT, p: &Paint) {
-    let px = |v: i32| (v as f64 * p.scale).round() as i32;
-    let (dc, row) = (item.hDC, item.rcItem);
-    let field = item.itemState.0 & ODS_COMBOBOXEDIT.0 != 0;
-    let lit = !field && item.itemState.0 & ODS_SELECTED.0 != 0;
-    let mut buffer = [0u16; 128];
-    // SAFETY: the combo copies one row's text into a local buffer of the length it is given.
-    let length = unsafe {
-        SendMessageW(
-            item.hwndItem,
-            CB_GETLBTEXT,
-            Some(WPARAM(item.itemID as usize)),
-            Some(LPARAM(buffer.as_mut_ptr() as isize)),
-        )
-    }
-    .0
-    .clamp(0, 127) as usize;
-    let (back, ink) = if lit {
-        (p.pal.accent, p.pal.on_accent)
-    } else {
-        (p.pal.card, p.pal.text)
-    };
-    // SAFETY: the DC and rectangle come from this owner-draw message.
-    unsafe {
-        fill(dc, row, p.pal.card);
-        if lit {
-            let cell = RECT {
-                left: row.left + px(3),
-                right: row.right - px(3),
-                ..row
-            };
-            round(dc, cell, (cell.bottom - cell.top) / 2, back, back);
-        }
-        SetBkMode(dc, TRANSPARENT);
-        SelectObject(dc, p.font.into());
-        let at = RECT {
-            left: row.left + px(10),
-            ..row
-        };
-        if item.itemID != u32::MAX {
-            write(
-                dc,
-                &String::from_utf16_lossy(&buffer[..length]),
-                at,
-                ink,
-                DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS,
-            );
-        }
-    }
-}
-
-fn is_push(h: HWND) -> bool {
-    // SAFETY: scalar query of a live child.
-    let kind = (unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32) & 0xf;
-    kind == BS_PUSHBUTTON as u32 || kind == BS_DEFPUSHBUTTON as u32
-}
-
-/// A push button as a capsule: the few starting actions are solid accent with dark ink, the rest a quiet fill;
-/// lighter under the pointer, an accent ring while focused, dim text when disabled.
-fn draw_push(note: &NMCUSTOMDRAW, p: &Paint) {
-    let (dc, r, h) = (note.hdc, note.rc, note.hdr.hwndFrom);
-    let state = note.uItemState.0;
-    let primary = matches!(
-        // SAFETY: scalar query of a live child.
-        unsafe { GetDlgCtrlID(h) } as usize,
-        START | PSTART | WDRANK
-    );
-    let (fill_colour, ink) = if state & CDIS_DISABLED.0 != 0 {
-        (p.pal.off, p.pal.dim)
-    } else if primary {
-        (p.pal.accent, p.pal.on_accent)
-    } else if state & (CDIS_HOT.0 | CDIS_SELECTED.0) != 0 {
-        (p.pal.field, p.pal.text)
-    } else {
-        (p.pal.sel, p.pal.text)
-    };
-    // SAFETY: the DC and rectangle come from this custom-draw notification.
-    unsafe {
-        fill(
-            dc,
-            r,
-            if GetDlgCtrlID(h) as usize == CLOSE {
-                p.pal.content
-            } else {
-                p.pal.card
-            },
-        );
-        ringed(dc, r, (r.bottom - r.top) / 2, fill_colour, focus_ring(h), p);
-        SetBkMode(dc, TRANSPARENT);
-        SelectObject(dc, p.font.into());
-        write(
-            dc,
-            &text(h, 256),
-            r,
-            ink,
-            DT_CENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
-        );
-    }
-}
-
-fn is_tile(h: HWND) -> bool {
-    // SAFETY: scalar query of a live child.
-    (MONITOR..MONITOR + MAX_OFF).contains(&(unsafe { GetDlgCtrlID(h) } as usize))
-}
-
-/// A monitor tile (a native checkbox underneath): lit with an accent ring when ROQA is on there, dim when off.
-/// It reads its lines from the checkbox text, "Display 1, primary, 1920 by 1080 at 125%, ROQA on".
-fn draw_tile(note: &NMCUSTOMDRAW, p: &Paint) {
-    let px = |v: i32| (v as f64 * p.scale).round() as i32;
-    let (dc, r, h) = (note.hdc, note.rc, note.hdr.hwndFrom);
-    let on = checked(h);
-    let label = text(h, 256);
-    let parts: Vec<&str> = label.split(", ").collect();
-    let (line, rest) = parts.split_at(parts.len().saturating_sub(2));
-    let head = if line.len() > 1 {
-        format!("{} ({})", line[0], line[1])
-    } else {
-        line.join(" ")
-    };
-    let (fill_colour, ink) = if on {
-        (p.pal.sel, p.pal.seltext)
-    } else {
-        (p.pal.side, p.pal.dim)
-    };
-    // SAFETY: the DC and rectangle come from this custom-draw notification.
-    unsafe {
-        fill(dc, r, p.pal.card);
-        // A capsule-cornered tile, lit by its fill (accent is not for status text); no outline.
-        ringed(dc, r, px(14), fill_colour, focus_ring(h), p);
-        SetBkMode(dc, TRANSPARENT);
-        // The display's name leads in semibold; its mode and ROQA's state follow, quiet, in one line each.
-        let quiet = if on { p.pal.dim } else { ink };
-        let lines = [
-            (head.as_str(), p.bold, ink),
-            (rest[0], p.font, quiet),
-            (rest[1], p.font, if on { ink } else { quiet }),
-        ];
-        for (n, (line, font, colour)) in lines.into_iter().enumerate() {
-            let top = r.top + px(8) + n as i32 * px(18);
-            if top + px(17) <= r.bottom {
-                SelectObject(dc, font.into());
-                let at = RECT {
-                    left: r.left + px(12),
-                    top,
-                    right: r.right - px(8),
-                    bottom: top + px(17),
-                };
-                write(
-                    dc,
-                    line,
-                    at,
-                    colour,
-                    DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS,
-                );
-            }
-        }
-    }
-}
-
-/// Dialog procedure: the settings colours, background and sidebar rows; everything else is the shared one.
-unsafe extern "system" fn settings_proc(
-    hwnd: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> isize {
-    let handled = PAINT.with(|cell| {
-        let guard = cell.try_borrow().ok()?;
-        let p = guard.as_ref()?;
-        match message {
-            WM_ERASEBKGND => {
-                paint(HDC(wparam.0 as *mut _), hwnd, p);
-                Some(1)
-            }
-            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_MOUSEMOVE | WM_LBUTTONUP | WM_CANCELMODE
-            | WM_CAPTURECHANGED => scroll::mouse(hwnd, message, lparam, &p.bar).then_some(1),
-            WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
-                let dc = HDC(wparam.0 as *mut _);
-                // SAFETY: the DC is the one this message carries; the child is live.
-                unsafe {
-                    let (text, back) = match GetDlgCtrlID(HWND(lparam.0 as *mut _)) as usize {
-                        STATUS => (p.pal.dim, p.pal.content),
-                        SIDE => (p.pal.text, p.pal.side),
-                        CAPTION => (p.pal.dim, p.pal.card),
-                        _ => (p.pal.text, p.pal.card),
-                    };
-                    SetTextColor(dc, rgb(text));
-                    SetBkColor(dc, rgb(back));
-                    SetDCBrushColor(dc, rgb(back));
-                    Some(GetStockObject(DC_BRUSH).0 as isize)
-                }
-            }
-            WM_NOTIFY => {
-                // SAFETY: for WM_NOTIFY lparam is an NMHDR that lives through this call; only a custom-draw
-                // notification (checked first) is an NMCUSTOMDRAW.
-                if unsafe { (*(lparam.0 as *const NMHDR)).code } != NM_CUSTOMDRAW {
-                    return None;
-                }
-                // SAFETY: the code says this is an NMCUSTOMDRAW.
-                let note = unsafe { &*(lparam.0 as *const NMCUSTOMDRAW) };
-                if note.dwDrawStage != CDDS_PREPAINT
-                    || !(is_toggle(note.hdr.hwndFrom) || is_push(note.hdr.hwndFrom))
-                {
-                    return None;
-                }
-                if is_push(note.hdr.hwndFrom) {
-                    draw_push(note, p);
-                } else if is_tile(note.hdr.hwndFrom) {
-                    draw_tile(note, p);
-                } else {
-                    draw_toggle(note, p);
-                }
-                // SAFETY: the result of this notification (DWLP_MSGRESULT, offset 0), on our own dialog.
-                unsafe {
-                    SetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(0), CDRF_SKIPDEFAULT as isize)
-                };
-                Some(1)
-            }
-            WM_DRAWITEM => {
-                // SAFETY: for WM_DRAWITEM lparam is a DRAWITEMSTRUCT that lives through this call.
-                let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
-                if item.CtlType == ODT_COMBOBOX {
-                    draw_combo(item, p);
-                } else if item.CtlType == ODT_BUTTON {
-                    let note = NMCUSTOMDRAW {
-                        hdr: NMHDR {
-                            hwndFrom: item.hwndItem,
-                            ..Default::default()
-                        },
-                        hdc: item.hDC,
-                        rc: item.rcItem,
-                        uItemState: if item.itemState.0 & ODS_SELECTED.0 != 0 {
-                            CDIS_SELECTED
-                        } else {
-                            Default::default()
-                        },
-                        ..Default::default()
-                    };
-                    draw_push(&note, p);
-                } else {
-                    draw_side(item, p);
-                }
-                Some(1)
-            }
-            _ => None,
-        }
-    });
-    match handled {
-        Some(result) => result,
-        // SAFETY: forwards the same arguments to the shared dialog procedure.
-        None => unsafe { dialog_proc(hwnd, message, wparam, lparam) },
-    }
-}
-
-/// Paint only the closed native combo; Windows retains its list, selection and mouse behavior.
-unsafe extern "system" fn combo_proc(
-    hwnd: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-    _: usize,
-    _: usize,
-) -> LRESULT {
-    if message == WM_PAINT {
-        let handled = PAINT.with(|cell| {
-            let guard = cell.borrow();
-            let Some(p) = guard.as_ref() else {
-                return false;
-            };
-            // SAFETY: BeginPaint/EndPaint bracket this owned control's live DC.
-            unsafe {
-                let mut paint = PAINTSTRUCT::default();
-                let dc = BeginPaint(hwnd, &mut paint);
-                let mut rect = RECT::default();
-                let _ = GetClientRect(hwnd, &mut rect);
-                fill(dc, rect, p.pal.card);
-                let radius = (rect.bottom - rect.top) / 2;
-                ringed(dc, rect, radius, p.pal.sel, focus_ring(hwnd), p);
-                // The field's 1 px frame (the same as the card's, `Paint::fields`) over the capsule's edge.
-                round_gdi(dc, rect, radius, u32::MAX, swap(p.pal.field));
-                let px = |v: i32| (v as f64 * p.scale).round() as i32;
-                let name = RECT {
-                    left: rect.left + px(10),
-                    right: rect.right - px(24),
-                    ..rect
-                };
-                SelectObject(dc, p.font.into());
-                write(
-                    dc,
-                    &text(hwnd, 128),
-                    name,
-                    p.pal.text,
-                    DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
-                );
-                let glyph = RECT {
-                    left: rect.right - px(22),
-                    top: (rect.bottom - px(16)) / 2,
-                    right: rect.right - px(6),
-                    bottom: (rect.bottom + px(16)) / 2,
-                };
-                draw_settings_glyph(dc, glyph, Glyph::Expand, swap(p.pal.text));
-                let _ = EndPaint(hwnd, &paint);
-            }
-            true
-        });
-        if handled {
-            return LRESULT(0);
-        }
-    }
-    // SAFETY: the native subclass chain owns all other combo messages.
-    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
-}
+use draw::{combo_proc, settings_proc};
+use paint::paint;
+use place::Geometry;
+use routes::*;
 
 /// A combo row kept inside `len` items; `CB_ERR` (no selection) becomes the first row.
 fn clamp_selection(row: isize, len: usize) -> usize {
@@ -1613,6 +595,17 @@ impl SettingsWindow {
         factor: f64,
         work: Bounds,
     ) -> Result<Self> {
+        let this = Self::open(current, monitors, factor, work)?;
+        // SAFETY: explicit user request only. Windows retains its normal foreground restrictions.
+        unsafe {
+            let _ = ShowWindow(this.window, SW_SHOWNOACTIVATE);
+            let _ = SetForegroundWindow(this.window);
+        }
+        Ok(this)
+    }
+
+    /// Builds the window, its controls and their values, and leaves it hidden.
+    fn open(current: &Settings, monitors: &[Monitor], factor: f64, work: Bounds) -> Result<Self> {
         // Composited: the dialog and its children paint into one back buffer shown whole, never half drawn.
         let window = empty_dialog(480, 300, Some(settings_proc), WS_EX_COMPOSITED)?;
         if crate::dock::system_rtl() {
@@ -1623,13 +616,23 @@ impl SettingsWindow {
                 SetWindowLongPtrW(window, GWL_EXSTYLE, ex | WS_EX_LAYOUTRTL.0 as isize);
             }
         }
+        let none = HWND::default();
         let mut this = Self {
             window,
-            side: HWND::default(),
-            status: HWND::default(),
-            close: HWND::default(),
+            side: none,
+            nav: none,
+            search: search::Search::default(),
+            viewport: none,
+            contents: Vec::new(),
+            tabs: Vec::new(),
+            status: none,
+            close: none,
             items: Vec::new(),
             page: 0,
+            route: 0,
+            last_page: std::array::from_fn(|route| pages_of(route).start),
+            offsets: vec![0; PAGES.len()],
+            frame: view::Frame::default(),
             move_pin: None,
             show_hidden: None,
             devices: Vec::new(),
@@ -1641,8 +644,7 @@ impl SettingsWindow {
             factor,
             scroll: 0,
             scroll_max: 0,
-            glide: motion::Tween::rest(0.0),
-            moves: RefCell::new(Vec::new()),
+            wheel_remainder: 0,
             current: current.clone(),
             change: None,
             start: None,
@@ -1657,12 +659,8 @@ impl SettingsWindow {
         this.fill_sounds(&current.prayer_sound);
         this.show(current);
         this.relayout()?;
-        // SAFETY: explicit user request only. Windows retains its normal foreground restrictions.
-        unsafe {
-            SetWindowTextW(window, w!("ROQA settings"))?;
-            let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
-            let _ = SetForegroundWindow(window);
-        }
+        // SAFETY: our own dialog.
+        unsafe { SetWindowTextW(window, w!("ROQA settings"))? };
         Ok(this)
     }
 
@@ -1905,7 +903,7 @@ Other hooks stay. A copy of the file is kept.",
         page: usize,
         card: usize,
     ) -> Result<Item> {
-        let window = self.window;
+        let window = self.contents[page];
         let (clip, flat) = (WS_CLIPSIBLINGS.0, WINDOW_EX_STYLE(0));
         let stat = |text: &str, id: usize| {
             control(window, w!("Static"), text, id, clip, WS_EX_NOPARENTNOTIFY)
@@ -2000,16 +998,17 @@ Other hooks stay. A copy of the file is kept.",
             h,
             label,
             cap,
+            row: Cell::new((0, 0)),
         })
     }
 
-    /// The tile's text (what it draws): "Display 1, primary, 1920 by 1080 at 125%, ROQA on".
-    fn tile_name(&self, index: usize, on: bool) -> String {
+    /// The display row's text: "Display 1, primary, 1920 by 1080 at 125%". The switch shows whether ROQA is on there.
+    fn tile_name(&self, index: usize) -> String {
         let m = &self.monitors[index];
         format!(
-            "Display {}{}, {} by {} at {}%, ROQA {}",
+            "Display {}{}, {} by {} at {}%",
             index + 1,
-            if m.rect.x == 0 && m.rect.y == 0 {
+            if self.is_primary_display(index) {
                 ", primary"
             } else {
                 ""
@@ -2017,7 +1016,6 @@ Other hooks stay. A copy of the file is kept.",
             m.rect.width,
             m.rect.height,
             m.dpi * 100 / 96,
-            if on { "on" } else { "off" }
         )
     }
 
@@ -2026,24 +1024,34 @@ Other hooks stay. A copy of the file is kept.",
         let item = self.add(
             MONITOR + index,
             Kind::Check,
-            &self.tile_name(index, on),
+            &self.tile_name(index),
             "",
             0,
-            MAP_CARD,
+            DISPLAYS_CARD,
         )?;
         set_checked(item.h, on);
         Ok(item)
     }
 
-    /// Replaces the monitor checkboxes after the monitor list changed.
+    /// Replaces the monitor switches after the monitor list changed (a passive refresh: it fires no setting).
     pub fn refresh_monitors(&mut self, monitors: &[Monitor]) -> Result<()> {
         if self.monitors.iter().eq(monitors.iter().take(MAX_OFF)) {
             return Ok(());
         }
-        self.set_monitors(monitors);
         let is_monitor = |i: &Item| (MONITOR..MONITOR + MAX_OFF).contains(&i.id);
+        // SAFETY: scalar query of focus on the Settings thread.
+        let focus = unsafe { GetFocus() };
+        let focused = self
+            .items
+            .iter()
+            .find(|item| is_monitor(item) && item.h == focus)
+            .map(|item| {
+                let index = item.id - MONITOR;
+                (index, self.devices[index].clone())
+            });
+        self.set_monitors(monitors);
         for item in self.items.iter().filter(|i| is_monitor(i)) {
-            // SAFETY: owned monitor checkbox, no retained references.
+            // SAFETY: owned monitor switch, no retained references.
             unsafe { DestroyWindow(item.h)? };
         }
         self.items.retain(|i| !is_monitor(i));
@@ -2054,10 +1062,6 @@ Other hooks stay. A copy of the file is kept.",
             .map_or(0, |i| i + 1);
         for index in 0..self.devices.len() {
             let item = self.monitor_item(index)?;
-            if self.page != 0 {
-                // SAFETY: our own live child.
-                let _ = unsafe { ShowWindow(item.h, SW_HIDE) };
-            }
             self.items.insert(at + index, item);
         }
         let font = self.font.as_ref().map(|f| f.handle);
@@ -2073,35 +1077,92 @@ Other hooks stay. A copy of the file is kept.",
             }
         }
         self.tab_stops();
-        self.layout()
+        self.refresh_search(true);
+        self.layout()?;
+        self.reveal_search()?;
+        if let Some((index, device)) = focused {
+            let next = self
+                .devices
+                .iter()
+                .position(|present| *present == device)
+                .unwrap_or(index.min(self.devices.len().saturating_sub(1)));
+            let focus = if self.devices.is_empty() {
+                self.h(NOTCH)
+            } else {
+                self.h(MONITOR + next)
+            };
+            // SAFETY: focus returns to one of our own live controls without sending an action.
+            unsafe {
+                let _ = SetFocus(Some(focus));
+            }
+            self.reveal_focus()?;
+        }
+        Ok(())
     }
 
-    /// Creates the controls: the sidebar, each page's rows top to bottom, then the footer.
+    /// Creates the controls: the rail and the compact picker, the local tabs, the viewport with one content
+    /// window per page and each page's rows top to bottom, then the footer. Creation order is Tab order.
     fn build(&mut self) -> Result<()> {
         let window = self.window;
+        let flat = WINDOW_EX_STYLE(0);
         self.side = control(
             window,
             w!("ListBox"),
             "",
             SIDE,
-            (LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT) as u32,
-            WINDOW_EX_STYLE(0),
+            (LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT) as u32
+                | WS_GROUP.0,
+            flat,
         )?;
-        for page in PAGES {
-            let name = wide(page.name);
-            // SAFETY: the list box copies the terminated string synchronously.
+        self.nav = control(
+            window,
+            w!("ComboBox"),
+            "",
+            NAV,
+            CBS_DROPDOWNLIST as u32
+                | CBS_OWNERDRAWFIXED as u32
+                | CBS_HASSTRINGS as u32
+                | WS_VSCROLL.0
+                | WS_GROUP.0,
+            flat,
+        )?;
+        // SAFETY: owned native control, subclass lasts exactly as long as the HWND.
+        unsafe {
+            let _ = SetWindowSubclass(self.nav, Some(combo_proc), 1, 0);
+        }
+        for route in &ROUTES {
+            let name = wide(route.name);
+            // SAFETY: the list box and the combo copy the terminated string synchronously.
             unsafe {
-                SendMessageW(
-                    self.side,
-                    LB_ADDSTRING,
-                    None,
-                    Some(LPARAM(name.as_ptr() as isize)),
-                );
+                let text = Some(LPARAM(name.as_ptr() as isize));
+                SendMessageW(self.side, LB_ADDSTRING, None, text);
+                SendMessageW(self.nav, CB_ADDSTRING, None, text);
             }
         }
-        // SAFETY: scalar selection on our own list box.
-        unsafe {
-            SendMessageW(self.side, LB_SETCURSEL, Some(WPARAM(0)), None);
+        self.build_search()?;
+        // One radio per page of a destination that has several; the first of each destination starts its group.
+        for (index, page) in PAGES.iter().enumerate() {
+            let tab = if page.name.is_empty() {
+                HWND::default()
+            } else {
+                let first = index == pages_of(usize::from(page.route)).start;
+                control(
+                    window,
+                    w!("Button"),
+                    page.name,
+                    TABBTN + index,
+                    BS_AUTORADIOBUTTON as u32
+                        | BS_PUSHLIKE as u32
+                        | if first { WS_GROUP.0 } else { 0 },
+                    flat,
+                )?
+            };
+            self.tabs.push(tab);
+        }
+        self.viewport = view::viewport(window)?;
+        self.search.body = view::page(self.viewport)?;
+        for _ in PAGES {
+            self.contents.push(view::page(self.viewport)?);
         }
         for (page, p) in PAGES.iter().enumerate() {
             for (card, c) in p.cards.iter().enumerate() {
@@ -2120,7 +1181,7 @@ Other hooks stay. A copy of the file is kept.",
         self.status = control(
             window,
             w!("Static"),
-            "",
+            DEFAULT_STATUS,
             STATUS,
             SS_NOTIFY | WS_CLIPSIBLINGS.0,
             WS_EX_NOPARENTNOTIFY,
@@ -2131,20 +1192,11 @@ Other hooks stay. A copy of the file is kept.",
             "Close",
             CLOSE,
             WS_CLIPSIBLINGS.0 | BS_OWNERDRAW as u32,
-            WINDOW_EX_STYLE(0),
+            flat,
         )?;
-        for item in &self.items {
-            if item.page != 0 {
-                for h in [item.h, item.label, item.cap] {
-                    if !h.0.is_null() {
-                        // SAFETY: our own live child.
-                        let _ = unsafe { ShowWindow(h, SW_HIDE) };
-                    }
-                }
-            }
-        }
         self.tab_stops();
         self.refresh_agents();
+        self.select_route();
         Ok(())
     }
 
@@ -2163,40 +1215,91 @@ Other hooks stay. A copy of the file is kept.",
         let page = self
             .items
             .iter()
-            .find(|item| item.h == self.h(CITY))
+            .find(|item| item.id == CITY)
             .map_or(0, |item| usize::from(item.page));
         self.show_page(page)?;
-        // SAFETY: both controls belong to this live dialog. Respect foreground restrictions.
+        // SAFETY: the control belongs to this live dialog. Respect foreground restrictions.
         unsafe {
-            SendMessageW(self.side, LB_SETCURSEL, Some(WPARAM(page)), None);
             if GetForegroundWindow() == self.window {
                 let _ = SetFocus(Some(self.h(CITY)));
             }
         }
-        Ok(())
+        self.reveal_focus()
     }
 
-    /// Shows page `page`: only its controls are visible (hidden ones stay out of the way), scrolled to the top.
+    /// Shows destination `route` on the page it was last left on.
+    fn show_route(&mut self, route: usize) -> Result<()> {
+        self.show_page(self.last_page[route.min(ROUTES.len() - 1)])
+    }
+
+    /// Shows the page (`PAGES` index) and its destination: its content window alone is visible, at the offset it
+    /// was left at, and the rail, picker and local tabs show where it is. The footer's message belongs to the
+    /// page where its action happened, so it clears.
     fn show_page(&mut self, page: usize) -> Result<()> {
-        self.page = page.min(PAGES.len() - 1);
-        self.scroll = 0;
-        self.glide = motion::Tween::rest(0.0);
-        // A message belongs to the page where its action happened.
-        self.say("")?;
-        for item in &self.items {
-            let command = if item.page as usize == self.page {
-                SW_SHOWNA
-            } else {
-                SW_HIDE
-            };
-            for h in [item.h, item.label, item.cap] {
-                if !h.0.is_null() {
-                    // SAFETY: our own live child.
-                    let _ = unsafe { ShowWindow(h, command) };
-                }
+        self.leave_search(true)?;
+        let page = page.min(PAGES.len() - 1);
+        scroll::release();
+        self.offsets[self.page] = self.scroll;
+        // A focused control on the page being left would hide with it: focus goes to the rail's stop instead.
+        // SAFETY: scalar queries and a focus move on our own live windows.
+        unsafe {
+            if self.page != page && IsChild(self.contents[self.page], GetFocus()).as_bool() {
+                let _ = SetFocus(Some(if self.frame.compact {
+                    self.nav
+                } else {
+                    self.side
+                }));
             }
         }
+        self.page = page;
+        self.route = usize::from(PAGES[page].route);
+        self.last_page[self.route] = page;
+        self.scroll = self.offsets[page];
+        self.wheel_remainder = 0;
+        self.say("")?;
+        self.select_route();
         self.layout()
+    }
+
+    /// Makes the controls say which page is shown: the rail row, the picker's row, the local tabs of this
+    /// destination (the others hide) with the current one checked, and the one visible content window.
+    fn select_route(&self) {
+        let tabbed = pages_of(self.route);
+        let searching = self.search.is_open();
+        // SAFETY: scalar messages and visibility changes on our own live controls.
+        unsafe {
+            SendMessageW(self.side, LB_SETCURSEL, Some(WPARAM(self.route)), None);
+            SendMessageW(self.nav, CB_SETCURSEL, Some(WPARAM(self.route)), None);
+            for (index, &tab) in self.tabs.iter().enumerate() {
+                if tab.0.is_null() {
+                    continue;
+                }
+                let here = !searching && tabbed.contains(&index);
+                let current = index == self.page;
+                SendMessageW(tab, BM_SETCHECK, Some(WPARAM(usize::from(current))), None);
+                // The group has one Tab stop: the current tab.
+                let style = GetWindowLongPtrW(tab, GWL_STYLE);
+                let stop = WS_TABSTOP.0 as isize;
+                SetWindowLongPtrW(
+                    tab,
+                    GWL_STYLE,
+                    if current { style | stop } else { style & !stop },
+                );
+                let _ = ShowWindow(tab, if here { SW_SHOWNA } else { SW_HIDE });
+            }
+            for (index, &content) in self.contents.iter().enumerate() {
+                let command = if !searching && index == self.page {
+                    SW_SHOWNA
+                } else {
+                    SW_HIDE
+                };
+                let _ = ShowWindow(content, command);
+            }
+            let _ = ShowWindow(
+                self.search.body,
+                if searching { SW_SHOWNA } else { SW_HIDE },
+            );
+        }
     }
 
     /// Writes `settings` into the controls (not the timer length, which is not a setting).
@@ -2211,7 +1314,7 @@ Other hooks stay. A copy of the file is kept.",
                     } else if let Some(device) = self.devices.get(item.id.wrapping_sub(MONITOR)) {
                         let on = !settings.off_monitors.contains(device);
                         set_checked(h, on);
-                        let _ = set_text(h, &self.tile_name(item.id - MONITOR, on));
+                        let _ = set_text(h, &self.tile_name(item.id - MONITOR));
                     }
                 }
                 Kind::Combo(_) => {
@@ -2398,7 +1501,17 @@ Other hooks stay. A copy of the file is kept.",
         next.off_monitors.extend(off);
         let kept_a_kind = next.dock || next.notch;
         let ranged = next.clamped();
-        let next = ranged.clone().keep_one_monitor(&self.devices);
+        let mut next = ranged.clone().keep_one_monitor(&self.devices);
+        if next != ranged
+            && let Some(active) = self
+                .devices
+                .iter()
+                .find(|device| !self.current.off_monitors.contains(device))
+        {
+            next = ranged
+                .clone()
+                .keep_one_monitor(std::slice::from_ref(active));
+        }
         self.show(&next);
         let changed = next != self.current;
         if let Some(status) = footer_status(invalid, kept_a_kind, ranged != next, changed) {
@@ -2416,8 +1529,16 @@ Other hooks stay. A copy of the file is kept.",
         Ok(())
     }
 
+    /// The footer's line; empty gives its resting words.
     pub fn say(&self, status: &str) -> Result<()> {
-        set_text(self.status, status)
+        set_text(
+            self.status,
+            if status.is_empty() {
+                DEFAULT_STATUS
+            } else {
+                status
+            },
+        )
     }
     /// Start at sign-in could not be changed: the switch goes back.
     pub fn set_autostart(&mut self, on: bool) {
@@ -2441,7 +1562,9 @@ Other hooks stay. A copy of the file is kept.",
 
     /// Today's water progress, shown beside the button.
     pub fn set_water(&self, progress: &str) {
-        if let Some(item) = self.items.iter().find(|i| i.id == WDRANK) {
+        if let Some(item) = self.items.iter().find(|i| i.id == WDRANK)
+            && text(item.label, 64) != progress
+        {
             let _ = set_text(item.label, progress);
         }
     }
@@ -2451,7 +1574,37 @@ Other hooks stay. A copy of the file is kept.",
         self.start.take()
     }
 
+    fn any_combo_dropped(&self) -> bool {
+        let dropped = |h: HWND| {
+            // SAFETY: scalar query of our own live combo box.
+            unsafe { SendMessageW(h, CB_GETDROPPEDSTATE, None, None).0 != 0 }
+        };
+        dropped(self.nav)
+            || self
+                .items
+                .iter()
+                .any(|i| matches!(i.kind, Kind::Combo(_)) && dropped(i.h))
+    }
+
     pub fn message(&mut self, message: &MSG) -> Result<bool> {
+        if message.message == WM_MOUSEWHEEL
+            && (message.hwnd == self.window
+                // SAFETY: scalar check of our own live dialog window.
+                || unsafe { IsChild(self.window, message.hwnd) }.as_bool())
+            && !self.any_combo_dropped()
+        {
+            // The wheel scrolls the page only while the pointer is over the viewport or its bar; over the rail,
+            // the heading and the footer it does nothing (and no control under it takes it).
+            let mut at = message.pt;
+            // SAFETY: a scalar conversion for our own live window.
+            let over = unsafe { ScreenToClient(self.window, &mut at) }.as_bool()
+                && self.frame.scrolls_at(at.x, at.y);
+            if over {
+                let delta = i32::from((message.wParam.0 >> 16) as i16);
+                self.scroll_message(WHEEL, delta)?;
+            }
+            return Ok(true);
+        }
         if message.hwnd != self.window || (WM_KEYFIRST..=WM_KEYLAST).contains(&message.message) {
             return self.key(message);
         }
@@ -2461,10 +1614,24 @@ Other hooks stay. A copy of the file is kept.",
                 let notification = (message.wParam.0 >> 16) as u32;
                 let kind = self.items.iter().find(|i| i.id == id).map(|i| i.kind);
                 match (id, kind) {
+                    (search::EDIT, _) if notification == EN_CHANGE => self.search_changed()?,
+                    (search::EDIT, _) if matches!(notification, EN_SETFOCUS | EN_KILLFOCUS) => {
+                        // SAFETY: our live dialog and the search field's client rectangle.
+                        unsafe {
+                            let _ =
+                                InvalidateRect(Some(self.window), Some(&self.frame.search), true);
+                        }
+                    }
                     (SIDE, _) if notification == LBN_SELCHANGE => {
                         // SAFETY: scalar query of our own list box.
                         let row = unsafe { SendMessageW(self.side, LB_GETCURSEL, None, None) }.0;
-                        self.show_page(row.max(0) as usize)?;
+                        self.show_route(row.max(0) as usize)?;
+                    }
+                    (NAV, _) if notification == CBN_SELCHANGE => {
+                        self.show_route(chosen_row(self.nav).unwrap_or(0))?;
+                    }
+                    (TABBTN..=0x1ff, _) if notification == BN_CLICKED => {
+                        self.show_page(id - TABBTN)?;
                     }
                     (PBROWSE | PTEST, _) if notification == BN_CLICKED => {
                         self.sound_action = Some(if id == PTEST {
@@ -2535,6 +1702,7 @@ Other hooks stay. A copy of the file is kept.",
                 }
             }
             RELAYOUT => self.relayout()?,
+            search::OPEN => self.open_search_hit(Some((message.wParam.0, message.lParam.0)))?,
             SCROLL => self.scroll_message(message.wParam.0, message.lParam.0 as i32)?,
             _ => return Ok(false),
         }
@@ -2554,6 +1722,7 @@ Other hooks stay. A copy of the file is kept.",
     /// New font (DPI or text size changed): applies it to every control, sizes the window, then lays out.
     fn relayout(&mut self) -> Result<()> {
         let work = self.work;
+        scroll::release();
         // SAFETY: owned dialog is live.
         let dpi = unsafe { GetDpiForWindow(self.window) }.max(96);
         let font = PickerFont::create(dpi, self.factor)?;
@@ -2588,7 +1757,13 @@ Other hooks stay. A copy of the file is kept.",
             .items
             .iter()
             .flat_map(|i| [(i.h, field(i)), (i.label, false), (i.cap, false)])
-            .chain([self.side, self.status, self.close].map(|h| (h, false)))
+            .chain([(self.nav, true), (self.search.edit, true)])
+            .chain(
+                [self.side, self.status, self.close]
+                    .into_iter()
+                    .chain(self.tabs.iter().copied())
+                    .map(|h| (h, false)),
+            )
             .filter(|(h, _)| !h.0.is_null());
         for (child, field) in handles {
             // The native look of lists, edits, drop-downs and buttons follows the app mode too.
@@ -2616,23 +1791,25 @@ Other hooks stay. A copy of the file is kept.",
         }
         let scale = font.scale;
         self.font = Some(font);
-        let px = |v: i32| (v as f64 * scale).round() as i32;
-        let mut frame = RECT {
-            right: px(654) + gutter(),
-            bottom: px(556),
+        let px = |v: i32| (f64::from(v) * scale).round() as i32;
+        let mut outer = RECT {
+            right: px(DESIGN_W),
+            bottom: px(DESIGN_H),
             ..Default::default()
         };
         // SAFETY: fills the local RECT for the dialog's fixed style at this DPI; positions only our own window.
         unsafe {
             AdjustWindowRectExForDpi(
-                &mut frame,
+                &mut outer,
                 WINDOW_STYLE(DIALOG_STYLE),
                 false,
                 WINDOW_EX_STYLE(0),
                 dpi,
             )?;
-            let width = (frame.right - frame.left).min(work.width);
-            let height = (frame.bottom - frame.top).min(work.height);
+            // The preferred size, kept 12 DIPs inside the work area when it can be, never larger than the area.
+            let room = |size: i32, area: i32| size.min(area - 2 * px(12)).min(area).max(1);
+            let width = room(outer.right - outer.left, work.width);
+            let height = room(outer.bottom - outer.top, work.height);
             let style = GetWindowLongPtrW(self.window, GWL_STYLE);
             SetWindowLongPtrW(self.window, GWL_STYLE, style | WS_CLIPCHILDREN.0 as isize);
             SetWindowPos(
@@ -2650,7 +1827,8 @@ Other hooks stay. A copy of the file is kept.",
     }
 
     /// Lays out with drawing frozen, then repaints once (frame and scroll bar too): moving and showing each
-    /// control on screen showed the page coming apart row by row.
+    /// control on screen showed the page coming apart row by row. Runs for a new page, size, font or text, never
+    /// for a scroll.
     fn layout(&mut self) -> Result<()> {
         let window = self.window;
         // SAFETY: our own live window; WM_SETREDRAW TRUE also shows a window, so a hidden one is left alone.
@@ -2662,7 +1840,7 @@ Other hooks stay. A copy of the file is kept.",
         unsafe { SendMessageW(window, WM_SETREDRAW, Some(WPARAM(0)), None) };
         let placed = self.arrange();
         let all = RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME;
-        // SAFETY: our own live window and its children.
+        // SAFETY: our own live window and children.
         unsafe {
             SendMessageW(window, WM_SETREDRAW, Some(WPARAM(1)), None);
             let _ = RedrawWindow(Some(window), None, None, all);
@@ -2670,71 +1848,123 @@ Other hooks stay. A copy of the file is kept.",
         placed
     }
 
-    /// Places the sidebar, the current page's rows and the footer, and hands the painter what to draw.
+    /// Places the rail or the picker, the local tabs, the viewport with the current page's content window, and
+    /// the footer, and hands the painters what to draw.
     fn arrange(&mut self) -> Result<()> {
         let Some(font) = self.font.as_ref() else {
             return Ok(());
         };
         let (handle, scale) = (font.handle, font.scale);
-        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let px = |v: i32| (f64::from(v) * scale).round() as i32;
         let mut client = RECT::default();
         // SAFETY: our own live window.
         unsafe { GetClientRect(self.window, &mut client)? };
-        // The scroll bar's gutter is the window's right edge, always reserved (content and Close never move
-        // between pages); a page that does not scroll leaves it empty.
-        let bar = gutter();
-        let beside = RECT {
-            right: client.right - bar,
-            ..client
+        let tabs = pages_of(self.route);
+        let frame = view::frame(
+            client.right,
+            client.bottom,
+            scale,
+            tabs.len() > 1 && !self.search.is_open(),
+        );
+        let (width, view) = (
+            frame.viewport.right - frame.viewport.left,
+            frame.viewport.bottom - frame.viewport.top,
+        );
+        let results = self.search.results(scale, frame.compact);
+        let (geometry, content) = if let Some(results) = &results {
+            (Geometry::default(), results.height())
+        } else {
+            self.place(self.page, scale, width, handle)?
         };
-        let (mut geometry, content) = self.place(scale, beside, handle)?;
-        let view = (client.bottom - px(FOOT)).max(1);
+        self.frame = frame;
         self.scroll_max = (content - view).max(0);
-        let clamped = self.scroll.clamp(0, self.scroll_max);
+        self.scroll = self.scroll.clamp(0, self.scroll_max);
         // SAFETY: our own live window and children.
         unsafe {
-            // A clamped position changes the geometry once more.
-            if clamped != self.scroll {
-                self.scroll = clamped;
-                self.glide = motion::Tween::rest(clamped as f32);
-                geometry = self.place(scale, beside, handle)?.0;
-            }
-            let side = px(SIDE_W);
-            let list = &[
-                (self.side, 0, px(10), side, client.bottom - px(10)),
-                // The message (two lines at most) stops short of Close, so the two never overlap.
-                (
-                    self.status,
-                    side + px(GUTTER),
-                    client.bottom - px(FOOT) + px(6),
-                    (beside.right - side - px(GUTTER * 2 + 108)).max(1),
-                    px(FOOT - 12),
-                ),
-                (
-                    self.close,
-                    beside.right - px(GUTTER + 100),
-                    client.bottom - px(FOOT) + px((FOOT - 28) / 2),
-                    px(100),
-                    px(28),
-                ),
-            ];
-            for &(h, x, y, w, ht) in list {
-                SetWindowPos(h, None, x, y, w, ht, SWP_NOZORDER | SWP_NOACTIVATE)?;
+            let put = |h: HWND, r: RECT| {
+                SetWindowPos(
+                    h,
+                    None,
+                    r.left,
+                    r.top,
+                    (r.right - r.left).max(1),
+                    (r.bottom - r.top).max(1),
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            };
+            let show = |h: HWND, on: bool| {
+                let _ = ShowWindow(h, if on { SW_SHOWNA } else { SW_HIDE });
+            };
+            show(self.side, !frame.compact);
+            show(self.nav, frame.compact);
+            if frame.compact {
+                place::size_combo(self.nav, frame.picker.bottom - frame.picker.top, px(36));
+                put(self.nav, frame.picker)?;
+            } else {
+                put(self.side, frame.rail)?;
             }
             SendMessageW(
                 self.side,
                 LB_SETITEMHEIGHT,
                 Some(WPARAM(0)),
-                Some(LPARAM(px(36) as isize)),
+                Some(LPARAM(px(44) as isize)),
             );
-            // The title font is made once per body font (a scroll step reuses it).
+            // The local tabs, side by side: the text and 28 DIPs of padding, 12 more for the selected dot.
+            let dc = GetDC(Some(self.window));
+            SelectObject(dc, handle.into());
+            let mut x = frame.tabs.left;
+            for index in tabs.filter(|_| frame.tabs.bottom > frame.tabs.top) {
+                let mut words: Vec<u16> = PAGES[index].name.encode_utf16().collect();
+                let mut measured = RECT::default();
+                DrawTextW(dc, &mut words, &mut measured, DT_CALCRECT | DT_SINGLELINE);
+                let wide = measured.right + px(40);
+                put(
+                    self.tabs[index],
+                    RECT {
+                        left: x,
+                        right: x + wide,
+                        ..frame.tabs
+                    },
+                )?;
+                x += wide + px(6);
+            }
+            ReleaseDC(Some(self.window), dc);
+            put(self.viewport, frame.viewport)?;
+            put(
+                self.search.edit,
+                RECT {
+                    left: frame.search.left + px(31),
+                    top: frame.search.top + px(6),
+                    right: frame.search.right - px(10),
+                    bottom: frame.search.bottom - px(5),
+                },
+            )?;
+            SetWindowPos(
+                self.scrolling_body(),
+                None,
+                0,
+                -self.scroll,
+                width.max(1),
+                content.max(view).max(1),
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
+            )?;
+            put(self.status, frame.status)?;
+            put(self.close, frame.close)?;
+            // The title font is made once per body font (a scroll never needs it).
             let old = PAINT.with(|p| p.take());
-            let (title_font, bold) = match &old {
-                Some(old) if old.font == handle => (old.title_font, old.bold),
+            let (title_font, bold, display_meta, display_number) = match &old {
+                Some(old) if old.font == handle => (
+                    old.title_font,
+                    old.bold,
+                    old.display_meta,
+                    old.display_number,
+                ),
                 _ => {
                     if let Some(old) = &old {
                         let _ = DeleteObject(old.title_font.into());
                         let _ = DeleteObject(old.bold.into());
+                        let _ = DeleteObject(old.display_meta.into());
+                        let _ = DeleteObject(old.display_number.into());
                     }
                     let mut face = LOGFONTW::default();
                     GetObjectW(
@@ -2742,12 +1972,23 @@ Other hooks stay. A copy of the file is kept.",
                         size_of::<LOGFONTW>() as i32,
                         Some((&mut face as *mut LOGFONTW).cast()),
                     );
+                    face.lfHeight = -px(12);
+                    let display_meta = CreateFontIndirectW(&face);
                     face.lfWeight = 600;
+                    face.lfHeight = -px(26);
+                    let display_number = CreateFontIndirectW(&face);
+                    face.lfHeight = -px(15);
                     let bold = CreateFontIndirectW(&face);
-                    face.lfHeight = face.lfHeight * 3 / 2;
-                    (CreateFontIndirectW(&face), bold)
+                    face.lfHeight *= 2;
+                    (
+                        CreateFontIndirectW(&face),
+                        bold,
+                        display_meta,
+                        display_number,
+                    )
                 }
             };
+            let route = &ROUTES[self.route];
             PAINT.with(|p| {
                 p.replace(Some(Paint {
                     pal: self.pal,
@@ -2755,317 +1996,33 @@ Other hooks stay. A copy of the file is kept.",
                     font: handle,
                     title_font,
                     bold,
-                    title: geometry.title,
-                    labels: geometry.labels,
-                    cards: geometry.cards,
-                    fields: geometry.fields,
-                    bar: scroll::Bar::new(
-                        RECT {
-                            left: client.right - bar,
-                            top: 0,
-                            right: client.right,
-                            bottom: view,
-                        },
-                        content,
-                        view,
-                        self.scroll,
-                        scale,
-                    ),
+                    display_meta,
+                    display_number,
+                    title: route.name,
+                    caption: route.caption,
+                    frame,
+                    geometry,
+                    results,
+                    bar: scroll::Bar::new(frame.gutter, content, view, self.scroll, scale),
                 }))
             });
         }
         Ok(())
     }
-
-    /// Moves the current page's controls (top to bottom, scrolled) and returns the geometry and content height.
-    /// Captions are measured with `font` on a DC of the window, so a wrapped caption gets its lines.
-    fn place(&self, scale: f64, client: RECT, font: HFONT) -> Result<(Geometry, i32)> {
-        // SAFETY: a common DC of our own live window, given the live font and released before returning.
-        let dc = unsafe {
-            let dc = GetDC(Some(self.window));
-            SelectObject(dc, font.into());
-            dc
-        };
-        let at = (dc, client.bottom - (FOOT as f64 * scale).round() as i32);
-        let placed = self.place_at(scale, client, at);
-        // SAFETY: the DC taken above.
-        unsafe { ReleaseDC(Some(self.window), dc) };
-        placed
-    }
-
-    fn place_at(&self, scale: f64, client: RECT, at: (HDC, i32)) -> Result<(Geometry, i32)> {
-        let px = |v: i32| (v as f64 * scale).round() as i32;
-        let (left, right) = (
-            px(SIDE_W + GUTTER),
-            (client.right - px(GUTTER)).max(px(SIDE_W + GUTTER + 100)),
-        );
-        self.moves.borrow_mut().clear();
-        let mut geometry = Geometry {
-            title: (RECT::default(), PAGES[self.page].name),
-            labels: Vec::new(),
-            cards: Vec::new(),
-            fields: Vec::new(),
-        };
-        let mut y = px(GUTTER) - self.scroll;
-        geometry.title.0 = RECT {
-            left,
-            top: y,
-            right,
-            bottom: y + px(30),
-        };
-        y += px(30 + 14);
-        for (index, card) in PAGES[self.page].cards.iter().enumerate() {
-            geometry.labels.push((
-                RECT {
-                    left,
-                    top: y,
-                    right,
-                    bottom: y + px(16),
-                },
-                card.label,
-            ));
-            y += px(16 + 6);
-            let top = y;
-            let rows = self
-                .items
-                .iter()
-                .filter(|i| i.page as usize == self.page && i.card as usize == index)
-                .filter(|i| !(MONITOR..MONITOR + MAX_OFF).contains(&i.id));
-            for item in rows {
-                let (height, field) =
-                    self.row(item, scale, (left + px(14), right - px(14)), y, at)?;
-                geometry.fields.extend(field);
-                y += height;
-            }
-            if self.page == 0 && index == MAP_CARD {
-                y += self.map(scale, (left + px(14), right - px(14)), y, at.1)?;
-            }
-            geometry.cards.push(RECT {
-                left,
-                top,
-                right,
-                bottom: y,
-            });
-            y += px(14);
-        }
-        Ok((geometry, y + self.scroll + px(8)))
-    }
-
-    /// Places the monitor tiles to scale from `y` down and returns the map's height.
-    fn map(&self, scale: f64, (a, b): (i32, i32), y: i32, view: i32) -> Result<i32> {
-        let px = |v: i32| (v as f64 * scale).round() as i32;
-        let rects: Vec<_> = self.monitors.iter().map(|m| m.rect).collect();
-        let tiles = topology::fit(&rects, b - a, px(MAP_H), px(3));
-        for (index, tile) in tiles.iter().enumerate() {
-            let (h, top) = (self.h(MONITOR + index), y + px(10) + tile.y);
-            // SAFETY: our own live tile.
-            unsafe {
-                SetWindowPos(
-                    h,
-                    None,
-                    a + tile.x,
-                    top,
-                    tile.width,
-                    tile.height,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
-                )?;
-                clip(h, top, tile.height, tile.width, view);
-            }
-            self.moves.borrow_mut().push(Move {
-                h,
-                x: a + tile.x,
-                y: top,
-                w: tile.width,
-                ht: tile.height,
-                cut: tile.height,
-                boxed: false,
-            });
-        }
-        Ok(px(MAP_H + 20))
-    }
-
-    /// Places one row from `y` and returns its height: a label or caption that wraps makes the row taller.
-    fn row(
-        &self,
-        item: &Item,
-        scale: f64,
-        (a, b): (i32, i32),
-        y: i32,
-        (dc, view): (HDC, i32),
-    ) -> Result<(i32, Option<RECT>)> {
-        let px = |v: i32| (v as f64 * scale).round() as i32;
-        // The wrapped height of a static's text at width `w` (0 when there is none).
-        let lines = |h: HWND, w: i32| {
-            if h.0.is_null() {
-                return 0;
-            }
-            let mut words: Vec<u16> = text(h, 256).encode_utf16().collect();
-            let mut r = RECT {
-                right: w,
-                ..Default::default()
-            };
-            // SAFETY: measures a local buffer on the caller's live DC.
-            unsafe { DrawTextW(dc, &mut words, &mut r, DT_CALCRECT | DT_WORDBREAK) };
-            r.bottom
-        };
-        let put = |h: HWND, x: i32, y: i32, w: i32, ht: i32| -> Result<()> {
-            if h.0.is_null() {
-                return Ok(());
-            }
-            // SAFETY: our own live child.
-            unsafe {
-                // NOCOPYBITS: a scrolled control repaints itself instead of dragging its old pixels along.
-                SetWindowPos(
-                    h,
-                    None,
-                    x,
-                    y,
-                    w.max(1),
-                    ht,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
-                )?;
-                clip(h, y, ht, w.max(1), view);
-            }
-            self.moves.borrow_mut().push(Move {
-                h,
-                x,
-                y,
-                w: w.max(1),
-                ht,
-                cut: ht,
-                boxed: false,
-            });
-            Ok(())
-        };
-        match item.kind {
-            Kind::Check => {
-                let (w, cap) = (b - a - px(22), lines(item.cap, b - a - px(22)));
-                let top = if cap > 0 { px(6) } else { 0 };
-                let height = if cap > 0 {
-                    (px(32) + cap).max(px(52))
-                } else {
-                    px(40)
-                };
-                put(item.h, a, y + top, b - a, height - top)?;
-                put(item.cap, a, y + px(30), w, cap)?;
-                if !item.cap.0.is_null() {
-                    // The switch spans the caption's line; above it the caption shows (it was hidden under it).
-                    // SAFETY: our own live child; only its place in the stacking order changes.
-                    let _ = unsafe {
-                        SetWindowPos(
-                            item.cap,
-                            Some(HWND_TOP),
-                            0,
-                            0,
-                            0,
-                            0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                        )
-                    };
-                }
-                Ok((height, None))
-            }
-            Kind::Combo(w) | Kind::Edit(w) => {
-                let w = px(w).min((b - a) * 3 / 5);
-                let side = (b - a - w - px(8)).max(1);
-                let (l, c) = (lines(item.label, side).max(px(20)), lines(item.cap, side));
-                let height = if c > 0 {
-                    (px(10) + l + c).max(px(52))
-                } else {
-                    (l + px(20)).max(px(40))
-                };
-                let drop = if matches!(item.kind, Kind::Combo(_)) {
-                    px(180)
-                } else {
-                    px(28)
-                };
-                // The box is framed by the parent: an edit sits inside it with side margins, a drop-down is
-                // clipped one pixel inside so the theme's own bright border stays hidden.
-                let boxed = RECT {
-                    left: b - w,
-                    top: y + (height - px(28)) / 2,
-                    right: b,
-                    bottom: y + (height - px(28)) / 2 + px(28),
-                };
-                if matches!(item.kind, Kind::Edit(_)) {
-                    put(item.h, b - w + px(7), boxed.top + px(5), w - px(14), px(18))?;
-                } else {
-                    put(item.h, b - w, boxed.top, w, drop)?;
-                    inset(item.h, w, px(28), boxed.top, view);
-                    if let Some(moved) = self.moves.borrow_mut().last_mut() {
-                        (moved.cut, moved.boxed) = (px(28), true);
-                    }
-                }
-                let top = if c > 0 {
-                    y + px(8)
-                } else {
-                    y + (height - l) / 2
-                };
-                put(item.label, a, top, side, l)?;
-                put(item.cap, a, top + l, side, c)?;
-                Ok((height, Some(boxed)))
-            }
-            Kind::Btn => {
-                // The button is as wide as its text plus margins (never narrower than 120 DIP), so no label clips.
-                let mut words: Vec<u16> = text(item.h, 256).encode_utf16().collect();
-                let mut measured = RECT::default();
-                // SAFETY: measures a local buffer on the caller's live DC.
-                unsafe { DrawTextW(dc, &mut words, &mut measured, DT_CALCRECT | DT_SINGLELINE) };
-                let width = (measured.right + px(32)).max(px(120)).min(b - a - px(80));
-                let side = b - a - width - px(8);
-                let l = lines(item.label, side);
-                let height = (l + px(20)).max(px(40));
-                put(item.h, b - width, y + (height - px(28)) / 2, width, px(28))?;
-                put(item.label, a, y + (height - l) / 2, side, l)?;
-                Ok((height, None))
-            }
-            Kind::Note => {
-                put(item.label, a, y + px(10), b - a, px(20))?;
-                Ok((px(40), None))
-            }
-        }
-    }
-}
-
-/// Shows only the part of a scrolled control above the footer (`view`), through a window region; a control
-/// that is wholly above it keeps none. Without this a row scrolled under the footer would paint over Close.
-fn clip(h: HWND, top: i32, height: i32, width: i32, view: i32) {
-    let shown = (view - top).clamp(0, height);
-    // SAFETY: our own live child; the system owns a region once it is set.
-    unsafe {
-        if shown < height {
-            SetWindowRgn(h, Some(CreateRectRgn(0, 0, width, shown)), true);
-        } else if GetWindowRgnBox(h, &mut RECT::default()).0 != 0 {
-            SetWindowRgn(h, None, true);
-        }
-    }
-}
-
-/// A drop-down's visible part: its closed box (`height` tall, `top` in the client), cut at the footer like
-/// `clip`. The window is taller than the box (the list drops from it), so the cut is always a straight edge;
-/// the capsule and its ring are painted anti-aliased by `combo_proc`, never cut with a rounded region.
-fn inset(h: HWND, width: i32, height: i32, top: i32, view: i32) {
-    let shown = (view - top).clamp(0, height);
-    // SAFETY: our own live child; the system owns a region once it is set.
-    unsafe {
-        SetWindowRgn(h, Some(CreateRectRgn(0, 0, width, shown)), true);
-    }
-}
-
-struct Geometry {
-    title: (RECT, &'static str),
-    labels: Vec<(RECT, &'static str)>,
-    cards: Vec<RECT>,
-    fields: Vec<RECT>,
 }
 
 impl Drop for SettingsWindow {
     fn drop(&mut self) {
         if let Some(paint) = PAINT.with(|p| p.take()) {
-            // SAFETY: the font is ours alone and the window that used it is destroyed next.
-            let _ = unsafe { DeleteObject(paint.title_font.into()) };
-            // SAFETY: as above, ours alone.
-            let _ = unsafe { DeleteObject(paint.bold.into()) };
+            for font in [
+                paint.title_font,
+                paint.bold,
+                paint.display_meta,
+                paint.display_number,
+            ] {
+                // SAFETY: this owned font is no longer available to the painter.
+                let _ = unsafe { DeleteObject(font.into()) };
+            }
         }
         // SAFETY: sole owner; destroying the parent synchronously destroys all child controls before the font drops.
         unsafe {
@@ -3109,8 +2066,17 @@ fn footer_status(
     }
 }
 
+mod displays;
+mod draw;
 mod keyboard;
+mod paint;
+mod place;
+mod routes;
 mod scroll;
+mod search;
+mod view;
+#[cfg(test)]
+mod window_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3175,7 +2141,6 @@ mod tests {
         let before = ids.len();
         ids.dedup();
         assert_eq!(ids.len(), before, "an id is on two rows");
-        assert_eq!(PAGES.len(), TILES.len());
     }
 
     #[test]

@@ -8,7 +8,7 @@ $results = @()
 # A src file past 2,500 lines must be split by job into sibling `impl` files (as src/host/ does for Desktop). The three files
 # already over the limit may not grow: a ceiling at today's size (keyed by path under src); shrink the ceiling when one is split.
 $limit = 2500
-$ceiling = @{ 'host.rs' = 4918; 'settings_window.rs' = 3229; 'layout.rs' = 2703 }
+$ceiling = @{ 'host.rs' = 4918; 'layout.rs' = 2703 }
 $srcRoot = Join-Path $projectRoot 'src'
 foreach ($file in Get-ChildItem -LiteralPath $srcRoot -Recurse -Filter *.rs) {
     $name = $file.FullName.Substring($srcRoot.Length + 1).Replace('\', '/')

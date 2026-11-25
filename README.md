@@ -38,7 +38,7 @@
 - **Shell Icons:** Asynchronous background icon extraction with bounded memory caching.
 - **Pin Management:** Pinned applications with drag-and-drop reordering, middle-click/context-menu launch.
 - **Window Switching & Minimizing:** Single-click activation, window cycling within groups, and minimizing.
-- **Live App Previews:** Hover a running app to preview its latest window; click the thumbnail to switch, or its close button to request a normal close with unsaved-work prompts preserved.
+- **Live App Previews:** Hover a running app to see its open windows, as thumbnails or in a scrollable list. Click a window to switch to it, or use its close button for a normal close that preserves unsaved-work prompts.
 - **Device batteries:** The battery button beside hidden icons lists connected paired wireless/network devices and Windows-reported receiver batteries. Each physical device appears once; missing or conflicting readings show Unavailable. Updates and removals come from Windows device events, without polling.
   Coverage depends on drivers exposing `System.Devices.BatteryLife` on the device or its Windows container. Receivers that expose only a USB receiver cannot identify or report each wireless peripheral; vendor protocols and direct Bluetooth GATT reads are not implemented. A receiver remaining plugged in may still be reported connected after its peripheral switches off. No hardware coverage is claimed until tested on that hardware.
 - **Dock Context Menu:** Clean right-click menu with options to launch new instances, pin/unpin apps, and close windows.
@@ -48,6 +48,7 @@
 - **Desktop Strip:** Quick show-desktop strip.
 
 ### Personalization & Settings
+- **Settings search:** Press Ctrl+F in Settings to find a control and jump to it without changing its value.
 - **Theme Palette:** Five themes sharing one shape, icon and motion system: *Classic, Light, Midnight, Frosted tint* and *Liquid glass*, with a single warm accent (Lamp `#FFB454`).
 - **Windows System Accent Match:** Optional integration with Windows system accent colour (`HKCU\...\DWM\AccentColor`).
 - **Tuning:** Adjustable notch sizing percentage, animation pace, and click-to-open behavior.

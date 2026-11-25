@@ -1,0 +1,187 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Limits and icons polish</title>
+<style>
+:root{--bg:#5F636B}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);font-family:"Segoe UI Variable Text","Segoe UI",sans-serif;color:#fff;padding:24px;font-size:13px}
+.sheet{display:none}.sheet.on{display:block}
+.cap{font:500 10.5px "Segoe UI Variable Text";color:#ECEEF2;margin-top:10px}
+.title{font:600 15px "Segoe UI Variable Display";color:#fff;margin-bottom:14px}
+.row5{display:flex;gap:20px;align-items:flex-start}
+/* popover: LIST_W 250, LIST_PAD 6, ROW_H 34, radius 23 */
+.pop{width:250px;padding:6px;border-radius:23px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.r{height:34px;border-radius:17px;position:relative}
+.h{display:flex;align-items:center;padding:0 12px;height:34px}
+.lim .t{position:absolute;left:12px;right:12px;top:4px;height:18px;display:flex;justify-content:space-between;align-items:center}
+.lim .pct{font-weight:500;font-variant-numeric:tabular-nums;width:40px;text-align:right}
+.lim .lab{font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}
+.trk{position:absolute;left:12px;right:12px;top:23px;height:4px;border-radius:2px}
+.fill{position:absolute;left:0;top:0;height:4px;border-radius:2px}
+/* themes: surface and ink only */
+.classic{--body:#000;--ink:#fff;--acc:#FFB454;--sec:.70;--trk:rgba(255,255,255,.18)}
+.midnight{--body:#0B1020;--ink:#E8EEFF;--acc:#FFB454;--sec:.70;--trk:rgba(232,238,255,.18)}
+.light{--body:#ECEEF2;--ink:#14161A;--acc:#9A5200;--sec:.81;--trk:rgba(20,22,26,.36)}
+.frosted{--body:rgba(16,20,32,.74);--ink:#fff;--acc:#FFB454;--sec:.70;--trk:rgba(255,255,255,.18)}
+.liquid{--body:linear-gradient(rgba(24,32,56,.78),rgba(14,20,38,.74));--ink:#fff;--acc:#FFB454;--sec:.70;--trk:rgba(255,255,255,.18)}
+.pop{background:var(--body);color:var(--ink)}
+.frosted.pop{box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 8px 24px rgba(0,0,0,.35)}
+.liquid.pop{box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 8px 24px rgba(0,0,0,.35)}
+.lab{opacity:var(--sec)}
+.trk{background:var(--trk)}.fill{background:var(--acc)}
+.hov{background:color-mix(in srgb,var(--acc) 22%,transparent)}
+/* backdrop with a darker band so the glass themes show their tint */
+.stage{padding:28px 24px;border-radius:24px;background:#6B6E75;position:relative;overflow:hidden}
+.stage:before{content:"";position:absolute;left:0;right:0;top:120px;height:90px;background:#3E4148}
+.stage>*{position:relative}
+/* redlines */
+.red{position:absolute;background:#FF7A7A}
+.note{font:500 10.5px "Segoe UI Variable Text";color:#14161A;background:#ECEEF2;border-radius:6px;padding:1px 5px;position:absolute;white-space:nowrap}
+/* icons */
+canvas{image-rendering:pixelated;display:block}
+.grid{display:grid;grid-template-columns:110px repeat(8,auto);gap:10px 14px;align-items:center}
+.gh{font:500 10.5px "Segoe UI Variable Text";color:#ECEEF2;text-align:center}
+.dock{display:inline-flex;gap:6px;align-items:center;height:48px;padding:0 10px;border-radius:24px}
+.cell{width:36px;height:36px;margin:0 2px;display:flex;align-items:center;justify-content:center;border-radius:18px}
+.ba{display:flex;gap:28px;align-items:flex-start}
+.ba img{border-radius:12px;display:block}
+</style></head><body>
+
+<div class="sheet" id="themes">
+  <div class="title">AI limits popover, five themes (2x)</div>
+  <div class="stage"><div class="row5" id="pops"></div></div>
+</div>
+
+<div class="sheet" id="states">
+  <div class="title">Bar anatomy and states (Classic, 2x)</div>
+  <div style="display:flex;gap:40px;align-items:flex-start">
+    <div class="stage" style="padding:28px 270px 60px 24px"><div id="anat"></div></div>
+    <div class="stage"><div id="stlist"></div></div>
+  </div>
+</div>
+
+<div class="sheet" id="icons">
+  <div class="title">Dock glyphs, device pixels, before and after</div>
+  <div class="grid" id="igrid"></div>
+</div>
+
+<div class="sheet" id="docks">
+  <div class="title">Dock right and left clusters, after, five themes (2x)</div>
+  <div class="stage" id="dockstage" style="display:flex;flex-direction:column;gap:14px"></div>
+</div>
+
+<div class="sheet" id="before">
+  <div class="title">Before and after: limit bars (Classic)</div>
+  <div class="ba">
+    <div><img src="../../stills/research-graphics/z-limit-bars-x4.png" width="500"><div class="cap">Before: fat rows, khaki 40% fill, slivers past the track</div></div>
+    <div><div id="afterpop" style="transform:scale(2);transform-origin:0 0;width:250px;height:330px"></div><div class="cap" style="margin-top:310px">After: thin 4 DIP capsule, full Lamp, label above</div></div>
+  </div>
+</div>
+
+<script>
+const view=(location.search.match(/v=(\w+)/)||[,'themes'])[1];
+document.getElementById(view).classList.add('on');
+
+const DATA=[{h:'Claude, as of 13:09'},{l:'5h, resets 13:30',p:12},{l:'Week, resets Sun 09:00',p:31},
+ {h:'Codex, as of 13:04'},{l:'5h, resets 13:42',p:2},{l:'Week, resets Fri 00:12',p:34},
+ {h:'Antigravity, as of 13:10'},{l:'5h, reset at 14:00',p:0}];
+const TRACK=250-12-24; // row width 238 minus 12 DIP each side
+function fillW(p){if(p<=0)return 0;return Math.min(TRACK,Math.max(4,Math.round(TRACK*p/100)))}
+function limRow(r,hover){return `<div class="r lim${hover?' hov':''}"><div class="t"><span class="lab">${r.l}</span><span class="pct">${r.p}%</span></div>
+ <div class="trk">${fillW(r.p)?`<div class="fill" style="width:${fillW(r.p)}px"></div>`:''}</div></div>`}
+function pop(theme,rows,hoverAt){return `<div class="pop ${theme}">`+rows.map((r,i)=>r.h?`<div class="r h">${r.h}</div>`:limRow(r,i===hoverAt)).join('')+'</div>'}
+
+if(view==='themes'){
+ document.getElementById('pops').innerHTML=[['classic','Classic'],['midnight','Midnight'],['light','Light'],['frosted','Frosted tint'],['liquid','Liquid glass']]
+  .map(([t,n],i)=>`<div>${pop(t,DATA,i===0?2:-1)}<div class="cap">${n}${i===0?', Week row hovered':''}</div></div>`).join('');
+}
+if(view==='before'){document.getElementById('afterpop').innerHTML=pop('classic',DATA.slice(0,6),-1)}
+if(view==='states'){
+ const a=document.getElementById('anat');
+ a.innerHTML=`<div style="position:relative">${pop('classic',[DATA[1]],-1)}
+ <div class="note" style="left:270px;top:6px">label: 13/400, ink 70%, top 4, height 18</div>
+ <div class="note" style="left:270px;top:26px">percent: 13/500, ink, tabular, 40 wide</div>
+ <div class="note" style="left:270px;top:46px">bar: top 23, height 4, radius 2, inset 12</div>
+ <div class="note" style="left:270px;top:66px">row 34, popover pad 6, radius 23</div></div>`;
+ const pcts=[0,1,2,12,50,99,100];
+ document.getElementById('stlist').innerHTML=pcts.map(p=>`<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px"><div style="width:250px">${pop('classic',[{l:p===0?'5h, reset at 14:00':'5h, resets 13:30',p}],-1)}</div><div class="cap" style="margin:0">${p}%${p===0?': track only':p<=2?': 4x4 dot, never a sliver':p===100?': full capsule':''}</div></div>`).join('')
+ +`<div style="display:flex;align-items:center;gap:12px"><div style="width:250px">${pop('classic',[DATA[2]],0)}</div><div class="cap" style="margin:0">hover: existing 22% accent capsule</div></div>`;
+}
+
+/* ---------- glyph geometry: parser, before (per-point) and after (rails) snapping ---------- */
+const P={
+ before:{search:"M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13zM15.4 15.4L20.5 20.5",
+  taskview:"M10 9h8a2 2 0 0 1 2 2v5.5a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2V11a2 2 0 0 1 2-2zM5 14.5V8a2 2 0 0 1 2-2h8",
+  drive:"M4 14.5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM4 14.5l2.3-7.6A2 2 0 0 1 8.2 5.5h7.6a2 2 0 0 1 1.9 1.4l2.3 7.6M16.5 16h.01",
+  chevron:"M6 15l6-6 6 6",
+  battery:"M5 6h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2zM21 10v4",
+  limits:"M3.5 18a8.5 8.5 0 1 1 17 0M12 15l5-6",
+  gear:"M3 7h3M10 7h11M3 17h11M18 17h3M8 5a2 2 0 1 0 0 4a2 2 0 1 0 0-4zM16 15a2 2 0 1 0 0 4a2 2 0 1 0 0-4z"}};
+P.after={...P.before,
+  battery:"M5.5 6.5h9.5a3 3 0 0 1 3 3v5a3 3 0 0 1-3 3H5.5a3 3 0 0 1-3-3v-5a3 3 0 0 1 3-3zM21.25 10.5v3",
+  limits:"M4.64 18.25A8.5 8.5 0 1 1 19.36 18.25M12 14l3.2-3.2",
+  gear:"M4 7h2M12 7h8M4 17h8M18 17h2M9 4a3 3 0 1 0 0 6a3 3 0 1 0 0-6zM15 14a3 3 0 1 0 0 6a3 3 0 1 0 0-6z"};
+const ORDER=['search','taskview','drive','chevron','battery','limits','gear'];
+
+function parse(d){const figs=[];let f=null,x=0,y=0,cmd='',i=0;
+ const num=()=>{const m=d.slice(i).match(/^[\s,]*(-?(?:\d+\.?\d*|\.\d+))/);i+=m[0].length;return +m[1]};
+ const more=()=>/^[\s,]*[-.\d]/.test(d.slice(i));
+ while(i<d.length){const c=d[i];if(/[a-zA-Z]/.test(c)){cmd=c;i++}else if(/[\s,]/.test(c)){i++;continue}
+  const rel=cmd===cmd.toLowerCase(),C=cmd.toUpperCase();
+  do{ if(C==='Z'){f.closed=true;x=f.n[0][0];y=f.n[0][1];break}
+   if(C==='M'){let a=num(),b=num();if(rel){a+=x;b+=y}x=a;y=b;f={n:[[x,y]],s:[],closed:false};figs.push(f);cmd=rel?'l':'L';continue}
+   if(C==='L'){let a=num(),b=num();if(rel){a+=x;b+=y}x=a;y=b;f.n.push([x,y]);f.s.push({t:'L'});continue}
+   if(C==='H'){let a=num();if(rel)a+=x;x=a;f.n.push([x,y]);f.s.push({t:'L'});continue}
+   if(C==='V'){let b=num();if(rel)b+=y;y=b;f.n.push([x,y]);f.s.push({t:'L'});continue}
+   if(C==='A'){const r=num();num();num();const lg=num(),sw=num();let a=num(),b=num();if(rel){a+=x;b+=y}x=a;y=b;f.n.push([x,y]);f.s.push({t:'A',r,lg,sw});continue}
+  }while(more());}
+ for(const g of figs){const n=g.n;if(g.closed){const l=n[n.length-1];if(Math.abs(l[0]-n[0][0])<1e-6&&Math.abs(l[1]-n[0][1])<1e-6)n.pop();else g.s.push({t:'L'})}}
+ return figs}
+function centre(p,q,s){const x1=(p[0]-q[0])/2,y1=(p[1]-q[1])/2,d2=x1*x1+y1*y1,k=Math.sqrt(Math.max(0,(s.r*s.r-d2)/d2))*(s.lg!==s.sw?1:-1);
+ return [k*y1+(p[0]+q[0])/2,-k*x1+(p[1]+q[1])/2]}
+function geom(d,side,mode){const G=24,k=side/G,sw=Math.max(1,Math.round(2.1*side/G)),ph=(sw%2)/2,sn=v=>Math.round(v*k-ph)+ph,eq=(a,b)=>Math.abs(a-b)<1e-6;
+ const figs=parse(d);let out='';const anchors=[];
+ const seg=(g,i)=>[g.n[i],g.n[(i+1)%g.n.length],g.s[i]]; // seg i: node i -> node i+1 (cyclic when closed)
+ for(const g of figs){let px;const n=g.n,N=n.length;
+  if(mode==='before'){px=n.map(([x,y])=>[sn(x),sn(y)]);g.k=k}
+  else{
+   const onlyArcs=g.s.every(s=>s.t==='A'),tiny=N<=2&&g.s.length===1&&g.s[0].t==='L'&&Math.hypot(n[1][0]-n[0][0],n[1][1]-n[0][1])<.1;
+   if(tiny){const dx=sn(n[0][0])-n[0][0]*k,dy=sn(n[0][1])-n[0][1]*k;px=n.map(([x,y])=>[x*k+dx,y*k+dy])}
+   else if(onlyArcs){ // circle or open dial: centre to the stroke phase, radius to whole pixels
+    const s0=g.s[0],c=centre(n[0],n[1%N],s0),cx=sn(c[0]),cy=sn(c[1]),rp=Math.max(1,Math.round(s0.r*k)),f=rp/(s0.r*k);
+    px=n.map(([x,y])=>[cx+(x-c[0])*k*f,cy+(y-c[1])*k*f]);g.r=rp;anchors.push([c,[cx,cy]]);
+   } else {
+    const S=g.s.length,rx=new Array(N).fill(null),ry=new Array(N).fill(null);
+    for(let i=0;i<S;i++){const a=i,b=(i+1)%N,[p,q,s]=[n[a],n[b],g.s[i]];if(s.t!=='L')continue;
+     if(eq(p[0],q[0])){rx[a]=rx[b]=sn(p[0])-p[0]*k} if(eq(p[1],q[1])){ry[a]=ry[b]=sn(p[1])-p[1]*k}}
+    px=n.map(([x,y],i)=>{let dx=rx[i],dy=ry[i];
+     for(const j of [i,(i-1+S)%S]){if(j>=S||j<0)continue;const s=g.s[j];if(!s||s.t!=='A')continue;const o=j===i?(i+1)%N:j;
+      if(dx===null&&rx[o]!==null)dx=rx[o];if(dy===null&&ry[o]!==null)dy=ry[o]}
+     for(const [c,cp] of anchors)if(eq(c[0],x)&&eq(c[1],y)){dx=cp[0]-x*k;dy=cp[1]-y*k}
+     return [x*k+(dx||0),y*k+(dy||0)]});
+   }}
+  out+=`M${px[0][0]} ${px[0][1]}`;
+  for(let i=0;i<g.s.length;i++){const s=g.s[i],q=px[(i+1)%N];
+   if(s.t==='L')out+=`L${q[0]} ${q[1]}`;else{const r=(mode==='after'&&g.r)?g.r:s.r*k;out+=`A${r} ${r} 0 ${s.lg} ${s.sw} ${q[0]} ${q[1]}`}}
+  if(g.closed)out+='Z';}
+ return {d:out,sw}}
+function glyph(name,mode,side,color,bg){const c=document.createElement('canvas');c.width=c.height=side;const x=c.getContext('2d');
+ if(bg){x.fillStyle=bg;x.fillRect(0,0,side,side)}const {d,sw}=geom(P[mode][name],side,mode);
+ x.strokeStyle=color;x.lineWidth=sw;x.lineCap='round';x.lineJoin='round';x.stroke(new Path2D(d));return c}
+
+if(view==='icons'){const g=document.getElementById('igrid');
+ const scales=[[1,6],[1.25,5],[1.5,4],[2,3]];
+ g.innerHTML='<div></div>'+scales.flatMap(([s])=>[`<div class="gh">${s*100}% before</div>`,`<div class="gh">${s*100}% after</div>`]).join('');
+ for(const name of ORDER){const lab=document.createElement('div');lab.className='gh';lab.style.textAlign='left';
+  lab.textContent=name+(['battery','limits','gear'].includes(name)?' (redrawn)':'');g.appendChild(lab);
+  for(const [s,z] of scales){const side=Math.round(26*s);for(const m of ['before','after']){const c=glyph(name,m,side,'#DCE1E8','#000');
+   c.style.width=c.style.height=(side*z/2)+'px';g.appendChild(c)}}}}
+
+if(view==='docks'){const st=document.getElementById('dockstage');
+ const T=[['Classic','#000','#DCE1E8'],['Midnight','#0B1020','#E8EEFF'],['Light','#ECEEF2','#14161A'],['Frosted tint','rgba(16,20,32,.74)','#FFFFFF'],['Liquid glass','linear-gradient(rgba(24,32,56,.78),rgba(14,20,38,.74))','#FFFFFF']];
+ for(const [n,body,ink] of T){const row=document.createElement('div');row.style.cssText='display:flex;align-items:center;gap:16px';
+  const d=document.createElement('div');d.className='dock';d.style.background=body;
+  ['search','taskview','drive',null,'chevron','battery','limits','gear'].forEach((name,i)=>{const cell=document.createElement('div');cell.className='cell';
+   if(name===null){cell.style.width='14px'}else{if(name==='limits')cell.style.background=n==='Light'?'rgba(154,82,0,.18)':'rgba(255,180,84,.18)';
+    const c=glyph(name,'after',52,ink);c.style.width=c.style.height='26px';c.style.imageRendering='auto';cell.appendChild(c)}d.appendChild(cell)});
+  row.appendChild(d);const cap=document.createElement('div');cap.className='cap';cap.style.margin=0;cap.textContent=n+(n==='Classic'?', limits hovered':'');row.appendChild(cap);st.appendChild(row)}}
+</script></body></html>

@@ -300,21 +300,21 @@ fn expanded_panel_draws_previous_play_pause_and_next_in_the_controls_row() {
         [
             (
                 rect(148.0, 84.0, 180.0, 112.0),
-                rect(155.0, 89.0, 173.0, 107.0),
+                rect(154.0, 88.0, 174.0, 108.0),
                 Glyph::Previous,
                 false,
                 DISABLED
             ),
             (
                 rect(186.0, 84.0, 234.0, 112.0),
-                rect(202.0, 90.0, 218.0, 106.0),
-                Glyph::Pause,
+                rect(200.0, 88.0, 220.0, 108.0),
+                Glyph::TransportPause,
                 true,
                 1.0
             ),
             (
                 rect(240.0, 84.0, 272.0, 112.0),
-                rect(247.0, 89.0, 265.0, 107.0),
+                rect(246.0, 88.0, 266.0, 108.0),
                 Glyph::Next,
                 false,
                 1.0
@@ -338,6 +338,35 @@ fn expanded_panel_draws_previous_play_pause_and_next_in_the_controls_row() {
     assert_eq!(opening.chips[1].rect.left, body.left + 146.0);
     assert_eq!(opening.chips[1].alpha, reveal);
     assert_eq!(opening.chips[0].alpha, reveal * DISABLED);
+}
+
+#[test]
+fn paused_transport_uses_centered_play_and_loses_accent_when_disabled() {
+    let mut song = track("Song", "Artist", false);
+    if let View::Track(track) = &mut song {
+        track.paused_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        track.controls = [true, true, true];
+    }
+    let panel = plan(&song, "9:50 pm", 1.0, 120);
+    let toggle = &panel.chips[PLAY_PAUSE];
+    assert_eq!(toggle.shape, Glyph::TransportPlay);
+    assert!(toggle.filled);
+    assert_eq!(toggle.glyph.right - toggle.glyph.left, 25.0);
+    assert_eq!(
+        toggle.glyph.left + toggle.glyph.right,
+        toggle.rect.left + toggle.rect.right
+    );
+    assert_eq!(
+        toggle.glyph.top + toggle.glyph.bottom,
+        toggle.rect.top + toggle.rect.bottom
+    );
+    if let View::Track(track) = &mut song {
+        track.controls[PLAY_PAUSE] = false;
+    }
+    let panel = plan(&song, "9:50 pm", 1.0, 120);
+    let toggle = &panel.chips[PLAY_PAUSE];
+    assert!(toggle.disabled && toggle.capsule && !toggle.filled);
+    assert_eq!(toggle.alpha, DISABLED);
 }
 
 #[test]

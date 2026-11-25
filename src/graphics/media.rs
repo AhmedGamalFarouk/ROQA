@@ -677,9 +677,9 @@ fn media_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip
         return Vec::new();
     }
     let toggle = if track.playing {
-        Glyph::Pause
+        Glyph::TransportPause
     } else {
-        Glyph::Play
+        Glyph::TransportPlay
     };
     let speaker = scene.volume.map_or(Glyph::Speaker, |level| {
         Glyph::speaker(level.percent, level.muted)
@@ -697,23 +697,34 @@ fn media_chips(scene: &NotchScene, track: &Track, body: &D2D_RECT_F) -> Vec<Chip
                 right: body.left + (control.x + control.width) as f32,
                 bottom: body.top + (control.y + control.height) as f32,
             };
-            let filled = index == PLAY_PAUSE;
-            // A 16 DIP glyph inside the circle, 18 DIP on its own (the 24-unit icon grid has its own margin).
-            let size = (if filled { 16.0 } else { 18.0 } * scale)
-                .round()
-                .min(rect.right - rect.left)
-                .min(rect.bottom - rect.top);
-            let centre = |extent: i32| ((extent as f32 - size) / 2.0).round();
-            Chip {
-                rect,
-                glyph: pixel_square(
+            let glyph = if shape.is_transport() {
+                let half = 10.0 * scale;
+                let center_x = (rect.left + rect.right) / 2.0;
+                let center_y = (rect.top + rect.bottom) / 2.0;
+                D2D_RECT_F {
+                    left: center_x - half,
+                    right: center_x + half,
+                    top: center_y - half,
+                    bottom: center_y + half,
+                }
+            } else {
+                let size = (18.0 * scale)
+                    .round()
+                    .min(rect.right - rect.left)
+                    .min(rect.bottom - rect.top);
+                let centre = |extent: i32| ((extent as f32 - size) / 2.0).round();
+                pixel_square(
                     rect.left + centre(control.width),
                     rect.top + centre(control.height),
                     size,
-                ),
+                )
+            };
+            Chip {
+                rect,
+                glyph,
                 shape,
-                filled,
-                capsule: index < PLAY_PAUSE + 2,
+                filled: index == PLAY_PAUSE && enabled[index],
+                capsule: shape.is_transport(),
                 alpha: reveal * if enabled[index] { 1.0 } else { DISABLED },
                 disabled: !enabled[index],
                 lit: false,
@@ -784,6 +795,9 @@ fn media_text(
             // The primary play/pause is a solid accent capsule, the others a faint ink one.
             let fill = if chip.filled {
                 with_alpha(p.accent, p.ink_alpha(chip.alpha))
+            } else if chip.shape.is_transport() && p.high_contrast.is_some() {
+                let crate::theme::Rgba(red, green, blue, _) = p.tile;
+                with_alpha((red, green, blue), p.ink_alpha(chip.alpha))
             } else {
                 with_alpha(p.ink, p.ink_alpha(0.12 * chip.alpha))
             };

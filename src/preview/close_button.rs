@@ -17,7 +17,7 @@ use windows::{
         UI::{
             Controls::WM_MOUSELEAVE,
             Input::KeyboardAndMouse::{
-                ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+                GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
             },
             WindowsAndMessaging::{
                 MSG, WM_CAPTURECHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WindowFromPoint,
@@ -51,7 +51,7 @@ fn bounds(preview: Bounds, work: Bounds, side: i32) -> Bounds {
     }
 }
 
-fn color((r, g, b): Rgb) -> u32 {
+pub(super) fn color((r, g, b): Rgb) -> u32 {
     u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16)
 }
 
@@ -100,7 +100,10 @@ impl CloseButton {
     }
 
     pub(super) fn place(&self, preview: Bounds, work: Bounds) -> Result<()> {
-        let at = bounds(preview, work, self.side);
+        self.place_at(bounds(preview, work, self.side))
+    }
+
+    pub(super) fn place_at(&self, at: Bounds) -> Result<()> {
         self.at.set(at);
         self.window.resize(at)
     }
@@ -151,7 +154,11 @@ impl CloseButton {
             WM_MOUSEMOVE if self.pressed && message.wParam.0 & MK_LBUTTON == 0 => {
                 self.pressed = false;
                 // SAFETY: releases this thread's pointer capture; harmless if it is already gone.
-                let _ = unsafe { ReleaseCapture() };
+                unsafe {
+                    if GetCapture() == self.window.0 {
+                        let _ = ReleaseCapture();
+                    }
+                }
             }
             WM_MOUSEMOVE => self.point(message),
             WM_MOUSELEAVE => {
@@ -170,6 +177,9 @@ impl CloseButton {
                 if pressed {
                     // SAFETY: releases this thread's pointer capture and reads scalar HWND identity.
                     unsafe {
+                        if GetCapture() != self.window.0 {
+                            return false;
+                        }
                         let over = WindowFromPoint(message.pt) == self.window.0;
                         let _ = ReleaseCapture();
                         return over;

@@ -1,11 +1,15 @@
-//! Dock hover thumbnails (features B2): after the pointer rests on a slot, a live DWM thumbnail of the
-//! group's most recent window floats above it. The DWM renders it (no capture, no copy); the popup exists
+//! Dock hover previews. DWM draws live thumbnails without capture or copying; the popup exists
 //! only while shown, and the wait is one host deadline.
 
 mod close_button;
+mod group;
 
 use crate::{
-    dock, layout::Bounds, native_window::NativeWindow, theme::Palette, window_model::WindowKey,
+    dock,
+    layout::Bounds,
+    native_window::NativeWindow,
+    theme::Palette,
+    window_model::{Identity, WindowKey, WindowModel},
 };
 use close_button::CloseButton;
 use std::time::{Duration, Instant};
@@ -169,43 +173,133 @@ pub fn popup_bounds(
     })
 }
 
-/// A shown preview: the popup and its DWM thumbnail. Dropping it unregisters the thumbnail and destroys
-/// the popup, so ending a preview is `Option::take`.
-pub struct Popup {
-    thumbnail: isize,
-    /// The previewed window; the host ends the preview when the dock no longer holds it.
-    pub target: WindowKey,
-    close: CloseButton,
-    window: NativeWindow,
+#[derive(Clone, Copy)]
+pub struct Placement {
+    pub owner: HWND,
+    pub slot_x: i32,
+    pub dock: Bounds,
+    pub work: Bounds,
+    pub dpi: u32,
 }
+
+pub struct Popup {
+    identity: Identity,
+    view: View,
+}
+
+enum View {
+    Single(Single),
+    Group(group::Panel),
+}
+
 impl Popup {
-    pub fn under_pointer(&self) -> bool {
-        let mut point = POINT::default();
-        // SAFETY: scalar cursor coordinates and the identity of our live HWND.
-        unsafe {
-            GetCursorPos(&mut point).is_ok()
-                && [self.window.0, self.close.hwnd()].contains(&WindowFromPoint(point))
+    pub fn show(
+        item: &dock::DockItem,
+        model: &WindowModel,
+        palette: Palette,
+        at: Placement,
+    ) -> Result<Self> {
+        let mut targets: Vec<_> = item
+            .windows
+            .iter()
+            .copied()
+            .filter(|&key| dock::valid_target(key))
+            .collect();
+        let first = most_recent(&targets, dock::foreground_key(), z_order())
+            .ok_or_else(|| Error::new(E_FAIL, "No window to preview."))?;
+        if let Some(index) = targets.iter().position(|&key| key == first) {
+            targets[..=index].rotate_right(1);
+        }
+        let view = if targets.len() == 1
+            && let Ok(single) = Single::show(first, palette, at)
+        {
+            View::Single(single)
+        } else {
+            View::Group(group::Panel::show(
+                targets,
+                model,
+                item.executable.as_deref(),
+                palette,
+                at,
+            )?)
+        };
+        Ok(Self {
+            identity: item.identity.clone(),
+            view,
+        })
+    }
+
+    pub fn refresh(&mut self, item: Option<&dock::DockItem>) -> bool {
+        let Some(item) =
+            item.filter(|item| item.identity == self.identity && item.members.is_empty())
+        else {
+            return false;
+        };
+        match &mut self.view {
+            View::Single(single) => item.windows.contains(&single.target),
+            View::Group(panel) => panel.refresh(&item.windows),
         }
     }
-    /// Routes normal close requests separately from thumbnail activation.
+
+    pub fn under_pointer(&self) -> bool {
+        match &self.view {
+            View::Single(single) => single.under_pointer(),
+            View::Group(panel) => panel.under_pointer(),
+        }
+    }
+
     pub fn message(&mut self, message: &MSG) -> bool {
+        match &mut self.view {
+            View::Single(single) => single.message(message),
+            View::Group(panel) => panel.message(message),
+        }
+    }
+}
+
+fn pointed_window() -> HWND {
+    let mut point = POINT::default();
+    // SAFETY: scalar cursor coordinates and HWND query.
+    unsafe {
+        if GetCursorPos(&mut point).is_ok() {
+            WindowFromPoint(point)
+        } else {
+            HWND::default()
+        }
+    }
+}
+
+fn track_leave(window: HWND) {
+    // SAFETY: one leave notification for our live window.
+    let _ = unsafe {
+        TrackMouseEvent(&mut TRACKMOUSEEVENT {
+            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: window,
+            dwHoverTime: 0,
+        })
+    };
+}
+
+struct Single {
+    target: WindowKey,
+    close: CloseButton,
+    thumbnail: Thumbnail,
+}
+impl Single {
+    fn under_pointer(&self) -> bool {
+        [self.thumbnail.window.0, self.close.hwnd()].contains(&pointed_window())
+    }
+    /// Routes normal close requests separately from thumbnail activation.
+    fn message(&mut self, message: &MSG) -> bool {
         if self.close.message(message) {
             dock::close(&[self.target]);
             return true;
         }
-        if message.hwnd != self.window.0 {
+        if message.hwnd != self.thumbnail.window.0 {
             return false;
         }
         if message.message == WM_MOUSEMOVE {
-            // SAFETY: a single leave notification for our live popup; no timer or polling.
-            let _ = unsafe {
-                TrackMouseEvent(&mut TRACKMOUSEEVENT {
-                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: self.window.0,
-                    dwHoverTime: 0,
-                })
-            };
+            track_leave(message.hwnd);
         }
         if message.message == WM_LBUTTONUP {
             let _ = dock::perform(dock::Action::Activate(self.target));
@@ -213,35 +307,44 @@ impl Popup {
         }
         false
     }
-    /// Shows the most recent window above `slot_x`, with a close control. Neither popup takes focus.
-    pub fn show(
-        windows: &[WindowKey],
-        palette: Palette,
-        slot_x: i32,
-        dock: Bounds,
-        work: Bounds,
-        dpi: u32,
-    ) -> Result<Self> {
-        let target = most_recent(windows, dock::foreground_key(), z_order())
-            .filter(|&key| dock::valid_target(key))
-            .ok_or_else(|| Error::new(E_FAIL, "No window to preview."))?;
-        let window = NativeWindow::create_preview("ROQA App Preview", None)?;
-        let close = CloseButton::create(window.0, dpi, palette)?;
-        // SAFETY: both HWNDs are live (ours, and the revalidated target); the DWM owns the thumbnail
-        // until `Drop`.
-        let thumbnail = unsafe { DwmRegisterThumbnail(window.0, HWND(target.handle as *mut _)) }?;
-        let popup = Self {
-            thumbnail,
+    fn show(target: WindowKey, palette: Palette, at: Placement) -> Result<Self> {
+        let thumbnail = Thumbnail::create(at.owner, target)?;
+        let close = CloseButton::create(thumbnail.window.0, at.dpi, palette)?;
+        let bounds = popup_bounds(thumbnail.size()?, at.slot_x, at.dock, at.work, at.dpi)
+            .ok_or_else(|| Error::new(E_FAIL, "No room for a preview."))?;
+        close.place(bounds, at.work)?;
+        thumbnail.place(bounds)?;
+        thumbnail.window.show();
+        close.show();
+        Ok(Self {
             target,
             close,
-            window,
-        };
-        // SAFETY: the id was just registered and is released only by `Drop`.
-        let size = unsafe { DwmQueryThumbnailSourceSize(thumbnail) }?;
-        let bounds = popup_bounds((size.cx, size.cy), slot_x, dock, work, dpi)
-            .ok_or_else(|| Error::new(E_FAIL, "No room for a preview."))?;
-        popup.close.place(bounds, work)?;
-        popup.window.resize(bounds)?;
+            thumbnail,
+        })
+    }
+}
+
+struct Thumbnail {
+    id: isize,
+    window: NativeWindow,
+}
+
+impl Thumbnail {
+    fn create(owner: HWND, target: WindowKey) -> Result<Self> {
+        let window = NativeWindow::create_preview("ROQA App Preview", Some(owner))?;
+        // SAFETY: our destination lives until Drop; DWM validates the foreign source HWND.
+        let id = unsafe { DwmRegisterThumbnail(window.0, HWND(target.handle as *mut _)) }?;
+        Ok(Self { id, window })
+    }
+
+    fn size(&self) -> Result<(i32, i32)> {
+        // SAFETY: this thumbnail registration is owned by self.
+        let size = unsafe { DwmQueryThumbnailSourceSize(self.id) }?;
+        Ok((size.cx, size.cy))
+    }
+
+    fn place(&self, bounds: Bounds) -> Result<()> {
+        self.window.resize(bounds)?;
         let properties = DWM_THUMBNAIL_PROPERTIES {
             dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE,
             rcDestination: RECT {
@@ -254,17 +357,14 @@ impl Popup {
             ..Default::default()
         };
         // SAFETY: `properties` outlives the call; the id is ours.
-        unsafe { DwmUpdateThumbnailProperties(thumbnail, &properties) }?;
-        popup.window.show();
-        popup.close.show();
-        Ok(popup)
+        unsafe { DwmUpdateThumbnailProperties(self.id, &properties) }
     }
 }
-impl Drop for Popup {
+impl Drop for Thumbnail {
     fn drop(&mut self) {
         // SAFETY: releases the id registered in `show`; the window is destroyed after this, by its field.
         unsafe {
-            let _ = DwmUnregisterThumbnail(self.thumbnail);
+            let _ = DwmUnregisterThumbnail(self.id);
         }
     }
 }

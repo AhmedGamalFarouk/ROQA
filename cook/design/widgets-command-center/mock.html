@@ -1,0 +1,215 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Dock widgets and command center</title>
+<style>
+:root{--bg:#5F636B}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);font-family:"Segoe UI Variable Text","Segoe UI",sans-serif;color:#fff;padding:24px;font-size:13px;width:max-content}
+.sheet{display:none}.sheet.on{display:block}
+.cap{font:500 10.5px "Segoe UI Variable Text";color:#ECEEF2;margin-top:8px;max-width:330px}
+.title{font:600 15px "Segoe UI Variable Display";color:#fff;margin-bottom:14px}
+.row{display:flex;gap:22px;align-items:flex-start}
+.stage{padding:28px 24px;border-radius:24px;background:#6B6E75;position:relative;overflow:hidden}
+.stage:before{content:"";position:absolute;left:0;right:0;top:200px;height:120px;background:#3E4148}
+.stage>*{position:relative}
+/* themes: surface and ink only */
+.classic{--body:#000;--ink:#fff;--acc:#FFB454;--sec:.70;--f:rgba(255,255,255,.14);--f0:rgba(255,255,255,.07);--trk:rgba(255,255,255,.18)}
+.midnight{--body:#0B1020;--ink:#E8EEFF;--acc:#FFB454;--sec:.70;--f:rgba(232,238,255,.15);--f0:rgba(232,238,255,.07);--trk:rgba(232,238,255,.18)}
+.light{--body:#ECEEF2;--ink:#14161A;--acc:#9A5200;--sec:.81;--f:rgba(20,22,26,.14);--f0:rgba(20,22,26,.06);--trk:rgba(20,22,26,.30)}
+.frosted{--body:rgba(16,20,32,.74);--ink:#fff;--acc:#FFB454;--sec:.70;--f:rgba(255,255,255,.14);--f0:rgba(255,255,255,.07);--trk:rgba(255,255,255,.18)}
+.liquid{--body:linear-gradient(rgba(24,32,56,.78),rgba(14,20,38,.74));--ink:#fff;--acc:#FFB454;--sec:.70;--f:rgba(255,255,255,.15);--f0:rgba(255,255,255,.07);--trk:rgba(255,255,255,.18)}
+.surf{background:var(--body);color:var(--ink);box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.frosted.surf{box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 8px 24px rgba(0,0,0,.35)}
+.liquid.surf{box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 8px 24px rgba(0,0,0,.35)}
+.sec{opacity:var(--sec)}
+svg.g{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
+/* ---- dock ---- */
+.dock{display:inline-flex;align-items:center;height:56px;padding:0 10px;border-radius:28px;gap:2px}
+.cell{width:44px;height:44px;display:flex;align-items:center;justify-content:center;border-radius:22px}
+.app{width:36px;height:36px;border-radius:18px;background:var(--f);margin:0 4px}
+.sep{width:1px;height:0}
+.gap{width:10px}
+/* widget tile: 36 high capsule in the 44 cell, glyph 20, reading 12/500 tabular */
+.wt{height:36px;border-radius:18px;display:flex;align-items:center;gap:6px;padding:0 12px 0 10px;margin:0 2px;font:500 12.5px "Segoe UI Variable Text";font-variant-numeric:tabular-nums;white-space:nowrap}
+.wt.hov,.hov{background:color-mix(in srgb,var(--acc) 22%,transparent)}
+.wt .sub{opacity:var(--sec);font-weight:400}
+.mk{position:absolute;font:500 10.5px "Segoe UI Variable Text";color:#14161A;background:#ECEEF2;border-radius:6px;padding:1px 5px;white-space:nowrap}
+/* ---- command center: width 308, pad 8, radius 28; tile 48 high capsule radius 24 ---- */
+.cc{width:308px;padding:8px;border-radius:28px}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.tile{height:48px;border-radius:24px;background:var(--f0);display:flex;align-items:center;gap:8px;padding:0 6px 0 14px;position:relative;overflow:hidden}
+.tile.on{background:var(--f)}
+.tile .tx{display:flex;flex-direction:column;min-width:0;line-height:1.15}
+.tile .a{font-weight:500;font-size:13px}
+.tile .b{font-size:11px;opacity:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.tile:not(.on) svg.g{opacity:.65}
+.dot{width:6px;height:6px;border-radius:3px;background:var(--acc);margin-left:auto;margin-right:8px;flex:none}
+.chev{margin-left:auto;width:32px;height:36px;border-radius:18px;display:flex;align-items:center;justify-content:center;flex:none}
+.tile.dim{opacity:.45}
+.srow{height:40px;display:flex;align-items:center;gap:10px;padding:0 12px 0 14px;margin-top:6px;border-radius:20px}
+.srow .trk{position:relative;flex:1;height:6px;border-radius:3px;background:var(--trk)}
+.srow .fill{position:absolute;left:0;top:0;height:6px;border-radius:3px;background:var(--acc)}
+.srow .pct{width:30px;text-align:right;font-variant-numeric:tabular-nums;font-weight:500}
+.foot{display:flex;gap:6px;margin-top:6px}
+.pill{height:40px;border-radius:20px;background:var(--f0);display:flex;align-items:center;gap:8px;padding:0 14px;font-weight:500}
+.pill.grow{flex:1}
+.pill.sq{width:40px;padding:0;justify-content:center}
+/* sub pages */
+.hd{height:44px;display:flex;align-items:center;gap:8px;padding:0 6px 0 4px}
+.hd .back{width:36px;height:36px;border-radius:18px;display:flex;align-items:center;justify-content:center}
+.hd .nm{font-weight:600;font-size:14px;flex:1}
+.sw{width:42px;height:24px;border-radius:12px;background:var(--trk);position:relative}
+.sw.on{background:var(--acc)}
+.sw:after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:9px;background:var(--body-solid,#fff)}
+.sw.on:after{left:21px}
+.light .sw:after{background:#ECEEF2}
+.lr{height:40px;border-radius:20px;display:flex;align-items:center;gap:10px;padding:0 14px}
+.lr .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lr .st{font-size:11px;opacity:var(--sec);font-variant-numeric:tabular-nums}
+.lr.sel{background:var(--f)}
+.lr.more{opacity:var(--sec)}
+.sh{height:26px;display:flex;align-items:flex-end;padding:0 14px 4px;font-size:11px;opacity:var(--sec)}
+/* widget popups: width 250 list-style */
+.wp{width:250px;padding:8px;border-radius:26px}
+.wp .h{height:36px;display:flex;align-items:center;justify-content:space-between;padding:0 10px 0 12px;font-weight:600}
+.wp .h .big{font:600 22px "Segoe UI Variable Display";font-variant-numeric:tabular-nums}
+.chips{display:flex;gap:6px;padding:2px 2px 4px}
+.chip{flex:1;height:60px;border-radius:20px;background:var(--f0);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:11px;font-variant-numeric:tabular-nums}
+.chip.now{background:var(--f)}
+.pr{height:34px;border-radius:17px;display:flex;align-items:center;padding:0 12px;gap:10px;font-variant-numeric:tabular-nums}
+.pr .n{flex:1}.pr.next{background:var(--f)}
+.sun{width:8px;height:8px;border-radius:4px;background:var(--acc)}
+.mini{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;padding:4px 2px;text-align:center;font-variant-numeric:tabular-nums;font-size:12px}
+.mini span{height:28px;display:flex;align-items:center;justify-content:center;border-radius:14px}
+.mini .dim{opacity:.35}.mini .dow{font-size:10px;opacity:var(--sec);height:20px}
+.mini .today{background:var(--acc);color:#14161A;font-weight:600}
+.bar{height:6px;border-radius:3px;background:var(--trk);position:relative;margin:0 4px}
+.bar i{position:absolute;left:0;top:0;height:6px;border-radius:3px;background:var(--acc)}
+.sy{height:40px;display:flex;align-items:center;gap:10px;padding:0 12px 0 12px}
+.sy .nm{width:44px;opacity:var(--sec)}.sy .bar{flex:1;margin:0}.sy .v{width:96px;white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums;font-weight:500}
+</style></head><body>
+<script>
+const G={
+wifi:'<path d="M2.5 9a13 13 0 0 1 19 0M5.5 12.5a8.5 8.5 0 0 1 13 0M8.6 16a4.2 4.2 0 0 1 6.8 0"/><path d="M12 19.5h.01"/>',
+bt:'<path d="M7 7.5l10 9-5 4.5V3l5 4.5-10 9"/>',
+air:'<path d="M12 3c1 0 1.7.8 1.7 1.8V9l7.3 4.6v2l-7.3-2.3v3.8l2 1.5v1.6L12 19.5 9.3 21.2v-1.6l2-1.5v-3.8L4 16.6v-2L11.3 9V4.8C11.3 3.8 12 3 12 3z"/>',
+hot:'<path d="M12 12.5a1.5 1.5 0 1 0 0 .01M8.4 9a5 5 0 0 0 0 7M15.6 9a5 5 0 0 1 0 7M5.4 6.2a9 9 0 0 0 0 13.6M18.6 6.2a9 9 0 0 1 0 13.6"/>',
+awake:'<path d="M3 12s3.4-6 9-6 9 6 9 6-3.4 6-9 6-9-6-9-6zM12 9.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5z"/>',
+theme:'<path d="M12 3.5a8.5 8.5 0 1 0 0 17zM12 3.5a8.5 8.5 0 0 1 0 17"/>',
+sun:'<path d="M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8zM12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6L7 7M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4"/>',
+vol:'<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4zM15.5 9a4 4 0 0 1 0 6M18 6.5a8 8 0 0 1 0 11"/>',
+lock:'<path d="M6.5 10.5h11a1.5 1.5 0 0 1 1.5 1.5v6.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 18.5V12a1.5 1.5 0 0 1 1.5-1.5zM8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>',
+sleep:'<path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z"/>',
+power:'<path d="M13 3L5.5 13.5H12L11 21l7.5-10.5H12z"/>',
+chev:'<path d="M9 6l6 6-6 6"/>',
+back:'<path d="M15 6l-6 6 6 6"/>',
+cloud:'<path d="M7 18.5a4 4 0 0 1-.6-7.95A5.5 5.5 0 0 1 17 9.5a4.5 4.5 0 0 1 0 9z"/>',
+cal:'<path d="M6.5 5.5h11a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-10a2 2 0 0 1 2-2zM4.5 10h15M8.5 3.5v3M15.5 3.5v3"/>',
+timer:'<path d="M12 7.5a7 7 0 1 0 0 14a7 7 0 1 0 0-14zM12 11v4l2.5 1.5M9.5 3h5"/>',
+gauge:'<path d="M3.5 18a8.5 8.5 0 1 1 17 0M12 15l5-6"/>',
+moon:'<path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z"/>',
+bat:'<path d="M5.5 6.5h9.5a3 3 0 0 1 3 3v5a3 3 0 0 1-3 3H5.5a3 3 0 0 1-3-3v-5a3 3 0 0 1 3-3zM21.25 10.5v3"/>',
+start:'<path d="M4.5 4.5h7v7h-7zM12.5 4.5h7v7h-7zM4.5 12.5h7v7h-7zM12.5 12.5h7v7h-7z"/>',
+sliders:'<path d="M3 7h3M10 7h11M3 17h11M18 17h3M8 5a2 2 0 1 0 0 4a2 2 0 1 0 0-4zM16 15a2 2 0 1 0 0 4a2 2 0 1 0 0-4z"/>',
+places:'<path d="M4 14.5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM4 14.5l2.3-7.6A2 2 0 0 1 8.2 5.5h7.6a2 2 0 0 1 1.9 1.4l2.3 7.6"/>',
+sig:'<path d="M5 18v-3M10 18v-6M15 18V9M20 18V6"/>',
+phone:'<path d="M9 3.5h6a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H9A1.5 1.5 0 0 1 7.5 19V5A1.5 1.5 0 0 1 9 3.5zM11 17.5h2"/>',
+head:'<path d="M4.5 14v-2a7.5 7.5 0 0 1 15 0v2M4.5 14h3v5h-1.5a1.5 1.5 0 0 1-1.5-1.5zM19.5 14h-3v5h1.5a1.5 1.5 0 0 0 1.5-1.5z"/>',
+drop:'<path d="M12 3.5s6 6.2 6 10.5a6 6 0 0 1-12 0C6 9.700 12 3.5 12 3.5z"/>',
+};
+const g=(k,s)=>`<svg class="g" viewBox="0 0 24 24"${s?` style="${s}"`:''}>${G[k]}</svg>`;
+const THEMES=[['classic','Classic'],['midnight','Midnight'],['light','Light'],['frosted','Frosted tint'],['liquid','Liquid glass']];
+const view=(location.search.match(/v=(\w+)/)||[,'dock'])[1];
+
+/* ---- pieces ---- */
+function dock(theme,{hover=-1,tiles=['weather','prayer','calendar'],timer=false}={}){
+ const W={weather:['cloud','29°'],prayer:['moon','Asr 12m'],calendar:['cal','Tue 24'],timer:['timer','18 min'],system:['gauge',''],water:['drop','3 of 8']};
+ const list=timer?[...tiles.filter(t=>t!=='timer'),'timer']:tiles;
+ const wt=list.map((k,i)=>`<div class="wt${hover===i?' hov':''}">${g(W[k][0])}${W[k][1]?`<span>${W[k][1]}</span>`:''}</div>`).join('');
+ const btn=(k,h)=>`<div class="cell${h?' hov':''}">${g(k)}</div>`;
+ return `<div class="dock surf ${theme}">
+  ${btn('start')}<div class="gap"></div>${['','','','','',''].map(()=>`<div class="app"></div>`).join('')}<div class="gap"></div>
+  <span style="display:flex;align-items:center">${wt}</span>
+  ${btn('sliders',hover===99)}${btn('places')}${btn('bat')}
+ </div>`;
+}
+function tile(k,a,b,{on,chev,dim}={}){return `<div class="tile${on?' on':''}${dim?' dim':''}">${g(k)}<div class="tx"><span class="a">${a}</span><span class="b">${b}</span></div>${chev?`<div class="chev">${g('chev','width:16px;height:16px')}</div>`:(on?'<span class="dot"></span>':'')}</div>`}
+function slider(k,p,hov){return `<div class="srow${hov?' hov':''}">${g(k)}<div class="trk"><div class="fill" style="width:${p}%"></div></div><span class="pct">${p}</span></div>`}
+function center(theme,o={}){
+ const s={wifi:true,bt:true,air:false,hot:false,awake:false,dark:true,...o};
+ return `<div class="cc surf ${theme}">
+  <div class="tiles">
+   ${tile('wifi','Wi-Fi',s.wifi?(s.air?'Off':'Home 5G'):'Off',{on:s.wifi,chev:s.wifi})}
+   ${tile('bt','Bluetooth',s.bt?'2 devices':'Off',{on:s.bt,chev:s.bt})}
+   ${tile('air','Airplane',s.air?'On':'Off',{on:s.air})}
+   ${tile('hot','Hotspot',s.hotNote||'Off',{on:s.hot,dim:s.hotDim})}
+   ${tile('awake','Keep awake',s.awake?'On':'Off',{on:s.awake})}
+   ${tile('theme','Theme',s.dark?'Dark':'Light',{on:false})}
+  </div>
+  ${slider('vol',62,o.hv==='vol')}
+  ${slider('sun',80,o.hv==='sun')}
+  <div class="foot"><div class="pill grow">${g('power')}<span>Balanced</span></div><div class="pill sq">${g('lock')}</div><div class="pill sq">${g('sleep')}</div></div>
+ </div>`;
+}
+function wifiPage(theme){
+ const rows=[['Home 5G','Connected',3,1],['Home 2.4G','Saved',2],['Cafe Aya','Saved',1],['Office guest','Saved',3]];
+ return `<div class="cc surf ${theme}"><div class="hd"><div class="back">${g('back')}</div><span class="nm">Wi-Fi</span><div class="sw on"></div></div>
+ <div class="sh">Saved networks in range</div>
+ ${rows.map(r=>`<div class="lr${r[3]?' sel':''}">${g('wifi')}<span class="nm">${r[0]}</span><span class="st">${r[1]}</span></div>`).join('')}
+ <div class="lr more">${g('sliders')}<span class="nm">More networks</span>${g('chev','width:16px;height:16px')}</div></div>`;
+}
+function btPage(theme){
+ const rows=[['head','WH-1000XM5','Connected, 80%',1],['phone','Pixel 8','Connected, 62%',1],['head','Buds Pro','Not connected'],['bt','Keyboard K3','Not connected']];
+ return `<div class="cc surf ${theme}"><div class="hd"><div class="back">${g('back')}</div><span class="nm">Bluetooth</span><div class="sw on"></div></div>
+ <div class="sh">Paired devices</div>
+ ${rows.map(r=>`<div class="lr${r[3]?' sel':''}">${g(r[0])}<span class="nm">${r[1]}</span><span class="st">${r[2].replace(/^.*?, /,'').replace('Not connected','')}${r[3]?'':''}</span></div>`).join('')}
+ <div class="lr more">${g('bt')}<span class="nm">Add a device</span>${g('chev','width:16px;height:16px')}</div></div>`;
+}
+const hrs=['Now','4 pm','5 pm','6 pm','7 pm','8 pm'];
+function weatherPop(t){return `<div class="wp surf ${t}"><div class="h"><span class="big">29°</span><span class="sec" style="font-weight:400">Clear, Cairo</span></div>
+ <div class="chips">${['29°','28°','26°','24°'].map((x,i)=>`<div class="chip${i?'':' now'}"><span class="sec">${hrs[i]}</span><span style="font-weight:500;font-size:13px">${x}</span></div>`).join('')}</div></div>`}
+function prayerPop(t){const p=[['Fajr','4:41 am'],['Dhuhr','11:52 am'],['Asr','3:19 pm',1],['Maghrib','5:38 pm'],['Isha','7:02 pm']];
+ return `<div class="wp surf ${t}"><div class="h"><span>Asr in 12 min</span></div>${p.map(r=>`<div class="pr${r[2]?' next':''}"><span class="n">${r[0]}</span><span class="sec">${r[1]}</span>${r[2]?'<span class="sun"></span>':'<span style="width:8px"></span>'}</div>`).join('')}</div>`}
+function calPop(t){const d=[...Array(42)].map((_,i)=>{const n=i-5;return n<1?30+n+1:(n>30?n-30:n)});
+ return `<div class="wp surf ${t}"><div class="h"><span>November 2026</span></div><div class="mini">${['M','T','W','T','F','S','S'].map(x=>`<span class="dow">${x}</span>`).join('')}${d.map((n,i)=>`<span class="${i<5||i>34?'dim':''}${n===24&&i>=5&&i<=34?' today':''}">${n}</span>`).join('')}</div></div>`}
+function sysPop(t){const r=[['CPU','14%',14],['Memory','9.8 of 16 GB',61],['Disk C','212 of 476 GB',45]];
+ return `<div class="wp surf ${t}"><div class="h"><span>System</span><span class="sec" style="font-weight:400;font-size:11px">Updates while open</span></div>${r.map(x=>`<div class="sy"><span class="nm">${x[0]}</span><div class="bar"><i style="width:${x[2]}%"></i></div><span class="v">${x[1]}</span></div>`).join('')}
+ <div class="sy"><span class="nm">Network</span><span style="flex:1"></span><span class="v" style="width:auto">1.2 down, 0.1 up Mb/s</span></div></div>`}
+function timerPop(t){return `<div class="wp surf ${t}"><div class="h"><span class="big">18:04</span><span class="sec" style="font-weight:400">Timer</span></div><div class="bar" style="margin:2px 12px 8px"><i style="width:28%"></i></div>
+ <div class="foot" style="margin-top:0"><div class="pill grow" style="justify-content:center">Pause</div><div class="pill grow" style="justify-content:center">Add 5 min</div></div></div>`}
+
+const el=document.createElement('div');el.className='sheet on';document.body.appendChild(el);
+const cap=(t)=>`<div class="cap">${t}</div>`;
+if(view==='dock'){
+ el.innerHTML=`<div class="title">Dock right cluster with widget tiles, five themes (2x)</div><div class="stage" style="display:flex;flex-direction:column;gap:16px">
+ ${THEMES.map(([t,n],i)=>`<div>${dock(t,{hover:i===0?1:-1})}${cap(n+(i===0?', Prayer tile hovered':''))}</div>`).join('')}</div>`;
+}
+if(view==='states'){
+ el.innerHTML=`<div class="title">Tile states (Classic, 2x)</div><div class="stage" style="display:flex;flex-direction:column;gap:14px">
+ <div>${dock('classic',{tiles:['weather','prayer','calendar']})}${cap('Three tiles, the most the dock shows. Rest: no fill, glyph and reading in ink.')}</div>
+ <div>${dock('classic',{tiles:['weather','calendar'],timer:true})}${cap('Timer tile appears only while a countdown runs, after the chosen ones. Fourth cell is the only time a fourth shows.')}</div>
+ <div>${dock('classic',{tiles:['system']})}${cap('System tile is glyph only: nothing is sampled until its popup opens.')}</div>
+ <div>${dock('classic',{tiles:['weather','prayer','calendar'],hover:0})}${cap('Hover: existing 22% Lamp capsule. No tooltip.')}</div>
+ <div>${dock('classic',{tiles:[]})}${cap('No widget chosen: no tiles, the dock is as it is today.')}</div></div>`;
+}
+if(view==='pops'){
+ el.innerHTML=`<div class="title">Widget popups (Classic, 2x)</div><div class="stage"><div class="row">
+ <div>${weatherPop('classic')}${cap('Weather')}</div><div>${prayerPop('classic')}${cap('Prayer: Lamp sun on the next one only')}</div><div>${calPop('classic')}${cap('Calendar: Lamp today marker')}</div><div>${sysPop('classic')}${cap('System')}</div><div>${timerPop('classic')}${cap('Timer')}</div></div></div>`;
+}
+if(view==='popthemes'){
+ el.innerHTML=`<div class="title">Prayer and System popups, five themes (2x)</div><div class="stage"><div class="row">${THEMES.map(([t,n])=>`<div>${prayerPop(t)}<div style="height:10px"></div>${sysPop(t)}${cap(n)}</div>`).join('')}</div></div>`;
+}
+if(view==='center'){
+ el.innerHTML=`<div class="title">Command center, five themes (2x)</div><div class="stage"><div class="row">${THEMES.map(([t,n],i)=>`<div>${center(t,{hv:i===0?'vol':''})}${cap(n+(i===0?', volume row hovered':''))}</div>`).join('')}</div></div>`;
+}
+if(view==='pages'){
+ el.innerHTML=`<div class="title">Command center pages and states (Classic, 2x)</div><div class="stage"><div class="row">
+ <div>${wifiPage('classic')}${cap('Wi-Fi page: saved networks in range. A click connects. Others open Windows Wi-Fi list.')}</div>
+ <div>${btPage('classic')}${cap('Bluetooth page: paired devices with battery. Rows are informational (no public connect call).')}</div>
+ <div>${center('classic',{wifi:false,bt:false,air:true})}${cap('Airplane on: radios off. Wi-Fi and Bluetooth read Off with no chevron.')}</div>
+ <div>${center('classic',{hotNote:'Open settings',hotDim:true,awake:true,dark:false})}${cap('If the hotspot spike fails: tile opens Windows settings. Keep awake on shows the Lamp dot.')}</div></div></div>`;
+}
+if(view==='open'){
+ el.innerHTML=`<div class="title">In place: popover above the sliders button (Classic, 2x)</div><div class="stage" style="display:inline-flex;flex-direction:column;align-items:flex-end;gap:14px;padding:28px 24px">${center('classic')}<div style="align-self:stretch;display:flex;justify-content:flex-end">${dock('classic',{hover:99})}</div></div>
+ <div class="cap">Popover opens above its button with a 14 DIP gap and its right edge on the dock end.</div>`;
+}
+</script></body></html>

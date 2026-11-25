@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          "cook/design/limits-icons-polish/mock.html"
+        ],
+        "createdAt": "2026-11-23T11:33:13.262Z",
+        "reason": "brand caption is 10.5/500 (cook/brand/BRAND.md section 7); mock annotation labels only"
+      }
+    ]
+  }
+}

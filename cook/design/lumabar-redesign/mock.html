@@ -1,0 +1,174 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Notch glance line</title>
+<style>
+:root{--bg:#696969}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);font-family:"Segoe UI Variable Text","Segoe UI",sans-serif;color:#fff;padding:24px;font-size:12px;width:max-content}
+.sheet{display:none}.sheet.on{display:block}
+h1{font:600 15px "Segoe UI Variable Display";color:#fff;margin:0 0 6px}
+.note{font:500 10.5px "Segoe UI Variable Text";color:#ECEEF2;opacity:.85;margin:0 0 14px;max-width:780px}
+.grid{display:grid;gap:18px 22px}
+.cell .cap{font:500 10.5px "Segoe UI Variable Text";color:#ECEEF2;margin-top:6px;max-width:380px}
+.cell .cap b{font-weight:600;color:#fff}
+/* one stage = the capture's 400 x 170 crop of the 800 wide window: notch body 360 x 128 */
+.stage{position:relative;width:400px;height:170px;background:#696969;overflow:hidden;border-radius:6px}
+.real{display:block;width:400px;height:170px;object-fit:none;object-position:-200px 0;border-radius:6px}
+.notch{position:absolute;left:20px;top:0;width:360px;height:128px;background:var(--body);border-radius:0 0 40px 40px;box-shadow:0 10px 26px rgba(0,0,0,var(--sh))}
+.notch:before,.notch:after{content:"";position:absolute;top:0;width:14px;height:14px}
+.notch:before{left:-14px;background:radial-gradient(circle at 0 100%,transparent 13.5px,var(--body) 14px)}
+.notch:after{right:-14px;background:radial-gradient(circle at 100% 100%,transparent 13.5px,var(--body) 14px)}
+.rail{position:absolute;left:106px;top:126px;width:188px;height:34px;background:var(--body);border-radius:0 0 16px 16px;display:flex;align-items:center;justify-content:center;gap:10px;padding-top:2px}
+.dot{width:7px;height:7px;border-radius:4px;background:var(--ink);opacity:.32}
+.tab{height:24px;border-radius:12px;background:var(--tile);display:flex;align-items:center;gap:8px;padding:0 18px 0 10px;font:600 11px "Segoe UI Variable Text";color:var(--ink);position:relative}
+.tab:after{content:"";position:absolute;left:10px;right:10px;bottom:-2px;height:3px;border-radius:2px;background:var(--acc)}
+.tab svg{width:14px;height:14px}
+.title{position:absolute;left:16px;top:12px;font:600 13px "Segoe UI Variable Display";color:var(--ink)}
+.knob{position:absolute;right:16px;top:8px;width:24px;height:24px;border-radius:12px;background:var(--tile);display:grid;place-items:center}
+.knob svg{width:14px;height:14px}
+.clockcol{position:absolute;left:12px;width:218px;top:36px;text-align:center}
+.clock{font:600 28px "Segoe UI Variable Display";color:var(--ink);letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.clock small{font-size:20px}
+.date{font:400 13px "Segoe UI Variable Text";color:var(--ink);opacity:.62;margin-top:2px}
+.hijri{font:400 10.5px "Segoe UI Variable Text";color:var(--ink);opacity:.5;margin-top:2px;font-variant-numeric:tabular-nums}
+.zone{position:absolute;right:12px;width:130px;top:36px;height:80px}
+.eyes{position:absolute;left:50%;top:10px;transform:translateX(-50%);display:flex;gap:15.5px}
+.eye{width:9.5px;height:18px;border-radius:5px;background:var(--acc)}
+.glance{position:absolute;left:0;right:0;top:48px;height:24px;display:flex;justify-content:center}
+.gl{height:24px;border-radius:12px;display:flex;align-items:center;gap:6px;padding:0 8px;font:400 12px "Segoe UI Variable Text";color:var(--ink);white-space:nowrap;max-width:130px;font-variant-numeric:tabular-nums}
+.gl span{opacity:.70;overflow:hidden;text-overflow:clip}
+.gl svg{width:14px;height:14px;flex:none;opacity:.55}
+.gl.hov{background:rgba(var(--inkrgb),.10)}
+.gl.hov span{opacity:1}.gl.hov svg{opacity:.85}
+.gl.plain svg{display:none}
+/* variant B: three rows, no eyes */
+.rows{position:absolute;right:12px;top:40px;width:136px;display:flex;flex-direction:column;gap:2px}
+.row{height:26px;border-radius:13px;background:var(--tile);display:flex;align-items:center;gap:7px;padding:0 10px;font:400 12px "Segoe UI Variable Text";color:var(--ink);font-variant-numeric:tabular-nums}
+.row svg{width:14px;height:14px;opacity:.6}
+.dest{position:absolute;left:16px;right:16px;top:40px;bottom:16px;border-radius:14px;background:var(--tile);opacity:.55;display:grid;place-items:center;font:400 12px "Segoe UI Variable Text";color:var(--ink)}
+svg{color:var(--ink)}
+.classic{--body:#000;--tile:#3A3A40;--ink:#fff;--inkrgb:255,255,255;--acc:#FFB454;--sh:.9}
+.midnight{--body:#0B1020;--tile:#283254;--ink:#E8EEFF;--inkrgb:232,238,255;--acc:#FFB454;--sh:.9}
+.light .gi svg{opacity:.55}
+.light{--body:#ECEEF2;--tile:#C6CAD1;--ink:#14161A;--inkrgb:20,22,26;--acc:#9A5200;--sh:.55}
+.frosted{--body:rgba(16,20,32,.74);--tile:rgba(255,255,255,.16);--ink:#fff;--inkrgb:255,255,255;--acc:#FFB454;--sh:.9}
+.glass{--body:linear-gradient(rgba(24,32,56,.78),rgba(14,20,38,.74));--tile:rgba(255,255,255,.16);--ink:#fff;--inkrgb:255,255,255;--acc:#FFB454;--sh:.9}
+.glass .notch{background:linear-gradient(rgba(24,32,56,.92),rgba(14,20,38,.9))}
+.glass .rail{background:rgba(14,20,38,.9)}
+.glass .notch:before{background:radial-gradient(circle at 0 100%,transparent 13.5px,rgba(24,32,56,.92) 14px)}
+.glass .notch:after{background:radial-gradient(circle at 100% 100%,transparent 13.5px,rgba(24,32,56,.92) 14px)}
+.frosted .notch,.frosted .rail{background:rgba(22,26,38,.9)}
+.frosted .notch:before{background:radial-gradient(circle at 0 100%,transparent 13.5px,rgba(22,26,38,.9) 14px)}
+.frosted .notch:after{background:radial-gradient(circle at 100% 100%,transparent 13.5px,rgba(22,26,38,.9) 14px)}
+.grail{position:absolute;top:126px;height:34px;background:var(--body);border-radius:0 0 16px 16px;display:flex;align-items:center;gap:10px;padding:2px 8px 0;transform:translateX(-50%);left:200px}
+.glass .grail{background:rgba(14,20,38,.9)}.frosted .grail{background:rgba(22,26,38,.9)}
+.gi{width:16px;height:24px;display:grid;place-items:center;color:var(--ink)}
+.gi svg{width:14px;height:14px;opacity:.45}
+.htab{height:24px;border-radius:12px;background:rgba(var(--inkrgb),.10);display:flex;align-items:center;gap:8px;padding:0 14px 0 10px;font:600 11px "Segoe UI Variable Text";color:var(--ink)}
+.htab svg{width:14px;height:14px}
+.grail .tab,.grail .htab{width:86px;justify-content:center;padding:0}
+#measure{font:400 12px "Segoe UI Variable Text";font-variant-numeric:tabular-nums}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute">
+ <defs>
+  <!-- 20 unit grid, stroke 1.75, round caps: brand icon style -->
+  <symbol id="i-prayer" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15h14"/><path d="M5.5 15a4.5 4.5 0 0 1 9 0"/><path d="M10 4.5v2M4.6 7.4l1.3 1.3M15.4 7.4l-1.3 1.3"/></symbol>
+  <symbol id="i-timer" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="11" r="6"/><path d="M10 11V8M8 2.5h4"/></symbol>
+  <symbol id="i-limits" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 14a6.5 6.5 0 1 1 13 0"/><path d="M10 14l3-4"/></symbol>
+  <symbol id="i-rain" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12.5a3.5 3.5 0 1 1 1-6.8 4.5 4.5 0 0 1 8.6 2 2.4 2.4 0 0 1-.6 4.8z"/><path d="M8 15.5l-.8 1.5M12 15.5l-.8 1.5"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="3.5"/><path d="M10 2.5v1.5M10 16v1.5M2.5 10H4M16 10h1.5M4.7 4.7l1 1M14.3 14.3l1 1M4.7 15.3l1-1M14.3 5.7l1-1"/></symbol>
+  <symbol id="i-media" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="14" rx="3"/><path d="M8.5 7.5v5l4-2.5z"/></symbol>
+  <symbol id="i-weather" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M7.5 6.2a3 3 0 0 1 5.3 1.3"/><path d="M5.5 16a3 3 0 0 1-.3-6 4 4 0 0 1 7.6-.6A3.3 3.3 0 0 1 14.5 16z"/></symbol>
+  <symbol id="i-shelf" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5l2.2-6A2 2 0 0 1 7 4h6a2 2 0 0 1 1.8 1.5l2.2 6"/><path d="M3 11.5V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2.5h-4l-1 1.8H9l-1-1.8z"/></symbol>
+  <symbol id="i-widgets" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="6" rx="3"/><rect x="11" y="3" width="6" height="6" rx="2"/><rect x="3" y="11" width="6" height="6" rx="2"/><rect x="11" y="11" width="6" height="6" rx="2"/></symbol>
+  <symbol id="i-knob" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h14M3 14h14"/><circle cx="7" cy="6" r="2"/><circle cx="13" cy="14" r="2"/></symbol>
+ </defs>
+</svg>
+
+<div id="app"></div>
+<div id="measure" style="position:absolute;left:-9999px"></div>
+
+<script>
+const q = new URLSearchParams(location.search).get('v') || 'compare';
+const ico = id => `<svg><use href="#i-${id}"/></svg>`;
+function notch({theme='classic', title='Media', glance=null, hover=false, plain=false, rows=null, eyes=true, dest=null, tab='Media', tabIcon='media', active=0}={}) {
+  const dots = n => Array.from({length:n},()=>'<i class="dot"></i>').join('');
+  const rail = `<div class="rail">${dots(active)}<div class="tab">${ico(tabIcon)}${tab}</div>${dots(5-active)}</div>`;
+  let right = '';
+  if (rows) right = `<div class="rows">${rows.map(r=>`<div class="row">${ico(r[0])}${r[1]}</div>`).join('')}</div>`;
+  else right = `<div class="zone">${eyes?'<div class="eyes"><i class="eye"></i><i class="eye"></i></div>':''}
+     <div class="glance"><div class="gl ${hover?'hov':''} ${plain?'plain':''}"><span>${glance?glance[1]:'Nothing playing'}</span></div></div></div>`;
+  const body = dest ? `<div class="dest">${dest}</div>` :
+   `<div class="clockcol"><div class="clock">5:48 <small>pm</small></div><div class="date">Tuesday, 24 November 2026</div><div class="hijri">14 Jumada II 1448 AH</div></div>${right}`;
+  return `<div class="stage ${theme}"><div class="notch"><div class="title">${title}</div><div class="knob">${ico('knob')}</div>${body}</div>${rail}</div>`;
+}
+const TABS=[['media','Media'],['weather','Weather'],['prayer','Prayer'],['timer','Timer'],['shelf','Shelf'],['limits','Limits'],['widgets','Widgets']];
+function grail(tabs, active, hover=-1, press=false){
+  return `<div class="grail">${tabs.map((t,i)=> i===active ? `<div class="tab ${press?'press':''}">${ico(t[0])}${t[1]}</div>` : i===hover ? `<div class="htab">${ico(t[0])}${t[1]}</div>` : `<div class="gi">${ico(t[0])}</div>`).join('')}</div>`;
+}
+function rnotch(o={}){ const tabs=o.tabs||TABS.filter(t=>t[0]!=='limits'); const a=o.active||0;
+  let h=notch({...o, hover:false, glance:o.glance||['prayer','Isha at 7:02 pm']});
+  h=h.replace(/<div class="rail">[\s\S]*?<\/div><\/div>$/, grail(tabs,a,o.rh??-1,o.press)+'</div>');
+  return h; }
+const cell = (html, cap) => `<div class="cell">${html}<div class="cap">${cap}</div></div>`;
+const S = {
+  compare(){ return `<h1>Idle notch, open: today vs proposed (Classic)</h1>
+  <p class="note">Left is a live capture (r18, 23 Nov, 2:33 am, untouched). Middle is the proposal: the mascot stays, the line under it says the next thing that matters and opens that tab. Right is the rejected alternative: three summary rows, which crowds out the eyes and starts a widget wall.</p>
+  <div class="grid" style="grid-template-columns:repeat(3,400px)">
+   ${cell(`<img class="real" src="../../stills/r18/10-media-rest.png">`,'<b>Now.</b> The open notch repeats the pill\'s clock; the right zone says "Nothing playing" on every open.')}
+   ${cell(notch({glance:['prayer','Maghrib in 12 min']}),'<b>Proposed A (recommended).</b> Same layout, same text slot and tokens as today. One line, one source, one click to its tab.')}
+   ${cell(notch({rows:[['prayer','Maghrib in 12 min'],['sun','29°, clear'],['limits','Claude at 86%']]}),'<b>Alternative B (not recommended).</b> More glance, but tiles in tiles, no mascot, and the panel turns into a dashboard.')}
+  </div>`; },
+  states(){ return `<h1>Proposed A: which line shows (first match wins), Classic</h1>
+  <p class="note">Sources are only tabs the user has on. The line is picked when the notch opens and on the clock's existing minute tick; no new timer, worker or sampling. Copy is 7 words or fewer.</p>
+  <div class="grid" style="grid-template-columns:repeat(3,400px)">
+   ${cell(notch({glance:['timer','Focus, 18 min left']}),'<b>1. Timer running.</b> Soonest timer, whole minutes (as the pill).')}
+   ${cell(notch({glance:['prayer','Maghrib in 12 min']}),'<b>2. Prayer within 60 min.</b> "Maghrib now" for its first 10 min.')}
+   ${cell(notch({glance:['limits','Claude at 86%']}),'<b>3. An AI limit at 80% or more.</b> Highest one; reset time stays in Limits.')}
+   ${cell(notch({glance:['rain','Rain in 40 min']}),'<b>4. Rain within the hour.</b> The existing rain-soon text, reused.')}
+   ${cell(notch({glance:['prayer','Isha at 7:02 pm']}),'<b>5. Next prayer, any distance.</b> The usual line on a quiet day.')}
+   ${cell(notch({glance:['sun','29°, clear']}),'<b>6. Weather now.</b> Prayer off, weather on.')}
+   ${cell(notch({plain:true}),'<b>7. No source on, or none has data.</b> Today\'s "Nothing playing", unchanged.')}
+   ${cell(notch({glance:['prayer','Maghrib in 12 min'],hover:true}),'<b>Hover.</b> Capsule ink .10, 24 high, pad 8; text to full ink; settle 260 ms. No glyph: it would not fit (see spec).')}
+   ${cell(notch({dest:'Prayer page, unchanged',tab:'Prayer',tabIcon:'prayer',active:2,title:'Prayer'}),'<b>Click.</b> Selects the Prayer tab with the existing slide (240 ms). The rail follows.')}
+  </div>`; },
+  themes(){ return `<h1>Proposed A in the five themes (surface and ink only)</h1>
+  <p class="note">Glance text uses ink at .70, the same token as the status line today. No accent on the line: the eyes keep the one warm thing.</p>
+  <div class="grid" style="grid-template-columns:repeat(3,400px)">
+   ${['classic','midnight','light','frosted','glass'].map((t,i)=>cell(notch({theme:t,glance:['prayer','Maghrib in 12 min'],hover:i==2}), t[0].toUpperCase()+t.slice(1)+(i==2?', hovered':''))).join('')}
+  </div>`; },
+  rail(){ return `<h1>Item 2: the rail shows each tab's glyph (Classic)</h1>
+  <p class="note">Top row is today: the active tab is labelled, the others are bare dots until hovered (live captures r18). Below: same rail, same active capsule and hover label, but every other tab shows its glyph at 14 px, ink .45. Glyph slot 16 wide, gap 10 and pad 8 as now. Widths computed from those constants.</p>
+  <div class="grid" style="grid-template-columns:repeat(3,400px)">
+   ${cell(`<img class="real" src="../../stills/r18/10-media-rest.png">`,'<b>Now, rest.</b> Five dots: which one is Prayer?')}
+   ${cell(`<img class="real" src="../../stills/r18/13-rail-hover.png">`,'<b>Now, hover.</b> You learn a dot by pointing at it.')}
+   ${cell(`<img class="real" src="../../stills/r18/10-weather-rest.png">`,'<b>Now, another tab.</b> The dots move around the label.')}
+   ${cell(rnotch({}),'<b>Proposed, rest.</b> Six tabs: 232 wide (now 187).')}
+   ${cell(rnotch({rh:3}),'<b>Proposed, hover.</b> The hovered glyph opens to its label, as now (pop 360 ms).')}
+   ${cell(rnotch({active:1,title:'Cairo',dest:'Weather page, unchanged',tab:'Weather'}),'<b>Proposed, Weather active.</b> Label and Lamp underline unchanged.')}
+   ${cell(rnotch({tabs:TABS}),'<b>All seven tabs on.</b> 258 wide (now 204); inside the 360 panel.')}
+   ${cell(rnotch({tabs:[TABS[0],TABS[2]]}),'<b>Two tabs.</b> 128 wide. One tab: no rail, as now.')}
+  </div>`; },
+  railthemes(){ return `<h1>Item 2 in the five themes</h1>
+  <p class="note">Glyphs are ink .45 (Light .55 for contrast); never Lamp. Only the active tab's underline is accent, as now.</p>
+  <div class="grid" style="grid-template-columns:repeat(3,400px)">
+   ${['classic','midnight','light','frosted','glass'].map((t,i)=>cell(rnotch({theme:t,rh:i==2?4:-1}), t[0].toUpperCase()+t.slice(1)+(i==2?', Shelf hovered':''))).join('')}
+  </div>`; },
+  edges(){ return `<h1>Edge cases (Classic unless named)</h1>
+  <p class="note">Longest strings measured at 12 px against the 130 DIP zone minus 8 DIP hover pad each side (114) (see spec, Measured).</p>
+  <div class="grid" style="grid-template-columns:repeat(3,400px)">
+   ${cell(notch({glance:['timer','Focus, 118 min left']}),'<b>Longest timer line.</b> 3-digit minutes still fit.')}
+   ${cell(notch({glance:['prayer','Maghrib at 12:58 pm']}),'<b>Longest prayer line.</b> Fits; no ellipsis needed.')}
+   ${cell(notch({theme:'light',glance:['limits','Antigravity at 100%']}),'<b>Longest limits name</b>, Light. 103 of 114 DIP.')}
+   ${cell(notch({glance:['sun','-12°, freezing fog']}),'<b>Weather now, long condition.</b> Over width: short form "-12°".')}
+   ${cell(notch({theme:'midnight',glance:['prayer','Maghrib now'],hover:true}),'<b>At prayer time</b>, Midnight, hovered. Notices still hide the line, as they hide the status now.')}
+   ${cell(notch({glance:['prayer','Fajr at 4:51 am']}),'<b>Overnight.</b> Next prayer crosses midnight; the time alone says it.')}
+  </div>`; },
+};
+if (S[q]) document.getElementById('app').innerHTML = `<div class="sheet on">${S[q]()}</div>`;
+if (q==='measure'){
+  const m=document.getElementById('measure'); const out=[];
+  for (const s of ['Nothing playing','Focus, 18 min left','Focus, 118 min left','Maghrib in 12 min','Maghrib at 12:58 pm','Claude at 86%','Antigravity at 100%','Rain from 8 pm','29°, clear','-12°, freezing fog','Fajr at 4:51 am']){ m.textContent=s; out.push(s+'\t'+m.getBoundingClientRect().width.toFixed(1)); }
+  document.body.setAttribute('data-m', out.join('|'));
+  document.getElementById('app').textContent='MEASURE '+out.join(' | ');
+}
+</script></body></html>

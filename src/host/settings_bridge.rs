@@ -165,6 +165,7 @@ impl Desktop {
         if let Some(index) = show {
             self.change_pins(|pins| pins.unhide(index));
         }
+        let changed = change.is_some();
         if let Some(next) = change {
             self.apply_settings(next, catalog)?;
         }
@@ -181,7 +182,9 @@ impl Desktop {
                 let _ = window.say(&status);
             }
         }
-        self.sync_water();
+        if drank || changed {
+            self.sync_water();
+        }
         if let Some(seconds) = start {
             let status = if self.pages.tabs.on(Tab::Timer) {
                 self.start_timer(seconds)

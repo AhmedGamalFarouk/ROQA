@@ -1,28 +1,22 @@
-//! Scrolling the Settings window: the bar in the window's right gutter (drawn with the page, in one paint, so it
-//! never flickers against it), its thumb drag and track paging, the wheel glide on the one motion clock, and the
-//! cheap scroll step that moves the page's controls without measuring or re-creating anything.
+//! Scrolling the Settings page: the bar in the window's right gutter (drawn with the frame), its thumb drag and
+//! track paging, the wheel, and the one move of the content window that every scroll is.
 //!
-//! The old bar was the system's, painted over by hand: its thumb drag ran Windows' own modal loop, where the
-//! posted scroll messages are never read (the page did not move), and every `SetScrollInfo` redrew it plain
-//! before the overdraw. Nothing here runs unless a scroll message or a glide frame asks for it.
+//! A scroll changes one number (the offset) and moves one window; it never lays out, measures, reads settings or
+//! writes them. Input is applied as it arrives: the wheel and the thumb go straight to the offset (a fine
+//! touchpad delta moves its fraction, carried across messages), with no glide to queue behind.
 
 use super::*;
-use crate::motion;
-use std::{
-    cell::Cell,
-    time::{Duration, Instant},
-};
+use std::cell::Cell;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 
 /// `SCROLL` message codes (the wheel's is `dialog::WHEEL`); the amount rides in `lParam`.
-const PAGE: usize = 1;
+pub(super) const PAGE: usize = 1;
 const DRAG: usize = 2;
-/// A wheel notch (120 units) scrolls this many DIPs.
-const NOTCH: i32 = 48;
-/// A wheel step or a page glides this long (at the chosen speed).
-const GLIDE: Duration = Duration::from_millis(180);
-/// The shortest thumb, in DIPs, so it stays easy to grab on a long page.
+/// A line is 18 DIPs; Windows' wheel setting says how many a notch scrolls (3 by default).
+const LINE: i32 = 18;
+/// The shortest thumb, and the visible thumb's width, in DIPs.
 const MIN_THUMB: i32 = 28;
+const THUMB_W: i32 = 6;
 
 thread_local! {
     /// Where in the thumb it was grabbed (pixels from its top) while the button is held.
@@ -39,6 +33,8 @@ pub(super) struct Bar {
     pub view: i32,
     pub scroll: i32,
     pub min_thumb: i32,
+    /// The visible thumb's width: narrower than the track's hit area, centred in it.
+    pub width: i32,
 }
 
 impl Bar {
@@ -49,6 +45,7 @@ impl Bar {
             view,
             scroll,
             min_thumb: (MIN_THUMB as f64 * scale).round() as i32,
+            width: (THUMB_W as f64 * scale).round() as i32,
         }
     }
 
@@ -96,10 +93,10 @@ impl Bar {
             && (self.track.top..self.track.bottom).contains(&y)
     }
 
-    /// The thumb as drawn: a capsule a third in from each side of the gutter.
+    /// The thumb as drawn: a capsule centred in the track.
     pub fn thumb_rect(&self) -> RECT {
         let (top, length) = self.thumb();
-        let inset = ((self.track.right - self.track.left) / 3).max(2);
+        let inset = ((self.track.right - self.track.left - self.width) / 2).max(0);
         RECT {
             left: self.track.left + inset,
             right: self.track.right - inset,
@@ -109,19 +106,69 @@ impl Bar {
     }
 }
 
-/// Where a wheel turn of `delta` units (positive is up) takes a glide aimed at `aim`.
-fn wheel_aim(aim: i32, delta: i32, notch: i32, max: i32) -> i32 {
-    (aim - delta * notch / 120).clamp(0, max)
+/// How far one wheel notch (120 units) scrolls, in pixels: Windows' lines per notch, or a page when it says so.
+pub(super) fn notch_px(lines: u32, scale: f64, view: i32) -> i32 {
+    if lines == u32::MAX {
+        return page_px(view, scale);
+    }
+    let line = (LINE as f64 * scale).round() as i32;
+    lines.min(100) as i32 * line
 }
 
-/// Where a track click (`direction` -1 above the thumb, 1 below) takes a glide aimed at `aim`: one view.
-fn page_aim(aim: i32, view: i32, direction: i32, max: i32) -> i32 {
-    (aim + direction * view).clamp(0, max)
+/// A page: the view less two lines (never under one).
+pub(super) fn page_px(view: i32, scale: f64) -> i32 {
+    let line = (LINE as f64 * scale).round() as i32;
+    (view - 2 * line).max(line)
+}
+
+/// Where a wheel turn of `delta` units (positive is up) takes the page from `offset`, carrying `remainder` (in
+/// 120ths of a pixel) so fine touchpad deltas never vanish. A turn the other way drops what was carried, and
+/// clamping at either end drops the leftover, so the first turn back moves at once.
+pub(super) fn wheel_step(
+    offset: i32,
+    delta: i32,
+    notch: i32,
+    max: i32,
+    remainder: i32,
+) -> (i32, i32) {
+    let moving = -delta;
+    let carry = if remainder != 0 && (remainder > 0) != (moving > 0) {
+        0
+    } else {
+        remainder
+    };
+    let total = carry + moving * notch;
+    let next = offset + total / 120;
+    let clamped = next.clamp(0, max);
+    let rest = if clamped == next { total % 120 } else { 0 };
+    (clamped, rest)
+}
+
+/// Windows' wheel setting: lines per notch (3 unless the user changed it; `u32::MAX` is a page).
+fn wheel_lines() -> u32 {
+    let mut lines = 3u32;
+    // SAFETY: fills a local the size the query declares.
+    let _ = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWHEELSCROLLLINES,
+            0,
+            Some((&mut lines as *mut u32).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    lines
 }
 
 fn post(window: HWND, code: usize, amount: i32) {
     // SAFETY: a plain posted message to our own window; the host loop reads it with the others.
     let _ = unsafe { PostMessageW(Some(window), SCROLL, WPARAM(code), LPARAM(amount as isize)) };
+}
+
+fn ask_drag(window: HWND, bar: &Bar, y: i32, grab: i32) {
+    let asked = bar.scroll_for(y - bar.track.top - grab);
+    if ASKED.replace(Some(asked)).is_none() {
+        post(window, DRAG, 0);
+    }
 }
 
 /// The bar's mouse use, from the dialog procedure (which cannot reach the window's state): a press on the thumb
@@ -146,14 +193,20 @@ pub(super) fn mouse(window: HWND, message: u32, lparam: LPARAM, bar: &Bar) -> bo
             true
         }
         WM_MOUSEMOVE => GRAB.get().is_some_and(|grab| {
-            let asked = bar.scroll_for(y - bar.track.top - grab);
-            if ASKED.replace(Some(asked)).is_none() {
-                post(window, DRAG, asked);
-            }
+            ask_drag(window, bar, y, grab);
             true
         }),
-        WM_LBUTTONUP | WM_CANCELMODE | WM_CAPTURECHANGED => {
+        WM_LBUTTONUP => GRAB.take().is_some_and(|grab| {
+            ask_drag(window, bar, y, grab);
+            // SAFETY: gives back the capture this window took above.
+            let _ = unsafe { ReleaseCapture() };
+            true
+        }),
+        WM_CANCELMODE | WM_CAPTURECHANGED => {
             let held = GRAB.take().is_some();
+            if held {
+                ASKED.set(None);
+            }
             if held && message != WM_CAPTURECHANGED {
                 // SAFETY: gives back the capture this window took above.
                 let _ = unsafe { ReleaseCapture() };
@@ -164,140 +217,105 @@ pub(super) fn mouse(window: HWND, message: u32, lparam: LPARAM, bar: &Bar) -> bo
     }
 }
 
-impl Paint {
-    /// Moves everything the page paints (not the bar) by `dy`.
-    fn shift(&mut self, dy: i32) {
-        let by = |r: &mut RECT| {
-            r.top += dy;
-            r.bottom += dy;
-        };
-        by(&mut self.title.0);
-        self.labels.iter_mut().for_each(|(r, _)| by(r));
-        self.cards.iter_mut().for_each(by);
-        self.fields.iter_mut().for_each(by);
+/// Lets go of the thumb (a page, a DPI or a focus change ends a drag in progress).
+pub(super) fn release() {
+    ASKED.set(None);
+    if GRAB.take().is_some() {
+        // SAFETY: gives back a capture this thread's window may hold; harmless when it does not.
+        let _ = unsafe { ReleaseCapture() };
     }
 }
 
-/// Draws the thumb (its fill is the track's: only the capsule shows).
-pub(super) unsafe fn draw_thumb(dc: HDC, bar: &Bar, colour: u32) {
+/// Draws the bar: a faint track and the thumb capsule (only when the page overflows).
+pub(super) fn draw_bar(b: &GdiBatch<'_>, bar: &Bar, track: u32, thumb: u32) {
     if !bar.scrolls() {
         return;
     }
-    let thumb = bar.thumb_rect();
-    // SAFETY: the caller's live DC.
-    unsafe { round(dc, thumb, (thumb.right - thumb.left) / 2, colour, colour) };
+    let width = bar.width;
+    let inset = ((bar.track.right - bar.track.left - width) / 2).max(0);
+    let lane = RECT {
+        left: bar.track.left + inset,
+        right: bar.track.right - inset,
+        ..bar.track
+    };
+    b.round(lane, width / 2, swap(track), swap(track));
+    let rect = bar.thumb_rect();
+    b.round(rect, width / 2, swap(thumb), swap(thumb));
 }
 
 impl SettingsWindow {
-    /// A scroll request from the dialog (see the codes above): the wheel and the track glide, the thumb follows.
+    pub(super) fn scrolling_body(&self) -> HWND {
+        if self.search.is_open() {
+            self.search.body
+        } else {
+            self.contents[self.page]
+        }
+    }
+    /// A scroll request from the dialog (see the codes above): the wheel, a track click and the thumb all land
+    /// on the offset at once.
     pub(super) fn scroll_message(&mut self, code: usize, amount: i32) -> Result<()> {
         let Some(scale) = self.font.as_ref().map(|f| f.scale) else {
             return Ok(());
         };
-        let aim = self.glide.target() as i32;
+        let view = self.frame.viewport.bottom - self.frame.viewport.top;
         match code {
-            PAGE => {
-                self.glide_to(page_aim(aim, self.view(scale), amount, self.scroll_max));
-                Ok(())
-            }
-            DRAG => self.jump(ASKED.take().unwrap_or(amount)),
+            PAGE => self.jump(self.scroll + amount * page_px(view, scale)),
+            DRAG => match ASKED.take() {
+                Some(asked) => self.jump(asked),
+                None => Ok(()),
+            },
             _ => {
-                let notch = (NOTCH as f64 * scale).round() as i32;
-                self.glide_to(wheel_aim(aim, amount, notch, self.scroll_max));
+                let notch = notch_px(wheel_lines(), scale, view);
+                let (next, rest) = wheel_step(
+                    self.scroll,
+                    amount,
+                    notch,
+                    self.scroll_max,
+                    self.wheel_remainder,
+                );
+                self.jump_to(next)?;
+                self.wheel_remainder = rest;
                 Ok(())
             }
         }
     }
 
-    /// The view's height: the client above the footer.
-    fn view(&self, scale: f64) -> i32 {
-        let mut client = RECT::default();
-        // SAFETY: our own live window.
-        let _ = unsafe { GetClientRect(self.window, &mut client) };
-        (client.bottom - (FOOT as f64 * scale).round() as i32).max(1)
-    }
-
-    /// Aims the glide at `to` (kept inside the page): the host's frames carry it there, and none run after.
-    fn glide_to(&mut self, to: i32) {
-        self.glide.retarget(
-            to.clamp(0, self.scroll_max) as f32,
-            motion::time(GLIDE),
-            motion::SETTLE,
-        );
-    }
-
-    /// Scrolls to `to` at once (a drag, a focused row coming into view) and ends any glide.
+    /// Scrolls to `to` (clamped), forgetting any carried wheel fraction: a drag, a page, a focused row coming
+    /// into view.
     pub(super) fn jump(&mut self, to: i32) -> Result<()> {
+        self.wheel_remainder = 0;
+        self.jump_to(to)
+    }
+
+    /// Moves the page to `to`: one move of the content window (the system clips it to the viewport and repaints
+    /// the strip it uncovers) and the thumb. Nothing else: no layout, no controls, no settings.
+    fn jump_to(&mut self, to: i32) -> Result<()> {
         let to = to.clamp(0, self.scroll_max);
-        self.glide = motion::Tween::rest(to as f32);
-        self.step(to)
-    }
-
-    /// One frame of the glide; true while it runs.
-    pub fn glide_frame(&mut self, now: Instant) -> Result<bool> {
-        let running = self.glide.running(now);
-        self.step((self.glide.value(now).round() as i32).clamp(0, self.scroll_max))?;
-        Ok(running)
-    }
-
-    /// Moves the page to `to`: the controls as one batch, the painted cards and the thumb with them, and one
-    /// repaint of the pane (never the sidebar or the footer). No text is measured; `place` made the list.
-    fn step(&mut self, to: i32) -> Result<()> {
-        let dy = to - self.scroll;
-        let Some(scale) = self.font.as_ref().map(|f| f.scale) else {
+        if to == self.scroll {
             return Ok(());
-        };
-        if dy == 0 {
-            return Ok(());
+        }
+        // SAFETY: our own live content window.
+        unsafe {
+            SetWindowPos(
+                self.scrolling_body(),
+                None,
+                0,
+                -to,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )?;
         }
         self.scroll = to;
-        let mut client = RECT::default();
-        // SAFETY: our own live window, its children and a deferred batch that ends before returning.
-        unsafe {
-            GetClientRect(self.window, &mut client)?;
-            let view = client.bottom - (FOOT as f64 * scale).round() as i32;
-            let mut moves = self.moves.borrow_mut();
-            let mut batch = BeginDeferWindowPos(moves.len().max(1) as i32)?;
-            for it in moves.iter_mut() {
-                it.y -= dy;
-                batch = DeferWindowPos(
-                    batch,
-                    it.h,
-                    None,
-                    it.x,
-                    it.y,
-                    it.w,
-                    it.ht,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
-                )?;
-            }
-            EndDeferWindowPos(batch)?;
-            for it in moves.iter() {
-                if it.boxed {
-                    inset(it.h, it.w, it.cut, it.y, view);
-                } else {
-                    clip(it.h, it.y, it.ht, it.w, view);
-                }
-            }
-            drop(moves);
-            PAINT.with(|cell| {
-                if let Some(p) = cell.borrow_mut().as_mut() {
-                    p.shift(-dy);
-                    p.bar.scroll = to;
-                }
-            });
-            let pane = RECT {
-                left: (SIDE_W as f64 * scale).round() as i32,
-                top: 0,
-                right: client.right,
-                bottom: view,
-            };
-            let _ = RedrawWindow(
-                Some(self.window),
-                Some(&pane),
-                None,
-                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
-            );
+        let track = PAINT.with(|cell| {
+            cell.borrow_mut().as_mut().map(|p| {
+                p.bar.scroll = to;
+                p.bar.track
+            })
+        });
+        if let Some(track) = track {
+            // SAFETY: our own live dialog; only the bar's strip is invalidated.
+            let _ = unsafe { InvalidateRect(Some(self.window), Some(&track), true) };
         }
         Ok(())
     }
@@ -312,14 +330,28 @@ mod tests {
             track: RECT {
                 left: 600,
                 top: 0,
-                right: 617,
+                right: 614,
                 bottom: view,
             },
             content,
             view,
             scroll,
             min_thumb: 28,
+            width: 6,
         }
+    }
+
+    #[test]
+    fn drag_release_keeps_the_final_position_until_it_is_read() {
+        let window = HWND::default();
+        let bar = bar(1000, 500, 0);
+        let position = |y: i32| LPARAM((y as isize) << 16);
+        GRAB.set(Some(10));
+        ASKED.set(Some(20));
+        assert!(mouse(window, WM_MOUSEMOVE, position(130), &bar));
+        assert!(mouse(window, WM_LBUTTONUP, position(260), &bar));
+        assert!(!mouse(window, WM_CAPTURECHANGED, LPARAM(0), &bar));
+        assert_eq!(ASKED.take(), Some(bar.max()));
     }
 
     #[test]
@@ -399,29 +431,73 @@ mod tests {
     }
 
     #[test]
-    fn the_mouse_finds_the_gutter_only() {
+    fn the_mouse_finds_the_gutter_only_and_the_thumb_is_centred_in_it() {
         let b = bar(1000, 500, 0);
-        assert!(b.holds(600, 0) && b.holds(616, 499));
-        assert!(!b.holds(599, 10) && !b.holds(617, 10) && !b.holds(610, 500));
+        assert!(b.holds(600, 0) && b.holds(613, 499));
+        assert!(!b.holds(599, 10) && !b.holds(614, 10) && !b.holds(610, 500));
         let thumb = b.thumb_rect();
-        assert!(
-            thumb.left > 600 && thumb.right < 617,
-            "a capsule inside the gutter"
+        assert_eq!(
+            (thumb.left, thumb.right),
+            (604, 610),
+            "6 wide in the 14 wide track"
         );
         assert_eq!((thumb.top, thumb.bottom), (0, 250));
     }
 
     #[test]
-    fn the_wheel_and_the_track_aim_inside_the_page() {
-        // One notch up from 100 is 48 up; the page's two ends hold.
-        assert_eq!(wheel_aim(100, 120, 48, 400), 52);
-        assert_eq!(wheel_aim(100, -120, 48, 400), 148);
-        assert_eq!(wheel_aim(10, 120, 48, 400), 0);
-        assert_eq!(wheel_aim(390, -240, 48, 400), 400);
-        // A fine wheel (touchpad) moves in proportion instead of a whole notch per message.
-        assert_eq!(wheel_aim(100, -30, 48, 400), 112);
-        assert_eq!(page_aim(100, 500, 1, 400), 400);
-        assert_eq!(page_aim(300, 500, -1, 400), 0);
-        assert_eq!(page_aim(0, 100, 1, 400), 100);
+    fn a_notch_follows_the_windows_wheel_setting() {
+        // Three lines of 18 is the default notch; a page when Windows says so; capped, never zero-sized.
+        assert_eq!(notch_px(3, 1.0, 500), 54);
+        assert_eq!(notch_px(1, 2.0, 500), 36);
+        assert_eq!(notch_px(u32::MAX, 1.0, 500), 464, "view less 36");
+        assert_eq!(page_px(40, 1.0), 18, "never under one line");
+        assert_eq!(
+            notch_px(u32::MAX - 1, 1.0, 500),
+            1800,
+            "a silly value is capped"
+        );
+    }
+
+    #[test]
+    fn the_wheel_moves_and_stops_at_both_ends() {
+        // One notch up from 100 is a notch up; the page's two ends hold.
+        assert_eq!(wheel_step(100, 120, 54, 400, 0), (46, 0));
+        assert_eq!(wheel_step(100, -120, 54, 400, 0), (154, 0));
+        assert_eq!(wheel_step(10, 120, 54, 400, 0), (0, 0));
+        assert_eq!(wheel_step(390, -240, 54, 400, 0), (400, 0));
+        // Pressing on at an end moves nothing and carries nothing.
+        assert_eq!(wheel_step(0, 30, 54, 400, 0), (0, 0));
+        assert_eq!(wheel_step(400, -30, 54, 400, 0), (400, 0));
+    }
+
+    #[test]
+    fn a_fine_wheel_moves_in_proportion_and_carries_what_is_left() {
+        assert_eq!(wheel_step(100, -30, 54, 400, 0), (113, 60));
+        // Tiny deltas add up across messages instead of vanishing: 54 * 2 / 120 is under a pixel each.
+        let mut state = (100, 0);
+        for _ in 0..10 {
+            state = wheel_step(state.0, -2, 54, 400, state.1);
+        }
+        assert_eq!(state.0, 109, "ten small turns are 1080/120 pixels");
+        assert_eq!(state.1, 0);
+    }
+
+    #[test]
+    fn turning_back_drops_what_was_carried_and_moves_at_once() {
+        let (at, rest) = wheel_step(100, -2, 54, 400, 0);
+        assert_eq!((at, rest), (100, 108), "almost a pixel down is carried");
+        // A turn back is its own 162/120: one pixel up, 42 over. The carried 108 cancels nothing of it.
+        let (back, rest) = wheel_step(at, 3, 54, 400, rest);
+        assert_eq!((back, rest), (99, -42));
+        // Clamping at an end clears the carry, so the first turn away from it is not eaten.
+        let (end, rest) = wheel_step(399, -30, 54, 400, 0);
+        assert_eq!((end, rest), (400, 0));
+        assert_eq!(wheel_step(end, 120, 54, 400, rest), (346, 0));
+    }
+
+    #[test]
+    fn a_track_click_pages_by_the_view() {
+        assert_eq!(page_px(500, 1.0), 464);
+        assert_eq!(page_px(500, 1.0).clamp(0, 400), 400);
     }
 }

@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="712" viewBox="0 0 880 712" aria-labelledby="title desc" role="img">
+  <title id="title">ROQA Settings search, Classic</title>
+  <desc id="desc">Results for sound replace the General page body. Finish sound is selected and leads to the Timer tab.</desc>
+  <style>
+    text{font:13px 'Segoe UI Variable Text','Segoe UI',sans-serif;fill:#fff}
+    .soft{font-size:12px;fill:#a6a6af}.label{font-weight:600}
+    .heading{font:600 30px 'Segoe UI Variable Display','Segoe UI',sans-serif}
+    .glyph{fill:none;stroke:#dce1e8;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+  </style>
+  <rect width="880" height="712" fill="#000"/>
+  <rect width="880" height="32" fill="#202023"/>
+  <text x="15" y="21" class="soft">ROQA Settings</text>
+  <path d="m852 12 8 8m0-8-8 8" stroke="#dce1e8" stroke-width="1.2"/>
+  <g transform="translate(0 32)">
+    <path fill="#0e0e10" d="M0 0h184v680H0zM184 628h696v52H184z"/>
+    <rect x="22" y="22" width="8" height="15" rx="4" fill="#ffb454"/>
+    <rect x="34" y="22" width="8" height="15" rx="4" fill="#ffb454"/>
+    <text x="54" y="34" class="label">ROQA</text>
+    <rect x="12" y="64" width="160" height="40" rx="20" fill="#26262a"/>
+    <circle cx="156" cy="84" r="3" fill="#ffb454"/>
+    <g transform="translate(24 74)"><g class="glyph"><circle cx="10" cy="10" r="6"/><circle cx="10" cy="10" r="2"/><path d="M10 2v2m0 12v2M2 10h2m12 0h2"/></g><text x="30" y="15">General</text></g>
+    <g transform="translate(24 118)"><g class="glyph"><path d="M3 5h14M3 10h14M3 15h14M6 3v4m7 1v4m-4 1v4"/></g><text x="30" y="15">Appearance</text></g>
+    <g transform="translate(24 162)"><g class="glyph"><rect x="2" y="6" width="16" height="8" rx="3"/><path d="M6 10h.1m4 0h.1m4 0h.1"/></g><text x="30" y="15">Dock</text></g>
+    <g transform="translate(24 206)"><g class="glyph"><path d="M2 5h16v2a6 6 0 0 1-6 6H8a6 6 0 0 1-6-6Z"/></g><text x="30" y="15">Notch</text></g>
+    <g transform="translate(24 250)"><g class="glyph"><circle cx="10" cy="11" r="6"/><path d="M10 11V8m-2-6h4"/></g><text x="30" y="15">Timers &amp; water</text></g>
+    <g transform="translate(24 294)"><g class="glyph"><path d="M5 15h10a3 3 0 0 0 0-6h-1a4 4 0 0 0-7-2m.5 3a3 3 0 1 0-2.5 5"/></g><text x="30" y="15">Weather</text></g>
+    <g transform="translate(24 338)"><g class="glyph"><path d="M3 15h14M5 12a5 5 0 0 1 10 0M10 3v2M4 6l2 2m10-2-2 2"/></g><text x="30" y="15">Prayer</text></g>
+    <g transform="translate(24 382)"><g class="glyph"><path d="M3 15h14M5 12V8m5 4V4m5 8V6"/></g><text x="30" y="15">Limits &amp; agents</text></g>
+    <g transform="translate(24 426)"><g class="glyph"><rect x="2" y="5" width="16" height="10" rx="2"/><path d="M6 9h.1m4 0h.1m4 0h.1m-7 3h6"/></g><text x="30" y="15">Hotkeys</text></g>
+    <g transform="translate(24 470)"><g class="glyph"><circle cx="10" cy="10" r="7"/><path d="M10 9v4m0-7h.1"/></g><text x="30" y="15">About</text></g>
+    <text x="208" y="49" class="heading">General</text>
+    <text x="208" y="74" class="soft">Where ROQA shows up.</text>
+    <rect x="611" y="25" width="230" height="30" rx="15" fill="#26262a" stroke="#fff" stroke-width="2"/>
+    <g class="glyph"><circle cx="631" cy="39" r="5"/><path d="m635 43 3 3"/></g>
+    <text x="647" y="45">sound</text><path d="M684 32v16" stroke="#fff"/>
+    <rect x="208" y="88" width="634" height="268" rx="16" fill="#141416"/>
+    <rect x="212" y="144" width="626" height="52" rx="22" fill="#3a3a40"/>
+    <circle cx="817" cy="170" r="3" fill="#ffb454"/>
+    <g transform="translate(224 92)"><text y="22" class="label">Reminder sounds</text><text y="40" class="soft">General</text></g>
+    <g transform="translate(224 144)"><text y="22" class="label">Finish sound</text><text y="40" class="soft">Timers &amp; water › Timer</text></g>
+    <g transform="translate(224 196)"><text y="22" class="label">Prayer sound</text><text y="40" class="soft">Prayer</text></g>
+    <g transform="translate(224 248)"><text y="22" class="label">Test sound</text><text y="40" class="soft">Prayer</text></g>
+    <g transform="translate(224 300)"><text y="22" class="label">Browse...</text><text y="40" class="soft">Prayer</text></g>
+    <text x="208" y="659" class="soft">Changes apply as you go.</text>
+    <rect x="758" y="638" width="84" height="32" rx="16" fill="#26262a"/>
+    <text x="800" y="659" text-anchor="middle" class="label">Close</text>
+  </g>
+</svg>

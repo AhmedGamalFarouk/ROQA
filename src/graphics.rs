@@ -69,7 +69,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 mod glyphs;
 mod moon;
-pub use glyphs::{draw_gdi as draw_settings_glyph, round_gdi};
+pub use glyphs::{GdiBatch, batch_gdi, draw_gdi as draw_settings_glyph, round_gdi};
 mod ask;
 mod limit_row;
 mod media;

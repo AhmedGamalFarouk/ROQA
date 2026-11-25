@@ -2338,7 +2338,7 @@ impl Desktop {
     }
     /// Shows a delayed DWM thumbnail, held through pointer transfer and popup interaction.
     #[inline(never)]
-    fn refresh_preview(&mut self) -> u32 {
+    fn refresh_preview(&mut self, model: &WindowModel) -> u32 {
         let now = Instant::now();
         let slots = self.dock_slots();
         let hovered = self
@@ -2366,17 +2366,22 @@ impl Desktop {
         let spot = hovered.map(|(index, slot, _)| (self.surfaces[index].window.0.0 as usize, slot));
         let over = self.popup.as_ref().is_some_and(|p| p.under_pointer());
         let ended = self.preview.point_preview(spot, over, now);
-        let stale = self.popup.as_ref().is_some_and(|popup| {
-            let owner = self.preview.spot().and_then(|(hwnd, slot)| {
-                self.dock_at(HWND(hwnd as *mut _)).filter(|s| s.visible)?;
-                self.dock_items.get(slot)
-            });
-            self.menu.is_some() || !owner.is_some_and(|item| item.windows.contains(&popup.target))
-        });
-        if ended || stale {
+        if ended {
             self.popup = None;
-            if !ended {
-                self.preview.dismiss(); // the window went away under a resting pointer
+        } else if self.popup.is_some() {
+            let slot = self.preview.spot().and_then(|(hwnd, slot)| {
+                self.dock_at(HWND(hwnd as *mut _)).filter(|s| s.visible)?;
+                Some(slot)
+            });
+            let item = slot.and_then(|slot| self.dock_items.get(slot));
+            if self.menu.is_some()
+                || self
+                    .popup
+                    .as_mut()
+                    .is_some_and(|popup| !popup.refresh(item))
+            {
+                self.popup = None;
+                self.preview.dismiss();
             }
         }
         if self.preview.take_due(now).is_some() {
@@ -2395,7 +2400,14 @@ impl Desktop {
                     slot,
                     dock.dpi,
                 );
-                preview::Popup::show(&item.windows, theme, slot_x, dock.bounds, work, dock.dpi).ok()
+                let at = preview::Placement {
+                    owner: dock.window.0,
+                    slot_x,
+                    dock: dock.bounds,
+                    work,
+                    dpi: dock.dpi,
+                };
+                preview::Popup::show(item, model, theme, at).ok()
             });
             match shown {
                 Some(popup) => self.popup = Some(popup),
@@ -4147,7 +4159,7 @@ impl Desktop {
         let stamp = model.generation.wrapping_add(window_catalog::frames());
         self.refresh_fullscreen(stamp)?;
         let native_wait = self.refresh_interactions();
-        let preview_wait = self.refresh_preview();
+        let preview_wait = self.refresh_preview(model);
         let hover_wait = self.refresh_hover_popup();
         self.refresh_menu();
         let close_wait = self.refresh_close();
@@ -4180,14 +4192,7 @@ impl Desktop {
         {
             self.settings_window.take();
         }
-        // The Settings wheel glide takes the same frames as the surfaces, and none once it lands.
-        let scrolling = self.settings_window.as_mut().is_some_and(|window| {
-            window.glide_frame(Instant::now()).unwrap_or_else(|error| {
-                eprintln!("Settings scroll: {error}");
-                false
-            })
-        });
-        let running = self.animate()? || scrolling;
+        let running = self.animate()?;
         let wait = wait.min(self.refresh_footer_hover());
         Ok((wait, running))
     }

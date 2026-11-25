@@ -1,7 +1,7 @@
 //! Every drawn icon (features I1, direction B "crisp line"): one 24-unit grid, 1.75-unit strokes with round
 //! caps and joins, no fills, one `DrawGeometry` per icon. Each glyph is one SVG-style path string; the cached
-//! geometry is built once per Direct2D factory, and the stroke is snapped to whole device pixels so lines
-//! stay sharp at any DPI. No raster, no icon font.
+//! geometry is cached per Direct2D factory and size. Most strokes snap to device pixels; media transport
+//! keeps fractional spacing and stroke widths. No raster, no icon font.
 
 use super::*;
 use crate::weather::Icon;
@@ -11,13 +11,15 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_ARC_SIZE_LARGE, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_STROKE_STYLE_PROPERTIES, D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory,
-    ID2D1RenderTarget, ID2D1StrokeStyle,
+    ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Glyph {
     Play,
     Pause,
+    TransportPlay,
+    TransportPause,
     Previous,
     Next,
     /// The mute toggle: a speaker with two sound waves, one wave at a low level, none while muted.
@@ -84,9 +86,11 @@ pub enum Glyph {
     MoonTheme,
     Sliders,
 }
-const ALL: [Glyph; 52] = [
+const ALL: [Glyph; 54] = [
     Glyph::Play,
     Glyph::Pause,
+    Glyph::TransportPlay,
+    Glyph::TransportPause,
     Glyph::Previous,
     Glyph::Next,
     Glyph::Speaker,
@@ -178,6 +182,19 @@ impl Glyph {
             Icon::Storm => Glyph::Storm,
         }
     }
+    pub(super) fn is_transport(self) -> bool {
+        matches!(
+            self,
+            Glyph::TransportPlay | Glyph::TransportPause | Glyph::Previous | Glyph::Next
+        )
+    }
+    fn stroke(self, side: f32) -> f32 {
+        if self.is_transport() {
+            STROKE * side / GRID
+        } else {
+            stroke_pixels(side)
+        }
+    }
     /// The glyph's path on the 24-unit grid (SVG syntax: M L H V A Z, absolute or relative).
     fn path(self) -> &'static str {
         match self {
@@ -188,12 +205,10 @@ impl Glyph {
             Glyph::Pause => {
                 "M8 5.5h1.8a.7.7 0 0 1 .7.7v11.6a.7.7 0 0 1-.7.7H8a.7.7 0 0 1-.7-.7V6.2a.7.7 0 0 1 .7-.7zM14.2 5.5H16a.7.7 0 0 1 .7.7v11.6a.7.7 0 0 1-.7.7h-1.8a.7.7 0 0 1-.7-.7V6.2a.7.7 0 0 1 .7-.7z"
             }
-            Glyph::Next => {
-                "M5.5 6.4v11.2a.5.5 0 0 0 .8.4l8-5.6a.5.5 0 0 0 0-.8l-8-5.6a.5.5 0 0 0-.8.4zM18.5 6v12"
-            }
-            Glyph::Previous => {
-                "M18.5 6.4v11.2a.5.5 0 0 1-.8.4l-8-5.6a.5.5 0 0 1 0-.8l8-5.6a.5.5 0 0 1 .8.4zM5.5 6v12"
-            }
+            Glyph::TransportPlay => "M8.1 5.7L18.3 12L8.1 18.3Z",
+            Glyph::TransportPause => "M6.9 5.7H10.5V18.3H6.9ZM13.5 5.7H17.1V18.3H13.5Z",
+            Glyph::Next => "M18.9 5.7V18.3M5.1 5.7L14.7 12L5.1 18.3Z",
+            Glyph::Previous => "M5.1 5.7V18.3M18.9 5.7L9.3 12L18.9 18.3Z",
             Glyph::Speaker => {
                 "M4.5 9.5h2.7L12 5.6v12.8l-4.8-3.9H4.5a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1zM15.2 9.2a4 4 0 0 1 0 5.6M18 6.6a8 8 0 0 1 0 10.8"
             }
@@ -469,12 +484,12 @@ fn slot(fixes: &mut Vec<Fix>, at: (f32, f32)) -> &mut [Option<f32>; 2] {
 /// (`cook/design/limits-icons-polish.md` C). A horizontal or vertical run snaps its fixed coordinate, an
 /// arc end rides the rail its other end sits on, a figure of arcs only snaps its centre and rounds its
 /// radius, a node on such a centre follows it, and everything else stays exact.
-fn place(path: &str, side: f32) -> Vec<Seg> {
+fn place(glyph: Glyph, side: f32) -> Vec<Seg> {
     let k = side / GRID;
     // Each segment with the point it starts from, its figure's start and the figure's index.
     let mut walk = Vec::new();
     let (mut at, mut start, mut figure) = ((0.0, 0.0), (0.0, 0.0), 0);
-    parse(path, |segment| {
+    parse(glyph.path(), |segment| {
         if let Seg::M(x, y) = segment {
             figure += 1;
             start = (x, y);
@@ -485,6 +500,19 @@ fn place(path: &str, side: f32) -> Vec<Seg> {
             Seg::Z => start,
         };
     });
+    if glyph.is_transport() {
+        return walk
+            .into_iter()
+            .map(|(_, segment, _, _)| match segment {
+                Seg::M(x, y) => Seg::M(x * k, y * k),
+                Seg::L(x, y) => Seg::L(x * k, y * k),
+                Seg::A(radius, large, sweep, x, y) => {
+                    Seg::A(radius * k, large, sweep, x * k, y * k)
+                }
+                Seg::Z => Seg::Z,
+            })
+            .collect();
+    }
     let mut fixes: Vec<Fix> = Vec::new();
     // Rails (and `h.01` dots, which are both): the fixed coordinate snaps.
     for &(from, segment, start, _) in &walk {
@@ -575,7 +603,7 @@ fn build(factory: &ID2D1Factory, glyph: Glyph, side: f32) -> Result<ID2D1PathGeo
         let shape = factory.CreatePathGeometry()?;
         let sink = shape.Open()?;
         let mut open = false;
-        for segment in place(glyph.path(), side) {
+        for segment in place(glyph, side) {
             match segment {
                 Seg::M(x, y) => {
                     if open {
@@ -624,16 +652,31 @@ pub(super) fn draw(
     glyph: Glyph,
     color: D2D1_COLOR_F,
 ) -> Result<()> {
-    // Whole pixels, centred in the square: callers hand over scaled DIP sizes (18 DIP at 125 % is 22.5), and a
-    // fractional side would snap every stroke to a grid that does not fit the glyph.
+    // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is local.
+    let brush = unsafe { context.CreateSolidColorBrush(&color, None)? };
+    draw_with_brush(context, &brush, square, glyph, color)
+}
+
+fn draw_with_brush(
+    context: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    square: D2D_RECT_F,
+    glyph: Glyph,
+    color: D2D1_COLOR_F,
+) -> Result<()> {
     let (width, height) = (square.right - square.left, square.bottom - square.top);
-    let side = width.round().max(1.0);
-    let (left, top) = (
-        (square.left + (width - side) / 2.0).round(),
-        (square.top + (height - side) / 2.0).round(),
-    );
-    // SAFETY: context is live between surface BeginDraw/EndDraw; the brush is local, the cached geometry
-    // and style belong to this thread's factory, and the transform is put back before returning.
+    let (side, left, top) = if glyph.is_transport() {
+        (width, square.left, square.top)
+    } else {
+        let side = width.round().max(1.0);
+        (
+            side,
+            (square.left + (width - side) / 2.0).round(),
+            (square.top + (height - side) / 2.0).round(),
+        )
+    };
+    // SAFETY: context is live between BeginDraw/EndDraw; the cached geometry and style belong to this
+    // thread's factory, the brush is live on `context`, and the transform is restored before returning.
     unsafe {
         let factory = context.GetFactory()?;
         let key = windows::core::Interface::as_raw(&factory) as usize;
@@ -663,7 +706,7 @@ pub(super) fn draw(
             slot.push((side, shape.clone()));
             Ok((shape, kit.style.clone()))
         })?;
-        let brush = context.CreateSolidColorBrush(&color, None)?;
+        brush.SetColor(&color);
         let mut before = Matrix3x2::identity();
         context.GetTransform(&mut before);
         context.SetTransform(&Matrix3x2 {
@@ -674,7 +717,7 @@ pub(super) fn draw(
             M31: left,
             M32: top,
         });
-        context.DrawGeometry(&shape, &brush, stroke_pixels(side), Some(&style));
+        context.DrawGeometry(&shape, brush, glyph.stroke(side), Some(&style));
         context.SetTransform(&before);
     }
     Ok(())
@@ -839,6 +882,120 @@ fn bgr(value: u32) -> D2D1_COLOR_F {
     }
 }
 
+/// A Direct2D batch bound once to a GDI DC so many shapes and glyphs paint in one `BindDC`/`BeginDraw`/`EndDraw`.
+pub struct GdiBatch<'a> {
+    target: &'a ID2D1RenderTarget,
+    brush: ID2D1SolidColorBrush,
+    origin: (f32, f32),
+}
+
+impl GdiBatch<'_> {
+    pub fn title(&self, rect: RECT, text: &str, size: f32, ink: u32) {
+        let font = Font {
+            family: TEXT_FONT,
+            size,
+            weight: DWRITE_FONT_WEIGHT_NORMAL,
+            designator: 1.0,
+            align: DWRITE_TEXT_ALIGNMENT_LEADING,
+        };
+        let width = (rect.right - rect.left) as f32;
+        let height = (rect.bottom - rect.top) as f32;
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let Ok(layout) = text_layout(text, &font, width, height) else {
+            return;
+        };
+        // SAFETY: the batch owns the live target and brush for this draw.
+        unsafe {
+            self.brush.SetColor(&bgr(ink));
+            self.target.DrawTextLayout(
+                Vector2 {
+                    X: rect.left as f32 - self.origin.0,
+                    Y: rect.top as f32 - self.origin.1,
+                },
+                &layout,
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+        }
+    }
+
+    /// Anti-aliased rounded rectangle on the batch DC (`fill == u32::MAX` skips fill; `line == fill` skips outline).
+    pub fn round(&self, rect: RECT, radius: i32, fill: u32, line: u32) {
+        let (w, h) = (
+            (rect.right - rect.left) as f32,
+            (rect.bottom - rect.top) as f32,
+        );
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let left = rect.left as f32 - self.origin.0;
+        let top = rect.top as f32 - self.origin.1;
+        let shape = |inset: f32| D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: left + inset,
+                top: top + inset,
+                right: left + w - inset,
+                bottom: top + h - inset,
+            },
+            radiusX: (radius as f32 - inset).min(w / 2.0).max(0.0),
+            radiusY: (radius as f32 - inset).min(h / 2.0).max(0.0),
+        };
+        // SAFETY: target and brush are live between BeginDraw/EndDraw for the duration of `batch_gdi`.
+        unsafe {
+            if fill != u32::MAX {
+                self.brush.SetColor(&bgr(fill));
+                self.target.FillRoundedRectangle(&shape(0.0), &self.brush);
+            }
+            if line != fill {
+                self.brush.SetColor(&bgr(line));
+                self.target
+                    .DrawRoundedRectangle(&shape(0.5), &self.brush, 1.0, None);
+            }
+        }
+    }
+
+    /// Anti-aliased settings glyph on the batch DC; `ink` is a COLORREF.
+    pub fn glyph(&self, rect: RECT, glyph: Glyph, ink: u32) {
+        let side = (rect.right - rect.left) as f32;
+        if side <= 0.0 {
+            return;
+        }
+        let left = rect.left as f32 - self.origin.0;
+        let top = rect.top as f32 - self.origin.1;
+        let square = D2D_RECT_F {
+            left,
+            top,
+            right: left + side,
+            bottom: top + side,
+        };
+        let _ = draw_with_brush(self.target, &self.brush, square, glyph, bgr(ink));
+    }
+}
+
+/// Runs `f` inside one Direct2D `BindDC`/`BeginDraw`/`EndDraw` pass over `rect` of `dc`.
+pub fn batch_gdi(
+    dc: windows::Win32::Graphics::Gdi::HDC,
+    rect: windows::Win32::Foundation::RECT,
+    f: impl FnOnce(&GdiBatch<'_>),
+) {
+    if rect.right <= rect.left || rect.bottom <= rect.top {
+        return;
+    }
+    with_dc(dc, rect, |target| {
+        // SAFETY: `target` is between BeginDraw/EndDraw; `brush` is local to this pass.
+        let brush = unsafe { target.CreateSolidColorBrush(&bgr(0), None)? };
+        let batch = GdiBatch {
+            target,
+            brush,
+            origin: (rect.left as f32, rect.top as f32),
+        };
+        f(&batch);
+        Ok(())
+    });
+}
+
 /// Settings glyph on its GDI DC: the same paths and rounded stroke as the D2D tabs, anti-aliased. `ink` is a COLORREF.
 pub fn draw_gdi(
     dc: windows::Win32::Graphics::Gdi::HDC,
@@ -846,14 +1003,7 @@ pub fn draw_gdi(
     glyph: Glyph,
     ink: u32,
 ) {
-    let side = (rect.right - rect.left) as f32;
-    let square = D2D_RECT_F {
-        left: 0.0,
-        top: 0.0,
-        right: side,
-        bottom: side,
-    };
-    with_dc(dc, rect, |target| draw(target, square, glyph, bgr(ink)));
+    batch_gdi(dc, rect, |batch| batch.glyph(rect, glyph, ink));
 }
 
 /// A Settings capsule or card on its GDI DC, anti-aliased: `fill` and `line` are COLORREFs, `line == fill` means no
@@ -865,40 +1015,7 @@ pub fn round_gdi(
     fill: u32,
     line: u32,
 ) {
-    let (w, h) = (
-        (rect.right - rect.left) as f32,
-        (rect.bottom - rect.top) as f32,
-    );
-    with_dc(dc, rect, |target| {
-        let shape = |inset: f32| D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: inset,
-                top: inset,
-                right: w - inset,
-                bottom: h - inset,
-            },
-            radiusX: (radius as f32 - inset).min(w / 2.0).max(0.0),
-            radiusY: (radius as f32 - inset).min(h / 2.0).max(0.0),
-        };
-        // SAFETY: the target is live between BeginDraw/EndDraw; the brushes are local.
-        unsafe {
-            if fill != u32::MAX {
-                target.FillRoundedRectangle(
-                    &shape(0.0),
-                    &target.CreateSolidColorBrush(&bgr(fill), None)?,
-                );
-            }
-            if line != fill {
-                target.DrawRoundedRectangle(
-                    &shape(0.5),
-                    &target.CreateSolidColorBrush(&bgr(line), None)?,
-                    1.0,
-                    None,
-                );
-            }
-        }
-        Ok(())
-    });
+    batch_gdi(dc, rect, |batch| batch.round(rect, radius, fill, line));
 }
 
 /// What `draw` paints onto a transparent `side` x `side` 32-bit DIB, as premultiplied BGRA pixels (alpha in
@@ -1035,6 +1152,33 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn batched_gdi_matches_individual_round_and_glyph_draws() {
+        let box_rect = windows::Win32::Foundation::RECT {
+            left: 4,
+            top: 6,
+            right: 28,
+            bottom: 30,
+        };
+        let glyph_rect = windows::Win32::Foundation::RECT {
+            left: 8,
+            top: 10,
+            right: 24,
+            bottom: 26,
+        };
+        let single = sample(36, |dc, _| {
+            round_gdi(dc, box_rect, 8, 0x223344, 0x556677);
+            draw_gdi(dc, glyph_rect, Glyph::Expand, 0xabcdef);
+        });
+        let batched = sample(36, |dc, outer| {
+            batch_gdi(dc, outer, |b| {
+                b.round(box_rect, 8, 0x223344, 0x556677);
+                b.glyph(glyph_rect, Glyph::Expand, 0xabcdef);
+            });
+        });
+        assert_eq!(batched, single);
+    }
     #[test]
     fn a_fractional_square_draws_as_its_whole_pixel_square() {
         // 18 DIP at 125 % is 22.5 px: it snaps to 23 px, centred, so strokes keep their whole-pixel rules.
@@ -1070,7 +1214,7 @@ mod tests {
                         let side = (dips * scale as f32).round();
                         let shape = build(&factory, glyph, side).unwrap();
                         let bounds = shape
-                            .GetWidenedBounds(stroke_pixels(side), Some(&style), None, 0.01)
+                            .GetWidenedBounds(glyph.stroke(side), Some(&style), None, 0.01)
                             .unwrap();
                         assert!(
                             bounds.left <= bounds.right && bounds.top <= bounds.bottom,
@@ -1189,7 +1333,7 @@ mod tests {
                     Seg::Z => panic!("no end"),
                 };
                 // Battery: the four body rails and the nub land on whole px; a corner keeps radius and chord.
-                let battery = place(Glyph::Battery.path(), side);
+                let battery = place(Glyph::Battery, side);
                 for (index, x) in [(3, true), (7, true), (11, true), (0, false), (5, false)] {
                     let (px, py) = end(battery[index]);
                     crisp(if x { px } else { py });
@@ -1201,7 +1345,7 @@ mod tests {
                 let (a, b) = (end(battery[1]), end(battery[2]));
                 assert!((b.0 - a.0 - 3.0 * k).abs() < 1e-3 && (b.1 - a.1 - 3.0 * k).abs() < 1e-3);
                 // Quick sliders: a knob's centre is on the stroke's phase grid, its radius whole px.
-                let gear = place(Glyph::Gear.path(), side);
+                let gear = place(Glyph::Gear, side);
                 let (top, Seg::A(radius, ..)) = (end(gear[8]), gear[9]) else {
                     panic!("knob")
                 };
@@ -1210,7 +1354,7 @@ mod tests {
                 crisp(top.0);
                 crisp((top.1 + bottom.1) / 2.0);
                 // Limits: the needle starts on the dial's centre.
-                let limits = place(Glyph::Limits.path(), side);
+                let limits = place(Glyph::Limits, side);
                 let Seg::A(radius, large, sweep, ..) = limits[1] else {
                     panic!("dial")
                 };
